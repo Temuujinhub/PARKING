@@ -75,7 +75,12 @@ def recent_exits(site_id: str, minutes: int = 30,
                 ParkingSession.updated_at >= since)
         .order_by(ParkingSession.updated_at.desc()).limit(20).all()
     )
-    return [_session_out(db, s, with_fee=True) for s in sessions]
+    # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
+    from ..models import Compensation
+    debt_plates = {p for (p,) in db.query(Compensation.plate_number)
+                   .filter(Compensation.status == "PENDING").all()}
+    return [_session_out(db, s, with_fee=True) | {"has_debt": s.plate_number in debt_plates}
+            for s in sessions]
 
 
 @router.post("/manual-entry")
@@ -90,9 +95,11 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
     site_id = body.get("site_id")
     if not plate or not site_id:
         raise HTTPException(400, "plate_number болон site_id шаардлагатай")
-    if not is_valid_plate(plate):
+    # force=true — дипломат/тусгай дугаар (стандарт форматад тохирохгүй) гэдгийг оператор баталгаажуулсан
+    if not is_valid_plate(plate) and not body.get("force"):
         raise HTTPException(400, f"«{plate}» дугаарын формат буруу байна. "
-                                 "Зөв формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА)")
+                                 "Зөв формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА). "
+                                 "Дипломат/тусгай дугаар бол force=true илгээнэ.")
 
     existing = get_open_session(db, plate, site_id)
     if existing:
@@ -163,8 +170,9 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
     if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-ий дугаарыг засна")
     new_plate = normalize_plate(body.get("plate_number", ""))
-    if not is_valid_plate(new_plate):
-        raise HTTPException(400, f"«{new_plate}» формат буруу. Зөв: 4 орон + 3 кирилл үсэг (1234УБА)")
+    if not is_valid_plate(new_plate) and not body.get("force"):
+        raise HTTPException(400, f"«{new_plate}» формат буруу. Зөв: 4 орон + 3 кирилл үсэг (1234УБА). "
+                                 "Дипломат/тусгай дугаар бол force=true илгээнэ.")
     dup = get_open_session(db, new_plate, s.site_id)
     if dup and dup.id != s.id:
         raise HTTPException(400, f"{new_plate} дугаартай өөр нээлттэй бүртгэл байна")
@@ -183,7 +191,8 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
 async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):
     """Оператор гараар гаргах (төлбөргүйгээр эсвэл асуудал шийдсэний дараа).
-    body: {open_barrier: bool, device_id?: str, reason: str}"""
+    body: {open_barrier: bool, device_id?: str, reason: str, create_compensation?: bool}
+    create_compensation=true бол төлөгдөөгүй дүнгээр нөхөн төлбөрийн нэхэмжлэл үүснэ."""
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
@@ -194,6 +203,11 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     if s.total_fee is None:
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+
+    # Төлбөргүй гаргаж буй бол нөхөн төлбөрийн нэхэмжлэл үүсгэх сонголт
+    if body.get("create_compensation") and not s.paid_at and not fee["is_free"]:
+        from .compensations_router import create_compensation
+        create_compensation(db, s, body.get("reason") or "unpaid_exit", user.username)
 
     barrier_opened = False
     if body.get("open_barrier"):

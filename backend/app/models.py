@@ -247,6 +247,25 @@ class CashierShift(Base):
     user = relationship("User", lazy="joined")
 
 
+class Compensation(Base):
+    """Нөхөн төлбөр — төлбөргүй гарсан/шөнийн хаалтаар гаргасан машины нэхэмжлэл.
+    Төлөгдөөгүй 3+ нэхэмжлэлтэй дугаар автоматаар хар жагсаалтад орно (JGA спек)."""
+    __tablename__ = "compensations"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False)
+    plate_number = Column(String(20), nullable=False, index=True)
+    amount = Column(Numeric(12, 2), nullable=False)
+    reason = Column(String(200), nullable=False, default="")  # unpaid_exit, night_close, manual
+    status = Column(String(20), nullable=False, default="PENDING", index=True)  # PENDING, PAID, CANCELLED
+    created_by = Column(String(60), default="system")
+    paid_at = Column(DateTime, nullable=True)
+    paid_by = Column(String(60), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    site = relationship("ParkingSite", lazy="joined")
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)

@@ -111,10 +111,14 @@ export default function Cashier() {
 
   const manualExit = async () => {
     if (!confirm(`${selected.plate_number} дугаартай машиныг төлбөргүйгээр гаргах уу?`)) return
+    // Төлбөртэй машиныг гаргаж буй бол нөхөн төлбөрийн нэхэмжлэл үүсгэх эсэхийг асууна
+    const createComp = !fee?.is_free &&
+      confirm(`Нөхөн төлбөрийн нэхэмжлэл (${fmt(fee?.total_fee)}₮) үүсгэх үү?\n\nOK = үүсгэнэ (дараагийн ирэлтэд нэхэмжилнэ, 3+ бол хар жагсаалт)\nCancel = нэхэмжлэлгүй гаргана`)
     try {
       await api(`/api/sessions/${selected.id}/manual-exit`,
-        { method: 'POST', body: { open_barrier: true, reason: 'Кассын гараар гаргалт' } })
-      toast('Гаргалаа'); setSelected(null); loadExits(siteId)
+        { method: 'POST', body: { open_barrier: true, reason: 'Кассын гараар гаргалт', create_compensation: createComp } })
+      toast(createComp ? 'Гаргаж, нөхөн төлбөрийн нэхэмжлэл үүслээ' : 'Гаргалаа')
+      setSelected(null); loadExits(siteId)
     } catch (e) { toast(e.message, 'error') }
   }
 
@@ -122,6 +126,11 @@ export default function Cashier() {
     e.preventDefault()
     try {
       const body = { site_id: siteId, plate_number: manualEntry.plate_number }
+      // Стандарт бус (дипломат/тусгай) дугаарыг оператор баталгаажуулж бүртгэнэ
+      if (!plateValid) {
+        if (!confirm(`«${manualEntry.plate_number}» стандарт форматад тохирохгүй байна.\nДипломат/тусгай дугаар мөн бол OK дарж бүртгэнэ үү.`)) return
+        body.force = true
+      }
       // datetime-local нь локал цаг — backend UTC хадгалдаг тул хөрвүүлнэ
       if (manualEntry.entry_time) body.entry_time = new Date(manualEntry.entry_time).toISOString().slice(0, 19)
       const s = await api('/api/sessions/manual-entry', { method: 'POST', body })
@@ -188,13 +197,16 @@ export default function Cashier() {
             {exits.map((s) => (
               <button key={s.id} onClick={() => setSelected(s)}
                 className={`w-full text-left px-4 py-3 rounded-lg border transition-colors cursor-pointer
-                  ${selected?.id === s.id ? 'border-accent bg-accent/5' : 'border-surface-border/60 bg-surface-muted/30 hover:border-slate-500'}`}>
+                  ${selected?.id === s.id ? 'border-accent bg-accent/5'
+                    : s.has_debt ? 'border-red-500/60 bg-red-500/5 hover:border-red-400'
+                    : 'border-surface-border/60 bg-surface-muted/30 hover:border-slate-500'}`}>
                 <div className="flex items-center justify-between">
-                  <span className="font-mono font-bold text-lg">{s.plate_number}</span>
+                  <span className={`font-mono font-bold text-lg ${s.has_debt ? 'text-red-400' : ''}`}>{s.plate_number}</span>
                   <span className="font-mono font-semibold text-amber-400">{fmt(s.fee?.total_fee ?? s.total_fee)}₮</span>
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
                   Орсон: {fmtDate(s.entry_time)} · {fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}
+                  {s.has_debt && <span className="text-red-400 font-medium"> · ⚠ Нөхөн төлбөрийн өртэй!</span>}
                 </div>
               </button>
             ))}
@@ -345,7 +357,9 @@ export default function Cashier() {
                 onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value, offset: -1 })} />
               <div className="text-xs text-slate-500 mt-1">3 цагаас дээш бол дээрх талбараас гараар засна.</div>
             </Field>
-            <button className="btn-primary w-full justify-center" disabled={!plateValid}>Бүртгэх</button>
+            <button className="btn-primary w-full justify-center" disabled={!manualEntry.plate_number}>
+              {plateValid ? 'Бүртгэх' : 'Тусгай дугаараар бүртгэх'}
+            </button>
           </form>
         )}
       </Modal>

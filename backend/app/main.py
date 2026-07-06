@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import Base, engine
 from .routers import (
-    admin_router, auth_router, barriers_router, cashier_router,
+    admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     lpr_router, payments_router, public_router, reports_router, sessions_router,
 )
 from .ws import manager
@@ -22,7 +22,7 @@ app.add_middleware(
 )
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
-          public_router, barriers_router, cashier_router, reports_router):
+          public_router, barriers_router, cashier_router, reports_router, compensations_router):
     app.include_router(r.router)
 
 
