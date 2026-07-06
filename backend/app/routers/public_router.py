@@ -7,11 +7,14 @@
   4. POST /api/payments/qpay/invoice          — QPay invoice
   5. POST /api/payments/qpay/check/{id}       — төлөгдсөн эсэх polling
 """
+import io
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..models import ParkingSession, ParkingSite
 from ..session_logic import normalize_plate, session_fee_info
@@ -24,6 +27,31 @@ def _mask(plate: str) -> str:
     if len(plate) <= 4:
         return plate
     return plate[:2] + "*" * (len(plate) - 5) + plate[-3:]
+
+
+@router.get("/qr/{site_code}.png")
+def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
+    """Зогсоолын төлбөрийн QR код (хэвлэхэд бэлэн PNG).
+    Зогсоол бүр өөрийн /pay?site={code} линктэй тул QR нь автоматаар өвөрмөц байна."""
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_H
+
+    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code,
+                                        ParkingSite.is_active.is_(True)).first()
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    url = f"{settings.public_base_url}/pay?site={site.site_code}"
+    qr = qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=max(4, min(40, size // 33)), border=3)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#231F20", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png", headers={
+        "Content-Disposition": f'inline; filename="{site.site_code}-pay-qr.png"',
+        "Cache-Control": "public, max-age=3600",
+    })
 
 
 @router.get("/site/{site_code}")

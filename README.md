@@ -3,7 +3,7 @@
 Монголын зах зээлд зориулсан ухаалаг төлбөрт зогсоолын бүрэн систем.
 Dahua ANPR камер + DZBL-A barrier + QPay + PAX POS + e-Barimt интеграцтай.
 
-**Live:** http://152.42.235.199 · **API docs:** http://152.42.235.199/api/docs
+**Live:** https://test.easy-parking.mn · **API docs:** https://test.easy-parking.mn/api/docs
 
 ## Урсгал
 

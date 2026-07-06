@@ -115,7 +115,7 @@ Barrier device_id-г `GET /api/admin/devices?site_id=...` (device_type=barrier, 
 
 ```json
 {
-  "server_url": "http://152.42.235.199",
+  "server_url": "https://test.easy-parking.mn",
   "site_id": "{Тохиргоо→Зогсоол хуудаснаас UUID}",
   "terminal_id": "TDB-PAX-SITE01-01",
   "operator_username": "pos_site01"

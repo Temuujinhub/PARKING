@@ -1,11 +1,11 @@
 {
   "info": {
     "name": "Easy Parking — POS/Mobile хөгжүүлэгчийн API",
-    "description": "PAX A9000 POS апп болон Mobile апп хөгжүүлэгчдэд зориулсан бүрэн collection.\n\n**Ашиглах заавар:**\n1. `base_url` хувьсагчийг шалгана (одоогоор http://152.42.235.199)\n2. Эхлээд `1. Нэвтрэлт → Login` хүсэлтийг ажиллуулна — token автоматаар хадгалагдана\n3. Бусад хүсэлтүүд `{{token}}`-ийг автоматаар ашиглана\n\n**Туршилтын урсгал (Туршилт хавтас доторх дарааллаар):**\nМашин оруулах → Гарах камерт уншуулах → Recent Exits-ээс харах → POS confirm.\n\nWebSocket: ws://152.42.235.199/ws/sites/{site_id} (Postman-ий New → WebSocket Request ашиглана)",
+    "description": "PAX A9000 POS апп болон Mobile апп хөгжүүлэгчдэд зориулсан бүрэн collection.\n\n**Ашиглах заавар:**\n1. `base_url` хувьсагчийг шалгана (одоогоор https://test.easy-parking.mn)\n2. Эхлээд `1. Нэвтрэлт → Login` хүсэлтийг ажиллуулна — token автоматаар хадгалагдана\n3. Бусад хүсэлтүүд `{{token}}`-ийг автоматаар ашиглана\n\n**Туршилтын урсгал (Туршилт хавтас доторх дарааллаар):**\nМашин оруулах → Гарах камерт уншуулах → Recent Exits-ээс харах → POS confirm.\n\nWebSocket: ws://152.42.235.199/ws/sites/{site_id} (Postman-ий New → WebSocket Request ашиглана)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://152.42.235.199" },
+    { "key": "base_url", "value": "https://test.easy-parking.mn" },
     { "key": "token", "value": "" },
     { "key": "site_id", "value": "" },
     { "key": "site_code", "value": "SITE01" },

@@ -45,6 +45,7 @@ function Sites() {
   }
 
   const payUrl = (code) => `${location.origin}/pay?site=${code}`
+  const qrUrl = (code) => `/api/public/qr/${code}.png`
 
   return (
     <>
@@ -118,8 +119,10 @@ function Sites() {
         {qrSite && (
           <div className="text-center space-y-4">
             <img className="mx-auto rounded-xl bg-white p-3 w-64 h-64"
-              src={`https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(payUrl(qrSite.site_code))}`}
+              src={qrUrl(qrSite.site_code)}
               alt={`${qrSite.name} зогсоолын төлбөрийн QR код`} />
+            <a href={qrUrl(qrSite.site_code)} download={`${qrSite.site_code}-pay-qr.png`}
+              className="btn-primary justify-center w-full">Хэвлэх PNG татах (өндөр нягтрал)</a>
             <div className="flex items-center gap-2 bg-surface-muted rounded-lg px-3 py-2">
               <code className="text-xs flex-1 text-left break-all">{payUrl(qrSite.site_code)}</code>
               <button className="btn-secondary py-1 px-2" aria-label="Хуулах"

@@ -71,7 +71,7 @@ backend багтай хамтарч тодорхойлно.
 
 ## 6. Туршилтын орчин
 
-- Base URL: `http://152.42.235.199`
+- Base URL: `https://test.easy-parking.mn`
 - Туршилтын машин оруулах: `POST /api/lpr/simulate {"device_key": "cam-entry-site01", "plate": "ТАНЫДУГААР"}`
 - Гарах: `{"device_key": "cam-exit-site01", ...}`
 - QPay MOCK горимд: invoice үүсгэсний дараа `POST /api/payments/qpay/webhook?payment_id={id}`

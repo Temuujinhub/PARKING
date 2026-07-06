@@ -2,7 +2,7 @@
 
 Гадаад хөгжүүлэгчдэд (Mobile апп, PAX POS апп) зориулсан API баримт бичиг.
 
-- **Base URL:** `http://152.42.235.199` (⚠️ одоогоор зөвхөн HTTP — домэйн холбогдмогц HTTPS болно)
+- **Base URL:** `https://test.easy-parking.mn` (⚠️ одоогоор зөвхөн HTTP — домэйн холбогдмогц HTTPS болно)
 - **Interactive docs (Swagger):** `GET /api/docs`
 - **Postman collection:** [postman/EasyParking_POS.postman_collection.json](postman/EasyParking_POS.postman_collection.json)
   — Postman → Import хийгээд `1. Нэвтрэлт → Login`-г ажиллуулбал token автоматаар тохирно.
@@ -170,8 +170,8 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 ## 6. WebSocket (Real-time)
 
 ```
-ws://152.42.235.199/ws/sites/{site_id}     — нэг зогсоолын events
-ws://152.42.235.199/ws/sites/all           — бүх зогсоол
+wss://test.easy-parking.mn/ws/sites/{site_id}     — нэг зогсоолын events
+wss://test.easy-parking.mn/ws/sites/all           — бүх зогсоол
 ```
 
 Мессежийн формат:

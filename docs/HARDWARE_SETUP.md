@@ -17,7 +17,7 @@
 2. Камерын Web UI (браузераар IP руу нь орно):
    - **Setting → Network → Platform Access → ITSAPI** (зарим firmware дээр *Platform Server*)
    - Enable ✓
-   - Server: `152.42.235.199`, Port: `80`
+   - Server: `test.easy-parking.mn` (эсвэл `152.42.235.199`), Port: `80` — HTTP-ээр зөвшөөрөгдсөн
    - Path: `/api/lpr/callback?device_key=cam-entry-site01`  ← орох камерын түлхүүр
 3. Гарах камерт мөн адил, гарах камерын device_key-ээр
 4. **Setting → ANPR**: Plate detection zone, trigger line-ийг эгнээндээ тааруулна
