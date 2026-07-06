@@ -69,8 +69,32 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
         "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
-        "receipt_url": receipt.receipt_url if receipt else None,
+        "qr_data": receipt.receipt_url if receipt else None,
     }
+
+
+@router.get("/receipt/{payment_id}/qr.png")
+def receipt_qr(payment_id: str, db: Session = Depends(get_db)):
+    """e-Barimt баримтын qrData-г QR зураг болгон буцаана (ebarimt апп-аар уншуулна)."""
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_M
+
+    from ..models import Payment, VatReceipt
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.status != "PAID":
+        raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
+    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).first()
+    if not receipt or not receipt.receipt_url:
+        raise HTTPException(404, "Баримтын QR өгөгдөл олдсонгүй")
+    qr = qrcode.QRCode(error_correction=ERROR_CORRECT_M, box_size=8, border=2)
+    qr.add_data(receipt.receipt_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#231F20", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png",
+                             headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/site/{site_code}")

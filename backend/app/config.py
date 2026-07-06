@@ -22,12 +22,13 @@ class Settings(BaseSettings):
     qpay_invoice_code: str = "PARKING_INVOICE"
     qpay_mock: bool = True  # Бодит credentials байхгүй үед mock горим
 
-    # e-Barimt
-    ebarimt_base_url: str = "https://ebarimt-pos.eba.mn/api/1.0"
+    # e-Barimt — POS API 3.0 (татварын PosAPI сервис локал дээр суусан байна)
+    ebarimt_posapi_url: str = "http://localhost:7080/rest"
     ebarimt_merchant_tin: str = ""
-    ebarimt_pos_no: str = "POS-001"
+    ebarimt_pos_no: str = "10000001"
     ebarimt_branch_no: str = "001"
-    ebarimt_district_code: str = "23"
+    ebarimt_district_code: str = "3420"
+    ebarimt_classification_code: str = "5221190"  # Зогсоолын үйлчилгээний ангиллын код (бүртгэлээр тодруулна)
     ebarimt_mock: bool = True
 
     # НӨАТ

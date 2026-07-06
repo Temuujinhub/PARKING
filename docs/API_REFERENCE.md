@@ -133,10 +133,16 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 {
   "status": "PAID",
   "barrier_opened": true,
-  "ebarimt_id": "EB-2026-...",
-  "lottery_code": "AB123456",
+  "ebarimt_id": "1234567890123456789012345678901234567890",
+  "lottery_code": "65432101",
+  "qr_data": "1234567890...543210",
   "print_data": {"lines": ["ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ", "Дугаар: 5428УНО", "..."]}
 }
+```
+
+e-Barimt нь **POS API 3.0** форматтай: `ebarimt_id` = ДДТД (billId, 40 орон),
+`qr_data`-г thermal printer дээр **QR код болгон хэвлэнэ** — хэрэглэгч ebarimt апп-аар уншуулна.
+```json
 ```
 
 ⚠️ `amount` нь системийн тооцсон дүнтэй таарахгүй бол `400` буцна — картаар авахын ӨМНӨ
@@ -156,6 +162,8 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 | GET /api/public/search?site=&q=0028 | Хялбар хайлт: эхний тоогоор таарах машинууд (үсэг шаардахгүй, 2+ тэмдэгт) |
 | GET /api/public/sessions?plate=&site= | Session + төлбөрийн задаргаа |
 | GET /api/public/qr/{site_code}.png | Зогсоолын төлбөрийн QR (хэвлэхэд бэлэн PNG) |
+| GET /api/public/receipt/{payment_id} | Төлбөрийн дараах e-Barimt баримт (billId/ДДТД, lottery, qr_data) |
+| GET /api/public/receipt/{payment_id}/qr.png | Баримтын qrData-г QR зураг болгосон PNG (ebarimt апп уншина) |
 
 ---
 

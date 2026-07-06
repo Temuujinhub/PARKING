@@ -36,10 +36,10 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     )
     db.add(VatReceipt(
         payment_id=payment.id, session_id=payment.session_id,
-        ebarimt_id=receipt_raw.get("id"), lottery_code=receipt_raw.get("lottery"),
+        ebarimt_id=receipt_raw.get("billId"), lottery_code=receipt_raw.get("lottery"),
         amount=payment.amount, vat_amount=payment.vat_amount,
-        receipt_url=receipt_raw.get("qrData"),
-        status="SENT" if receipt_raw.get("id") else "FAILED",
+        receipt_url=receipt_raw.get("qrData"),  # POS API 3.0 qrData — QR болгон хэвлэнэ
+        status="SENT" if receipt_raw.get("billId") else "FAILED",
     ))
     session = db.get(ParkingSession, payment.session_id)
     await mark_paid_and_open(db, session)
@@ -195,6 +195,8 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
         "status": "PAID", "payment_id": payment.id, "barrier_opened": True,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
+        # PAX thermal printer: энэ qrData-г QR код болгон хэвлэнэ (e-Barimt POS API 3.0)
+        "qr_data": receipt.receipt_url if receipt else None,
         "print_data": {
             "lines": [
                 "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
@@ -203,6 +205,7 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
                 f"Хугацаа: {session.duration_minutes} мин",
                 f"Дүн: {float(payment.amount):,.0f}₮",
                 f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
+                f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
                 f"Сугалаа: {receipt.lottery_code if receipt else '-'}",
             ]
         },

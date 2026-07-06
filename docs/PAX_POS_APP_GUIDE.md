@@ -99,7 +99,10 @@ Authorization: Bearer {token}
 
 ### 3.5 Receipt Print
 
-`print_data.lines` массивыг thermal printer-ээр хэвлэнэ + e-Barimt QR (`lottery_code`).
+`print_data.lines` массивыг thermal printer-ээр хэвлэнэ, дараа нь хариултын
+`qr_data` талбарыг (e-Barimt POS API 3.0-ийн qrData) **QR код болгон хэвлэнэ** —
+хэрэглэгч ebarimt апп-аар уншуулж баримтаа бүртгүүлнэ. Сугалааны кодыг (`lottery_code`)
+текстээр давхар хэвлэнэ.
 
 ### 3.6 Operator Override
 

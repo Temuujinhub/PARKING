@@ -88,7 +88,10 @@ export default function Pay() {
 
   const onPaid = async (paymentId) => {
     setPaid(true)
-    try { setReceipt(await publicApi(`/api/public/receipt/${paymentId}`)) } catch {}
+    try {
+      const r = await publicApi(`/api/public/receipt/${paymentId}`)
+      setReceipt({ ...r, qr_png: r.qr_data ? `/api/public/receipt/${paymentId}/qr.png` : null })
+    } catch {}
   }
 
   // Туршилтын горим: QPay-г алгасаж төлөгдсөн болгоно (зөвхөн mock үед харагдана)
@@ -125,11 +128,18 @@ export default function Pay() {
                 <span className="font-mono text-right">{fmt(receipt.amount)}₮</span>
                 <span className="text-slate-400">НӨАТ (10%)</span>
                 <span className="font-mono text-right">{fmt(receipt.vat_amount)}₮</span>
-                <span className="text-slate-400">Баримтын дугаар</span>
-                <span className="font-mono text-right text-xs pt-0.5">{receipt.ebarimt_id || '-'}</span>
+                <span className="text-slate-400">ДДТД</span>
+                <span className="font-mono text-right text-[10px] pt-1 break-all">{receipt.ebarimt_id || '-'}</span>
                 <span className="text-slate-400">Сугалааны код</span>
                 <span className="font-mono text-right text-lg font-bold text-accent">{receipt.lottery_code || '-'}</span>
               </div>
+              {receipt.qr_png && (
+                <div className="pt-2 text-center border-t border-dashed border-surface-border">
+                  <img src={receipt.qr_png} alt="e-Barimt баримтын QR код"
+                    className="mx-auto w-40 h-40 bg-white rounded-lg p-2 mt-2" />
+                  <div className="text-xs text-slate-500 mt-1.5">ebarimt апп-аар уншуулж баримтаа бүртгүүлээрэй</div>
+                </div>
+              )}
             </div>
           )}
           <p className="text-sm text-slate-400">
