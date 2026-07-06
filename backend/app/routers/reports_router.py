@@ -135,6 +135,97 @@ def revenue_excel(date_from: str | None = None, date_to: str | None = None,
         headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+def _excel_response(wb, prefix: str):
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"{prefix}_{datetime.utcnow():%Y%m%d_%H%M}.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@router.get("/site-sessions/excel")
+def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
+                        db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Нэг зогсоолын session-уудын дэлгэрэнгүй Excel (тайлангийн мөрийн 'Татах' үйлдэл)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    start, end = _range(date_from, date_to)
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        from fastapi import HTTPException
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    rows = (db.query(ParkingSession)
+            .filter(ParkingSession.site_id == site_id,
+                    ParkingSession.entry_time >= start, ParkingSession.entry_time < end)
+            .order_by(ParkingSession.entry_time.desc()).limit(20000).all())
+    STATUS_MN = {"OPEN": "Зогсож байна", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
+                 "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
+                 "MANUAL_CLOSED": "Гараар хаасан"}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = site.name[:30]
+    ws.append(["Дугаар", "Орсон", "Гарсан", "Хугацаа (мин)", "Дүн (₮)", "НӨАТ (₮)",
+               "Хөнгөлөлт (₮)", "Гэрээт", "Төлөв"])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for s in rows:
+        ws.append([
+            s.plate_number,
+            s.entry_time.strftime("%Y-%m-%d %H:%M"),
+            s.exit_time.strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
+            s.duration_minutes or "",
+            float(s.total_fee or 0), float(s.vat_amount or 0), float(s.discount_amount or 0),
+            "Тийм" if s.is_registered else "",
+            STATUS_MN.get(s.status, s.status),
+        ])
+    for col, w in zip("ABCDEFGHI", (12, 18, 18, 14, 12, 10, 14, 8, 18)):
+        ws.column_dimensions[col].width = w
+    return _excel_response(wb, f"sessions_{site.site_code}")
+
+
+@router.get("/shifts/excel")
+def shifts_excel(date_from: str | None = None, date_to: str | None = None,
+                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Касс хаалтын тайлангийн Excel."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    from ..models import CashierShift, Payment
+    from sqlalchemy import func as f
+    start, end = _range(date_from, date_to)
+    shifts = (db.query(CashierShift).filter(CashierShift.opened_at >= start,
+                                            CashierShift.opened_at < end)
+              .order_by(CashierShift.opened_at.desc()).limit(2000).all())
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Касс хаалтын тайлан"
+    ws.append(["Кассчин", "Төлөв", "Нээсэн цаг", "Хаасан цаг", "Эхэлсэн дүн (₮)",
+               "Гүйлгээний тоо", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    grand = 0.0
+    for s in shifts:
+        totals = dict(db.query(Payment.provider, f.coalesce(f.sum(Payment.amount), 0))
+                      .filter(Payment.shift_id == s.id, Payment.status == "PAID")
+                      .group_by(Payment.provider).all())
+        count = db.query(Payment).filter(Payment.shift_id == s.id, Payment.status == "PAID").count()
+        cash, qpay_amt, pos = (float(totals.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        total = cash + qpay_amt + pos
+        grand += total
+        ws.append([s.user.username if s.user else "", "Нээлттэй" if s.status == "OPEN" else "Хаагдсан",
+                   s.opened_at.strftime("%Y-%m-%d %H:%M"),
+                   s.closed_at.strftime("%Y-%m-%d %H:%M") if s.closed_at else "",
+                   float(s.opening_amount or 0), count, cash, qpay_amt, pos, total])
+    ws.append(["НИЙТ", "", "", "", "", "", "", "", "", grand])
+    ws[f"A{ws.max_row}"].font = Font(bold=True)
+    ws[f"J{ws.max_row}"].font = Font(bold=True)
+    for col, w in zip("ABCDEFGHIJ", (14, 10, 18, 18, 14, 14, 12, 12, 12, 16)):
+        ws.column_dimensions[col].width = w
+    return _excel_response(wb, "cashier_shifts")
+
+
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  limit: int = 200, db: Session = Depends(get_db),

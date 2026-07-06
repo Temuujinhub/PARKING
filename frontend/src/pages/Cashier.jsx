@@ -20,6 +20,10 @@ export default function Cashier() {
   const [qpayInfo, setQpayInfo] = useState(null)
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
 
+  // Монгол дугаарын формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА)
+  const PLATE_RE = /^\d{4}[А-ЯЁӨҮ]{3}$/
+  const plateValid = manualEntry ? PLATE_RE.test(manualEntry.plate_number) : false
+
   // datetime-local input-д зориулсан локал цагийн формат (YYYY-MM-DDTHH:MM)
   const toLocalInput = (d) => {
     const p = (n) => String(n).padStart(2, '0')
@@ -284,10 +288,24 @@ export default function Cashier() {
               Орох камерт уншигдалгүй орсон машиныг (эргүүлээр илэрсэн) энд бүртгэнэ.
               Бүртгэсэн цагаас нь төлбөр тооцогдоно.
             </div>
-            <Field label="Улсын дугаар" required>
-              <input className="input font-mono text-xl text-center tracking-widest uppercase" autoFocus
-                value={manualEntry.plate_number} required maxLength={10}
-                onChange={(e) => setManualEntry({ ...manualEntry, plate_number: e.target.value.toUpperCase() })} />
+            <Field label="Улсын дугаар (4 орон + 3 кирилл үсэг)" required>
+              <input autoFocus required maxLength={7} inputMode="text"
+                className={`input font-mono text-xl text-center tracking-widest uppercase border-2
+                  ${!manualEntry.plate_number ? '' : plateValid ? 'border-accent' : 'border-red-500/70'}`}
+                value={manualEntry.plate_number} placeholder="1234УБА" aria-describedby="plate-hint"
+                onChange={(e) => setManualEntry({
+                  ...manualEntry,
+                  // Зөвхөн тоо + кирилл үсэг үлдээж, урд нь 4 тоо, ард нь 3 үсэг гэсэн дарааллаар шүүнэ
+                  plate_number: e.target.value.toUpperCase().replace(/[^0-9А-ЯЁӨҮ]/g, '').slice(0, 7),
+                })} />
+              <div id="plate-hint" aria-live="polite"
+                className={`text-xs mt-1 ${!manualEntry.plate_number ? 'text-slate-500' : plateValid ? 'text-accent' : 'text-red-400'}`}>
+                {!manualEntry.plate_number
+                  ? 'Жишээ: 1234УБА'
+                  : plateValid
+                    ? '✓ Дугаарын формат зөв'
+                    : 'Формат буруу — эхлээд 4 тоо, дараа нь 3 кирилл үсэг (жишээ: 1234УБА)'}
+              </div>
             </Field>
             <Field label="Хэдий хугацааны өмнө орсон бэ?">
               <div className="grid grid-cols-5 gap-1.5 mb-2">
@@ -306,7 +324,7 @@ export default function Cashier() {
                 onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value, offset: -1 })} />
               <div className="text-xs text-slate-500 mt-1">3 цагаас дээш бол дээрх талбараас гараар засна.</div>
             </Field>
-            <button className="btn-primary w-full justify-center">Бүртгэх</button>
+            <button className="btn-primary w-full justify-center" disabled={!plateValid}>Бүртгэх</button>
           </form>
         )}
       </Modal>

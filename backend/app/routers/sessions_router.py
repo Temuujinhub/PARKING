@@ -85,11 +85,14 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
     (2 цаг тутмын эргүүлээр илэрсэн машин г.м.)
     body: {site_id, plate_number, entry_time?: ISO datetime — эргүүлээр тааварлаж
            оруулах бол орсон гэж үзэх цаг, default = одоо}"""
-    from ..session_logic import find_registered, is_blacklisted
+    from ..session_logic import find_registered, is_blacklisted, is_valid_plate
     plate = normalize_plate(body.get("plate_number", ""))
     site_id = body.get("site_id")
     if not plate or not site_id:
         raise HTTPException(400, "plate_number болон site_id шаардлагатай")
+    if not is_valid_plate(plate):
+        raise HTTPException(400, f"«{plate}» дугаарын формат буруу байна. "
+                                 "Зөв формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА)")
 
     existing = get_open_session(db, plate, site_id)
     if existing:

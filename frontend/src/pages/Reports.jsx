@@ -21,14 +21,16 @@ export default function Reports() {
   }
   useEffect(load, [tab, from, to])
 
-  const downloadExcel = async () => {
+  const downloadBlob = async (path, filename) => {
     try {
-      const blob = await api(`/api/reports/revenue/excel?date_from=${from}&date_to=${to}`, { blob: true })
+      const blob = await api(path, { blob: true })
       const url = URL.createObjectURL(blob)
-      const a = Object.assign(document.createElement('a'), { href: url, download: `tailan_${from}_${to}.xlsx` })
+      const a = Object.assign(document.createElement('a'), { href: url, download: filename })
       a.click(); URL.revokeObjectURL(url)
     } catch (e) { toast(e.message, 'error') }
   }
+  const downloadExcel = () =>
+    downloadBlob(`/api/reports/revenue/excel?date_from=${from}&date_to=${to}`, `tailan_${from}_${to}.xlsx`)
 
   return (
     <div className="space-y-5">
@@ -38,8 +40,13 @@ export default function Reports() {
           <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх огноо" />
           <span className="text-slate-500">—</span>
           <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах огноо" />
-          {tab === 'revenue' && (
+          {tab === 'revenue' ? (
             <button className="btn-primary" onClick={downloadExcel}><Download size={16} /> Excel</button>
+          ) : (
+            <button className="btn-primary"
+              onClick={() => downloadBlob(`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `kass_${from}_${to}.xlsx`)}>
+              <Download size={16} /> Excel
+            </button>
           )}
         </div>
       </div>
@@ -56,7 +63,7 @@ export default function Reports() {
 
       {tab === 'revenue' && revenue && (
         <>
-          <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Нийт хугацаа', 'Төлөгдөөгүй (₮)', 'Төлбөр (₮)']}
+          <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Нийт хугацаа', 'Төлөгдөөгүй (₮)', 'Төлбөр (₮)', 'Үйлдэл']}
             empty={revenue.rows.length === 0}>
             {revenue.rows.map((r) => (
               <tr key={r.site_id}>
@@ -66,6 +73,14 @@ export default function Reports() {
                 <td className="td font-mono">{fmtDur(r.total_minutes)}</td>
                 <td className="td font-mono text-amber-400">{fmt(r.unpaid_amount)}</td>
                 <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
+                <td className="td">
+                  <button className="btn-secondary py-1 px-2 text-xs" aria-label={`${r.site_name} дэлгэрэнгүй татах`}
+                    onClick={() => downloadBlob(
+                      `/api/reports/site-sessions/excel?site_id=${r.site_id}&date_from=${from}&date_to=${to}`,
+                      `${r.site_name}_${from}_${to}.xlsx`)}>
+                    <Download size={13} /> Татах
+                  </button>
+                </td>
               </tr>
             ))}
           </Table>

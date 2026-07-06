@@ -12,8 +12,18 @@ from .services.barrier import open_barrier
 from .ws import manager
 
 
+import re
+
+# Монгол улсын дугаарын формат: 4 орон + 3 кирилл үсэг (Ө, Ү орно). Жишээ: 1234УБА
+PLATE_RE = re.compile(r"^\d{4}[А-ЯЁӨҮ]{3}$")
+
+
 def normalize_plate(plate: str) -> str:
     return (plate or "").upper().replace(" ", "").replace("-", "").strip()
+
+
+def is_valid_plate(plate: str) -> bool:
+    return bool(PLATE_RE.match(normalize_plate(plate)))
 
 
 def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:

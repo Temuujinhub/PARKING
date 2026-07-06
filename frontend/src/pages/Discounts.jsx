@@ -29,6 +29,31 @@ export default function Discounts() {
           <Plus size={16} /> Нэмэх
         </button>
       </div>
+
+      {/* Хөнгөлөлтийн логикийн тайлбар */}
+      <div className="card text-sm space-y-2">
+        <div className="font-semibold text-slate-200">Хөнгөлөлт хэрхэн ажилладаг вэ?</div>
+        <div className="grid md:grid-cols-3 gap-3 text-slate-400">
+          <div className="bg-surface-muted/40 rounded-lg p-3">
+            <div className="text-slate-200 font-medium mb-1">1. Хэн үүсгэх вэ</div>
+            Энэ хуудсан дээр <b className="text-slate-300">Админ / Супер админ</b> хөнгөлөлтийн төрлүүдийг
+            урьдчилан бүртгэнэ (жишээ: байгууллагын 20%, 1 цаг үнэгүй купон).
+          </div>
+          <div className="bg-surface-muted/40 rounded-lg p-3">
+            <div className="text-slate-200 font-medium mb-1">2. Хэн, хаана хэрэглэх вэ</div>
+            <b className="text-slate-300">Кассын ажилтан</b> Касс хуудсан дээр гарах машиныг сонгоод
+            «Хөнгөлөлт хэрэглэх» цэснээс сонгоно. Жишээ: дэлгүүрийн купон үзүүлсэн жолоочид
+            кассир 1 цаг үнэгүйг нь хасаж тооцно.
+          </div>
+          <div className="bg-surface-muted/40 rounded-lg p-3">
+            <div className="text-slate-200 font-medium mb-1">3. Хэрхэн тооцогдох вэ</div>
+            <b className="text-slate-300">Хувиар</b>: дүнгээс % хасна (4000₮, 50% → 2000₮).{' '}
+            <b className="text-slate-300">Тогтмол дүн</b>: ₮ хасна.{' '}
+            <b className="text-slate-300">Үнэгүй минут</b>: хугацаанаас хасч дараа нь үнэ бодно
+            (3ц зогссон, 60 мин үнэгүй → 2ц-ийн үнэ). Хөнгөлөлт Түүх/Тайланд тусдаа баганаар харагдана.
+          </div>
+        </div>
+      </div>
       <Table headers={['Нэр', 'Төрөл', 'Утга', 'Төлөв', '']} empty={rows.length === 0}>
         {rows.map((d) => (
           <tr key={d.id}>
