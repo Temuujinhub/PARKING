@@ -36,8 +36,8 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
     import qrcode
     from qrcode.constants import ERROR_CORRECT_H
 
-    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code,
-                                        ParkingSite.is_active.is_(True)).first()
+    # is_active шүүлтгүй — идэвхгүй зогсоолын QR-ийг ч админ урьдчилан хэвлэж болно
+    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
     url = f"{settings.public_base_url}/pay?site={site.site_code}"

@@ -35,6 +35,29 @@ export default function Settings() {
   )
 }
 
+// QR зураг — ачаалж чадаагүй бол алдаа + "Дахин үүсгэх" товч харуулна
+function QrImage({ code, alt }) {
+  const [key, setKey] = useState(0)
+  const [err, setErr] = useState(false)
+  const retry = () => { setErr(false); setKey((k) => k + 1) }
+  if (err) {
+    return (
+      <div className="mx-auto w-52 h-52 rounded-xl bg-surface-muted flex flex-col items-center justify-center gap-3 text-sm text-slate-400">
+        QR ачаалж чадсангүй
+        <button type="button" className="btn-primary py-1.5" onClick={retry}>Дахин үүсгэх</button>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <img key={key} className="mx-auto rounded-xl bg-white p-3 w-52 h-52"
+        src={`/api/public/qr/${code}.png?v=${key}`} alt={alt} onError={() => setErr(true)} />
+      <button type="button" className="text-xs text-slate-500 hover:text-slate-300 mt-1.5 cursor-pointer underline"
+        onClick={retry}>QR дахин үүсгэх</button>
+    </div>
+  )
+}
+
 // Wizard-ийн стандарт төхөөрөмжийн загвар — зогсоол бүр орох/гарах төхөөрөмжтэй
 const STD_DEVICES = [
   { key: 'entry_cam', name: 'Орох камер', device_type: 'camera', lane_dir: 'entry', lane_no: 1, auto_open: true, icon: Camera },
@@ -236,8 +259,7 @@ function Sites() {
             {wizard.step === 3 && wizard.created && (
               <div className="space-y-4">
                 <div className="text-center">
-                  <img className="mx-auto rounded-xl bg-white p-3 w-52 h-52"
-                    src={qrUrl(wizard.created.site_code)}
+                  <QrImage code={wizard.created.site_code}
                     alt={`${wizard.created.name} зогсоолын төлбөрийн QR код`} />
                   <a href={qrUrl(wizard.created.site_code)} download={`${wizard.created.site_code}-pay-qr.png`}
                     className="btn-primary justify-center mt-3 w-full">
@@ -324,8 +346,7 @@ function Sites() {
       <Modal open={!!qrSite} onClose={() => setQrSite(null)} title={`${qrSite?.name} — Төлбөрийн QR`}>
         {qrSite && (
           <div className="text-center space-y-4">
-            <img className="mx-auto rounded-xl bg-white p-3 w-64 h-64"
-              src={qrUrl(qrSite.site_code)}
+            <QrImage code={qrSite.site_code}
               alt={`${qrSite.name} зогсоолын төлбөрийн QR код`} />
             <a href={qrUrl(qrSite.site_code)} download={`${qrSite.site_code}-pay-qr.png`}
               className="btn-primary justify-center w-full">Хэвлэх PNG татах (өндөр нягтрал)</a>
