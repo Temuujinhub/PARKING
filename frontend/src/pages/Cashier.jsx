@@ -90,8 +90,13 @@ export default function Cashier() {
 
   const applyDiscount = async (discountId) => {
     try {
+      // Хөнгөлөлт хэрэглэх шалтгааны тайлбар (аудитад хадгалагдана)
+      let note = ''
+      if (discountId) {
+        note = prompt('Хөнгөлөлт хэрэглэх тайлбар (жишээ: дэлгүүрийн купон үзүүлсэн):') || ''
+      }
       const updated = await api(`/api/sessions/${selected.id}/apply-discount`,
-        { method: 'POST', body: { discount_id: discountId || null } })
+        { method: 'POST', body: { discount_id: discountId || null, note } })
       setSelected(updated)
       toast('Хөнгөлөлт шинэчлэгдлээ')
     } catch (e) { toast(e.message, 'error') }

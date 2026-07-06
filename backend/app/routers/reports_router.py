@@ -269,6 +269,34 @@ def shifts_excel(date_from: str | None = None, date_to: str | None = None,
     return _excel_response(wb, "cashier_shifts")
 
 
+@router.get("/vat-info")
+async def vat_info(user: User = Depends(require("vat", "reports"))):
+    """PosAPI getInformation — сугалааны үлдэгдэл, илгээгдээгүй мэдээ (ТЕГ шаардлага №6).
+    Frontend үүнийг ашиглан анхааруулга харуулна."""
+    from ..services import ebarimt
+    info = await ebarimt.get_information()
+    warnings = []
+    if int(info.get("leftLotteries") or 0) < 500:
+        warnings.append(f"Сугалааны дугаар дуусаж байна ({info.get('leftLotteries')} үлдсэн) — "
+                        "шинээр авахгүй бол сугалаагүй баримт хэвлэгдэнэ!")
+    if int(info.get("unsentCount") or 0) > 0:
+        warnings.append(f"Илгээгдээгүй {info.get('unsentCount')} баримт байна — "
+                        "3 хоногийн дотор илгээх хуультай.")
+    return {**info, "warnings": warnings}
+
+
+@router.post("/vat-send")
+async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("vat", "reports"))):
+    """Борлуулалтын мэдээг ТЕГ рүү ГАРААР илгээх (ТЕГ шаардлага №5 — гэмтэл саатлын үед)."""
+    from ..models import AuditLog
+    from ..services import ebarimt
+    result = await ebarimt.send_data()
+    db.add(AuditLog(username=user.username, action="VAT_SEND_DATA", entity="ebarimt",
+                    detail={"result": result.get("message", str(result.get("success")))}))
+    db.commit()
+    return result
+
+
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  limit: int = 200, db: Session = Depends(get_db),

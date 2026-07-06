@@ -143,8 +143,10 @@ def apply_discount(session_id: str, body: dict, db: Session = Depends(get_db),
     s.discount_amount = fee["discount_amount"]
     if s.status == "AWAITING_PAYMENT":
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+    # Хөнгөлөлт хэрэглэсэн тайлбар (шалтгаан)-ыг аудитад хадгална
     db.add(AuditLog(username=user.username, action="APPLY_DISCOUNT", entity="session",
-                    entity_id=session_id, detail=body))
+                    entity_id=session_id,
+                    detail={"discount_id": body.get("discount_id"), "note": body.get("note", "")}))
     db.commit()
     return _session_out(db, s, with_fee=True)
 

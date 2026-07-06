@@ -15,11 +15,33 @@
 }
 """
 import random
+import time
 from datetime import datetime
 
 import httpx
 
 from ..config import settings
+
+# ТЕГ-ын шаардлага №11: "QR код хадгалахгүй" — qrData-г DB-д хадгалахгүй,
+# зөвхөн түр санах ойд (1 цаг) байршуулж баримт үзүүлэх/хэвлэхэд ашиглана.
+_qr_cache: dict[str, tuple[str, float]] = {}
+_QR_TTL = 3600
+
+
+def cache_qr(payment_id: str, qr_data: str | None):
+    if qr_data:
+        _qr_cache[payment_id] = (qr_data, time.monotonic() + _QR_TTL)
+
+
+def get_cached_qr(payment_id: str) -> str | None:
+    item = _qr_cache.get(payment_id)
+    if not item:
+        return None
+    qr, exp = item
+    if time.monotonic() > exp:
+        _qr_cache.pop(payment_id, None)
+        return None
+    return qr
 
 
 def _mock_receipt() -> dict:
@@ -98,6 +120,34 @@ async def create_receipt(amount: float, vat_amount: float, payment_type: str,
         "date": data.get("date"),
         "raw": data,
     }
+
+
+async def get_information() -> dict:
+    """PosAPI getInformation — сугалааны үлдэгдэл, илгээгээгүй мэдээний байдал (шаардлага №6)."""
+    if settings.ebarimt_mock:
+        return {
+            "posId": 10000001, "posNo": settings.ebarimt_pos_no,
+            "operatorTin": settings.ebarimt_merchant_tin or "0000000",
+            "leftLotteries": 9500,          # үлдсэн сугалааны тоо
+            "lastSentDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "unsentCount": 0,               # илгээгдээгүй баримтын тоо
+            "mock": True,
+        }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(f"{settings.ebarimt_posapi_url}/info")
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def send_data() -> dict:
+    """PosAPI sendData — цугларсан баримтуудыг ТЕГ-ын нэгдсэн системд илгээх
+    (шаардлага №4 автомат — өдөр бүр, №5 гараар — Ибаримт хуудасны товч)."""
+    if settings.ebarimt_mock:
+        return {"success": True, "message": "MOCK: мэдээ илгээгдлээ", "mock": True}
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(f"{settings.ebarimt_posapi_url}/sendData")
+        resp.raise_for_status()
+        return resp.json()
 
 
 async def delete_receipt(bill_id: str, date: str) -> bool:

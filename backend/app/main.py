@@ -31,6 +31,24 @@ def health():
     return {"status": "ok", "app": settings.app_name}
 
 
+@app.on_event("startup")
+async def start_vat_auto_send():
+    """ТЕГ шаардлага №4: борлуулалтын мэдээг өдөрт нэгээс доошгүй удаа АВТОМАТААР илгээх."""
+    import asyncio
+
+    from .services import ebarimt
+
+    async def daily_send():
+        while True:
+            await asyncio.sleep(24 * 3600)
+            try:
+                await ebarimt.send_data()
+            except Exception:
+                pass  # дараагийн өдөр дахин оролдоно; гараар илгээх товч нөөц болно
+
+    asyncio.get_event_loop().create_task(daily_send())
+
+
 @app.websocket("/ws/sites/{site_id}")
 async def ws_site(websocket: WebSocket, site_id: str):
     """Real-time events: dashboard, касс, PAX терминал холбогдоно.

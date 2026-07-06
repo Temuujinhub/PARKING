@@ -61,6 +61,7 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
     if not payment or payment.status != "PAID":
         raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
+    from ..services.ebarimt import get_cached_qr
     receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).first()
     return {
         "plate_number": payment.session.plate_number if payment.session else None,
@@ -69,7 +70,9 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
         "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
-        "qr_data": receipt.receipt_url if receipt else None,
+        "customer_tin": receipt.customer_tin if receipt else None,
+        # QR түр санах ойгоос (ТЕГ №11 — DB-д хадгалагдахгүй, 1 цагийн дотор л үзнэ)
+        "qr_data": get_cached_qr(payment_id),
     }
 
 
@@ -80,14 +83,15 @@ def receipt_qr(payment_id: str, db: Session = Depends(get_db)):
     from qrcode.constants import ERROR_CORRECT_M
 
     from ..models import Payment, VatReceipt
+    from ..services.ebarimt import get_cached_qr
     payment = db.get(Payment, payment_id)
     if not payment or payment.status != "PAID":
         raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
-    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).first()
-    if not receipt or not receipt.receipt_url:
-        raise HTTPException(404, "Баримтын QR өгөгдөл олдсонгүй")
+    qr_data = get_cached_qr(payment_id)
+    if not qr_data:
+        raise HTTPException(404, "Баримтын QR хугацаа дууссан (аюулгүй байдлын үүднээс хадгалагддаггүй)")
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_M, box_size=8, border=2)
-    qr.add_data(receipt.receipt_url)
+    qr.add_data(qr_data)
     qr.make(fit=True)
     img = qr.make_image(fill_color="#231F20", back_color="white")
     buf = io.BytesIO()

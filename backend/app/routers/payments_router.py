@@ -35,11 +35,14 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         "CASH" if payment.payment_method == "CASH" else "CARD",
         customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
     )
+    # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
+    ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
     db.add(VatReceipt(
         payment_id=payment.id, session_id=payment.session_id,
-        ebarimt_id=receipt_raw.get("billId"), lottery_code=receipt_raw.get("lottery"),
+        ebarimt_id=receipt_raw.get("billId"),
+        # B2B (байгууллагын ТТД-тэй) баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
+        lottery_code=None if payment.customer_tin else receipt_raw.get("lottery"),
         amount=payment.amount, vat_amount=payment.vat_amount,
-        receipt_url=receipt_raw.get("qrData"),  # POS API 3.0 qrData — QR болгон хэвлэнэ
         customer_tin=payment.customer_tin,
         status="SENT" if receipt_raw.get("billId") else "FAILED",
     ))
@@ -198,24 +201,26 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     db.commit()
 
     receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).first()
+    lines = [
+        "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
+        f"Дугаар: {session.plate_number}",
+        f"Орсон: {session.entry_time:%Y-%m-%d %H:%M}",
+        f"Хугацаа: {session.duration_minutes} мин",
+        f"Дүн: {float(payment.amount):,.0f}₮",
+        f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
+        f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
+    ]
+    if payment.customer_tin:
+        lines.append(f"Худалдан авагч ТТД: {payment.customer_tin}")  # B2B — сугалаа хэвлэгдэхгүй
+    elif receipt and receipt.lottery_code:
+        lines.append(f"Сугалаа: {receipt.lottery_code}")
     return {
         "status": "PAID", "payment_id": payment.id, "barrier_opened": True,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
-        # PAX thermal printer: энэ qrData-г QR код болгон хэвлэнэ (e-Barimt POS API 3.0)
-        "qr_data": receipt.receipt_url if receipt else None,
-        "print_data": {
-            "lines": [
-                "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
-                f"Дугаар: {session.plate_number}",
-                f"Орсон: {session.entry_time:%Y-%m-%d %H:%M}",
-                f"Хугацаа: {session.duration_minutes} мин",
-                f"Дүн: {float(payment.amount):,.0f}₮",
-                f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
-                f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
-                f"Сугалаа: {receipt.lottery_code if receipt else '-'}",
-            ]
-        },
+        # PAX thermal printer: энэ qrData-г QR код болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй)
+        "qr_data": ebarimt.get_cached_qr(payment.id),
+        "print_data": {"lines": lines},
     }
 
 

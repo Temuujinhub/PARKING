@@ -4,7 +4,10 @@ import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
-const CONTRACT_TYPES = { MONTHLY: 'Сарын эрх', CONTRACT: 'Гэрээт', VIP: 'VIP', STAFF: 'Ажилтан' }
+const CONTRACT_TYPES = {
+  MONTHLY: 'Сарын эрх', CONTRACT: 'Гэрээт', VIP: 'VIP', STAFF: 'Ажилтан',
+  SPECIAL: 'Тусгай хэрэгцээт (түргэн, онцгой байдал г.м)',
+}
 
 export default function Drivers() {
   const toast = useToast()
