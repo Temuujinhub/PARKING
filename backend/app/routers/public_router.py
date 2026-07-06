@@ -54,6 +54,25 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
     })
 
 
+@router.get("/receipt/{payment_id}")
+def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
+    """Төлбөрийн дараах НӨАТ (e-Barimt) баримтын мэдээлэл — /pay хуудасны амжилтын дэлгэцэд."""
+    from ..models import Payment, VatReceipt
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.status != "PAID":
+        raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
+    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).first()
+    return {
+        "plate_number": payment.session.plate_number if payment.session else None,
+        "amount": float(payment.amount),
+        "vat_amount": float(payment.vat_amount),
+        "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+        "ebarimt_id": receipt.ebarimt_id if receipt else None,
+        "lottery_code": receipt.lottery_code if receipt else None,
+        "receipt_url": receipt.receipt_url if receipt else None,
+    }
+
+
 @router.get("/site/{site_code}")
 def get_site(site_code: str, db: Session = Depends(get_db)):
     site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code,

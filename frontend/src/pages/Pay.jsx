@@ -31,6 +31,7 @@ export default function Pay() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [matches, setMatches] = useState([])
+  const [receipt, setReceipt] = useState(null)
   const pollRef = useRef(null)
   const debounceRef = useRef(null)
 
@@ -79,9 +80,26 @@ export default function Pay() {
       pollRef.current = setInterval(async () => {
         try {
           const st = await publicApi(`/api/payments/qpay/check/${inv.payment_id}`, { method: 'POST' })
-          if (st.status === 'PAID') { clearInterval(pollRef.current); setPaid(true) }
+          if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(inv.payment_id) }
         } catch {}
       }, 5000)
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+
+  const onPaid = async (paymentId) => {
+    setPaid(true)
+    try { setReceipt(await publicApi(`/api/public/receipt/${paymentId}`)) } catch {}
+  }
+
+  // Туршилтын горим: QPay-г алгасаж төлөгдсөн болгоно (зөвхөн mock үед харагдана)
+  const mockPay = async () => {
+    setBusy(true)
+    try {
+      await publicApi(`/api/payments/qpay/webhook?payment_id=${payment.payment_id}`, {
+        method: 'POST', body: { payment_status: 'PAID', amount: payment.amount },
+      })
+      clearInterval(pollRef.current)
+      onPaid(payment.payment_id)
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
@@ -89,17 +107,34 @@ export default function Pay() {
   if (paid) {
     return (
       <Shell site={site}>
-        <div className="text-center py-10 space-y-4">
-          <CheckCircle2 size={72} className="mx-auto text-accent" aria-hidden />
+        <div className="text-center py-6 space-y-4">
+          <CheckCircle2 size={64} className="mx-auto text-accent" aria-hidden />
           <h2 className="text-2xl font-bold">Төлбөр төлөгдлөө!</h2>
           <p className="text-slate-300">
             Хаалт нээгдэнэ — <b>сайн замаараа яваарай!</b>
           </p>
-          {session && (
-            <p className="text-sm text-slate-400">
-              {site?.grace_minutes || 15} минутын дотор гарна уу. Хаалт нээгдэхгүй бол дугаараа гарах камерт дахин уншуулаарай.
-            </p>
+          {receipt && (
+            <div className="text-left bg-surface-muted/40 rounded-xl p-4 space-y-2">
+              <div className="text-center text-xs font-bold tracking-widest text-slate-400 uppercase pb-1 border-b border-dashed border-surface-border">
+                НӨАТ-ийн баримт (e-Barimt)
+              </div>
+              <div className="grid grid-cols-2 gap-y-1.5 text-sm pt-1">
+                <span className="text-slate-400">Машины дугаар</span>
+                <span className="font-mono text-right font-bold">{receipt.plate_number}</span>
+                <span className="text-slate-400">Төлсөн дүн</span>
+                <span className="font-mono text-right">{fmt(receipt.amount)}₮</span>
+                <span className="text-slate-400">НӨАТ (10%)</span>
+                <span className="font-mono text-right">{fmt(receipt.vat_amount)}₮</span>
+                <span className="text-slate-400">Баримтын дугаар</span>
+                <span className="font-mono text-right text-xs pt-0.5">{receipt.ebarimt_id || '-'}</span>
+                <span className="text-slate-400">Сугалааны код</span>
+                <span className="font-mono text-right text-lg font-bold text-accent">{receipt.lottery_code || '-'}</span>
+              </div>
+            </div>
           )}
+          <p className="text-sm text-slate-400">
+            {site?.grace_minutes || 15} минутын дотор гарна уу. Хаалт нээгдэхгүй бол дугаараа гарах камерт дахин уншуулаарай.
+          </p>
         </div>
       </Shell>
     )
@@ -126,7 +161,16 @@ export default function Pay() {
           <div className="flex items-center justify-center gap-2 text-sm text-slate-400">
             <Loader2 size={15} className="animate-spin" aria-hidden /> Төлбөр хүлээж байна…
           </div>
-          {payment.mock && <div className="text-xs text-amber-400">Туршилтын горим (QPay холбогдоогүй)</div>}
+          {payment.mock && (
+            <div className="space-y-2">
+              <div className="text-xs text-amber-400">Туршилтын горим (QPay холбогдоогүй)</div>
+              <button onClick={mockPay} disabled={busy}
+                className="btn w-full justify-center bg-amber-500/15 text-amber-400 border border-amber-500/40 hover:bg-amber-500/25">
+                {busy ? <Loader2 className="animate-spin" size={16} /> : null}
+                Туршилт: Төлөгдсөн болгож НӨАТ баримт авах →
+              </button>
+            </div>
+          )}
         </div>
       </Shell>
     )
