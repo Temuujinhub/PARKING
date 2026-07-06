@@ -76,6 +76,46 @@ def recent_exits(site_id: str, minutes: int = 30,
     return [_session_out(db, s, with_fee=True) for s in sessions]
 
 
+@router.post("/manual-entry")
+async def manual_entry(body: dict, db: Session = Depends(get_db),
+                       user: User = Depends(require("cashier"))):
+    """Орох талд уншигдалгүй орсон машиныг ажилтан гараар бүртгэнэ.
+    (2 цаг тутмын эргүүлээр илэрсэн машин г.м.)
+    body: {site_id, plate_number, entry_time?: ISO datetime — эргүүлээр тааварлаж
+           оруулах бол орсон гэж үзэх цаг, default = одоо}"""
+    from ..session_logic import find_registered, is_blacklisted
+    plate = normalize_plate(body.get("plate_number", ""))
+    site_id = body.get("site_id")
+    if not plate or not site_id:
+        raise HTTPException(400, "plate_number болон site_id шаардлагатай")
+
+    existing = get_open_session(db, plate, site_id)
+    if existing:
+        raise HTTPException(400, f"{plate} дугаартай машин аль хэдийн бүртгэлтэй байна "
+                                 f"(орсон: {existing.entry_time:%Y-%m-%d %H:%M})")
+
+    entry_time = (datetime.fromisoformat(body["entry_time"])
+                  if body.get("entry_time") else datetime.utcnow())
+    registered = find_registered(db, plate, site_id)
+    black = is_blacklisted(db, plate)
+
+    s = ParkingSession(
+        site_id=site_id, plate_number=plate, entry_time=entry_time,
+        is_registered=registered is not None, status="OPEN",
+    )
+    db.add(s)
+    db.flush()
+    db.add(AuditLog(username=user.username, action="MANUAL_ENTRY", entity="session",
+                    entity_id=s.id, detail={"plate": plate, "entry_time": entry_time.isoformat()}))
+    db.commit()
+    await manager.broadcast(site_id, "ENTRY_EVENT", {
+        "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),
+        "registered": registered is not None, "blacklisted": black is not None,
+        "barrier_opened": False, "manual": True, "by": user.username,
+    })
+    return _session_out(db, s, with_fee=True)
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str, db: Session = Depends(get_db),
                 user: User = Depends(require("history", "cashier"))):

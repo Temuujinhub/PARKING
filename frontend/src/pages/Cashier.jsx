@@ -1,5 +1,5 @@
 // Касс — операторын гол дэлгэц: гарах машинууд real-time, төлбөр авах, хаалт нээх, ээлж
-import { Banknote, CreditCard, DoorOpen, QrCode, RefreshCw, Search } from 'lucide-react'
+import { Banknote, CarFront, CreditCard, DoorOpen, QrCode, RefreshCw, Search } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
@@ -17,6 +17,7 @@ export default function Cashier() {
   const [barriers, setBarriers] = useState([])
   const [busy, setBusy] = useState(false)
   const [qpayInfo, setQpayInfo] = useState(null)
+  const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time}
 
   const loadExits = useCallback((sid) => {
     if (!sid) return
@@ -90,6 +91,18 @@ export default function Cashier() {
     } catch (e) { toast(e.message, 'error') }
   }
 
+  const saveManualEntry = async (e) => {
+    e.preventDefault()
+    try {
+      const body = { site_id: siteId, plate_number: manualEntry.plate_number }
+      // datetime-local нь локал цаг — backend UTC хадгалдаг тул хөрвүүлнэ
+      if (manualEntry.entry_time) body.entry_time = new Date(manualEntry.entry_time).toISOString().slice(0, 19)
+      const s = await api('/api/sessions/manual-entry', { method: 'POST', body })
+      toast(`${s.plate_number} бүртгэгдлээ`)
+      setManualEntry(null)
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const toggleShift = async () => {
     try {
       if (shift?.open) {
@@ -113,6 +126,9 @@ export default function Cashier() {
           <select className="input w-56" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
+          <button onClick={() => setManualEntry({ plate_number: '', entry_time: '' })} className="btn-secondary">
+            <CarFront size={16} /> Машин бүртгэх
+          </button>
           <button onClick={toggleShift}
             className={shift?.open ? 'btn-danger' : 'btn-primary'}>
             {shift?.open ? 'Ээлж хаах' : 'Ээлж нээх'}
@@ -238,6 +254,28 @@ export default function Cashier() {
           {barriers.length === 0 && <span className="text-sm text-slate-500">Barrier төхөөрөмж бүртгэгдээгүй</span>}
         </div>
       </div>
+
+      {/* Гараар бүртгэх modal — уншигдалгүй орсон машин (эргүүлийн шалгалт) */}
+      <Modal open={!!manualEntry} onClose={() => setManualEntry(null)} title="Машин гараар бүртгэх">
+        {manualEntry && (
+          <form onSubmit={saveManualEntry} className="space-y-3">
+            <div className="text-sm text-slate-400 bg-surface-muted/40 rounded-lg px-3 py-2">
+              Орох камерт уншигдалгүй орсон машиныг (эргүүлээр илэрсэн) энд бүртгэнэ.
+              Бүртгэсэн цагаас нь төлбөр тооцогдоно.
+            </div>
+            <Field label="Улсын дугаар" required>
+              <input className="input font-mono text-xl text-center tracking-widest uppercase" autoFocus
+                value={manualEntry.plate_number} required maxLength={10}
+                onChange={(e) => setManualEntry({ ...manualEntry, plate_number: e.target.value.toUpperCase() })} />
+            </Field>
+            <Field label="Орсон гэж үзэх цаг (хоосон бол одоо)">
+              <input className="input" type="datetime-local" value={manualEntry.entry_time}
+                onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value })} />
+            </Field>
+            <button className="btn-primary w-full justify-center">Бүртгэх</button>
+          </form>
+        )}
+      </Modal>
 
       {/* QPay QR modal */}
       <Modal open={!!qpayInfo} onClose={() => setQpayInfo(null)} title="QPay төлбөр">
