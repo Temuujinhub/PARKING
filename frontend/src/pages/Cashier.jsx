@@ -17,7 +17,14 @@ export default function Cashier() {
   const [barriers, setBarriers] = useState([])
   const [busy, setBusy] = useState(false)
   const [qpayInfo, setQpayInfo] = useState(null)
-  const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time}
+  const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
+
+  // datetime-local input-д зориулсан локал цагийн формат (YYYY-MM-DDTHH:MM)
+  const toLocalInput = (d) => {
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+  const minutesAgo = (mins) => toLocalInput(new Date(Date.now() - mins * 60000))
 
   const loadExits = useCallback((sid) => {
     if (!sid) return
@@ -126,7 +133,7 @@ export default function Cashier() {
           <select className="input w-56" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <button onClick={() => setManualEntry({ plate_number: '', entry_time: '' })} className="btn-secondary">
+          <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
             <CarFront size={16} /> Машин бүртгэх
           </button>
           <button onClick={toggleShift}
@@ -268,9 +275,22 @@ export default function Cashier() {
                 value={manualEntry.plate_number} required maxLength={10}
                 onChange={(e) => setManualEntry({ ...manualEntry, plate_number: e.target.value.toUpperCase() })} />
             </Field>
-            <Field label="Орсон гэж үзэх цаг (хоосон бол одоо)">
-              <input className="input" type="datetime-local" value={manualEntry.entry_time}
-                onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value })} />
+            <Field label="Хэдий хугацааны өмнө орсон бэ?">
+              <div className="grid grid-cols-5 gap-1.5 mb-2">
+                {[[0, 'Одоо'], [30, '30 мин'], [60, '1 цаг'], [120, '2 цаг'], [180, '3 цаг']].map(([mins, label]) => (
+                  <button key={mins} type="button"
+                    onClick={() => setManualEntry({ ...manualEntry, entry_time: minutesAgo(mins), offset: mins })}
+                    className={`px-2 py-2 rounded-lg text-sm font-medium border transition-colors cursor-pointer
+                      ${manualEntry.offset === mins
+                        ? 'bg-accent text-white border-accent'
+                        : 'bg-surface-muted/40 text-slate-300 border-surface-border hover:border-slate-500'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <input className="input" type="datetime-local" value={manualEntry.entry_time} aria-label="Орсон цаг гараар засах"
+                onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value, offset: -1 })} />
+              <div className="text-xs text-slate-500 mt-1">3 цагаас дээш бол дээрх талбараас гараар засна.</div>
             </Field>
             <button className="btn-primary w-full justify-center">Бүртгэх</button>
           </form>
