@@ -87,7 +87,7 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     if existing and existing.provider_invoice_id:
         return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
                 "qr_text": existing.qr_text, "deep_link": existing.deep_link,
-                "amount": float(existing.amount)}
+                "amount": float(existing.amount), "mock": settings.qpay_mock}
 
     payment = _create_payment(db, session, "QPAY", "QR")
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
