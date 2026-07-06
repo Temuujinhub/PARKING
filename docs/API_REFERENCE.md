@@ -2,7 +2,7 @@
 
 Гадаад хөгжүүлэгчдэд (Mobile апп, PAX POS апп) зориулсан API баримт бичиг.
 
-- **Base URL:** `https://test.easy-parking.mn` (⚠️ одоогоор зөвхөн HTTP — домэйн холбогдмогц HTTPS болно)
+- **Base URL:** `https://test.easy-parking.mn` (HTTPS — Let's Encrypt)
 - **Interactive docs (Swagger):** `GET /api/docs`
 - **Postman collection:** [postman/EasyParking_POS.postman_collection.json](postman/EasyParking_POS.postman_collection.json)
   — Postman → Import хийгээд `1. Нэвтрэлт → Login`-г ажиллуулбал token автоматаар тохирно.
