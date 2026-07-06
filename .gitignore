@@ -1,0 +1,11 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# Нууц тохиргоо — .env.example-г ашиглана
+backend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
