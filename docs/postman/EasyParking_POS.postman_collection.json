@@ -205,6 +205,22 @@
           }
         },
         {
+          "name": "Хялбар хайлт (эхний тоогоор, үсэггүй)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/public/search?site={{site_code}}&q=8888",
+              "host": ["{{base_url}}"], "path": ["api", "public", "search"],
+              "query": [
+                { "key": "site", "value": "{{site_code}}" },
+                { "key": "q", "value": "8888" }
+              ]
+            },
+            "description": "Жолооч дугаарынхаа эхний тоог (2+ тэмдэгт) бичихэд таарах машинуудын жагсаалт. /pay хуудасны live хайлт үүнийг ашигладаг."
+          }
+        },
+        {
           "name": "Session хайх (public, дугаараар)",
           "event": [
             {

@@ -153,7 +153,9 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 |---|---|
 | GET /api/public/site/{site_code} | Зогсоолын нэр, үнэгүй минут |
 | GET /api/public/recent-exits/{site_code} | Сүүлд гарах камерт уншигдсан дугаарууд |
+| GET /api/public/search?site=&q=0028 | Хялбар хайлт: эхний тоогоор таарах машинууд (үсэг шаардахгүй, 2+ тэмдэгт) |
 | GET /api/public/sessions?plate=&site= | Session + төлбөрийн задаргаа |
+| GET /api/public/qr/{site_code}.png | Зогсоолын төлбөрийн QR (хэвлэхэд бэлэн PNG) |
 
 ---
 

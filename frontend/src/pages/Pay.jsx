@@ -30,7 +30,9 @@ export default function Pay() {
   const [paid, setPaid] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [matches, setMatches] = useState([])
   const pollRef = useRef(null)
+  const debounceRef = useRef(null)
 
   useEffect(() => {
     if (!siteCode) { setError('QR код буруу байна — зогсоолын код олдсонгүй.'); return }
@@ -38,7 +40,22 @@ export default function Pay() {
     publicApi(`/api/public/recent-exits/${siteCode}`).then(setRecent).catch(() => {})
   }, [siteCode])
 
-  useEffect(() => () => clearInterval(pollRef.current), [])
+  useEffect(() => () => { clearInterval(pollRef.current); clearTimeout(debounceRef.current) }, [])
+
+  // Хялбар хайлт: 2+ тэмдэгт бичихэд таарах машинуудыг live харуулна
+  const onPlateChange = (value) => {
+    const v = value.toUpperCase()
+    setPlate(v)
+    setError('')
+    clearTimeout(debounceRef.current)
+    if (v.trim().length < 2) { setMatches([]); return }
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const list = await publicApi(`/api/public/search?site=${siteCode}&q=${encodeURIComponent(v.trim())}`)
+        setMatches(list)
+      } catch { setMatches([]) }
+    }, 350)
+  }
 
   const search = async (p) => {
     const target = (p || plate).toUpperCase().replace(/\s/g, '')
@@ -175,12 +192,28 @@ export default function Pay() {
           </div>
         )}
         <div>
-          <label className="text-sm text-slate-400 block mb-2" htmlFor="plate">Машины улсын дугаараа оруулна уу:</label>
+          <label className="text-sm text-slate-400 block mb-2" htmlFor="plate">
+            Машины улсын дугаараа оруулна уу <span className="text-slate-500">(эхний тоог бичихэд хайлт гарна)</span>:
+          </label>
           <input id="plate" className="input text-center text-2xl font-mono tracking-widest py-3.5 uppercase"
             placeholder="1234 АБВ" value={plate} maxLength={10} autoComplete="off"
-            onChange={(e) => setPlate(e.target.value.toUpperCase())}
+            onChange={(e) => onPlateChange(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && search()} />
         </div>
+        {matches.length > 0 && (
+          <div className="space-y-2" aria-live="polite">
+            <div className="text-xs text-slate-500">Таарсан машинууд — өөрийнхөө дугаарыг сонгоно уу:</div>
+            {matches.map((m, i) => (
+              <button key={i} onClick={() => { setMatches([]); setPlate(m.plate_number); search(m.plate_number) }}
+                className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-surface-muted/50 border border-surface-border/60 hover:border-accent transition-colors cursor-pointer">
+                <span className="font-mono text-lg font-bold tracking-wider">{m.plate_number}</span>
+                <span className={`font-mono font-semibold ${m.is_free ? 'text-accent' : 'text-amber-400'}`}>
+                  {m.is_free ? 'Үнэгүй' : `${fmt(m.total_fee)}₮`}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {error && <div role="alert" className="text-sm text-red-400 bg-red-500/10 rounded-xl px-4 py-3">{error}</div>}
         <button onClick={() => search()} disabled={busy || !plate.trim()} className="btn-primary w-full justify-center text-base py-3.5">
           {busy ? <Loader2 className="animate-spin" size={18} /> : <Car size={18} />} Төлбөр шалгах

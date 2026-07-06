@@ -84,6 +84,36 @@ def recent_exits(site_code: str, db: Session = Depends(get_db)):
              "total_fee": float(s.total_fee or 0)} for s in sessions]
 
 
+@router.get("/search")
+def search_plates(site: str, q: str, db: Session = Depends(get_db)):
+    """Хялбар хайлт: дугаарын эхний тоогоор (үсэг оруулахгүйгээр) нээлттэй
+    session-уудаас таарах машинуудын жагсаалт буцаана. Жолооч жагсаалтаас сонгоно."""
+    q = normalize_plate(q)
+    if len(q) < 2:
+        return []
+    site_obj = db.query(ParkingSite).filter(ParkingSite.site_code == site).first()
+    if not site_obj:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    sessions = (
+        db.query(ParkingSession)
+        .filter(ParkingSession.site_id == site_obj.id,
+                ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
+                ParkingSession.plate_number.ilike(f"{q}%"))
+        .order_by(ParkingSession.updated_at.desc()).limit(8).all()
+    )
+    out = []
+    for s in sessions:
+        fee = session_fee_info(db, s)
+        out.append({
+            "plate_number": s.plate_number,
+            "total_fee": fee["total_fee"],
+            "duration_minutes": fee["duration_minutes"],
+            "is_free": fee["is_free"],
+            "status": s.status,
+        })
+    return out
+
+
 @router.get("/sessions")
 def find_session(plate: str, site: str, db: Session = Depends(get_db)):
     """Дугаараар нээлттэй session хайна (төлбөрийн задаргаатай)."""
