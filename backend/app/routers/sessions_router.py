@@ -149,6 +149,34 @@ def apply_discount(session_id: str, body: dict, db: Session = Depends(get_db),
     return _session_out(db, s, with_fee=True)
 
 
+@router.put("/{session_id}/plate")
+async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
+                     user: User = Depends(require("cashier"))):
+    """Камер алдаатай уншсан дугаарыг засах (easy-park UAT items 18, 21, 24).
+    Зассаны дараа төлбөр/хайлт шинэ дугаараар хэвийн ажиллана."""
+    from ..session_logic import is_valid_plate
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+        raise HTTPException(400, "Зөвхөн нээлттэй session-ий дугаарыг засна")
+    new_plate = normalize_plate(body.get("plate_number", ""))
+    if not is_valid_plate(new_plate):
+        raise HTTPException(400, f"«{new_plate}» формат буруу. Зөв: 4 орон + 3 кирилл үсэг (1234УБА)")
+    dup = get_open_session(db, new_plate, s.site_id)
+    if dup and dup.id != s.id:
+        raise HTTPException(400, f"{new_plate} дугаартай өөр нээлттэй бүртгэл байна")
+    old_plate = s.plate_number
+    s.plate_number = new_plate
+    db.add(AuditLog(username=user.username, action="EDIT_PLATE", entity="session",
+                    entity_id=session_id, detail={"old": old_plate, "new": new_plate}))
+    db.commit()
+    await manager.broadcast(s.site_id, "PLATE_EDITED", {
+        "session_id": s.id, "old_plate": old_plate, "plate": new_plate, "by": user.username,
+    })
+    return _session_out(db, s, with_fee=True)
+
+
 @router.post("/{session_id}/manual-exit")
 async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):

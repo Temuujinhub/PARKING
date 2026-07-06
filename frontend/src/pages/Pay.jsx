@@ -32,6 +32,8 @@ export default function Pay() {
   const [busy, setBusy] = useState(false)
   const [matches, setMatches] = useState([])
   const [receipt, setReceipt] = useState(null)
+  const [vatType, setVatType] = useState('PERSON') // PERSON | ORG
+  const [orgTin, setOrgTin] = useState('')
   const pollRef = useRef(null)
   const debounceRef = useRef(null)
 
@@ -70,9 +72,15 @@ export default function Pay() {
   }
 
   const payQpay = async () => {
+    if (vatType === 'ORG' && !/^\d{7}$|^\d{10,14}$/.test(orgTin.trim())) {
+      setError('Байгууллагын ТТД буруу байна (7 эсвэл 10+ оронтой тоо)')
+      return
+    }
     setBusy(true); setError('')
     try {
-      const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: session.session_id } })
+      const body = { session_id: session.session_id }
+      if (vatType === 'ORG') body.customer_tin = orgTin.trim()
+      const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
       setPayment(inv)
       // Утасны QPay апп руу шилжүүлнэ
       if (inv.deep_link && !inv.mock) window.location.href = inv.deep_link
@@ -218,9 +226,29 @@ export default function Pay() {
               Төлбөргүй — {session.free_reason || 'үнэгүй хугацаанд байна'}. Шууд гарна уу!
             </div>
           ) : (
-            <button onClick={payQpay} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">
-              {busy ? <Loader2 className="animate-spin" size={18} /> : <CreditCard size={18} />} QPay-ээр төлөх
-            </button>
+            <>
+              {/* НӨАТ баримтын төрөл (easy-park UAT item 25) */}
+              <div>
+                <div className="text-sm text-slate-400 mb-2">НӨАТ-ийн баримт:</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {[['PERSON', 'Хувь хүн'], ['ORG', 'Байгууллага']].map(([v, l]) => (
+                    <button key={v} type="button" onClick={() => setVatType(v)}
+                      className={`px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors cursor-pointer
+                        ${vatType === v ? 'bg-accent text-white border-accent' : 'bg-surface-muted/40 text-slate-300 border-surface-border'}`}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                {vatType === 'ORG' && (
+                  <input className="input mt-2 font-mono text-center" inputMode="numeric"
+                    placeholder="Байгууллагын ТТД (регистр)" value={orgTin} maxLength={14}
+                    onChange={(e) => setOrgTin(e.target.value.replace(/\D/g, ''))} aria-label="Байгууллагын ТТД" />
+                )}
+              </div>
+              <button onClick={payQpay} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">
+                {busy ? <Loader2 className="animate-spin" size={18} /> : <CreditCard size={18} />} QPay-ээр төлөх
+              </button>
+            </>
           )}
         </div>
       </Shell>

@@ -177,6 +177,7 @@ class Payment(Base):
     card_last4 = Column(String(4), nullable=True)
     card_brand = Column(String(20), nullable=True)
     terminal_id = Column(String(60), nullable=True)
+    customer_tin = Column(String(20), nullable=True)  # Байгууллагаар НӨАТ авах бол ТТД
     cashier_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
     shift_id = Column(UUID(as_uuid=False), ForeignKey("cashier_shifts.id"), nullable=True)
     qr_text = Column(Text, nullable=True)

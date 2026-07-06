@@ -9,6 +9,12 @@
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=PT+Sans:wght@400;700&family=PT+Sans+Caption:wght@400;700&display=swap" rel="stylesheet" />
   </head>
   <body>
+    <script>
+      // Theme flash-аас сэргийлж эхэнд нь тавина (default: шөнийн горим)
+      if (localStorage.getItem('parking_theme') !== 'light') {
+        document.documentElement.classList.add('dark')
+      }
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

@@ -224,7 +224,23 @@ export default function Cashier() {
           {selected ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="font-mono text-2xl font-bold">{selected.plate_number}</span>
+                <span className="font-mono text-2xl font-bold flex items-center gap-2">
+                  {selected.plate_number}
+                  <button className="text-xs font-sans font-normal text-slate-500 hover:text-accent underline cursor-pointer"
+                    title="Камер алдаатай уншсан бол дугаарыг засна"
+                    onClick={async () => {
+                      const np = prompt(`Дугаар засах (одоо: ${selected.plate_number}).\nЗөв формат: 4 тоо + 3 кирилл үсэг`, selected.plate_number)
+                      if (!np || np === selected.plate_number) return
+                      try {
+                        const updated = await api(`/api/sessions/${selected.id}/plate`, { method: 'PUT', body: { plate_number: np } })
+                        setSelected(updated)
+                        toast(`Дугаар ${updated.plate_number} болж засагдлаа`)
+                        loadExits(siteId)
+                      } catch (err) { toast(err.message, 'error') }
+                    }}>
+                    засах
+                  </button>
+                </span>
                 <Badge value={selected.status} />
               </div>
               <div className="grid grid-cols-2 gap-2 text-sm bg-surface-muted/30 rounded-lg p-3">

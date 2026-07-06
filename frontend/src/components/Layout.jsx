@@ -1,10 +1,14 @@
 import {
-  Banknote, Car, ClipboardList, FileText, History, LayoutDashboard, ListX,
-  LogOut, Percent, ReceiptText, ScrollText, Settings, ShieldAlert, Users, DoorOpen,
+  Banknote, Car, ClipboardList, FileText, History, KeyRound, LayoutDashboard,
+  LogOut, Moon, Percent, ReceiptText, ScrollText, Settings, ShieldAlert, Sun, Users, DoorOpen,
 } from 'lucide-react'
+import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { api } from '../api'
 import { useAuth } from '../auth'
+import { isDark, toggleTheme } from '../theme'
 import Logo from './Logo'
+import { Field, Modal, useToast } from './ui'
 
 // Цэс: module = эрхийн матрицын түлхүүр (backend ROLE_PERMISSIONS-тэй ижил)
 const MENU = [
@@ -30,7 +34,23 @@ const ROLE_LABELS = {
 export default function Layout() {
   const { user, can, logout } = useAuth()
   const navigate = useNavigate()
+  const toast = useToast()
+  const [dark, setDark] = useState(isDark())
+  const [pwModal, setPwModal] = useState(null) // {old_password, new_password, confirm}
   const items = MENU.filter((m) => (m.module === 'users' ? user?.role === 'SUPER_ADMIN' : can(m.module)))
+
+  const changePassword = async (e) => {
+    e.preventDefault()
+    if (pwModal.new_password !== pwModal.confirm) return toast('Шинэ нууц үг давхцахгүй байна', 'error')
+    try {
+      await api('/api/auth/change-password', {
+        method: 'POST',
+        body: { old_password: pwModal.old_password, new_password: pwModal.new_password },
+      })
+      toast('Нууц үг солигдлоо')
+      setPwModal(null)
+    } catch (err) { toast(err.message, 'error') }
+  }
 
   return (
     <div className="flex min-h-dvh">
@@ -51,12 +71,46 @@ export default function Layout() {
           ))}
         </nav>
         <div className="p-4 border-t border-surface-border/60">
-          <div className="text-sm font-medium truncate">{user?.full_name || user?.username}</div>
-          <div className="text-xs text-slate-500 mb-2">{ROLE_LABELS[user?.role] || user?.role}</div>
-          <button onClick={() => { logout(); navigate('/login') }} className="btn-secondary w-full justify-center text-xs py-1.5">
-            <LogOut size={14} /> Гарах
-          </button>
+          <div className="flex items-center justify-between mb-2">
+            <div className="min-w-0">
+              <div className="text-sm font-medium truncate">{user?.full_name || user?.username}</div>
+              <div className="text-xs text-slate-500">{ROLE_LABELS[user?.role] || user?.role}</div>
+            </div>
+            <button onClick={() => setDark(toggleTheme())} aria-label="Өдөр/шөнийн горим солих"
+              className="p-2 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-400 hover:text-accent transition-colors">
+              {dark ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button onClick={() => setPwModal({ old_password: '', new_password: '', confirm: '' })}
+              className="btn-secondary justify-center text-xs py-1.5" title="Нууц үг солих">
+              <KeyRound size={13} /> Нууц үг
+            </button>
+            <button onClick={() => { logout(); navigate('/login') }} className="btn-secondary justify-center text-xs py-1.5">
+              <LogOut size={13} /> Гарах
+            </button>
+          </div>
         </div>
+
+        <Modal open={!!pwModal} onClose={() => setPwModal(null)} title="Нууц үг солих">
+          {pwModal && (
+            <form onSubmit={changePassword} className="space-y-3">
+              <Field label="Одоогийн нууц үг" required>
+                <input className="input" type="password" required autoComplete="current-password"
+                  value={pwModal.old_password} onChange={(e) => setPwModal({ ...pwModal, old_password: e.target.value })} />
+              </Field>
+              <Field label="Шинэ нууц үг (8+ тэмдэгт)" required>
+                <input className="input" type="password" required minLength={8} autoComplete="new-password"
+                  value={pwModal.new_password} onChange={(e) => setPwModal({ ...pwModal, new_password: e.target.value })} />
+              </Field>
+              <Field label="Шинэ нууц үг давтах" required>
+                <input className="input" type="password" required autoComplete="new-password"
+                  value={pwModal.confirm} onChange={(e) => setPwModal({ ...pwModal, confirm: e.target.value })} />
+              </Field>
+              <button className="btn-primary w-full justify-center">Солих</button>
+            </form>
+          )}
+        </Modal>
       </aside>
       <main className="flex-1 min-w-0 p-6 overflow-y-auto">
         <Outlet />

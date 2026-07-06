@@ -33,12 +33,14 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     receipt_raw = await ebarimt.create_receipt(
         float(payment.amount), float(payment.vat_amount),
         "CASH" if payment.payment_method == "CASH" else "CARD",
+        customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
     )
     db.add(VatReceipt(
         payment_id=payment.id, session_id=payment.session_id,
         ebarimt_id=receipt_raw.get("billId"), lottery_code=receipt_raw.get("lottery"),
         amount=payment.amount, vat_amount=payment.vat_amount,
         receipt_url=receipt_raw.get("qrData"),  # POS API 3.0 qrData — QR болгон хэвлэнэ
+        customer_tin=payment.customer_tin,
         status="SENT" if receipt_raw.get("billId") else "FAILED",
     ))
     session = db.get(ParkingSession, payment.session_id)
@@ -90,6 +92,9 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
                 "amount": float(existing.amount), "mock": settings.qpay_mock}
 
     payment = _create_payment(db, session, "QPAY", "QR")
+    # НӨАТ-аа байгууллагаар авах бол ТТД (item 25 — easy-park UAT)
+    if body.get("customer_tin"):
+        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
     inv = await qpay.create_invoice(
         payment.sender_invoice_no, float(payment.amount),
@@ -187,6 +192,8 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     payment.card_last4 = body.get("card_last4")
     payment.card_brand = body.get("card_brand")
     payment.terminal_id = body.get("terminal_id")
+    if body.get("customer_tin"):
+        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
     await _finalize_paid(db, payment, raw=body)
     db.commit()
 

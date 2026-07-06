@@ -12,11 +12,13 @@ export default function Reports() {
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
   const [revenue, setRevenue] = useState(null)
+  const [daily, setDaily] = useState(null)
   const [shifts, setShifts] = useState([])
 
   const load = () => {
     const qs = `date_from=${from}&date_to=${to}`
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
+    else if (tab === 'daily') api(`/api/reports/daily?${qs}`).then(setDaily).catch(() => {})
     else api(`/api/cashier/shifts?${qs}`).then(setShifts).catch(() => {})
   }
   useEffect(load, [tab, from, to])
@@ -40,9 +42,10 @@ export default function Reports() {
           <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх огноо" />
           <span className="text-slate-500">—</span>
           <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах огноо" />
-          {tab === 'revenue' ? (
+          {tab === 'revenue' && (
             <button className="btn-primary" onClick={downloadExcel}><Download size={16} /> Excel</button>
-          ) : (
+          )}
+          {tab === 'shifts' && (
             <button className="btn-primary"
               onClick={() => downloadBlob(`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `kass_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
@@ -52,7 +55,7 @@ export default function Reports() {
       </div>
 
       <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
-        {[['revenue', 'Зогсоолын орлого'], ['shifts', 'Касс хаалтын тайлан']].map(([v, l]) => (
+        {[['revenue', 'Зогсоолын орлого'], ['daily', 'Өдрөөр'], ['shifts', 'Касс хаалтын тайлан']].map(([v, l]) => (
           <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer
               ${tab === v ? 'border-accent text-accent' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>
@@ -63,7 +66,7 @@ export default function Reports() {
 
       {tab === 'revenue' && revenue && (
         <>
-          <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Нийт хугацаа', 'Төлөгдөөгүй (₮)', 'Төлбөр (₮)', 'Үйлдэл']}
+          <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Төлөгдөөгүй (₮)', 'Нийт (₮)', 'Үйлдэл']}
             empty={revenue.rows.length === 0}>
             {revenue.rows.map((r) => (
               <tr key={r.site_id}>
@@ -71,6 +74,9 @@ export default function Reports() {
                 <td className="td font-mono">{fmt(r.entered)}</td>
                 <td className="td font-mono">{fmt(r.exited)}</td>
                 <td className="td font-mono">{fmtDur(r.total_minutes)}</td>
+                <td className="td font-mono">{fmt(r.cash_amount)}</td>
+                <td className="td font-mono">{fmt(r.qpay_amount)}</td>
+                <td className="td font-mono">{fmt(r.pos_amount)}</td>
                 <td className="td font-mono text-amber-400">{fmt(r.unpaid_amount)}</td>
                 <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
                 <td className="td">
@@ -84,12 +90,38 @@ export default function Reports() {
               </tr>
             ))}
           </Table>
-          <div className="card py-3 flex flex-wrap gap-6 text-sm">
-            <span>Нийт орсон: <b className="font-mono">{fmt(revenue.totals.entered)}</b></span>
-            <span>Нийт гарсан: <b className="font-mono">{fmt(revenue.totals.exited)}</b></span>
-            <span>Нийт хугацаа: <b className="font-mono">{fmtDur(revenue.totals.total_minutes)}</b></span>
+          <div className="card py-3 flex flex-wrap gap-5 text-sm">
+            <span>Орсон: <b className="font-mono">{fmt(revenue.totals.entered)}</b></span>
+            <span>Гарсан: <b className="font-mono">{fmt(revenue.totals.exited)}</b></span>
+            <span>Бэлэн: <b className="font-mono">{fmt(revenue.totals.cash_amount)}₮</b></span>
+            <span>QPay: <b className="font-mono">{fmt(revenue.totals.qpay_amount)}₮</b></span>
+            <span>Карт: <b className="font-mono">{fmt(revenue.totals.pos_amount)}₮</b></span>
             <span>Төлөгдөөгүй: <b className="font-mono text-amber-400">{fmt(revenue.totals.unpaid_amount)}₮</b></span>
             <span>Нийт орлого: <b className="font-mono text-accent">{fmt(revenue.totals.paid_amount)}₮</b></span>
+          </div>
+        </>
+      )}
+
+      {tab === 'daily' && daily && (
+        <>
+          <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
+            empty={daily.rows.length === 0}>
+            {daily.rows.map((r) => (
+              <tr key={r.date}>
+                <td className="td font-mono font-medium">{r.date}</td>
+                <td className="td font-mono">{fmt(r.entered)}</td>
+                <td className="td font-mono">{fmt(r.exited)}</td>
+                <td className="td font-mono">{fmt(r.cash_amount)}</td>
+                <td className="td font-mono">{fmt(r.qpay_amount)}</td>
+                <td className="td font-mono">{fmt(r.pos_amount)}</td>
+                <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
+              </tr>
+            ))}
+          </Table>
+          <div className="card py-3 flex flex-wrap gap-5 text-sm">
+            <span>Орсон: <b className="font-mono">{fmt(daily.totals.entered)}</b></span>
+            <span>Гарсан: <b className="font-mono">{fmt(daily.totals.exited)}</b></span>
+            <span>Нийт орлого: <b className="font-mono text-accent">{fmt(daily.totals.paid_amount)}₮</b></span>
           </div>
         </>
       )}

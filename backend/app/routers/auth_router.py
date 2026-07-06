@@ -31,3 +31,19 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
     return {"user": to_dict(user), "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set()))}
+
+
+@router.post("/change-password")
+def change_password(body: dict, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Хэрэглэгч өөрийн нууц үгээ солино (easy-park UAT item 8)."""
+    from ..auth import hash_password
+    old, new = body.get("old_password", ""), body.get("new_password", "")
+    if not verify_password(old, user.password_hash):
+        raise HTTPException(400, "Одоогийн нууц үг буруу байна.")
+    if len(new) < 8:
+        raise HTTPException(400, "Шинэ нууц үг дор хаяж 8 тэмдэгт байх ёстой.")
+    user.password_hash = hash_password(new)
+    db.add(AuditLog(username=user.username, action="CHANGE_PASSWORD", entity="user", entity_id=user.id))
+    db.commit()
+    return {"ok": True}

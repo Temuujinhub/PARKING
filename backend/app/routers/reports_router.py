@@ -85,18 +85,27 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
         minutes = db.query(func.coalesce(func.sum(ParkingSession.duration_minutes), 0)).filter(
             ParkingSession.site_id == s.id, ParkingSession.entry_time >= start,
             ParkingSession.entry_time < end).scalar()
-        paid = float(db.query(func.coalesce(func.sum(Payment.amount), 0))
-                     .join(ParkingSession, Payment.session_id == ParkingSession.id)
-                     .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
-                             Payment.paid_at >= start, Payment.paid_at < end).scalar())
+        # Төлбөрийн төрлөөр задаргаа (easy-park UAT items 1, 4, 6, 7)
+        prov = dict(db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+                    .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                    .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
+                            Payment.paid_at >= start, Payment.paid_at < end)
+                    .group_by(Payment.provider).all())
+        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        paid = cash + qpay_amt + pos
         unpaid = float(db.query(func.coalesce(func.sum(ParkingSession.total_fee), 0)).filter(
             ParkingSession.site_id == s.id, ParkingSession.status == "AWAITING_PAYMENT",
             ParkingSession.entry_time >= start, ParkingSession.entry_time < end).scalar())
         out.append({"site_id": s.id, "site_name": s.name, "entered": entered, "exited": exited,
-                    "total_minutes": int(minutes or 0), "paid_amount": paid, "unpaid_amount": unpaid})
+                    "total_minutes": int(minutes or 0),
+                    "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
+                    "paid_amount": paid, "unpaid_amount": unpaid})
     totals = {
         "entered": sum(r["entered"] for r in out), "exited": sum(r["exited"] for r in out),
         "total_minutes": sum(r["total_minutes"] for r in out),
+        "cash_amount": sum(r["cash_amount"] for r in out),
+        "qpay_amount": sum(r["qpay_amount"] for r in out),
+        "pos_amount": sum(r["pos_amount"] for r in out),
         "paid_amount": sum(r["paid_amount"] for r in out),
         "unpaid_amount": sum(r["unpaid_amount"] for r in out),
     }
@@ -113,18 +122,21 @@ def revenue_excel(date_from: str | None = None, date_to: str | None = None,
     wb = Workbook()
     ws = wb.active
     ws.title = "Орлогын тайлан"
-    headers = ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"]
+    headers = ["Зогсоол", "Орсон", "Гарсан", "Нийт минут",
+               "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"]
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True)
     for r in data["rows"]:
         ws.append([r["site_name"], r["entered"], r["exited"], r["total_minutes"],
+                   r["cash_amount"], r["qpay_amount"], r["pos_amount"],
                    r["paid_amount"], r["unpaid_amount"]])
     t = data["totals"]
     ws.append(["НИЙТ", t["entered"], t["exited"], t["total_minutes"],
+               t["cash_amount"], t["qpay_amount"], t["pos_amount"],
                t["paid_amount"], t["unpaid_amount"]])
     ws[f"A{ws.max_row}"].font = Font(bold=True)
-    for col, w in zip("ABCDEF", (30, 12, 12, 14, 18, 18)):
+    for col, w in zip("ABCDEFGHI", (30, 10, 10, 12, 14, 14, 14, 18, 16)):
         ws.column_dimensions[col].width = w
     buf = io.BytesIO()
     wb.save(buf)
@@ -133,6 +145,37 @@ def revenue_excel(date_from: str | None = None, date_to: str | None = None,
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@router.get("/daily")
+def daily_report(date_from: str | None = None, date_to: str | None = None,
+                 site_id: str | None = None,
+                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Өдөр өдрөөр задарсан тайлан (easy-park UAT item 3)."""
+    start, end = _range(date_from, date_to)
+    out = []
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < end:
+        nxt = day + timedelta(days=1)
+        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
+                                             ParkingSession.entry_time < nxt)
+        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+              .join(ParkingSession, Payment.session_id == ParkingSession.id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
+        if site_id:
+            sq = sq.filter(ParkingSession.site_id == site_id)
+            pq = pq.filter(ParkingSession.site_id == site_id)
+        prov = dict(pq.group_by(Payment.provider).all())
+        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        out.append({"date": day.strftime("%Y-%m-%d"),
+                    "entered": sq.count(),
+                    "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
+                    "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
+                    "paid_amount": cash + qpay_amt + pos})
+        day = nxt
+    totals = {k: sum(r[k] for r in out) for k in
+              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
+    return {"rows": out, "totals": totals}
 
 
 def _excel_response(wb, prefix: str):

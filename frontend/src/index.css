@@ -2,6 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Өдрийн горим (default) — Easy Parking брэндийн цайвар дэвсгэр.
+   RGB triplet формат — Tailwind-ийн opacity modifier (/60 г.м) ажиллуулахад шаардлагатай */
+:root {
+  --surface: 242 245 243;
+  --surface-card: 255 255 255;
+  --surface-muted: 231 236 232;
+  --surface-border: 208 216 210;
+  --ink-100: 17 24 39;
+  --ink-200: 31 41 55;
+  --ink-300: 55 65 81;
+  --ink-400: 75 85 99;
+  --ink-500: 107 114 128;
+  --ink-600: 156 163 175;
+  --ink-700: 209 213 219;
+  --ink-900: 249 250 251;
+}
+
+/* Шөнийн горим */
+.dark {
+  --surface: 17 19 18;
+  --surface-card: 28 31 29;
+  --surface-muted: 40 44 41;
+  --surface-border: 58 63 59;
+  --ink-100: 241 245 243;
+  --ink-200: 226 232 228;
+  --ink-300: 203 213 206;
+  --ink-400: 148 163 154;
+  --ink-500: 100 116 107;
+  --ink-600: 71 85 80;
+  --ink-700: 51 65 85;
+  --ink-900: 15 18 17;
+}
+
 body {
   @apply bg-surface text-slate-100 font-sans antialiased;
 }
@@ -26,8 +59,8 @@ body {
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #0f172a; }
-::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--surface-border); border-radius: 4px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
