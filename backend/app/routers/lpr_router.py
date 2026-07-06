@@ -68,7 +68,11 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
 
 @router.post("/simulate")
 async def simulate_lpr(body: dict, db: Session = Depends(get_db)):
-    """Туршилтын event (хөгжүүлэлт/демонд). body: {device_key, plate, confidence?}"""
+    """Туршилтын event (хөгжүүлэлт/демонд). body: {device_key, plate, confidence?}
+    Production-д (PARKING_ALLOW_SIMULATE=false эсвэл barrier бодит болмогц) хаагдана."""
+    from ..config import settings
+    if not settings.allow_simulate or not settings.barrier_mock:
+        raise HTTPException(403, "Simulate endpoint production-д идэвхгүй байна")
     device = db.query(Device).filter(Device.device_key == body.get("device_key")).first()
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")

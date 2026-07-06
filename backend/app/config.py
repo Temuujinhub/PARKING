@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     qpay_password: str = ""
     qpay_invoice_code: str = "PARKING_INVOICE"
     qpay_mock: bool = True  # Бодит credentials байхгүй үед mock горим
+    # Webhook нууц токен — тохируулсан бол /qpay/webhook хүсэлтэд ?token= таарах ёстой
+    # (QPay callback_url-д нэмж өгнө). Хоосон бол шалгахгүй (mock/туршилтын үед).
+    qpay_webhook_secret: str = ""
+
+    # Аюулгүй байдал
+    # /api/lpr/simulate туршилтын endpoint-ийг production-д хаах (barrier бодит болмогц автоматаар хаагдана)
+    allow_simulate: bool = True
+    # CORS: production-д домэйноо зааж өгнө (жишээ: "https://test.easy-parking.mn")
+    cors_origins: str = "*"
 
     # e-Barimt — POS API 3.0 (татварын PosAPI сервис локал дээр суусан байна)
     ebarimt_posapi_url: str = "http://localhost:7080/rest"

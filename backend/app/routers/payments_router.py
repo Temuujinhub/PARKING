@@ -1,8 +1,14 @@
 """Төлбөр: QPay invoice/webhook, кассын бэлэн мөнгө, PAX POS баталгаажуулалт."""
+import hmac
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+
+
+def secrets_compare(a: str, b: str) -> bool:
+    """Цагийн зөрүүнд суурилсан халдлагаас хамгаалсан харьцуулалт."""
+    return hmac.compare_digest((a or "").encode(), (b or "").encode())
 from sqlalchemy.orm import Session
 
 from ..auth import require
@@ -99,6 +105,8 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
+    if settings.qpay_webhook_secret:
+        callback += f"&token={settings.qpay_webhook_secret}"
     inv = await qpay.create_invoice(
         payment.sender_invoice_no, float(payment.amount),
         f"Зогсоолын төлбөр — {session.plate_number}",
@@ -115,8 +123,14 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/qpay/webhook")
-async def qpay_webhook(request: Request, payment_id: str = "", db: Session = Depends(get_db)):
-    """QPay төлбөр амжилттай болмогц дуудагдана (callback_url)."""
+async def qpay_webhook(request: Request, payment_id: str = "", token: str = "",
+                       db: Session = Depends(get_db)):
+    """QPay төлбөр амжилттай болмогц дуудагдана (callback_url).
+    PARKING_QPAY_WEBHOOK_SECRET тохируулсан бол ?token= таарах ёстой — хуурамч
+    webhook-оор barrier нээлгэхээс хамгаална."""
+    if settings.qpay_webhook_secret:
+        if not secrets_compare(token, settings.qpay_webhook_secret):
+            raise HTTPException(403, "Webhook токен буруу")
     try:
         body = await request.json()
     except Exception:

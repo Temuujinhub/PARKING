@@ -13,10 +13,13 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title=settings.app_name, docs_url="/api/docs", openapi_url="/api/openapi.json")
 
+# CORS: default "*" (nginx-ийн ард same-origin). Production-д PARKING_CORS_ORIGINS-оор домэйн зааж өгнө.
+# "*" үед credentials-ийг унтраана (стандарт шаардлага — wildcard + credentials зөрчилддөг).
+_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # nginx ард ажиллана; production-д домэйнээ зааж өгнө
-    allow_credentials=True,
+    allow_origins=_origins,
+    allow_credentials=_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
