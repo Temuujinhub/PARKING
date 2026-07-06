@@ -1,8 +1,18 @@
 // Тохиргоо: Зогсоол / Тарифын загвар / Төхөөрөмж
-import { Copy, Plus, QrCode, Trash2 } from 'lucide-react'
+import { Camera, Check, Copy, DoorOpen, Download, Plus, QrCode, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+
+// Enter дархад дараагийн талбар руу шилжих (сүүлийнх дээр submit)
+function enterToNext(e) {
+  if (e.key !== 'Enter' || e.target.tagName === 'BUTTON') return
+  e.preventDefault()
+  const els = [...e.target.form.querySelectorAll('input, select')].filter((el) => !el.disabled)
+  const i = els.indexOf(e.target)
+  if (i > -1 && i < els.length - 1) els[i + 1].focus()
+  else e.target.form.requestSubmit()
+}
 
 export default function Settings() {
   const [tab, setTab] = useState('sites')
@@ -25,12 +35,21 @@ export default function Settings() {
   )
 }
 
+// Wizard-ийн стандарт төхөөрөмжийн загвар — зогсоол бүр орох/гарах төхөөрөмжтэй
+const STD_DEVICES = [
+  { key: 'entry_cam', name: 'Орох камер', device_type: 'camera', lane_dir: 'entry', lane_no: 1, auto_open: true, icon: Camera },
+  { key: 'exit_cam', name: 'Гарах камер', device_type: 'camera', lane_dir: 'exit', lane_no: 2, auto_open: false, icon: Camera },
+  { key: 'entry_bar', name: 'Орох хаалт', device_type: 'barrier', lane_dir: 'entry', lane_no: 1, auto_open: false, icon: DoorOpen },
+  { key: 'exit_bar', name: 'Гарах хаалт', device_type: 'barrier', lane_dir: 'exit', lane_no: 2, auto_open: false, icon: DoorOpen },
+]
+
 function Sites() {
   const toast = useToast()
   const [rows, setRows] = useState([])
   const [templates, setTemplates] = useState([])
   const [editing, setEditing] = useState(null)
   const [qrSite, setQrSite] = useState(null)
+  const [wizard, setWizard] = useState(null)
   const load = () => api('/api/admin/sites').then(setRows)
   useEffect(() => { load(); api('/api/admin/tariff-templates').then(setTemplates) }, [])
 
@@ -38,8 +57,7 @@ function Sites() {
     e.preventDefault()
     try {
       const body = { ...editing, capacity: +editing.capacity, tariff_template_id: editing.tariff_template_id || null }
-      if (editing.id) await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
-      else await api('/api/admin/sites', { method: 'POST', body })
+      await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
     } catch (err) { toast(err.message, 'error') }
   }
@@ -47,10 +65,58 @@ function Sites() {
   const payUrl = (code) => `${location.origin}/pay?site=${code}`
   const qrUrl = (code) => `/api/public/qr/${code}.png`
 
+  const openWizard = () => setWizard({
+    step: 1,
+    site: { name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: templates[0]?.id || '' },
+    devices: Object.fromEntries(STD_DEVICES.map((d) => [d.key, { enabled: true, ip_address: '' }])),
+    created: null,
+    createdDevices: [],
+  })
+
+  // Алхам 1 → зогсоол үүсгэх
+  const wizardCreateSite = async (e) => {
+    e.preventDefault()
+    try {
+      const s = wizard.site
+      const created = await api('/api/admin/sites', {
+        method: 'POST',
+        body: { ...s, capacity: +s.capacity, tariff_template_id: s.tariff_template_id || null },
+      })
+      setWizard({ ...wizard, step: 2, created })
+      load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
+  // Алхам 2 → сонгосон төхөөрөмжүүдийг үүсгэх
+  const wizardCreateDevices = async (e) => {
+    e.preventDefault()
+    try {
+      const createdDevices = []
+      for (const tpl of STD_DEVICES) {
+        const cfg = wizard.devices[tpl.key]
+        if (!cfg.enabled) continue
+        const d = await api('/api/admin/devices', {
+          method: 'POST',
+          body: {
+            site_id: wizard.created.id, name: tpl.name, device_type: tpl.device_type,
+            vendor: 'Dahua', model: tpl.device_type === 'camera' ? 'IPMECS-2234-IZ' : 'DZBL-A / DZE-BL',
+            ip_address: cfg.ip_address, lane_no: tpl.lane_no, lane_dir: tpl.lane_dir, auto_open: tpl.auto_open,
+          },
+        })
+        createdDevices.push(d)
+      }
+      setWizard({ ...wizard, step: 3, createdDevices })
+      toast(`${createdDevices.length} төхөөрөмж холбогдлоо`)
+    } catch (err) { toast(err.message, 'error') }
+  }
+
+  const copy = (text) => { navigator.clipboard.writeText(text); toast('Хуулагдлаа') }
+  const callbackUrl = (key) => `${location.origin}/api/lpr/callback?device_key=${key}`
+
   return (
     <>
       <div className="flex justify-end">
-        <button className="btn-primary" onClick={() => setEditing({ name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: '' })}>
+        <button className="btn-primary" onClick={openWizard}>
           <Plus size={16} /> Зогсоол нэмэх
         </button>
       </div>
@@ -76,7 +142,147 @@ function Sites() {
         ))}
       </Table>
 
-      <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Зогсоол засах' : 'Зогсоол нэмэх'}>
+      {/* ─── Зогсоол үүсгэх 3 алхамт wizard ─── */}
+      <Modal open={!!wizard} onClose={() => { setWizard(null); load() }} title="Шинэ зогсоол холбох" wide>
+        {wizard && (
+          <div>
+            {/* Алхамын заагч */}
+            <div className="flex items-center gap-2 mb-5">
+              {[[1, 'Мэдээлэл'], [2, 'Төхөөрөмж'], [3, 'QR ба тохиргоо']].map(([n, label], i) => (
+                <div key={n} className="flex items-center gap-2 flex-1">
+                  <span className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold shrink-0
+                    ${wizard.step > n ? 'bg-accent text-white' : wizard.step === n ? 'bg-accent/20 text-accent border-2 border-accent' : 'bg-surface-muted text-slate-500'}`}>
+                    {wizard.step > n ? <Check size={15} /> : n}
+                  </span>
+                  <span className={`text-sm ${wizard.step === n ? 'text-accent font-medium' : 'text-slate-500'}`}>{label}</span>
+                  {i < 2 && <div className="flex-1 h-px bg-surface-border" />}
+                </div>
+              ))}
+            </div>
+
+            {/* Алхам 1: Зогсоолын мэдээлэл — Enter дараагийн талбар руу */}
+            {wizard.step === 1 && (
+              <form onSubmit={wizardCreateSite} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Зогсоолын нэр" required>
+                    <input className="input" value={wizard.site.name} required autoFocus onKeyDown={enterToNext}
+                      onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, name: e.target.value } })} />
+                  </Field>
+                  <Field label="Код (QR URL-д, жишээ: SITE02)" required>
+                    <input className="input font-mono" value={wizard.site.site_code} required onKeyDown={enterToNext}
+                      onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, site_code: e.target.value.toUpperCase().replace(/\s/g, '') } })} />
+                  </Field>
+                  <Field label="Бүс">
+                    <select className="input" value={wizard.site.zone_code} onKeyDown={enterToNext}
+                      onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, zone_code: e.target.value } })}>
+                      {['A', 'B', 'C'].map((z) => <option key={z}>{z}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Багтаамж">
+                    <input className="input" type="number" min="0" value={wizard.site.capacity} onKeyDown={enterToNext}
+                      onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, capacity: e.target.value } })} />
+                  </Field>
+                </div>
+                <Field label="Хаяг">
+                  <input className="input" value={wizard.site.address} onKeyDown={enterToNext}
+                    onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, address: e.target.value } })} />
+                </Field>
+                <Field label="Тарифын загвар">
+                  <select className="input" value={wizard.site.tariff_template_id} onKeyDown={enterToNext}
+                    onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, tariff_template_id: e.target.value } })}>
+                    <option value="">Сонгоогүй</option>
+                    {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+                <button className="btn-primary w-full justify-center">Үргэлжлүүлэх →</button>
+              </form>
+            )}
+
+            {/* Алхам 2: Орох/гарах төхөөрөмж холбох */}
+            {wizard.step === 2 && (
+              <form onSubmit={wizardCreateDevices} className="space-y-3">
+                <div className="text-sm text-slate-400">
+                  <b className="text-slate-200">{wizard.created?.name}</b> зогсоолын орох/гарах төхөөрөмжүүдийг сонгоно уу.
+                  IP хаягийг дараа нь ч оруулж болно.
+                </div>
+                {STD_DEVICES.map((tpl) => {
+                  const cfg = wizard.devices[tpl.key]
+                  const Icon = tpl.icon
+                  return (
+                    <div key={tpl.key} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors
+                      ${cfg.enabled ? 'border-accent/40 bg-accent/5' : 'border-surface-border bg-surface-muted/30 opacity-60'}`}>
+                      <input type="checkbox" checked={cfg.enabled} id={`dev-${tpl.key}`} className="cursor-pointer"
+                        onChange={(e) => setWizard({ ...wizard, devices: { ...wizard.devices, [tpl.key]: { ...cfg, enabled: e.target.checked } } })} />
+                      <label htmlFor={`dev-${tpl.key}`} className="flex items-center gap-2 w-36 cursor-pointer">
+                        <Icon size={16} className={tpl.lane_dir === 'entry' ? 'text-accent' : 'text-amber-400'} />
+                        <span className="text-sm font-medium">{tpl.name}</span>
+                      </label>
+                      <span className="text-xs text-slate-500 w-14">Эгнээ {tpl.lane_no}</span>
+                      <input className="input flex-1 font-mono text-xs" placeholder="IP хаяг (заавал биш)" value={cfg.ip_address}
+                        disabled={!cfg.enabled} onKeyDown={enterToNext}
+                        onChange={(e) => setWizard({ ...wizard, devices: { ...wizard.devices, [tpl.key]: { ...cfg, ip_address: e.target.value } } })} />
+                    </div>
+                  )
+                })}
+                <div className="flex gap-2">
+                  <button type="button" className="btn-secondary flex-1 justify-center"
+                    onClick={() => setWizard({ ...wizard, step: 3, createdDevices: [] })}>Алгасах</button>
+                  <button className="btn-primary flex-1 justify-center">Төхөөрөмж холбох →</button>
+                </div>
+              </form>
+            )}
+
+            {/* Алхам 3: QR татах + камерын callback тохиргоо */}
+            {wizard.step === 3 && wizard.created && (
+              <div className="space-y-4">
+                <div className="text-center">
+                  <img className="mx-auto rounded-xl bg-white p-3 w-52 h-52"
+                    src={qrUrl(wizard.created.site_code)}
+                    alt={`${wizard.created.name} зогсоолын төлбөрийн QR код`} />
+                  <a href={qrUrl(wizard.created.site_code)} download={`${wizard.created.site_code}-pay-qr.png`}
+                    className="btn-primary justify-center mt-3 w-full">
+                    <Download size={16} /> QR зураг татах (хэвлэхэд бэлэн)
+                  </a>
+                  <div className="flex items-center gap-2 bg-surface-muted rounded-lg px-3 py-2 mt-2">
+                    <code className="text-xs flex-1 text-left break-all">{payUrl(wizard.created.site_code)}</code>
+                    <button className="btn-secondary py-1 px-2" onClick={() => copy(payUrl(wizard.created.site_code))} aria-label="URL хуулах">
+                      <Copy size={13} />
+                    </button>
+                  </div>
+                </div>
+
+                {wizard.createdDevices.length > 0 && (
+                  <div>
+                    <div className="label mb-2">Камерын ITSAPI callback тохиргоо (камерын Web UI дээр оруулна):</div>
+                    <div className="space-y-2">
+                      {wizard.createdDevices.filter((d) => d.device_type === 'camera').map((d) => (
+                        <div key={d.id} className="bg-surface-muted/40 rounded-lg px-3 py-2">
+                          <div className="text-xs font-medium mb-1">{d.name}</div>
+                          <div className="flex items-center gap-2">
+                            <code className="text-[10px] flex-1 break-all text-slate-400">{callbackUrl(d.device_key)}</code>
+                            <button className="btn-secondary py-1 px-2" onClick={() => copy(callbackUrl(d.device_key))} aria-label="Callback URL хуулах">
+                              <Copy size={13} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-2">
+                      Хаалтны IP хаягийг Тохиргоо → Төхөөрөмж хэсгээс хэзээ ч засаж болно.
+                    </div>
+                  </div>
+                )}
+
+                <button className="btn-primary w-full justify-center" onClick={() => { setWizard(null); load() }}>
+                  <Check size={16} /> Дуусгах
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!editing} onClose={() => setEditing(null)} title="Зогсоол засах">
         {editing && (
           <form onSubmit={save} className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
