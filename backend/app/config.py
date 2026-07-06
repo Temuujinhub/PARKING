@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Ерөнхий
-    app_name: str = "Smart Parking MN"
+    app_name: str = "Easy Parking"
     debug: bool = False
     secret_key: str = "change-me-in-production-9f8a7b6c5d4e"
     jwt_algorithm: str = "HS256"

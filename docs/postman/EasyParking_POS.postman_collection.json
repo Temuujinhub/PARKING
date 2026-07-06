@@ -1,0 +1,380 @@
+{
+  "info": {
+    "name": "Easy Parking — POS/Mobile хөгжүүлэгчийн API",
+    "description": "PAX A9000 POS апп болон Mobile апп хөгжүүлэгчдэд зориулсан бүрэн collection.\n\n**Ашиглах заавар:**\n1. `base_url` хувьсагчийг шалгана (одоогоор http://152.42.235.199)\n2. Эхлээд `1. Нэвтрэлт → Login` хүсэлтийг ажиллуулна — token автоматаар хадгалагдана\n3. Бусад хүсэлтүүд `{{token}}`-ийг автоматаар ашиглана\n\n**Туршилтын урсгал (Туршилт хавтас доторх дарааллаар):**\nМашин оруулах → Гарах камерт уншуулах → Recent Exits-ээс харах → POS confirm.\n\nWebSocket: ws://152.42.235.199/ws/sites/{site_id} (Postman-ий New → WebSocket Request ашиглана)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://152.42.235.199" },
+    { "key": "token", "value": "" },
+    { "key": "site_id", "value": "" },
+    { "key": "site_code", "value": "SITE01" },
+    { "key": "session_id", "value": "" },
+    { "key": "payment_id", "value": "" },
+    { "key": "test_plate", "value": "8888ТЕС" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "1. Нэвтрэлт",
+      "item": [
+        {
+          "name": "Login (token автоматаар хадгална)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const d = pm.response.json();",
+                  "pm.test('Login амжилттай', () => pm.expect(d.access_token).to.be.a('string'));",
+                  "pm.collectionVariables.set('token', d.access_token);",
+                  "console.log('Role:', d.user.role, '| Permissions:', d.permissions.join(', '));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "username", "value": "operator" },
+                { "key": "password", "value": "Operator@2026" }
+              ]
+            },
+            "url": { "raw": "{{base_url}}/api/auth/login", "host": ["{{base_url}}"], "path": ["api", "auth", "login"] }
+          }
+        },
+        {
+          "name": "Me (эрх шалгах)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/auth/me", "host": ["{{base_url}}"], "path": ["api", "auth", "me"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Зогсоол ба төхөөрөмж",
+      "item": [
+        {
+          "name": "Зогсоолын жагсаалт (site_id автоматаар хадгална)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const sites = pm.response.json();",
+                  "if (sites.length) { pm.collectionVariables.set('site_id', sites[0].id); console.log('site_id =', sites[0].id, sites[0].name); }"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/admin/sites", "host": ["{{base_url}}"], "path": ["api", "admin", "sites"] }
+          }
+        },
+        {
+          "name": "Төхөөрөмжийн жагсаалт (device_key-үүд эндээс)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/admin/devices?site_id={{site_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "admin", "devices"],
+              "query": [{ "key": "site_id", "value": "{{site_id}}" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. POS үндсэн урсгал",
+      "item": [
+        {
+          "name": "Recent Exits — гарах машинууд (session_id хадгална)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "if (rows.length) { pm.collectionVariables.set('session_id', rows[0].id); console.log('session_id =', rows[0].id, rows[0].plate_number, rows[0].fee?.total_fee + '₮'); }",
+                  "else console.log('Гарах машин алга — Туршилт хавтаснаас entry/exit simulate хийнэ үү');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/sessions/recent-exits?site_id={{site_id}}&minutes=30",
+              "host": ["{{base_url}}"], "path": ["api", "sessions", "recent-exits"],
+              "query": [
+                { "key": "site_id", "value": "{{site_id}}" },
+                { "key": "minutes", "value": "30" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Дугаараар хайх",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/sessions/check?plate={{test_plate}}&site_id={{site_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "sessions", "check"],
+              "query": [
+                { "key": "plate", "value": "{{test_plate}}" },
+                { "key": "site_id", "value": "{{site_id}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Session дэлгэрэнгүй (картын өмнө дүн баталгаажуулах!)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/sessions/{{session_id}}", "host": ["{{base_url}}"], "path": ["api", "sessions", "{{session_id}}"] }
+          }
+        },
+        {
+          "name": "POS Confirm — карт амжилттай уншсаны дараа",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const d = pm.response.json();",
+                  "pm.test('PAID + barrier нээгдсэн', () => { pm.expect(d.status).to.eql('PAID'); pm.expect(d.barrier_opened).to.be.true; });",
+                  "console.log('e-Barimt:', d.ebarimt_id, '| Сугалаа:', d.lottery_code);",
+                  "console.log('Хэвлэх мөрүүд:', JSON.stringify(d.print_data.lines, null, 1));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"amount\": 1000,\n  \"auth_code\": \"TEST01\",\n  \"card_last4\": \"4242\",\n  \"card_brand\": \"Visa\",\n  \"terminal_id\": \"TDB-PAX-SITE01-01\",\n  \"transaction_id\": \"TDB-TXN-TEST-001\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/api/payments/pos/confirm", "host": ["{{base_url}}"], "path": ["api", "payments", "pos", "confirm"] },
+            "description": "⚠️ amount нь Session дэлгэрэнгүй-гээс авсан fee.total_fee-тэй таарах ёстой, эс бөгөөс 400 ирнэ (картын гүйлгээг VOID хийнэ)."
+          }
+        },
+        {
+          "name": "Бэлэн мөнгөний төлбөр",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/payments/cash", "host": ["{{base_url}}"], "path": ["api", "payments", "cash"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. QPay урсгал (Mobile/QR)",
+      "item": [
+        {
+          "name": "Site мэдээлэл (public)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/public/site/{{site_code}}", "host": ["{{base_url}}"], "path": ["api", "public", "site", "{{site_code}}"] }
+          }
+        },
+        {
+          "name": "Recent exits (public, гарах хаалтны QR)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/public/recent-exits/{{site_code}}", "host": ["{{base_url}}"], "path": ["api", "public", "recent-exits", "{{site_code}}"] }
+          }
+        },
+        {
+          "name": "Session хайх (public, дугаараар)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) { const d = pm.response.json(); pm.collectionVariables.set('session_id', d.session_id); console.log('Дүн:', d.total_fee + '₮', '| is_free:', d.is_free); }"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/public/sessions?plate={{test_plate}}&site={{site_code}}",
+              "host": ["{{base_url}}"], "path": ["api", "public", "sessions"],
+              "query": [
+                { "key": "plate", "value": "{{test_plate}}" },
+                { "key": "site", "value": "{{site_code}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "QPay invoice үүсгэх (payment_id хадгална)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const d = pm.response.json();",
+                  "pm.collectionVariables.set('payment_id', d.payment_id);",
+                  "console.log('deep_link:', d.deep_link, '| mock:', d.mock);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/payments/qpay/invoice", "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "invoice"] }
+          }
+        },
+        {
+          "name": "Төлбөр шалгах (polling, 5 сек тутам)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/api/payments/qpay/check/{{payment_id}}", "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "check", "{{payment_id}}"] }
+          }
+        },
+        {
+          "name": "[MOCK] Webhook — төлөгдсөн мэт дуудах (туршилтад)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"payment_status\": \"PAID\",\n  \"amount\": 1000\n}", "options": { "raw": { "language": "json" } } },
+            "url": {
+              "raw": "{{base_url}}/api/payments/qpay/webhook?payment_id={{payment_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "webhook"],
+              "query": [{ "key": "payment_id", "value": "{{payment_id}}" }]
+            },
+            "description": "⚠️ Зөвхөн MOCK горимд туршилтад ашиглана. amount нь invoice-ийн дүнтэй таарах ёстой."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Кассын ээлж",
+      "item": [
+        {
+          "name": "Одоогийн ээлж",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/cashier/shift/current", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "current"] }
+          }
+        },
+        {
+          "name": "Ээлж нээх",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"opening_amount\": 0\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/cashier/shift/open", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "open"] }
+          }
+        },
+        {
+          "name": "Ээлж хаах",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/api/cashier/shift/close", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "close"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Хаалт",
+      "item": [
+        {
+          "name": "Хаалт гараар нээх (device_id-г 2-р хавтаснаас)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/barriers/BARRIER_DEVICE_ID/open", "host": ["{{base_url}}"], "path": ["api", "barriers", "BARRIER_DEVICE_ID", "open"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Туршилт (LPR simulate — камергүйгээр)",
+      "item": [
+        {
+          "name": "Машин ОРУУЛАХ",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"device_key\": \"cam-entry-site01\",\n  \"plate\": \"{{test_plate}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/lpr/simulate", "host": ["{{base_url}}"], "path": ["api", "lpr", "simulate"] }
+          }
+        },
+        {
+          "name": "Машин ГАРГАХ (exit камерт уншуулах)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const d = pm.response.json();",
+                  "if (d.session_id) pm.collectionVariables.set('session_id', d.session_id);",
+                  "console.log('action:', d.action, '| total_fee:', d.total_fee);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"device_key\": \"cam-exit-site01\",\n  \"plate\": \"{{test_plate}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{base_url}}/api/lpr/simulate", "host": ["{{base_url}}"], "path": ["api", "lpr", "simulate"] }
+          }
+        },
+        {
+          "name": "Dahua ITSAPI жинхэнэ формат (камерын callback)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"Events\": [{\n    \"Code\": \"TrafficJunction\",\n    \"Action\": \"Start\",\n    \"TrafficCar\": {\n      \"PlateNumber\": \"{{test_plate}}\",\n      \"VehicleColor\": \"White\",\n      \"Confidence\": 97\n    },\n    \"UTC\": \"2026-07-06 12:00:00\"\n  }]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/lpr/callback?device_key=cam-entry-site01",
+              "host": ["{{base_url}}"], "path": ["api", "lpr", "callback"],
+              "query": [{ "key": "device_key", "value": "cam-entry-site01" }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

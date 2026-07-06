@@ -1,9 +1,11 @@
-# Smart Parking MN — API лавлах
+# Easy Parking — API лавлах
 
 Гадаад хөгжүүлэгчдэд (Mobile апп, PAX POS апп) зориулсан API баримт бичиг.
 
-- **Base URL:** `http://152.42.235.199` (production-д домэйн + HTTPS болно)
+- **Base URL:** `http://152.42.235.199` (⚠️ одоогоор зөвхөн HTTP — домэйн холбогдмогц HTTPS болно)
 - **Interactive docs (Swagger):** `GET /api/docs`
+- **Postman collection:** [postman/EasyParking_POS.postman_collection.json](postman/EasyParking_POS.postman_collection.json)
+  — Postman → Import хийгээд `1. Нэвтрэлт → Login`-г ажиллуулбал token автоматаар тохирно.
 - **Формат:** JSON, UTF-8. Огноо ISO-8601 (UTC).
 - **Мөнгөн дүн:** ₮ (MNT), НӨАТ 10% үнэд багтсан.
 

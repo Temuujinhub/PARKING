@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
+import { LogoMark, LogoText } from '../components/Logo'
 
 export default function Login() {
   const { login } = useAuth()
@@ -27,8 +28,11 @@ export default function Login() {
     <div className="min-h-dvh flex items-center justify-center p-4">
       <form onSubmit={submit} className="card w-full max-w-sm space-y-4">
         <div className="text-center mb-2">
-          <div className="text-3xl font-bold"><span className="text-accent">P</span> Smart Parking</div>
-          <div className="text-sm text-slate-500 mt-1">Удирдлагын системд нэвтрэх</div>
+          <div className="flex flex-col items-center gap-2">
+            <LogoMark size={56} />
+            <LogoText className="text-2xl" />
+          </div>
+          <div className="text-sm text-slate-500 mt-2">Удирдлагын системд нэвтрэх</div>
         </div>
         <div>
           <label className="label" htmlFor="u">Нэвтрэх нэр</label>

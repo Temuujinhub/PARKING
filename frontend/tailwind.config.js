@@ -4,17 +4,27 @@ export default {
   theme: {
     extend: {
       colors: {
-        // UI/UX design system: dark ops dashboard + status green accent
+        // Easy Parking Brandbook 2025: Green #4CAF52, Gray #585856/#7E7E7D
         surface: {
-          DEFAULT: '#0F172A',
-          card: '#1E293B',
-          muted: '#272F42',
-          border: '#374151',
+          DEFAULT: '#111312',
+          card: '#1C1F1D',
+          muted: '#282C29',
+          border: '#3A3F3B',
         },
-        accent: { DEFAULT: '#22C55E', hover: '#16A34A' },
+        accent: { DEFAULT: '#4CAF52', hover: '#3F9A46' },
+        brand: {
+          green: '#4CAF52',
+          green2: '#68BD45',
+          gray: '#585856',
+          gray2: '#7E7E7D',
+          red: '#D64C45',
+          teal: '#4DA9AE',
+          blue: '#0D6EFF',
+          orange: '#FF7300',
+        },
       },
       fontFamily: {
-        sans: ['Fira Sans', 'system-ui', 'sans-serif'],
+        sans: ['PT Sans', 'system-ui', 'sans-serif'],
         mono: ['Fira Code', 'monospace'],
       },
     },

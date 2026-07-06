@@ -4,6 +4,7 @@ import { ArrowLeft, Car, CheckCircle2, Clock, CreditCard, Loader2 } from 'lucide
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { fmt, fmtDur } from '../api'
+import { LogoMark, LogoText } from '../components/Logo'
 
 async function publicApi(path, opts = {}) {
   const res = await fetch(path, {
@@ -194,14 +195,14 @@ function Shell({ site, children }) {
     <div className="min-h-dvh bg-surface flex flex-col items-center px-4 py-6">
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
-          <div className="inline-flex items-center gap-2 text-xl font-bold">
-            <span className="w-8 h-8 rounded-lg bg-accent text-slate-900 flex items-center justify-center font-black">P</span>
-            Зогсоолын төлбөр
+          <div className="inline-flex items-center gap-2.5">
+            <LogoMark size={38} />
+            <LogoText className="text-xl" />
           </div>
-          {site && <div className="text-sm text-slate-400 mt-1">{site.name} · {site.zone_code} бүс</div>}
+          <div className="text-sm text-slate-400 mt-2">Зогсоолын төлбөр{site && ` — ${site.name} · ${site.zone_code} бүс`}</div>
         </div>
         <div className="card">{children}</div>
-        <div className="text-center text-xs text-slate-600 mt-4">Smart Parking MN</div>
+        <div className="text-center text-xs text-slate-600 mt-4">Easy Parking</div>
       </div>
     </div>
   )

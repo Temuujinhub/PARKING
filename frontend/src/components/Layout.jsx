@@ -4,6 +4,7 @@ import {
 } from 'lucide-react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
+import Logo from './Logo'
 
 // Цэс: module = эрхийн матрицын түлхүүр (backend ROLE_PERMISSIONS-тэй ижил)
 const MENU = [
@@ -35,10 +36,8 @@ export default function Layout() {
     <div className="flex min-h-dvh">
       <aside className="w-60 shrink-0 bg-surface-card border-r border-surface-border/60 flex flex-col">
         <div className="px-5 py-5 border-b border-surface-border/60">
-          <div className="font-bold text-lg tracking-tight">
-            <span className="text-accent">P</span> Smart Parking
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">Зогсоолын удирдлага</div>
+          <Logo size={30} textClass="text-base" />
+          <div className="text-xs text-slate-500 mt-1.5">Зогсоолын удирдлага</div>
         </div>
         <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5" aria-label="Үндсэн цэс">
           {items.map(({ to, label, icon: Icon }) => (
