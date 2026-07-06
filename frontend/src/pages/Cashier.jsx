@@ -1,6 +1,6 @@
 // Касс — операторын гол дэлгэц: гарах машинууд real-time, төлбөр авах, хаалт нээх, ээлж
 import { Banknote, CarFront, CreditCard, DoorOpen, QrCode, RefreshCw, Search } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
@@ -13,6 +13,7 @@ export default function Cashier() {
   const [selected, setSelected] = useState(null)
   const [searchPlate, setSearchPlate] = useState('')
   const [searchResults, setSearchResults] = useState(null)
+  const searchDebounce = useRef(null)
   const [discounts, setDiscounts] = useState([])
   const [barriers, setBarriers] = useState([])
   const [busy, setBusy] = useState(false)
@@ -50,11 +51,21 @@ export default function Cashier() {
     return close
   }, [siteId, loadExits])
 
-  const search = async () => {
-    if (!searchPlate.trim()) return
+  const search = async (q) => {
+    const value = (q ?? searchPlate).trim()
+    if (value.length < 2) { setSearchResults(null); return }
     try {
-      setSearchResults(await api(`/api/sessions/check?plate=${encodeURIComponent(searchPlate)}&site_id=${siteId}`))
+      setSearchResults(await api(`/api/sessions/check?plate=${encodeURIComponent(value)}&site_id=${siteId}`))
     } catch (e) { toast(e.message, 'error') }
+  }
+
+  // Live хайлт: эхний 2+ тэмдэгт бичихэд таарах машинууд шууд гарна
+  const onSearchChange = (value) => {
+    const v = value.toUpperCase()
+    setSearchPlate(v)
+    clearTimeout(searchDebounce.current)
+    if (v.trim().length < 2) { setSearchResults(null); return }
+    searchDebounce.current = setTimeout(() => search(v), 300)
   }
 
   const pay = async (method) => {
@@ -185,19 +196,22 @@ export default function Cashier() {
         <div className="card">
           <h2 className="font-semibold mb-3">Төлбөр авах</h2>
           <div className="flex gap-2 mb-4">
-            <input className="input" placeholder="Дугаар хайх… (жишээ: 1234АБВ)" value={searchPlate}
-              onChange={(e) => setSearchPlate(e.target.value.toUpperCase())}
+            <input className="input font-mono" placeholder="Дугаар хайх… эхний тоо хангалттай (00…)" value={searchPlate}
+              onChange={(e) => onSearchChange(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && search()} aria-label="Улсын дугаар хайх" />
-            <button onClick={search} className="btn-secondary" aria-label="Хайх"><Search size={16} /></button>
+            <button onClick={() => search()} className="btn-secondary" aria-label="Хайх"><Search size={16} /></button>
           </div>
           {searchResults && (
-            <div className="mb-4 space-y-1.5">
+            <div className="mb-4 space-y-1.5" aria-live="polite">
               {searchResults.length === 0 && <div className="text-sm text-slate-500">Нээлттэй бүртгэл олдсонгүй</div>}
               {searchResults.map((s) => (
-                <button key={s.id} onClick={() => { setSelected(s); setSearchResults(null) }}
-                  className="w-full text-left px-3 py-2 rounded-lg bg-surface-muted/40 hover:bg-surface-muted text-sm cursor-pointer flex justify-between">
-                  <span className="font-mono font-semibold">{s.plate_number}</span>
-                  <Badge value={s.status} />
+                <button key={s.id} onClick={() => { setSelected(s); setSearchResults(null); setSearchPlate('') }}
+                  className="w-full text-left px-3 py-2.5 rounded-lg bg-surface-muted/40 hover:bg-surface-muted border border-surface-border/50 hover:border-accent text-sm cursor-pointer flex items-center justify-between transition-colors">
+                  <span className="font-mono font-bold text-base">{s.plate_number}</span>
+                  <span className="flex items-center gap-3">
+                    <span className="font-mono text-amber-400">{s.fee?.is_free ? 'Үнэгүй' : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}</span>
+                    <Badge value={s.status} />
+                  </span>
                 </button>
               ))}
             </div>

@@ -27,8 +27,8 @@ def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict
 def list_sessions(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
     date_from: str | None = None, date_to: str | None = None,
-    limit: int = 100, offset: int = 0,
-    db: Session = Depends(get_db), user: User = Depends(require("history", "cashier")),
+    limit: int = 100, offset: int = 0, with_fee: bool = False,
+    db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
     q = db.query(ParkingSession)
     if site_id:
@@ -43,21 +43,23 @@ def list_sessions(
         q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(date_to) + timedelta(days=1))
     total = q.count()
     rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
-    return {"total": total, "rows": [_session_out(db, s) for s in rows]}
+    return {"total": total, "rows": [_session_out(db, s, with_fee=with_fee) for s in rows]}
 
 
 @router.get("/check")
 def check_plate(plate: str, site_id: str | None = None,
                 db: Session = Depends(get_db), user: User = Depends(require("check", "cashier"))):
-    """Шалгах: тухайн дугаарын нээлттэй session + төлбөрийн мэдээлэл."""
+    """Шалгах/касс: дугаарын ЭХНИЙ хэсгээр нээлттэй session хайна (live хайлт, 2+ тэмдэгт)."""
     plate = normalize_plate(plate)
+    if len(plate) < 2:
+        return []
     q = db.query(ParkingSession).filter(
-        ParkingSession.plate_number == plate,
+        ParkingSession.plate_number.ilike(f"{plate}%"),
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
     )
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
-    sessions = q.order_by(ParkingSession.entry_time.desc()).all()
+    sessions = q.order_by(ParkingSession.updated_at.desc()).limit(10).all()
     return [_session_out(db, s, with_fee=True) for s in sessions]
 
 
