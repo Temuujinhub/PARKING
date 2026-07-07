@@ -1,5 +1,5 @@
-// Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх, командын лог
-import { DoorOpen, PlugZap, RefreshCw } from 'lucide-react'
+// Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх/хаах, командын лог
+import { DoorClosed, DoorOpen, PlugZap, RefreshCw, ShieldAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { Badge, Table, useToast } from '../components/ui'
@@ -15,12 +15,19 @@ export default function Barriers() {
   }
   useEffect(load, [])
 
-  const open = async (id) => {
+  const command = async (id, action, body = {}, okMsg = 'Амжилттай') => {
     try {
-      const r = await api(`/api/barriers/${id}/open`, { method: 'POST', body: {} })
-      toast(r.status === 'SUCCESS' ? 'Хаалт нээгдлээ' : 'Команд амжилтгүй', r.status === 'SUCCESS' ? 'success' : 'error')
+      const r = await api(`/api/barriers/${id}/${action}`, { method: 'POST', body })
+      toast(r.status === 'SUCCESS' ? okMsg : `Команд амжилтгүй: ${r.response || ''}`,
+        r.status === 'SUCCESS' ? 'success' : 'error')
       load()
     } catch (e) { toast(e.message, 'error') }
+  }
+  const open = (id) => command(id, 'open', {}, 'Хаалт нээгдлээ')
+  const close = (id) => command(id, 'close', {}, 'Хаалт хаагдлаа')
+  const forceOpen = (id) => {
+    if (window.confirm('Албадан нээх үү? Хаалт онгорхой хэвээр үлдэнэ (гараар хаах хүртэл).'))
+      command(id, 'open', { force: true }, 'Албадан нээгдлээ')
   }
 
   const testConn = async (id) => {
@@ -51,8 +58,17 @@ export default function Barriers() {
               {b.site_name} · Эгнээ {b.lane_no} ({b.lane_dir === 'entry' ? 'орох' : 'гарах'}) · {b.model || 'DZBL-A'}
               {b.ip_address && <span className="font-mono"> · {b.ip_address}</span>}
             </div>
-            <button className="btn-primary w-full justify-center" onClick={() => open(b.id)}>
-              <DoorOpen size={16} /> Нээх
+            <div className="flex gap-2">
+              <button className="btn-primary flex-1 justify-center" onClick={() => open(b.id)}>
+                <DoorOpen size={16} /> Нээх
+              </button>
+              <button className="btn-secondary flex-1 justify-center" onClick={() => close(b.id)}>
+                <DoorClosed size={16} /> Хаах
+              </button>
+            </div>
+            <button className="btn-secondary w-full justify-center mt-2 text-amber-400"
+              onClick={() => forceOpen(b.id)} title="Хаалтыг онгорхой байлгах (forceBreaking)">
+              <ShieldAlert size={14} /> Албадан нээх
             </button>
           </div>
         ))}

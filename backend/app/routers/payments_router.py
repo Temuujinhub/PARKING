@@ -17,7 +17,7 @@ from ..database import get_db
 from ..models import AuditLog, CashierShift, ParkingSession, Payment, User, VatReceipt
 from ..serializers import to_dict
 from ..services import ebarimt, qpay
-from ..session_logic import mark_paid_and_open, session_fee_info
+from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -61,6 +61,16 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
     fee = session_fee_info(db, session)
     if fee["total_fee"] <= 0:
         raise HTTPException(400, "Төлбөр шаардлагагүй (үнэгүй) session байна")
+    # Grace хэтэрч дахин ирсэн session: өмнө төлснийг хасаад зөвхөн үлдэгдлийг нэхнэ
+    due = amount_due(db, session, fee)
+    if due <= 0:
+        raise HTTPException(400, "Төлбөр бүрэн төлөгдсөн байна — нэмэлт төлбөр шаардлагагүй")
+    if due >= fee["total_fee"]:
+        vat_due = fee["vat_amount"]  # анхны төлбөр — тооцоолсон НӨАТ-ыг шууд ашиглана
+    else:
+        # Үлдэгдэлд ногдох НӨАТ (total_fee ямагт НӨАТ багтсан эцсийн дүн)
+        r = settings.vat_rate
+        vat_due = round(due * r / (1 + r))
     session.base_fee, session.vat_amount, session.total_fee = (
         fee["base_fee"], fee["vat_amount"], fee["total_fee"])
     session.duration_minutes = fee["duration_minutes"]
@@ -72,7 +82,7 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
     payment = Payment(
         session_id=session.id, provider=provider, payment_method=method,
         sender_invoice_no=_invoice_no(session),
-        amount=fee["total_fee"], vat_amount=fee["vat_amount"],
+        amount=due, vat_amount=vat_due,
         cashier_id=cashier.id if cashier else None,
         shift_id=shift.id if shift else None,
     )
@@ -91,14 +101,20 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
 
-    # Өмнө үүсгэсэн PENDING invoice байвал дахин ашиглана
+    # Өмнө үүсгэсэн PENDING invoice байвал дүн нь одоогийн үлдэгдэлтэй таарч
+    # байгаа тохиолдолд л дахин ашиглана (хугацаа өнгөрч тариф өссөн эсвэл
+    # grace хэтэрч зөрүү нэхэж буй үед хуучин QR буруу дүнтэй болно)
     existing = db.query(Payment).filter(Payment.session_id == session.id,
                                         Payment.provider == "QPAY",
                                         Payment.status == "PENDING").first()
     if existing and existing.provider_invoice_id:
-        return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
-                "qr_text": existing.qr_text, "deep_link": existing.deep_link, "urls": [],
-                "amount": float(existing.amount), "mock": settings.qpay_mock}
+        current_due = amount_due(db, session, session_fee_info(db, session))
+        if abs(float(existing.amount) - current_due) <= 1:
+            return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
+                    "qr_text": existing.qr_text, "deep_link": existing.deep_link, "urls": [],
+                    "amount": float(existing.amount), "mock": settings.qpay_mock}
+        existing.status = "CANCELLED"  # дүн зөрсөн — шинэ invoice үүсгэнэ
+        db.flush()
 
     payment = _create_payment(db, session, "QPAY", "QR")
     # НӨАТ-аа байгууллагаар авах бол ТТД (item 25 — easy-park UAT)

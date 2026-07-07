@@ -253,7 +253,8 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
                       or db.query(Device).filter(Device.site_id == s.site_id,
                                                  Device.device_type == "barrier").first())
         if device:
-            cmd = await open_barrier(db, device, s.id, "manual", issued_by=user.username)
+            cmd = await open_barrier(db, device, s.id, "manual", issued_by=user.username,
+                                     plate=s.plate_number)
             barrier_opened = cmd.status == "SUCCESS"
 
     db.add(AuditLog(username=user.username, action="MANUAL_EXIT", entity="session",

@@ -40,21 +40,30 @@ Pulse: 1000–2000ms (Setting → ANPR → Barrier Control)
 Энэ горимд whitelist (гэрээт жолооч)-ийг камерын өөрийн whitelist руу нэмж болно —
 интернэт тасарсан үед ч ажиллана.
 
-### Арга Б: Сервер CGI командаар нээх (системээр бүрэн удирдах — санал болгож буй)
+### Арга Б: Сервер RPC2 командаар нээх (системээр бүрэн удирдах — санал болгож буй)
 
-1. **Тохиргоо → Төхөөрөмж** дээр barrier төхөөрөмжийн IP-г оруулна
+ITC камер (Web 5.0 firmware) CGI команд дэмждэггүй ("Not Implemented") тул систем
+**RPC2 (JSON-RPC)** ашигладаг — 2026-07-07-нд бодит хаалт дээр баталгаажсан:
+
+1. **Тохиргоо → Төхөөрөмж** дээр камерын IP-г оруулна (хаалт нь камерын relay-ээр
+   нээгддэг тул хаалт төхөөрөмжид IP заавал хэрэггүй — ижил эгнээний камерын IP
+   автоматаар ашиглагдана)
 2. Сервер `.env` дээр:
    ```
    PARKING_BARRIER_MOCK=false
    PARKING_BARRIER_USERNAME=admin
-   PARKING_BARRIER_PASSWORD={контроллерийн нууц үг}
+   PARKING_BARRIER_PASSWORD={камерын web нууц үг}
    ```
 3. `systemctl restart parking-backend`
-4. Систем дараах командыг ашиглана:
+4. Систем дараах дарааллаар команд явуулна (команд бүрт шинээр login — session 60с):
    ```
-   GET http://{IP}/cgi-bin/accessControl.cgi?action=openDoor&channel=1&UserID=101&Type=Remote
-   (Digest authentication)
+   POST /RPC2_Login  global.login (challenge → MD5 hash)
+   POST /RPC2        trafficSnap.factory.instance {channel: 0}
+   POST /RPC2        trafficSnap.openStrobe | closeStrobe | forceBreaking
+                     {info: {openType: "Test", plateNumber: "..."}}
    ```
+   Камер талд: Barrier Control → Barrier Opening Config → Alarm-Channel + Post-alarm
+   тохируулсан байх ёстой (relay → DZBL-A).
 
 **Зөвлөмж:** Орох тал — Арга А (хурдан, серверээс хамааралгүй),
 Гарах тал — Арга Б (төлбөр баталгаажсаны дараа л нээгдэнэ).

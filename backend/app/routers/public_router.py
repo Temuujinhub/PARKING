@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import ParkingSession, ParkingSite
-from ..session_logic import normalize_plate, session_fee_info
+from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
@@ -180,14 +180,17 @@ def find_session(plate: str, site: str, db: Session = Depends(get_db)):
     if not s:
         raise HTTPException(404, "Энэ дугаартай нээлттэй бүртгэл олдсонгүй. Дугаараа шалгана уу.")
     fee = session_fee_info(db, s)
+    due = amount_due(db, s, fee)
     return {
         "session_id": s.id, "plate_number": s.plate_number,
         "entry_time": s.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"],
         "base_fee": fee["base_fee"], "vat_amount": fee["vat_amount"],
         "discount_amount": fee["discount_amount"], "total_fee": fee["total_fee"],
+        # Төлөх ёстой үлдэгдэл — grace хэтэрсэн (өмнө нь төлсөн) үед зөвхөн зөрүү
+        "amount_due": due,
         "is_free": fee["is_free"], "free_reason": fee["reason"],
         "status": s.status,
-        "paid": s.status == "PAID",
+        "paid": s.status == "PAID" and due <= 0,
         "exit_deadline": s.exit_deadline.isoformat() if s.exit_deadline else None,
     }

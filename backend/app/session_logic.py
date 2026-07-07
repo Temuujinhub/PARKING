@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 from .billing import calculate_fee
 from .config import settings
 from .models import (
-    BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite, RegisteredDriver,
+    BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite, Payment,
+    RegisteredDriver,
 )
 from .services.barrier import open_barrier
 from .ws import manager
@@ -70,6 +71,19 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     )
 
 
+def paid_total(db: Session, s: ParkingSession) -> float:
+    """Session-д аль хэдийн төлөгдсөн нийт дүн (PAID төлбөрүүдийн нийлбэр)."""
+    rows = db.query(Payment.amount).filter(Payment.session_id == s.id,
+                                           Payment.status == "PAID").all()
+    return float(sum(float(r[0]) for r in rows))
+
+
+def amount_due(db: Session, s: ParkingSession, fee: dict) -> float:
+    """Одоо төлөх ёстой үлдэгдэл: нийт тооцоолсон дүнгээс төлснийг хассан.
+    Grace хугацаа хэтэрч дахин тооцоход өмнөх төлбөрийг ДАВХАРДУУЛЖ нэхэхгүй."""
+    return max(0.0, round(fee["total_fee"] - paid_total(db, s), 2))
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол)."""
     site_id = device.site_id
@@ -115,7 +129,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         barrier = _find_barrier(db, site_id, device)
         if barrier:
             source = "whitelist" if registered else "auto_entry"
-            cmd = await open_barrier(db, barrier, session.id, source)
+            cmd = await open_barrier(db, barrier, session.id, source, plate=plate)
             barrier_opened = cmd.status == "SUCCESS"
 
     await manager.broadcast(site_id, "ENTRY_EVENT", {
@@ -133,6 +147,19 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     """
     site_id = device.site_id
     now = datetime.utcnow()
+
+    # Давхар event хамгаалалт — камер нэг машиныг хэдэн секундын зайтай дахин
+    # уншихад давхар broadcast/нээх команд явуулахгүй (орох талтай ижил дүрэм)
+    recent = (
+        db.query(LprEvent)
+        .filter(
+            LprEvent.plate_number == plate, LprEvent.site_id == site_id,
+            LprEvent.lane_dir == "exit", LprEvent.accepted.is_(True),
+            LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
+        ).first()
+    )
+    if recent:
+        return {"action": "dedup", "plate": plate}
 
     session = get_open_session(db, plate, site_id)
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
@@ -153,11 +180,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     if session.status == "PAID":
         if not session.exit_deadline or now <= session.exit_deadline:
             return await _close_and_open(db, device, session, now, fee, source="auto_exit")
-        # Grace хэтэрсэн — нэмэлт төлбөр шаардана
+        # Grace хэтэрсэн — нэмэлт төлбөр шаардана (доор үлдэгдлээр шалгана)
         session.status = "AWAITING_PAYMENT"
 
     if fee["is_free"]:
         session.status = "PAID"  # үнэгүй тул шууд гаргана
+        return await _close_and_open(db, device, session, now, fee, source="auto_exit")
+
+    # Үлдэгдэл тооцох: өмнө нь төлсөн бол (grace хэтэрсэн тохиолдол) зөвхөн зөрүүг нэхнэ.
+    # Тарифын шатлал ахиагүй бол зөрүү 0 — нэмэлт төлбөргүйгээр гаргана.
+    due = amount_due(db, session, fee)
+    if due <= 0 and session.paid_at:
+        session.status = "PAID"
         return await _close_and_open(db, device, session, now, fee, source="auto_exit")
 
     # Төлбөртэй — төлбөр хүлээнэ
@@ -172,8 +206,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         "session_id": session.id, "plate": plate,
         "entry_time": session.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
+        "amount_due": due,
     })
-    return {"action": "awaiting_payment", "session_id": session.id, "total_fee": fee["total_fee"]}
+    return {"action": "awaiting_payment", "session_id": session.id,
+            "total_fee": fee["total_fee"], "amount_due": due}
 
 
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
@@ -189,7 +225,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
     if barrier:
-        cmd = await open_barrier(db, barrier, session.id, source)
+        cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number)
         barrier_opened = cmd.status == "SUCCESS"
     db.commit()
 

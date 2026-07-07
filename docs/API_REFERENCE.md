@@ -173,10 +173,19 @@ e-Barimt нь **POS API 3.0** форматтай: `ebarimt_id` = ДДТД (billI
 ## 5. Хаалт (Barrier)
 
 ### POST /api/barriers/{device_id}/open  (OPERATOR+)
-Гараар нээх. Хариу: `{"status": "SUCCESS" | "FAILED"}`
+Гараар нээх. Body: `{"force": true}` өгвөл forceBreaking — хаалт онгорхой хэвээр
+үлдэнэ (гараар хаах хүртэл). Хариу: `{"status": "SUCCESS" | "FAILED", "response": "..."}`
+
+### POST /api/barriers/{device_id}/close  (OPERATOR+)
+Гараар хаах (closeStrobe) — албадан нээснийг буцаах, туршилтын дараа хаах.
+Хариу: `{"status": "SUCCESS" | "FAILED", "response": "..."}`
 
 ### GET /api/barriers/commands
 Командын аудит лог.
+
+> Хаалтын команд Dahua ITC камерын **RPC2** (JSON-RPC) интерфэйсээр явдаг:
+> `global.login` (2 алхамт MD5) → `trafficSnap.openStrobe / closeStrobe / forceBreaking`.
+> Хаалт төхөөрөмжид IP байхгүй бол ижил эгнээний камерын IP автоматаар ашиглагдана.
 
 ---
 

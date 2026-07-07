@@ -49,13 +49,16 @@ class Settings(BaseSettings):
     vat_rate: float = 0.10
     vat_inclusive: bool = True  # Тарифын үнэ НӨАТ багтсан эсэх
 
-    # Barrier
+    # Barrier — Dahua ITC камерын RPC2 (trafficSnap.openStrobe/closeStrobe)
     barrier_mock: bool = True  # Бодит төхөөрөмжгүй үед mock
-    barrier_timeout_sec: float = 3.0
+    barrier_timeout_sec: float = 5.0
     barrier_username: str = "admin"
     barrier_password: str = ""
-    # Хаалт нээх CGI зам гараар давхарлах (тодорхой болсон үед). Жишээ:
+    barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)
+    barrier_open_type: str = "Test"  # openStrobe info.openType (баталгаажсан: "Test")
+    # RPC2 дэмждэггүй ӨӨР загварын төхөөрөмжид CGI замыг гараар зааж болно. Жишээ:
     # "/cgi-bin/trafficParking.cgi?action=openStrobe&channel=1&info.openType=Normal"
+    # Тохируулсан үед "нээх" команд RPC2-ийн оронд энэ CGI-гээр явна.
     barrier_open_path: str = ""
 
     # LPR

@@ -14,16 +14,39 @@ router = APIRouter(prefix="/api/barriers", tags=["barriers"])
 @router.post("/{device_id}/open")
 async def manual_open(device_id: str, body: dict | None = None, db: Session = Depends(get_db),
                       user: User = Depends(require("barriers", "cashier"))):
+    """Гараар нээх. body: {session_id?, force?} — force=true үед forceBreaking
+    (албадан онгойлгоод барих, гацсан үед)."""
     from ..services.barrier import open_barrier
     device = db.get(Device, device_id)
     if not device or device.device_type != "barrier":
         raise HTTPException(404, "Barrier төхөөрөмж олдсонгүй")
+    force = bool((body or {}).get("force"))
     cmd = await open_barrier(db, device, (body or {}).get("session_id"),
-                             "manual", issued_by=user.username)
+                             "manual", issued_by=user.username, force=force)
     db.add(AuditLog(username=user.username, action="BARRIER_OPEN", entity="device",
-                    entity_id=device_id, detail={"result": cmd.status}))
+                    entity_id=device_id, detail={"result": cmd.status, "force": force}))
     db.commit()
     await manager.broadcast(device.site_id, "BARRIER_MANUAL_OPEN", {
+        "device_id": device_id, "device_name": device.name,
+        "by": user.username, "status": cmd.status, "force": force,
+    })
+    return {"status": cmd.status, "response": cmd.response_text}
+
+
+@router.post("/{device_id}/close")
+async def manual_close(device_id: str, body: dict | None = None, db: Session = Depends(get_db),
+                       user: User = Depends(require("barriers", "cashier"))):
+    """Гараар хаах (closeStrobe). Албадан нээснийг буцаах, туршилтын дараа хаах гэх мэт."""
+    from ..services.barrier import close_barrier
+    device = db.get(Device, device_id)
+    if not device or device.device_type != "barrier":
+        raise HTTPException(404, "Barrier төхөөрөмж олдсонгүй")
+    cmd = await close_barrier(db, device, (body or {}).get("session_id"),
+                              "manual", issued_by=user.username)
+    db.add(AuditLog(username=user.username, action="BARRIER_CLOSE", entity="device",
+                    entity_id=device_id, detail={"result": cmd.status}))
+    db.commit()
+    await manager.broadcast(device.site_id, "BARRIER_MANUAL_CLOSE", {
         "device_id": device_id, "device_name": device.name,
         "by": user.username, "status": cmd.status,
     })
