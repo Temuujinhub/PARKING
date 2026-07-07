@@ -97,6 +97,19 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     return {"ok": True, "results": results}
 
 
+@router.api_route("/keepalive", methods=["GET", "POST"])
+@router.api_route("/register", methods=["GET", "POST"])
+async def lpr_keepalive(request: Request, device_key: str = "", db: Session = Depends(get_db)):
+    """Dahua ITSAPI Registration/Heartbeat (KeepAlive) — камер платформ амьд эсэхийг шалгана.
+    200 буцаана. device_key өгсөн бол камерын last_seen шинэчилнэ."""
+    if device_key:
+        dev = db.query(Device).filter(Device.device_key == device_key).first()
+        if dev:
+            dev.last_seen = datetime.utcnow()
+            db.commit()
+    return {"ok": True, "result": True}
+
+
 @router.post("/simulate")
 async def simulate_lpr(body: dict, db: Session = Depends(get_db)):
     """Туршилтын event (хөгжүүлэлт/демонд). body: {device_key, plate, confidence?}
