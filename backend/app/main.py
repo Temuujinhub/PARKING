@@ -54,6 +54,10 @@ async def start_vat_auto_send():
 
     asyncio.get_event_loop().create_task(daily_send())
 
+    # CGI event pull — камераас ANPR татах (PARKING_CGI_POLL=true үед)
+    from .services.cgi_poller import supervisor as cgi_supervisor
+    asyncio.get_event_loop().create_task(cgi_supervisor())
+
 
 @app.websocket("/ws/sites/{site_id}")
 async def ws_site(websocket: WebSocket, site_id: str):

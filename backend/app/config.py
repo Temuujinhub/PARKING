@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # Гарсны дараах давхар event хамгаалалт (секунд)
     lpr_dedup_seconds: int = 20
 
+    # CGI event pull — сервер камераас ANPR датаг ТАТАЖ авах (хуучин easy-park шиг).
+    # Камер→сервер push (ITSAPI) ажиллахгүй, гэхдээ сервер→камер ажилладаг үед ашиглана.
+    cgi_poll: bool = False
+    camera_username: str = "admin"   # камерын web admin нэвтрэх нэр
+    camera_password: str = ""        # камерын web admin нууц үг (.env-д)
+
     class Config:
         env_file = ".env"
         env_prefix = "PARKING_"
