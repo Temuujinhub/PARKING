@@ -17,6 +17,14 @@ from ..session_logic import handle_entry, handle_exit, normalize_plate
 router = APIRouter(prefix="/api/lpr", tags=["lpr"])
 
 
+def _client_ip(request: Request) -> str:
+    """nginx-ийн ард жинхэнэ эх IP-г уншина (X-Forwarded-For / X-Real-IP)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+
+
 def _extract_events(payload: dict) -> list[dict]:
     """Dahua ITSAPI-ийн хэд хэдэн хувилбарын бүтцийг дэмжинэ:
     - eventManager CGI:  {"Events": [{"TrafficCar": {...}}]}
@@ -65,8 +73,8 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         device = db.query(Device).filter(Device.device_key == device_key,
                                          Device.device_type == "camera").first()
     if not device:
-        # device_key байхгүй бол IP-ээр таних оролдлого
-        client_ip = request.client.host if request.client else ""
+        # device_key байхгүй бол эх IP-ээр таних (nginx-ийн ард X-Forwarded-For)
+        client_ip = _client_ip(request)
         device = db.query(Device).filter(Device.ip_address == client_ip,
                                          Device.device_type == "camera").first()
     if not device:
@@ -101,12 +109,17 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
 @router.api_route("/register", methods=["GET", "POST"])
 async def lpr_keepalive(request: Request, device_key: str = "", db: Session = Depends(get_db)):
     """Dahua ITSAPI Registration/Heartbeat (KeepAlive) — камер платформ амьд эсэхийг шалгана.
-    200 буцаана. device_key өгсөн бол камерын last_seen шинэчилнэ."""
+    200 буцаана. Камерыг device_key ЭСВЭЛ эх IP-ээр таньж last_seen шинэчилнэ (онлайн статус)."""
+    dev = None
     if device_key:
         dev = db.query(Device).filter(Device.device_key == device_key).first()
-        if dev:
-            dev.last_seen = datetime.utcnow()
-            db.commit()
+    if not dev:
+        # Heartbeat Interface-д device_key байхгүй бол эх IP-ээр таних
+        dev = db.query(Device).filter(Device.ip_address == _client_ip(request),
+                                      Device.device_type == "camera").first()
+    if dev:
+        dev.last_seen = datetime.utcnow()
+        db.commit()
     return {"ok": True, "result": True}
 
 
