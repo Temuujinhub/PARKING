@@ -60,10 +60,28 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
             Payment.paid_at < day + timedelta(days=1)).scalar())
         week.append({"date": day.strftime("%m-%d"), "revenue": rev})
 
+    # Төхөөрөмжийн холболтын статус (сүүлийн 3 минутад холбогдсон = онлайн)
+    from ..models import Device
+    online_cutoff = datetime.utcnow() - timedelta(minutes=3)
+    devices = db.query(Device).filter(Device.status == "active").all()
+    device_status = []
+    online_n = 0
+    for d in devices:
+        online = bool(d.last_seen and d.last_seen >= online_cutoff)
+        if online:
+            online_n += 1
+        device_status.append({
+            "id": d.id, "name": d.name, "device_type": d.device_type,
+            "lane_dir": d.lane_dir, "site_name": d.site.name if d.site else None,
+            "online": online, "last_seen": d.last_seen.isoformat() if d.last_seen else None,
+        })
+
     return {"open_sessions": open_count, "awaiting_payment": awaiting,
             "today_entries": today_entries, "today_exits": today_exits,
             "today_revenue": today_revenue, "total_capacity": int(total_capacity or 0),
-            "sites": sites, "week_revenue": week}
+            "sites": sites, "week_revenue": week,
+            "devices_online": online_n, "devices_total": len(devices),
+            "device_status": device_status}
 
 
 @router.get("/revenue")

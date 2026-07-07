@@ -1,4 +1,4 @@
-import { Activity, Banknote, Car, CarFront, Clock, LogIn, LogOut as ExitIcon } from 'lucide-react'
+import { Activity, Banknote, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, Wifi, WifiOff } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { Badge, StatCard } from '../components/ui'
@@ -42,6 +42,39 @@ export default function Dashboard() {
         <StatCard icon={LogIn} label="Өнөөдөр орсон" value={stats.today_entries} color="text-blue-400"
           sub={`Гарсан: ${stats.today_exits}`} />
         <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
+      </div>
+
+      {/* Төхөөрөмжийн холболтын статус */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Төхөөрөмжийн холболт</h2>
+          <span className="text-sm text-slate-400">
+            <span className="text-accent font-mono font-semibold">{stats.devices_online ?? 0}</span>
+            {' / '}{stats.devices_total ?? 0} онлайн
+          </span>
+        </div>
+        {(!stats.device_status || stats.device_status.length === 0) ? (
+          <div className="text-sm text-slate-500 py-2">Төхөөрөмж бүртгэгдээгүй байна</div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+            {stats.device_status.map((d) => {
+              const Icon = d.device_type === 'camera' ? Camera : d.device_type === 'barrier' ? DoorOpen : Activity
+              return (
+                <div key={d.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm
+                  ${d.online ? 'border-accent/40 bg-accent/5' : 'border-red-500/30 bg-red-500/5'}`}>
+                  <Icon size={15} className="text-slate-400 shrink-0" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs font-medium">{d.name}</div>
+                    <div className="text-[10px] text-slate-500 truncate">{d.site_name}</div>
+                  </div>
+                  {d.online
+                    ? <Wifi size={14} className="text-accent shrink-0" aria-label="онлайн" />
+                    : <WifiOff size={14} className="text-red-400 shrink-0" aria-label="офлайн" />}
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">

@@ -1,6 +1,6 @@
 """Тохиргооны CRUD: зогсоол, төхөөрөмж, тарифын загвар, хөнгөлөлт, жолооч, хар жагсаалт, хэрэглэгч."""
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -71,11 +71,18 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
 @router.get("/devices")
 def list_devices(site_id: str | None = None, db: Session = Depends(get_db),
                  user: User = Depends(get_current_user)):
+    from datetime import timedelta
     q = db.query(Device)
     if site_id:
         q = q.filter(Device.site_id == site_id)
-    return [to_dict(d, extra={"site_name": d.site.name if d.site else None})
-            for d in q.order_by(Device.created_at).all()]
+    # Онлайн = сүүлийн 3 минутад холбогдсон (heartbeat эсвэл LPR event)
+    online_cutoff = datetime.utcnow() - timedelta(minutes=3)
+    out = []
+    for d in q.order_by(Device.created_at).all():
+        online = bool(d.last_seen and d.last_seen >= online_cutoff)
+        out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
+                                     "online": online}))
+    return out
 
 
 @router.post("/devices")

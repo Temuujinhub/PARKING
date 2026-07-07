@@ -53,14 +53,20 @@ export default function Barriers() {
 
       <div className="card">
         <h2 className="font-semibold mb-3">Камерын холболт</h2>
-        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Төлөв']} empty={cameras.length === 0}>
+        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Холболт']} empty={cameras.length === 0}>
           {cameras.map((c) => (
             <tr key={c.id}>
               <td className="td">{c.name}</td>
               <td className="td">{c.lane_dir === 'entry' ? 'Орох' : 'Гарах'}</td>
               <td className="td font-mono text-xs">{c.ip_address || '-'}</td>
               <td className="td font-mono text-xs">{fmtDate(c.last_seen)}</td>
-              <td className="td"><Badge value={c.status} /></td>
+              <td className="td">
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium
+                  ${c.online ? 'bg-accent/15 text-accent' : 'bg-red-500/15 text-red-400'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${c.online ? 'bg-accent' : 'bg-red-400'}`} />
+                  {c.online ? 'Онлайн' : 'Офлайн'}
+                </span>
+              </td>
             </tr>
           ))}
         </Table>
