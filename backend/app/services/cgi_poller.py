@@ -74,13 +74,17 @@ async def _process_event(device_id: str, data: dict):
         if not device:
             return
         device.last_seen = datetime.utcnow()
+        db.commit()  # ямар ч event ирвэл камер онлайн болно
         raw_plate, conf = _plate_from(data)
         plate = normalize_plate(raw_plate)
         if not plate:
-            db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number="?",
-                            lane_dir=device.lane_dir, confidence=0, accepted=False,
-                            reject_reason="CGI: plate not parsed", raw=data))
-            db.commit()
+            # Traffic/ANPR event боловч дугаар олдоогүй бол л логлоно (heartbeat г.м-ийг алгасна)
+            is_traffic = any(k in data for k in ("Plate", "TrafficCar", "Vehicle", "PlateNumber"))
+            if is_traffic:
+                db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number="?",
+                                lane_dir=device.lane_dir, confidence=0, accepted=False,
+                                reject_reason="CGI: plate not parsed", raw=data))
+                db.commit()
             return
         if conf < settings.lpr_min_confidence:
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
@@ -99,8 +103,9 @@ async def _process_event(device_id: str, data: dict):
 
 
 async def _poll_one(device_id: str, ip: str):
-    """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй)."""
-    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[TrafficJunction]"
+    """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй).
+    codes=[All] — камерын бүх event-ийг авч, дугаартайг нь л боловсруулна (дибагт хялбар)."""
+    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]&heartbeat=5"
     auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
     while True:
         buffer = ""
@@ -108,17 +113,22 @@ async def _poll_one(device_id: str, ip: str):
             async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=None)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
                     if resp.status_code != 200:
-                        print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — 15 сек дараа дахин")
+                        print(f"[cgi_poll] {ip}: HTTP {resp.status_code} "
+                              f"({'нууц үг буруу' if resp.status_code == 401 else 'алдаа'}) — 15с дараа дахин")
                         await asyncio.sleep(15)
                         continue
-                    # Холболт тогтмогц камерыг онлайн болгоно
+                    print(f"[cgi_poll] {ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
                     async for chunk in resp.aiter_text():
                         buffer += chunk
+                        # Дибаг: Code= мөр бүрийг логд харуулна (камер юу илгээж байгааг харах)
+                        for line in chunk.splitlines():
+                            if line.startswith("Code="):
+                                print(f"[cgi_poll] {ip} event: {line[:90]}")
                         blocks, buffer = _extract_json_blocks(buffer)
                         for data in blocks:
                             await _process_event(device_id, data)
         except Exception as e:
-            print(f"[cgi_poll] {ip}: холболт тасарлаа ({e}) — 15 сек дараа дахин")
+            print(f"[cgi_poll] {ip}: холболт тасарлаа ({e}) — 15с дараа дахин")
             await asyncio.sleep(15)
 
 
