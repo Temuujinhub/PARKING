@@ -128,6 +128,40 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
     return _session_out(db, s, with_fee=True)
 
 
+@router.post("/test-awaiting")
+async def test_awaiting(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require("cashier"))):
+    """ТЕСТ: камергүйгээр 'Гарах машинууд (төлбөр хүлээж буй)' листэд машин нэмнэ.
+    Зөвхөн тест горим (PARKING_ALLOW_SIMULATE=true) дээр ажиллана."""
+    import random
+    from ..config import settings
+    if not settings.allow_simulate:
+        raise HTTPException(403, "Тест горим идэвхгүй (production)")
+    site_id = body.get("site_id")
+    if not site_id:
+        raise HTTPException(400, "site_id шаардлагатай")
+    letters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЭЮЯӨҮ"
+    plate = normalize_plate(body.get("plate") or
+                            f"{random.randint(1000, 9999)}{''.join(random.choice(letters) for _ in range(3))}")
+    minutes = int(body.get("minutes") or random.randint(35, 130))
+    now = datetime.utcnow()
+    s = ParkingSession(site_id=site_id, plate_number=plate, entry_time=now - timedelta(minutes=minutes),
+                       status="AWAITING_PAYMENT")
+    db.add(s)
+    db.flush()
+    fee = session_fee_info(db, s, at=now)
+    s.duration_minutes = fee["duration_minutes"]
+    s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+    db.add(AuditLog(username=user.username, action="TEST_AWAITING", entity="session",
+                    entity_id=s.id, detail={"plate": plate}))
+    db.commit()
+    await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
+        "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),
+        "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"], "test": True,
+    })
+    return _session_out(db, s, with_fee=True)
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str, db: Session = Depends(get_db),
                 user: User = Depends(require("history", "cashier"))):

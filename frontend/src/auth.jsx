@@ -6,12 +6,13 @@ const AuthContext = createContext(null)
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [permissions, setPermissions] = useState([])
+  const [testMode, setTestMode] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!getToken()) { setLoading(false); return }
     api('/api/auth/me')
-      .then((d) => { setUser(d.user); setPermissions(d.permissions) })
+      .then((d) => { setUser(d.user); setPermissions(d.permissions); setTestMode(!!d.test_mode) })
       .catch(() => clearToken())
       .finally(() => setLoading(false))
   }, [])
@@ -21,13 +22,14 @@ export function AuthProvider({ children }) {
     setToken(d.access_token)
     setUser(d.user)
     setPermissions(d.permissions)
+    setTestMode(!!d.test_mode)
     return d
   }
   const logout = () => { clearToken(); setUser(null); setPermissions([]) }
   const can = (module) => permissions.includes('*') || permissions.includes(module)
 
   return (
-    <AuthContext.Provider value={{ user, permissions, loading, login, logout, can }}>
+    <AuthContext.Provider value={{ user, permissions, loading, login, logout, can, testMode }}>
       {children}
     </AuthContext.Provider>
   )

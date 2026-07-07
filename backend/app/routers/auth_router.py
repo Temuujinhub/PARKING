@@ -20,17 +20,21 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
     db.add(AuditLog(username=user.username, action="LOGIN", entity="user", entity_id=user.id,
                     ip_address=request.client.host if request.client else None))
     db.commit()
+    from ..config import settings
     return {
         "access_token": create_access_token(user),
         "token_type": "bearer",
         "user": to_dict(user),
         "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set())),
+        "test_mode": settings.allow_simulate,
     }
 
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
-    return {"user": to_dict(user), "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set()))}
+    from ..config import settings
+    return {"user": to_dict(user), "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set())),
+            "test_mode": settings.allow_simulate}
 
 
 @router.post("/change-password")

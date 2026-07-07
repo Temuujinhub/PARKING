@@ -1,11 +1,13 @@
 // Касс — операторын гол дэлгэц: гарах машинууд real-time, төлбөр авах, хаалт нээх, ээлж
-import { Banknote, CarFront, CreditCard, DoorOpen, QrCode, RefreshCw, Search } from 'lucide-react'
+import { Banknote, CarFront, CreditCard, DoorOpen, FlaskConical, QrCode, RefreshCw, Search } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
+import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 export default function Cashier() {
   const toast = useToast()
+  const { testMode } = useAuth()
   const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [exits, setExits] = useState([])
@@ -139,6 +141,15 @@ export default function Cashier() {
     } catch (err) { toast(err.message, 'error') }
   }
 
+  const addTestCar = async () => {
+    if (!siteId) return
+    try {
+      const s = await api('/api/sessions/test-awaiting', { method: 'POST', body: { site_id: siteId } })
+      toast(`Тест машин нэмэгдлээ: ${s.plate_number} (${fmt(s.fee?.total_fee ?? s.total_fee)}₮)`)
+      loadExits(siteId)
+    } catch (e) { toast(e.message, 'error') }
+  }
+
   const toggleShift = async () => {
     try {
       if (shift?.open) {
@@ -162,6 +173,12 @@ export default function Cashier() {
           <select className="input w-56" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
+          {testMode && (
+            <button onClick={addTestCar} className="btn-secondary border-amber-500/40 text-amber-400"
+              title="Тест: камергүйгээр гарах машин нэмнэ">
+              <FlaskConical size={16} /> Тест машин
+            </button>
+          )}
           <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
             <CarFront size={16} /> Машин бүртгэх
           </button>
