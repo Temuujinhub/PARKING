@@ -15,10 +15,19 @@ PUBLIC_HOST="${1:-$(hostname -I | awk '{print $1}')}"
 
 echo "==> 1/8 Систем шинэчлэх, багц суулгах"
 export DEBIAN_FRONTEND=noninteractive
+# needrestart нь systemd-resolved-ийг дахин асааж DNS-ийг арилгахаас сэргийлж түр унтраана
+export NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
 apt-get update -qq
-apt-get install -y -qq git curl nginx postgresql postgresql-contrib python3-venv python3-pip openssl
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-apt-get install -y -qq nodejs
+apt-get install -y -qq git curl nginx postgresql postgresql-contrib \
+  python3-venv python3-pip python3-dev build-essential libpq-dev openssl
+
+# Node.js — NodeSource оролдож, амжилтгүй бол Ubuntu-ийн nodejs (26.04 нь Node 20+ агуулна)
+if ! command -v node >/dev/null 2>&1; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1 || true
+  apt-get install -y -qq nodejs npm 2>/dev/null || apt-get install -y -qq nodejs || true
+fi
+node -v >/dev/null 2>&1 || { echo "  Node.js суулгаж чадсангүй — гараар: sudo apt install nodejs npm"; exit 1; }
+echo "  Node $(node -v), npm $(npm -v 2>/dev/null || echo '?')"
 
 echo "==> 2/8 Код татах"
 if [ -d "$APP_DIR/.git" ]; then
