@@ -113,6 +113,33 @@ def update_device(device_id: str, body: dict, db: Session = Depends(get_db),
     return to_dict(device)
 
 
+@router.post("/devices/{device_id}/test-connection")
+async def test_device_connection(device_id: str, db: Session = Depends(get_db),
+                                 user: User = Depends(require("settings", "barriers"))):
+    """Сервер → төхөөрөмж холболт шалгах (TCP connect камерын web порт руу).
+    Хариу: {reachable, ms, detail}. Камерын IP-г урьдчилан бүртгэсэн байх ёстой."""
+    import asyncio
+    import time
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Төхөөрөмж олдсонгүй")
+    if not device.ip_address:
+        return {"reachable": False, "detail": "IP хаяг бүртгэгдээгүй байна"}
+    port = 80
+    t0 = time.monotonic()
+    try:
+        fut = asyncio.open_connection(device.ip_address, port)
+        reader, writer = await asyncio.wait_for(fut, timeout=3.0)
+        writer.close()
+        ms = int((time.monotonic() - t0) * 1000)
+        return {"reachable": True, "ms": ms,
+                "detail": f"Сервер {device.ip_address}:{port} руу хүрч байна ({ms}ms)"}
+    except asyncio.TimeoutError:
+        return {"reachable": False, "detail": f"{device.ip_address}:{port} — timeout (routing/firewall)"}
+    except Exception as e:
+        return {"reachable": False, "detail": f"{device.ip_address} — {e}"}
+
+
 @router.delete("/devices/{device_id}")
 def delete_device(device_id: str, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     device = db.get(Device, device_id)

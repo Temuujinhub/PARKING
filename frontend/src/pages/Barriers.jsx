@@ -1,5 +1,5 @@
 // Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх, командын лог
-import { DoorOpen, RefreshCw } from 'lucide-react'
+import { DoorOpen, PlugZap, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { Badge, Table, useToast } from '../components/ui'
@@ -20,6 +20,13 @@ export default function Barriers() {
       const r = await api(`/api/barriers/${id}/open`, { method: 'POST', body: {} })
       toast(r.status === 'SUCCESS' ? 'Хаалт нээгдлээ' : 'Команд амжилтгүй', r.status === 'SUCCESS' ? 'success' : 'error')
       load()
+    } catch (e) { toast(e.message, 'error') }
+  }
+
+  const testConn = async (id) => {
+    try {
+      const r = await api(`/api/admin/devices/${id}/test-connection`, { method: 'POST' })
+      toast(r.detail, r.reachable ? 'success' : 'error')
     } catch (e) { toast(e.message, 'error') }
   }
 
@@ -53,7 +60,11 @@ export default function Barriers() {
 
       <div className="card">
         <h2 className="font-semibold mb-3">Камерын холболт</h2>
-        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Холболт']} empty={cameras.length === 0}>
+        <div className="text-xs text-slate-500 mb-2">
+          <b>Онлайн</b> = камер серверт дата/heartbeat илгээж байна (камер→сервер).
+          <b>Холболт шалгах</b> = сервер камер руу хүрч байгаа эсэх (сервер→камер, хаалт нээхэд хэрэгтэй).
+        </div>
+        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Онлайн', 'Сервер→камер']} empty={cameras.length === 0}>
           {cameras.map((c) => (
             <tr key={c.id}>
               <td className="td">{c.name}</td>
@@ -66,6 +77,11 @@ export default function Barriers() {
                   <span className={`w-1.5 h-1.5 rounded-full ${c.online ? 'bg-accent' : 'bg-red-400'}`} />
                   {c.online ? 'Онлайн' : 'Офлайн'}
                 </span>
+              </td>
+              <td className="td">
+                <button className="btn-secondary py-1 text-xs" onClick={() => testConn(c.id)} disabled={!c.ip_address}>
+                  <PlugZap size={13} /> Шалгах
+                </button>
               </td>
             </tr>
           ))}
