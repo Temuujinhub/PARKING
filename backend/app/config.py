@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     barrier_timeout_sec: float = 3.0
     barrier_username: str = "admin"
     barrier_password: str = ""
+    # Хаалт нээх CGI зам гараар давхарлах (тодорхой болсон үед). Жишээ:
+    # "/cgi-bin/trafficParking.cgi?action=openStrobe&channel=1&info.openType=Normal"
+    barrier_open_path: str = ""
 
     # LPR
     lpr_min_confidence: float = 90.0
