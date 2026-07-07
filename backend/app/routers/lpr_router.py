@@ -18,12 +18,39 @@ router = APIRouter(prefix="/api/lpr", tags=["lpr"])
 
 
 def _extract_events(payload: dict) -> list[dict]:
-    """Dahua ITSAPI-ийн хэд хэдэн хувилбарын бүтцийг дэмжинэ."""
-    if "Events" in payload:
-        return payload["Events"] or []
-    if "Picture" in payload or "TrafficCar" in payload:
-        return [payload]
-    return []
+    """Dahua ITSAPI-ийн хэд хэдэн хувилбарын бүтцийг дэмжинэ:
+    - eventManager CGI:  {"Events": [{"TrafficCar": {...}}]}
+    - ITSAPI TollgateInfo: {"Plate": {...}, "VehicleType": ...}  ← гарах/орох камерын үндсэн формат
+    - Picture wrapper:     {"Picture": {"Plate": {...}}}
+    """
+    if isinstance(payload.get("Events"), list):
+        return payload["Events"]
+    # TollgateInfo болон бусад дан event-ийг нэг элементтэй жагсаалт болгоно
+    return [payload]
+
+
+def _extract_plate(event: dict) -> tuple[str, float]:
+    """Event-ийн олон боломжит байршлаас дугаар + итгэлцүүрийг гаргана."""
+    # Боломжит байрлалууд: Plate.PlateNumber (ITSAPI), TrafficCar.PlateNumber (CGI),
+    # Picture.Plate.PlateNumber, дээд түвшний PlateNumber
+    candidates = [
+        event.get("Plate"),
+        event.get("TrafficCar"),
+        (event.get("Picture") or {}).get("Plate"),
+        event,  # дээд түвшинд шууд байвал
+    ]
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        num = c.get("PlateNumber") or c.get("PlateNo") or c.get("plateNumber")
+        if num:
+            conf = c.get("Confidence") or c.get("Accuracy") or event.get("Confidence") or 100
+            try:
+                conf = float(conf)
+            except (ValueError, TypeError):
+                conf = 100.0
+            return str(num), conf
+    return "", 0.0
 
 
 @router.post("/callback")
@@ -48,10 +75,14 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     device.last_seen = datetime.utcnow()
     results = []
     for event in _extract_events(payload):
-        car = event.get("TrafficCar") or event.get("Picture", {}).get("Plate") or {}
-        plate = normalize_plate(car.get("PlateNumber") or car.get("PlateNo") or "")
-        conf = float(car.get("Confidence") or event.get("Confidence") or 100)
+        raw_plate, conf = _extract_plate(event)
+        plate = normalize_plate(raw_plate)
         if not plate:
+            # Дугаар танигдаагүй/формат таарахгүй бол raw-ийг логд хадгална (камер тохируулахад тусална)
+            db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number="?",
+                            lane_dir=device.lane_dir, confidence=0, accepted=False,
+                            reject_reason="plate not parsed", raw=event))
+            db.commit()
             continue
         if conf < settings.lpr_min_confidence:
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
