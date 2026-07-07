@@ -15,12 +15,17 @@ class Settings(BaseSettings):
     # Public pay page-ийн үндсэн URL (QR код энэ URL руу чиглэнэ)
     public_base_url: str = "http://localhost"
 
-    # QPay
-    qpay_base_url: str = "https://merchant.qpay.mn/v2"
-    qpay_username: str = ""
-    qpay_password: str = ""
+    # QPay v2 (developer.qpay.mn)
+    qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
+    qpay_username: str = ""    # client_id (QPay merchant гэрээнээс)
+    qpay_password: str = ""    # client_secret
     qpay_invoice_code: str = "PARKING_INVOICE"
-    qpay_mock: bool = True  # Бодит credentials байхгүй үед mock горим
+    qpay_mock: bool = True     # Бодит credentials байхгүй үед mock горим
+
+    @property
+    def qpay_base_url(self) -> str:
+        host = "merchant-sandbox.qpay.mn" if self.qpay_sandbox else "merchant.qpay.mn"
+        return f"https://{host}/v2"
     # Webhook нууц токен — тохируулсан бол /qpay/webhook хүсэлтэд ?token= таарах ёстой
     # (QPay callback_url-д нэмж өгнө). Хоосон бол шалгахгүй (mock/туршилтын үед).
     qpay_webhook_secret: str = ""

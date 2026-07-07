@@ -171,10 +171,28 @@ export default function Pay() {
           ) : (
             <div className="text-xs bg-surface-muted rounded-xl p-4 font-mono break-all">{payment.qr_text}</div>
           )}
+          <div className="text-sm text-slate-400">QR-ийг банкны апп-аараа уншуулна уу</div>
           {payment.deep_link && (
             <a href={payment.deep_link} className="btn-primary w-full justify-center text-base py-3">
               <CreditCard size={18} /> QPay апп нээх
             </a>
+          )}
+          {/* Банкны сонголтууд (QPay urls) — тухайн утсанд суусан банкаа сонгоно */}
+          {payment.urls?.length > 0 && (
+            <div>
+              <div className="text-xs text-slate-500 mb-2">Эсвэл банкаа сонгоно уу:</div>
+              <div className="grid grid-cols-4 gap-2">
+                {payment.urls.map((u, i) => (
+                  <a key={i} href={u.link} title={u.description || u.name}
+                    className="flex flex-col items-center gap-1 p-2 rounded-xl bg-surface-muted/50 border border-surface-border hover:border-accent transition-colors">
+                    {u.logo
+                      ? <img src={u.logo} alt={u.name} className="w-8 h-8 rounded-lg object-contain bg-white" />
+                      : <span className="w-8 h-8 rounded-lg bg-accent/15 text-accent flex items-center justify-center text-xs font-bold">{(u.name || '?')[0]}</span>}
+                    <span className="text-[10px] text-slate-400 truncate w-full text-center">{u.name}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
           )}
           <div className="flex items-center justify-center gap-2 text-sm text-slate-400">
             <Loader2 size={15} className="animate-spin" aria-hidden /> Төлбөр хүлээж байна…

@@ -97,7 +97,7 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
                                         Payment.status == "PENDING").first()
     if existing and existing.provider_invoice_id:
         return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
-                "qr_text": existing.qr_text, "deep_link": existing.deep_link,
+                "qr_text": existing.qr_text, "deep_link": existing.deep_link, "urls": [],
                 "amount": float(existing.amount), "mock": settings.qpay_mock}
 
     payment = _create_payment(db, session, "QPAY", "QR")
@@ -118,8 +118,8 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     db.commit()
     return {"payment_id": payment.id, "invoice_id": inv["invoice_id"],
             "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
-            "deep_link": inv["deep_link"], "amount": float(payment.amount),
-            "mock": inv.get("mock", False)}
+            "deep_link": inv["deep_link"], "urls": inv.get("urls", []),
+            "amount": float(payment.amount), "mock": inv.get("mock", False)}
 
 
 @router.post("/qpay/webhook")
