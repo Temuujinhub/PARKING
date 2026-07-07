@@ -11,6 +11,9 @@ from .ws import manager
 
 Base.metadata.create_all(bind=engine)
 
+from .migrations import run_migrations  # noqa: E402
+run_migrations()
+
 app = FastAPI(title=settings.app_name, docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 # CORS: default "*" (nginx-ийн ард same-origin). Production-д PARKING_CORS_ORIGINS-оор домэйн зааж өгнө.
