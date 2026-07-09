@@ -17,7 +17,7 @@ from sqlalchemy import text
 from ..auth import require_role
 from ..config import settings
 from ..database import get_db
-from ..models import Device, ParkingSession, User
+from ..models import Device, User
 from ..ws import manager
 
 try:
@@ -26,6 +26,43 @@ except Exception:  # noqa: BLE001
     psutil = None
 
 router = APIRouter(prefix="/api/health", tags=["health"])
+
+# Хүснэгт → ангилал (өгөгдлийн сан ямар төрлийн датагаар хэдэн хувь дүүрснийг харуулна)
+TABLE_CATEGORY = {
+    # Мөнгөн урсгал / бичилт (гүйлгээ, төлбөр, баримт)
+    "payments": "Мөнгөн урсгал", "parking_sessions": "Мөнгөн урсгал",
+    "vat_receipts": "Мөнгөн урсгал", "compensations": "Мөнгөн урсгал",
+    "daily_settlements": "Мөнгөн урсгал", "cashier_shifts": "Мөнгөн урсгал",
+    # Лог / түүх
+    "audit_logs": "Лог/түүх", "lpr_events": "Лог/түүх", "barrier_commands": "Лог/түүх",
+    # Техникийн тохиргоо
+    "users": "Тохиргоо", "parking_sites": "Тохиргоо", "devices": "Тохиргоо",
+    "tariff_templates": "Тохиргоо", "tariff_tiers": "Тохиргоо", "discounts": "Тохиргоо",
+    "registered_drivers": "Тохиргоо", "blacklist": "Тохиргоо",
+}
+CATEGORY_ORDER = ["Мөнгөн урсгал", "Лог/түүх", "Тохиргоо", "Бусад"]
+
+
+def _db_storage(db) -> dict:
+    """Өгөгдлийн сан дахь хүснэгтүүдийн эзлэх зайг ангиллаар бүлэглэж хувиар гаргана."""
+    try:
+        rows = db.execute(text(
+            "SELECT relname, pg_total_relation_size(relid) AS bytes "
+            "FROM pg_stat_user_tables")).all()
+    except Exception:  # noqa: BLE001
+        return {}
+    cats, tops, total = {}, [], 0
+    for relname, b in rows:
+        b = int(b or 0)
+        total += b
+        cats[TABLE_CATEGORY.get(relname, "Бусад")] = cats.get(TABLE_CATEGORY.get(relname, "Бусад"), 0) + b
+        tops.append({"table": relname, "bytes": b})
+    categories = [{"name": c, "bytes": cats[c], "percent": round(cats[c] * 100 / total, 1) if total else 0}
+                  for c in CATEGORY_ORDER if c in cats]
+    tops.sort(key=lambda x: x["bytes"], reverse=True)
+    for t in tops:
+        t["percent"] = round(t["bytes"] * 100 / total, 1) if total else 0
+    return {"total_bytes": total, "categories": categories, "top_tables": tops[:6]}
 
 _START = time.time()  # backend асаасан цаг (uptime тооцох)
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -109,6 +146,14 @@ def _system_metrics() -> dict:
         disks.append({"mount": part.mountpoint, "total": u.total, "used": u.used,
                       "free": u.free, "percent": u.percent})
     net = psutil.net_io_counters()
+    try:
+        backend_rss = psutil.Process().memory_info().rss
+    except Exception:  # noqa: BLE001
+        backend_rss = None
+    try:
+        proc_count = len(psutil.pids())
+    except Exception:  # noqa: BLE001
+        proc_count = None
     return {
         "available": True,
         "cpu_percent": psutil.cpu_percent(interval=0.3),
@@ -122,6 +167,8 @@ def _system_metrics() -> dict:
         "temperature_c": _cpu_temperature(),
         "boot_time": psutil.boot_time(),
         "uptime_seconds": int(time.time() - psutil.boot_time()),
+        "backend_rss": backend_rss,
+        "processes": proc_count,
     }
 
 
@@ -165,13 +212,11 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
     try:
         size = db.execute(text("SELECT pg_database_size(current_database())")).scalar()
         conns = db.execute(text("SELECT count(*) FROM pg_stat_activity")).scalar()
-        open_sessions = db.query(ParkingSession).filter(
-            ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
-        sessions_today = db.execute(text(
-            "SELECT count(*) FROM parking_sessions WHERE entry_time >= date_trunc('day', now())")).scalar()
-        # Санхүүгийн дүн энд гаргахгүй — health бол ажиллагааны мониторинг (мөнгө нь Тайлан/Тооцоонд)
+        maxc = db.execute(text("SELECT setting FROM pg_settings WHERE name='max_connections'")).scalar()
+        # Health = ажиллагааны мониторинг: санхүү/session тоо биш, харин САНГИЙН эрүүл мэнд —
+        # хэмжээ, холболт, ямар төрлийн датагаар хэдэн хувь дүүрсэн (storage breakdown)
         database = {"ok": True, "size_bytes": int(size or 0), "active_connections": int(conns or 0),
-                    "sessions_open": open_sessions, "sessions_today": int(sessions_today or 0)}
+                    "max_connections": int(maxc or 0), "storage": _db_storage(db)}
     except Exception as e:  # noqa: BLE001
         database = {"ok": False, "error": str(e)[:120]}
 
@@ -199,8 +244,11 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
             "version": _git_version(),
             "uptime_seconds": int(now - _START),
             "debug": settings.debug,
+            # e-Barimt: QR-аар (QPay ebarimt_v3) бодит баримт үүсдэг тул qpay_ebarimt асаалттай
+            # + qpay бодит үед "бодит" гэж үзнэ (локал PosAPI mock нь зөвхөн картын нөөц суваг)
             "mock": {"qpay": settings.qpay_mock, "barrier": settings.barrier_mock,
-                     "ebarimt": settings.ebarimt_mock, "simulate": settings.allow_simulate},
+                     "ebarimt": settings.ebarimt_mock and not (settings.qpay_ebarimt and not settings.qpay_mock),
+                     "simulate": settings.allow_simulate},
         },
         "system": _system_metrics(),
         "kernel": _kernel(),

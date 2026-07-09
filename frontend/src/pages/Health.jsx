@@ -1,7 +1,7 @@
 // Системийн эрүүл мэнд — сервер metrics, сервисүүд, DB, харилцан холболт (5 сек auto-refresh)
 import {
   Activity, AlertTriangle, Camera, Cpu, Database, DoorClosed, HardDrive,
-  MemoryStick, Network, RefreshCw, Server, Thermometer, Wifi,
+  MemoryStick, Network, PieChart, RefreshCw, Server, Thermometer, Wifi,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
@@ -25,11 +25,37 @@ const ageLabel = (sec) => sec == null ? 'хэзээ ч' : sec < 90 ? `${sec}с` 
 const pctColor = (p) => p >= 90 ? 'bg-red-500' : p >= 75 ? 'bg-amber-500' : 'bg-accent'
 const pctText = (p) => p >= 90 ? 'text-red-400' : p >= 75 ? 'text-amber-400' : 'text-accent'
 
-function Bar({ percent, color }) {
+function Bar({ percent, color, hex }) {
   return (
     <div className="h-2 rounded-full bg-surface-muted overflow-hidden">
-      <div className={`h-full ${color || pctColor(percent)}`} style={{ width: `${Math.min(100, percent || 0)}%` }} />
+      <div className={`h-full ${hex ? '' : (color || pctColor(percent))}`}
+        style={{ width: `${Math.min(100, percent || 0)}%`, ...(hex ? { background: hex } : {}) }} />
     </div>
+  )
+}
+
+// Дата ангиллын өнгө (донат + бар) — гэрэл/бараан хоёуланд тод харагдана
+const CAT_COLORS = {
+  'Мөнгөн урсгал': '#34d399', 'Лог/түүх': '#fbbf24', 'Тохиргоо': '#60a5fa', 'Бусад': '#94a3b8',
+}
+
+function Donut({ categories }) {
+  const r = 42; const c = 2 * Math.PI * r
+  let offset = 0
+  return (
+    <svg viewBox="0 0 100 100" className="w-40 h-40 -rotate-90">
+      <circle cx="50" cy="50" r={r} fill="none" strokeWidth="13" className="stroke-surface-muted" />
+      {categories.map((cat) => {
+        const len = (cat.percent / 100) * c
+        const el = (
+          <circle key={cat.name} cx="50" cy="50" r={r} fill="none" strokeWidth="13"
+            stroke={CAT_COLORS[cat.name] || '#94a3b8'}
+            strokeDasharray={`${len} ${c - len}`} strokeDashoffset={-offset} />
+        )
+        offset += len
+        return el
+      })}
+    </svg>
   )
 }
 
@@ -41,7 +67,7 @@ function Dot({ ok }) {
 export default function Health() {
   const [d, setD] = useState(null)
   const [err, setErr] = useState(null)
-  const [auto, setAuto] = useState(true)
+  const [ivl, setIvl] = useState(30000) // шинэчлэх давтамж (мс), 0 = гараар
   const netRef = useRef(null) // сүлжээний хурд тооцох өмнөх дээж
   const [netRate, setNetRate] = useState(null)
 
@@ -62,10 +88,10 @@ export default function Health() {
 
   useEffect(() => { load() }, [])
   useEffect(() => {
-    if (!auto) return
-    const id = setInterval(load, 30000)
+    if (!ivl) return
+    const id = setInterval(load, ivl)
     return () => clearInterval(id)
-  }, [auto])
+  }, [ivl])
 
   if (err) return (
     <div className="card text-red-400 flex items-center gap-2"><AlertTriangle size={18} /> {err}</div>
@@ -88,9 +114,13 @@ export default function Health() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
-            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Авто (5с)
-          </label>
+          <select className="input w-auto py-1.5 text-xs" value={ivl}
+            onChange={(e) => setIvl(+e.target.value)} aria-label="Шинэчлэх давтамж">
+            <option value={0}>Гараар</option>
+            <option value={10000}>10 сек</option>
+            <option value={30000}>30 сек</option>
+            <option value={60000}>1 мин</option>
+          </select>
           <button className="btn-secondary" onClick={load}><RefreshCw size={15} /> Шинэчлэх</button>
         </div>
       </div>
@@ -116,13 +146,13 @@ export default function Health() {
             <div className="flex items-center gap-2 text-slate-400 text-sm"><Cpu size={16} /> CPU</div>
             <div className={`text-3xl font-bold font-mono ${pctText(sys.cpu_percent)}`}>{Math.round(sys.cpu_percent)}%</div>
             <Bar percent={sys.cpu_percent} />
-            <div className="text-xs text-slate-500">{sys.cpu_count} цөм · load {sys.load_avg?.join(' / ')}</div>
+            <div className="text-xs text-slate-500">{sys.cpu_count} цөм · load {sys.load_avg?.join(' / ')}{sys.processes ? ` · ${sys.processes} процесс` : ''}</div>
           </div>
           <div className="card space-y-2">
             <div className="flex items-center gap-2 text-slate-400 text-sm"><MemoryStick size={16} /> Санах ой (RAM)</div>
             <div className={`text-3xl font-bold font-mono ${pctText(mem.percent)}`}>{Math.round(mem.percent)}%</div>
             <Bar percent={mem.percent} />
-            <div className="text-xs text-slate-500">{fmtBytes(mem.used)} / {fmtBytes(mem.total)} · swap {Math.round(swap.percent || 0)}%</div>
+            <div className="text-xs text-slate-500">{fmtBytes(mem.used)} / {fmtBytes(mem.total)} · swap {Math.round(swap.percent || 0)}%{sys.backend_rss ? ` · API ${fmtBytes(sys.backend_rss)}` : ''}</div>
           </div>
           <div className="card space-y-2">
             <div className="flex items-center gap-2 text-slate-400 text-sm"><Thermometer size={16} /> Температур</div>
@@ -176,22 +206,58 @@ export default function Health() {
           </div>
         </div>
 
-        {/* Database */}
+        {/* Database тойм */}
         <div className="card">
           <div className="flex items-center gap-2 text-slate-400 text-sm mb-3"><Database size={16} /> Өгөгдлийн сан</div>
           {d.database?.ok ? (
             <div className="grid grid-cols-2 gap-3 text-sm">
               <Stat label="Холболт" value={<span className="text-accent flex items-center gap-1"><Dot ok /> Хэвийн</span>} />
-              <Stat label="DB хэмжээ" value={fmtBytes(d.database.size_bytes)} />
-              <Stat label="Идэвхтэй холболт" value={d.database.active_connections} />
-              <Stat label="Зогсоолд машин" value={d.database.sessions_open} />
-              <Stat label="Өнөөдрийн орц" value={d.database.sessions_today} />
+              <Stat label="Нийт хэмжээ" value={fmtBytes(d.database.size_bytes)} />
+              <Stat label="Идэвхтэй холболт" value={`${d.database.active_connections}${d.database.max_connections ? ' / ' + d.database.max_connections : ''}`} />
+              <Stat label="Дата ангилал" value={`${d.database.storage?.categories?.length || 0}`} />
             </div>
           ) : (
             <div className="text-red-400 text-sm flex items-center gap-2"><Dot ok={false} /> {d.database?.error || 'Холбогдсонгүй'}</div>
           )}
         </div>
       </div>
+
+      {/* Өгөгдлийн сангийн эзэлхүүн — ямар төрлийн датагаар хэдэн хувь дүүрсэн (донат) */}
+      {d.database?.storage?.total_bytes > 0 && (
+        <div className="card">
+          <div className="flex items-center gap-2 text-slate-400 text-sm mb-4">
+            <PieChart size={16} /> Өгөгдлийн сангийн эзэлхүүн — датагаар
+          </div>
+          <div className="flex flex-col md:flex-row gap-6 items-center">
+            <div className="relative shrink-0">
+              <Donut categories={d.database.storage.categories} />
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <div className="text-lg font-bold font-mono">{fmtBytes(d.database.storage.total_bytes)}</div>
+                <div className="text-[11px] text-slate-500">нийт</div>
+              </div>
+            </div>
+            <div className="flex-1 w-full space-y-2.5">
+              {d.database.storage.categories.map((cat) => (
+                <div key={cat.name}>
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-sm" style={{ background: CAT_COLORS[cat.name] || '#94a3b8' }} />
+                      {cat.name}
+                    </span>
+                    <span className="font-mono text-slate-300">{cat.percent}% · {fmtBytes(cat.bytes)}</span>
+                  </div>
+                  <Bar percent={cat.percent} hex={CAT_COLORS[cat.name] || '#94a3b8'} />
+                </div>
+              ))}
+              {d.database.storage.top_tables?.length > 0 && (
+                <div className="pt-2 mt-2 border-t border-surface-border/50 text-xs text-slate-500">
+                  Хамгийн том хүснэгт: {d.database.storage.top_tables.slice(0, 4).map((t) => `${t.table} (${t.percent}%)`).join(' · ')}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Интеграци: QPay + WebSocket */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -222,10 +288,13 @@ export default function Health() {
         </div>
       </div>
 
-      {/* Камер + Хаалт харилцан холболт */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <DeviceTable title="Камерууд" icon={Camera} rows={d.integrations?.cameras} />
-        <DeviceTable title="Хаалтууд" icon={DoorClosed} rows={d.integrations?.barriers} />
+      {/* Камер + Хаалт харилцан холболт (хаалт тусад нь бүртгэлтэй үед л харагдана —
+          зарим зогсоолд хаалт нь камертайгаа хамт удирддаг тул тусдаа төхөөрөмж байхгүй) */}
+      <div className={`grid grid-cols-1 gap-5 ${d.integrations?.barriers?.length ? 'lg:grid-cols-2' : ''}`}>
+        <DeviceTable title="Камерууд (хаалт удирдлагатай)" icon={Camera} rows={d.integrations?.cameras} />
+        {d.integrations?.barriers?.length > 0 && (
+          <DeviceTable title="Хаалтууд" icon={DoorClosed} rows={d.integrations?.barriers} />
+        )}
       </div>
     </div>
   )
