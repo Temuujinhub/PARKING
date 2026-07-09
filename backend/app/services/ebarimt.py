@@ -139,15 +139,40 @@ async def get_information() -> dict:
         return resp.json()
 
 
+import os
+
+_LAST_SEND_FILE = os.path.join(os.path.dirname(__file__), "..", "..", ".last_ebarimt_send")
+
+
+def record_send():
+    """ТЕГ-т мэдээ илгээсэн хугацааг файлд тэмдэглэнэ (restart-д тэсвэртэй, health-д харна)."""
+    try:
+        with open(_LAST_SEND_FILE, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def last_send_at() -> int | None:
+    """ТЕГ-т сүүлд мэдээ илгээсэн epoch (health мониторинг). Хэзээ ч илгээгээгүй бол None."""
+    try:
+        with open(_LAST_SEND_FILE) as f:
+            return int(f.read().strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def send_data() -> dict:
     """PosAPI sendData — цугларсан баримтуудыг ТЕГ-ын нэгдсэн системд илгээх
     (шаардлага №4 автомат — өдөр бүр, №5 гараар — Ибаримт хуудасны товч)."""
     if settings.ebarimt_mock:
+        record_send()
         return {"success": True, "message": "MOCK: мэдээ илгээгдлээ", "mock": True}
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(f"{settings.ebarimt_posapi_url}/sendData")
         resp.raise_for_status()
-        return resp.json()
+    record_send()
+    return resp.json()
 
 
 async def delete_receipt(bill_id: str, date: str) -> bool:

@@ -1,7 +1,7 @@
 // Системийн эрүүл мэнд — сервер metrics, сервисүүд, DB, харилцан холболт (5 сек auto-refresh)
 import {
   Activity, AlertTriangle, Camera, Cpu, Database, DoorClosed, HardDrive,
-  MemoryStick, Network, PieChart, RefreshCw, Server, Thermometer, Wifi,
+  MemoryStick, Network, PieChart, RefreshCw, Server, ShieldCheck, Thermometer, Wifi,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
@@ -24,6 +24,7 @@ const ageLabel = (sec) => sec == null ? 'хэзээ ч' : sec < 90 ? `${sec}с` 
 // Хувь → өнгө (ачаалал их бол улаан)
 const pctColor = (p) => p >= 90 ? 'bg-red-500' : p >= 75 ? 'bg-amber-500' : 'bg-accent'
 const pctText = (p) => p >= 90 ? 'text-red-400' : p >= 75 ? 'text-amber-400' : 'text-accent'
+const sslColor = (days) => days == null ? 'text-slate-400' : days <= 7 ? 'text-red-400' : days <= 20 ? 'text-amber-400' : 'text-accent'
 
 function Bar({ percent, color, hex }) {
   return (
@@ -287,6 +288,55 @@ export default function Health() {
           </div>
         </div>
       </div>
+
+      {/* Үйл ажиллагаа ба хамгаалалт — SSL, backup, ТЕГ авто-илгээлт, backend restart */}
+      {d.ops && (
+        <div className="card">
+          <div className="flex items-center gap-2 text-slate-400 text-sm mb-3"><ShieldCheck size={16} /> Үйл ажиллагаа ба хамгаалалт</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 text-sm">
+            <div>
+              <div className="text-xs text-slate-500 mb-1">SSL сертификат</div>
+              {d.ops.ssl ? (
+                <div>
+                  <span className={`font-mono font-bold ${sslColor(d.ops.ssl.days_left)}`}>{d.ops.ssl.days_left} хоног үлдсэн</span>
+                  <div className="text-[11px] text-slate-500">{new Date(d.ops.ssl.expires_at).toLocaleDateString()} хүртэл · {d.ops.ssl.host}</div>
+                </div>
+              ) : <span className="text-slate-500">— (тест/localhost)</span>}
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Сүүлийн backup</div>
+              {d.ops.backup?.age_sec != null ? (
+                <div>
+                  <span className={`font-mono font-bold ${d.ops.backup.age_sec > 172800 ? 'text-amber-400' : 'text-accent'}`}>{fmtDur(d.ops.backup.age_sec)} өмнө</span>
+                  <div className="text-[11px] text-slate-500">{fmtBytes(d.ops.backup.size_bytes)}{d.ops.backup.replicas != null ? ` · replica ${d.ops.backup.replicas}` : ''}</div>
+                </div>
+              ) : <span className="text-slate-500">Backup файл олдсонгүй</span>}
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-1">ТЕГ авто-илгээлт (e-Barimt)</div>
+              {d.ops.ebarimt_last_send ? (
+                <div>
+                  <span className="font-mono font-bold text-accent">{fmtDur(d.generated_at - d.ops.ebarimt_last_send)} өмнө</span>
+                  <div className="text-[11px] text-slate-500">{new Date(d.ops.ebarimt_last_send * 1000).toLocaleString()}</div>
+                </div>
+              ) : <span className="text-amber-400">Хараахан илгээгээгүй</span>}
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Backend restart</div>
+              <div>
+                <span className="font-mono font-bold">{fmtDur(d.app?.uptime_seconds)} өмнө</span>
+                <div className="text-[11px] text-slate-500">{d.app?.started_at ? new Date(d.app.started_at * 1000).toLocaleString() : ''}</div>
+              </div>
+            </div>
+          </div>
+          {(sys.disk_io || sys.open_files) && (
+            <div className="mt-3 pt-3 border-t border-surface-border/50 text-xs text-slate-500 flex flex-wrap gap-x-6 gap-y-1">
+              {sys.disk_io && <span>Диск I/O: уншсан {fmtBytes(sys.disk_io.read_bytes)} · бичсэн {fmtBytes(sys.disk_io.write_bytes)}</span>}
+              {sys.open_files && <span>Нээлттэй файл: {sys.open_files.allocated.toLocaleString()} / {sys.open_files.max.toLocaleString()}</span>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Камер + Хаалт харилцан холболт (хаалт тусад нь бүртгэлтэй үед л харагдана —
           зарим зогсоолд хаалт нь камертайгаа хамт удирддаг тул тусдаа төхөөрөмж байхгүй) */}
