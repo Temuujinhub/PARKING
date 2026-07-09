@@ -7,10 +7,11 @@ import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 export default function Cashier() {
   const toast = useToast()
-  const { testMode } = useAuth()
+  const { testMode, user } = useAuth()
   const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [exits, setExits] = useState([])
+  const [overview, setOverview] = useState(null) // {capacity, occupied, free, rows: өнөөдөр гарсан}
   const [shift, setShift] = useState(null)
   const [selected, setSelected] = useState(null)
   const [searchPlate, setSearchPlate] = useState('')
@@ -36,17 +37,21 @@ export default function Cashier() {
   const loadExits = useCallback((sid) => {
     if (!sid) return
     api(`/api/sessions/recent-exits?site_id=${sid}`).then(setExits).catch(() => {})
+    api(`/api/sessions/today-exits?site_id=${sid}`).then(setOverview).catch(() => {})
   }, [])
   const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => {})
 
   useEffect(() => {
     api('/api/admin/sites').then((s) => {
-      setSites(s)
-      if (s.length) setSiteId(s[0].id)
+      // Оператор зөвхөн өөрийн хариуцах зогсоолыг сонгоно (site_id тохируулсан бол)
+      const scoped = user?.role === 'OPERATOR' && user?.site_id
+        ? s.filter((x) => x.id === user.site_id) : s
+      setSites(scoped)
+      if (scoped.length) setSiteId(scoped[0].id)
     })
     api('/api/admin/discounts').then((d) => setDiscounts(d.filter((x) => x.is_active))).catch(() => {})
     loadShift()
-  }, [])
+  }, [user])
 
   useEffect(() => {
     if (!siteId) return
@@ -189,6 +194,24 @@ export default function Cashier() {
         </div>
       </div>
 
+      {/* Зогсоолын багтаамжийн тоолуур */}
+      {overview && (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono">{overview.occupied}<span className="text-lg text-slate-500">/{overview.capacity}</span></div>
+            <div className="text-xs text-slate-400 mt-1">Зогсож буй / Багтаамж</div>
+          </div>
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono text-accent">{overview.free}</div>
+            <div className="text-xs text-slate-400 mt-1">Сул зай</div>
+          </div>
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono text-amber-400">{overview.rows.length}</div>
+            <div className="text-xs text-slate-400 mt-1">Өнөөдөр гарсан</div>
+          </div>
+        </div>
+      )}
+
       {shift?.open && (
         <div className="card py-3 flex flex-wrap gap-6 text-sm">
           <span className="text-slate-400">Ээлж нээсэн: <span className="text-slate-200 font-mono">{fmtDate(shift.shift.opened_at)}</span></span>
@@ -327,6 +350,39 @@ export default function Cashier() {
             </button>
           ))}
           {barriers.length === 0 && <span className="text-sm text-slate-500">Barrier төхөөрөмж бүртгэгдээгүй</span>}
+        </div>
+      </div>
+
+      {/* Өнөөдөр гарсан машинууд — гарах камерт уншсан бүх машин (төлбөргүй/үнэгүй ч) */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Өнөөдөр гарсан машинууд</h2>
+          <span className="text-sm text-slate-400">{overview?.rows.length || 0} машин</span>
+        </div>
+        <Table headers={['Дугаар', 'Орсон', 'Гарсан', 'Хугацаа', 'Төрөл', 'Төлбөр', 'Хэрэгсэл', 'Төлөв', 'НӨАТ']}
+          empty={!overview || overview.rows.length === 0}>
+          {overview?.rows.map((r) => (
+            <tr key={r.session_id}>
+              <td className="td font-mono font-bold">{r.plate_number}</td>
+              <td className="td font-mono text-xs">{r.entry_time ? fmtDate(r.entry_time).slice(5, 16) : '-'}</td>
+              <td className="td font-mono text-xs">{r.exit_time ? fmtDate(r.exit_time).slice(5, 16) : '—'}</td>
+              <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
+              <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
+                {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}
+              </td>
+              <td className="td font-mono">{r.total_fee > 0 ? `${fmt(r.total_fee)}₮` : <span className="text-slate-500">Үнэгүй</span>}</td>
+              <td className="td text-xs">{r.provider || <span className="text-slate-500">—</span>}</td>
+              <td className="td">
+                {r.paid ? <span className="text-accent text-xs">Төлсөн</span>
+                  : r.status === 'AWAITING_PAYMENT' ? <span className="text-amber-400 text-xs">Хүлээж буй</span>
+                  : <span className="text-slate-500 text-xs">Төлбөргүй</span>}
+              </td>
+              <td className="td text-xs">{r.ebarimt ? <span className="text-accent">✓</span> : <span className="text-slate-600">—</span>}</td>
+            </tr>
+          ))}
+        </Table>
+        <div className="text-xs text-slate-500 mt-2">
+          Гарах камерт дугаар нь уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч оруулав).
         </div>
       </div>
 

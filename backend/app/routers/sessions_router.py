@@ -83,6 +83,51 @@ def recent_exits(site_id: str, minutes: int = 30,
             for s in sessions]
 
 
+@router.get("/today-exits")
+def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
+    """Касс: ӨНӨӨДӨР гарах камерт уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч).
+    + зогсоолын багтаамж/эзэлсэн тоолуур. Бичилтэнд: дугаар, орсон/гарсан цаг, хугацаа,
+    машины төрөл, төлбөрийн хэрэгсэл, төлсөн эсэх, e-Barimt өгсөн эсэх."""
+    from sqlalchemy import or_
+    from ..models import ParkingSite, Payment, VatReceipt
+    site = db.get(ParkingSite, site_id)
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    occupied = db.query(ParkingSession).filter(
+        ParkingSession.site_id == site_id,
+        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
+    sessions = (db.query(ParkingSession)
+                .filter(ParkingSession.site_id == site_id,
+                        or_(ParkingSession.exit_time >= today,
+                            ParkingSession.status == "AWAITING_PAYMENT"))
+                .order_by(ParkingSession.updated_at.desc()).limit(200).all())
+    ids = [s.id for s in sessions]
+    pays = {}
+    if ids:
+        for p in db.query(Payment).filter(Payment.session_id.in_(ids), Payment.status == "PAID").all():
+            pays.setdefault(p.session_id, p)
+    recs = {r.session_id for r in db.query(VatReceipt.session_id)
+            .filter(VatReceipt.session_id.in_(ids), VatReceipt.status == "SENT").all()} if ids else set()
+    prov_mn = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт"}
+    rows = []
+    for s in sessions:
+        p = pays.get(s.id)
+        car_type = "Гэрээт" if s.is_registered else ("Хөнгөлөлттэй" if s.discount_id else "Энгийн")
+        rows.append({
+            "session_id": s.id, "plate_number": s.plate_number,
+            "entry_time": s.entry_time.isoformat() if s.entry_time else None,
+            "exit_time": s.exit_time.isoformat() if s.exit_time else None,
+            "duration_minutes": s.duration_minutes,
+            "car_type": car_type, "discount_name": s.discount.name if s.discount else None,
+            "total_fee": float(s.total_fee or 0),
+            "provider": prov_mn.get(p.provider, p.provider) if p else None,
+            "paid": s.status == "PAID" or bool(p),
+            "status": s.status,
+            "ebarimt": s.id in recs,
+        })
+    return {"capacity": site.capacity if site else 0, "occupied": occupied,
+            "free": max(0, (site.capacity if site else 0) - occupied), "rows": rows}
+
+
 @router.post("/manual-entry")
 async def manual_entry(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier"))):
