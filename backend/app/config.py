@@ -17,10 +17,23 @@ class Settings(BaseSettings):
 
     # QPay v2 (developer.qpay.mn)
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
-    qpay_username: str = ""    # client_id (QPay merchant гэрээнээс)
-    qpay_password: str = ""    # client_secret
-    qpay_invoice_code: str = "PARKING_INVOICE"
+    qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)
+    qpay_password: str = ""    # client_secret — зөвхөн .env-д (git-д бүү бич)
+    # e-Barimt үүсгэдэг НӨАТ-ийн мэдээлэлтэй нэхэмжлэхийн код (QPay-ээс олгоно)
+    qpay_invoice_code: str = "EB_EASY_2PARKING_INVOICE"
     qpay_mock: bool = True     # Бодит credentials байхгүй үед mock горим
+
+    # QPay-ээр дамжуулсан e-Barimt 3.0 (ebarimt_v3/create). True үед локал PosAPI-ийн
+    # оронд QPay-ийн ebarimt_v3 endpoint ашиглаж баримт үүсгэнэ (QR-аар төлсөн үед).
+    qpay_ebarimt: bool = True
+    # tax_type: "1"=НӨАТ тооцогдох, "2"=чөлөөлөгдөх, "3"=0% (2,3 үед VAT тооцохгүй)
+    qpay_tax_type: str = "1"
+    # Нэхэмжлэх/баримтын мөрийн ангиллын код (зогсоолын үйлчилгээ) — GS1 ангиллаас
+    qpay_classification_code: str = "5221190"
+    # Нэхэмжлэх хүлээн авагчийн салбарын код (QPay гэрээнд бүртгэсэн салбар)
+    qpay_branch_code: str = "PARKING"
+    # Баримтын district_code (үйл ажиллагаа явуулж буй байршил, 4 орон)
+    qpay_district_code: str = "3505"
 
     @property
     def qpay_base_url(self) -> str:

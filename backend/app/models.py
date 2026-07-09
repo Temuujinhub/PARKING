@@ -169,6 +169,10 @@ class Payment(Base):
     provider = Column(String(30), nullable=False)        # QPAY, POS, CASH
     payment_method = Column(String(30), nullable=False)  # QR, CARD, CASH
     provider_invoice_id = Column(String(120), nullable=True)
+    # QPay-ийн g_payment_id (payment/check-ээс) — QPay ebarimt_v3 үүсгэхэд ашиглана
+    provider_payment_id = Column(String(120), nullable=True)
+    # e-Barimt хүлээн авагчийн төрөл: CITIZEN (иргэн) | COMPANY (ААН)
+    ebarimt_receiver_type = Column(String(20), nullable=True)
     sender_invoice_no = Column(String(120), unique=True, nullable=False)
     amount = Column(Numeric(12, 2), nullable=False)
     vat_amount = Column(Numeric(12, 2), nullable=False, default=0)

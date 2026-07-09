@@ -1,9 +1,10 @@
-"""Төлбөр: QPay invoice/webhook, кассын бэлэн мөнгө, PAX POS баталгаажуулалт."""
+"""Төлбөр: QPay invoice/webhook, e-Barimt 3.0, кассын бэлэн мөнгө, PAX POS баталгаажуулалт."""
 import hmac
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
 
 def secrets_compare(a: str, b: str) -> bool:
@@ -36,24 +37,86 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     if raw:
         payment.raw_payload = raw
 
-    receipt_raw = await ebarimt.create_receipt(
-        float(payment.amount), float(payment.vat_amount),
-        "CASH" if payment.payment_method == "CASH" else "CARD",
-        customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
-    )
+    receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
+    # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар
+    use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
+                   and bool(payment.provider_payment_id))
+    if use_qpay_eb:
+        receipt_raw = await qpay.create_ebarimt(
+            payment.provider_payment_id, receiver_type,
+            # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
+            receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+        )
+    else:
+        receipt_raw = await ebarimt.create_receipt(
+            float(payment.amount), float(payment.vat_amount),
+            "CASH" if payment.payment_method == "CASH" else "CARD",
+            customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
+        )
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
     ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
     db.add(VatReceipt(
         payment_id=payment.id, session_id=payment.session_id,
         ebarimt_id=receipt_raw.get("billId"),
-        # B2B (байгууллагын ТТД-тэй) баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
-        lottery_code=None if payment.customer_tin else receipt_raw.get("lottery"),
+        # ААН-ны баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
+        lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
         amount=payment.amount, vat_amount=payment.vat_amount,
         customer_tin=payment.customer_tin,
         status="SENT" if receipt_raw.get("billId") else "FAILED",
     ))
     session = db.get(ParkingSession, payment.session_id)
     await mark_paid_and_open(db, session)
+
+
+async def _confirm_qpay(db: Session, payment: Payment) -> bool:
+    """QPay төлбөрийг баталгаажуулж (mock үед шууд), g_payment_id аваад finalize хийнэ.
+    Буцаах: PAID болсон эсэх. Дүн зөрвөл REVIEW болгож False буцаана."""
+    if payment.status == "PAID":
+        return True
+    if settings.qpay_mock:
+        # Туршилтын горим — QPay ebarimt_v3-ийн урсгалыг бүрэн дуурайхын тулд mock payment_id тавина
+        if not payment.provider_payment_id:
+            payment.provider_payment_id = f"MOCK-PAY-{uuid.uuid4().hex[:12]}"
+        await _finalize_paid(db, payment)
+        return True
+    res = await qpay.check_payment(payment.provider_invoice_id)
+    if not res.get("paid"):
+        return False
+    if abs(float(res.get("paid_amount") or 0) - float(payment.amount)) > 1:
+        payment.status = "REVIEW"
+        payment.raw_payload = res.get("raw") or {}
+        db.commit()
+        return False
+    if res.get("payment_id"):
+        payment.provider_payment_id = res["payment_id"]
+    await _finalize_paid(db, payment, raw=res.get("raw"))
+    return True
+
+
+def _print_payload(db: Session, payment: Payment) -> dict:
+    """POS терминал/веб-д хэвлэх e-Barimt баримтын мэдээлэл (мөрүүд + QR + сугалаа)."""
+    session = db.get(ParkingSession, payment.session_id)
+    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).first()
+    lines = [
+        "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
+        f"Дугаар: {session.plate_number if session else '-'}",
+        f"Орсон: {session.entry_time:%Y-%m-%d %H:%M}" if session and session.entry_time else "",
+        f"Хугацаа: {session.duration_minutes} мин" if session and session.duration_minutes else "",
+        f"Дүн: {float(payment.amount):,.0f}₮",
+        f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
+        f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
+    ]
+    if payment.customer_tin:
+        lines.append(f"Худалдан авагч ТТД: {payment.customer_tin}")  # ААН — сугалаа хэвлэгдэхгүй
+    elif receipt and receipt.lottery_code:
+        lines.append(f"Сугалаа: {receipt.lottery_code}")
+    return {
+        "ebarimt_id": receipt.ebarimt_id if receipt else None,
+        "lottery_code": receipt.lottery_code if receipt else None,
+        # thermal printer энэ qrData-г QR болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй)
+        "qr_data": ebarimt.get_cached_qr(payment.id),
+        "print_data": {"lines": [ln for ln in lines if ln]},
+    }
 
 
 def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
@@ -117,16 +180,27 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
         db.flush()
 
     payment = _create_payment(db, session, "QPAY", "QR")
-    # НӨАТ-аа байгууллагаар авах бол ТТД (item 25 — easy-park UAT)
+    # НӨАТ-ийн баримтын хүлээн авагчийн төрөл: ТТД өгвөл ААН (COMPANY), үгүй бол иргэн (CITIZEN)
+    receiver_data = None
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
+        payment.ebarimt_receiver_type = "COMPANY"
+        receiver_data = {"register": payment.customer_tin}
+    else:
+        payment.ebarimt_receiver_type = "CITIZEN"
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
     if settings.qpay_webhook_secret:
         callback += f"&token={settings.qpay_webhook_secret}"
+    # e-Barimt нэхэмжлэхийн мөрүүд — бүтээгдэхүүн бүрээр (зогсоолын үйлчилгээ = нэг мөр)
+    lines = qpay.build_lines([{
+        "description": f"Зогсоолын үйлчилгээ — {session.plate_number}",
+        "unit_price": float(payment.amount), "quantity": 1,
+    }])
     inv = await qpay.create_invoice(
-        payment.sender_invoice_no, float(payment.amount),
+        payment.sender_invoice_no,
         f"Зогсоолын төлбөр — {session.plate_number}",
         f"terminal_{session.site.site_code if session.site else 'X'}", callback,
+        lines, receiver_data=receiver_data,
     )
     payment.provider_invoice_id = inv["invoice_id"]
     payment.qr_text = inv["qr_text"]
@@ -138,19 +212,15 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
             "amount": float(payment.amount), "mock": inv.get("mock", False)}
 
 
-@router.post("/qpay/webhook")
-async def qpay_webhook(request: Request, payment_id: str = "", token: str = "",
-                       db: Session = Depends(get_db)):
-    """QPay төлбөр амжилттай болмогц дуудагдана (callback_url).
-    PARKING_QPAY_WEBHOOK_SECRET тохируулсан бол ?token= таарах ёстой — хуурамч
-    webhook-оор barrier нээлгэхээс хамгаална."""
+async def _webhook_handler(payment_id: str, token: str, qpay_payment_id: str,
+                           body: dict, db: Session):
+    """QPay callback-ийн нийтлэг логик (GET/POST хоёуланд).
+
+    QPay стандарт: callback нь GET, HTTP 200 + body 'SUCCESS' буцаах ёстой. Тиймээс
+    төлбөрийг QPay-ийн payment/check-ээр эргэж баталгаажуулна (query дахь дүнд итгэхгүй)."""
     if settings.qpay_webhook_secret:
         if not secrets_compare(token, settings.qpay_webhook_secret):
             raise HTTPException(403, "Webhook токен буруу")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
     payment = None
     if payment_id:
         payment = db.get(Payment, payment_id)
@@ -159,32 +229,49 @@ async def qpay_webhook(request: Request, payment_id: str = "", token: str = "",
             Payment.sender_invoice_no == body["sender_invoice_no"]).first()
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
+    # QPay-ийн дамжуулсан payment_id-г эхлээд авна (баталгаажуулалтын check амжилтгүй бол ч)
+    if qpay_payment_id:
+        payment.provider_payment_id = str(qpay_payment_id)
+    # Бодит баталгаажуулалт: payment/check → paid + дүн + g_payment_id
+    await _confirm_qpay(db, payment)
+    db.commit()
 
-    # Дүн шалгах — зөрвөл barrier нээхгүй
-    paid_amount = float(body.get("amount") or body.get("paid_amount") or payment.amount)
-    if abs(paid_amount - float(payment.amount)) > 1:
-        payment.status = "REVIEW"
-        payment.raw_payload = body
-        db.commit()
-        raise HTTPException(400, "Төлбөрийн дүн зөрүүтэй — гараар шалгана")
 
-    await _finalize_paid(db, payment, raw=body)
-    return {"ok": True}
+@router.get("/qpay/webhook")
+async def qpay_webhook_get(payment_id: str = "", token: str = "",
+                           qpay_payment_id: str = "", db: Session = Depends(get_db)):
+    """QPay callback (GET) — стандарт форматаар 'SUCCESS' plain text буцаана."""
+    await _webhook_handler(payment_id, token, qpay_payment_id, {}, db)
+    return PlainTextResponse("SUCCESS")
+
+
+@router.post("/qpay/webhook")
+async def qpay_webhook_post(request: Request, payment_id: str = "", token: str = "",
+                            qpay_payment_id: str = "", db: Session = Depends(get_db)):
+    """QPay callback (POST) — зарим тохиргоонд body-той POST-оор ирдэг. 'SUCCESS' буцаана.
+    Мөн pay page-ийн туршилтын горим (mock) энэ endpoint-ийг дууддаг."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not qpay_payment_id:
+        qpay_payment_id = body.get("qpay_payment_id") or body.get("payment_id") or ""
+    await _webhook_handler(payment_id, token, qpay_payment_id, body, db)
+    return PlainTextResponse("SUCCESS")
 
 
 @router.post("/qpay/check/{payment_id}")
 async def qpay_check(payment_id: str, db: Session = Depends(get_db)):
-    """Webhook ирээгүй үед polling шалгалт (pay page 5 сек тутам дуудна)."""
+    """Webhook ирээгүй үед polling шалгалт (pay page/POS 5 сек тутам дуудна).
+    PAID болмогц e-Barimt-ийн хэвлэх мэдээллийг (POS терминалд) хамт буцаана."""
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
+    if payment.status != "PAID" and payment.provider == "QPAY" and payment.provider_invoice_id:
+        await _confirm_qpay(db, payment)
+        db.commit()
     if payment.status == "PAID":
-        return {"status": "PAID"}
-    if payment.provider == "QPAY" and payment.provider_invoice_id:
-        res = await qpay.check_payment(payment.provider_invoice_id)
-        if res.get("paid"):
-            await _finalize_paid(db, payment, raw=res.get("raw"))
-            return {"status": "PAID"}
+        return {"status": "PAID", **_print_payload(db, payment)}
     return {"status": payment.status}
 
 
@@ -227,31 +314,13 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     payment.terminal_id = body.get("terminal_id")
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
+        payment.ebarimt_receiver_type = "COMPANY"
+    else:
+        payment.ebarimt_receiver_type = "CITIZEN"
     await _finalize_paid(db, payment, raw=body)
     db.commit()
-
-    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).first()
-    lines = [
-        "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
-        f"Дугаар: {session.plate_number}",
-        f"Орсон: {session.entry_time:%Y-%m-%d %H:%M}",
-        f"Хугацаа: {session.duration_minutes} мин",
-        f"Дүн: {float(payment.amount):,.0f}₮",
-        f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
-        f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
-    ]
-    if payment.customer_tin:
-        lines.append(f"Худалдан авагч ТТД: {payment.customer_tin}")  # B2B — сугалаа хэвлэгдэхгүй
-    elif receipt and receipt.lottery_code:
-        lines.append(f"Сугалаа: {receipt.lottery_code}")
-    return {
-        "status": "PAID", "payment_id": payment.id, "barrier_opened": True,
-        "ebarimt_id": receipt.ebarimt_id if receipt else None,
-        "lottery_code": receipt.lottery_code if receipt else None,
-        # PAX thermal printer: энэ qrData-г QR код болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй)
-        "qr_data": ebarimt.get_cached_qr(payment.id),
-        "print_data": {"lines": lines},
-    }
+    return {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
+            **_print_payload(db, payment)}
 
 
 # ─────────────────────────── Жагсаалт ───────────────────────────
