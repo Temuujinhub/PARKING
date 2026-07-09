@@ -159,7 +159,7 @@ def list_templates(db: Session = Depends(get_db), user: User = Depends(get_curre
 
 
 @router.post("/tariff-templates")
-def create_template(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+def create_template(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings", "discounts"))):
     t = TariffTemplate(
         name=body["name"],
         free_minutes=body.get("free_minutes", 0),
@@ -180,7 +180,7 @@ def create_template(body: dict, db: Session = Depends(get_db), user: User = Depe
 
 @router.put("/tariff-templates/{template_id}")
 def update_template(template_id: str, body: dict, db: Session = Depends(get_db),
-                    user: User = Depends(require("settings"))):
+                    user: User = Depends(require("settings", "discounts"))):
     t = db.get(TariffTemplate, template_id)
     if not t:
         raise HTTPException(404, "Загвар олдсонгүй")

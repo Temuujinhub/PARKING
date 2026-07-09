@@ -64,6 +64,26 @@ def close_shift(db: Session = Depends(get_db),
     return {"shift": to_dict(shift), **totals}
 
 
+@router.get("/hr/worked-days")
+def hr_worked_days(month: str, db: Session = Depends(get_db), user: User = Depends(require("users", "reports"))):
+    """Хүний нөөц: тухайн сард (YYYY-MM) OPERATOR бүрийн ажилласан өдрүүд.
+    Ажилласан өдөр = тухайн өдөр ээлж нээгдсэн (login-д суурилсан). Календарт харуулна."""
+    from datetime import datetime as _dt
+    y, m = (int(x) for x in month.split("-"))
+    start = _dt(y, m, 1)
+    end = _dt(y + 1, 1, 1) if m == 12 else _dt(y, m + 1, 1)
+    ops = db.query(User).filter(User.role == "OPERATOR", User.is_active.is_(True)).order_by(User.full_name).all()
+    out = []
+    for op in ops:
+        shifts = db.query(CashierShift).filter(
+            CashierShift.user_id == op.id, CashierShift.opened_at >= start,
+            CashierShift.opened_at < end).all()
+        days = sorted({s.opened_at.strftime("%Y-%m-%d") for s in shifts})
+        out.append({"user_id": op.id, "name": op.full_name or op.username,
+                    "username": op.username, "days_count": len(days), "days": days})
+    return {"month": month, "operators": out}
+
+
 @router.get("/shifts")
 def shift_report(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports", "cashier"))):

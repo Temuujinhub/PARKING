@@ -15,6 +15,7 @@ const CREATABLE_ROLES = { ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, OPERATOR: 
 
 export default function Users() {
   const toast = useToast()
+  const [tab, setTab] = useState('staff')
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [editing, setEditing] = useState(null)
@@ -35,10 +36,23 @@ export default function Users() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Хэрэглэгчид ба эрх</h1>
+      <h1 className="text-2xl font-bold">Ажилтан</h1>
+      <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
+        {[['staff', 'Ажилтан ба эрх'], ['hr', 'Хүний нөөц (ажилласан өдөр)']].map(([v, l]) => (
+          <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer
+              ${tab === v ? 'border-accent text-accent' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'hr' && <HR />}
+
+      {tab === 'staff' && (<>
+      <div className="flex justify-end">
         <button className="btn-primary" onClick={() => setEditing({ username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '' })}>
-          <Plus size={16} /> Хэрэглэгч нэмэх
+          <Plus size={16} /> Ажилтан нэмэх
         </button>
       </div>
 
@@ -64,8 +78,9 @@ export default function Users() {
           </tr>
         ))}
       </Table>
+      </>)}
 
-      <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Хэрэглэгч засах' : 'Хэрэглэгч нэмэх'}>
+      <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Ажилтан засах' : 'Ажилтан нэмэх'}>
         {editing && (
           <form onSubmit={save} className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
@@ -111,6 +126,79 @@ export default function Users() {
           </form>
         )}
       </Modal>
+    </div>
+  )
+}
+
+// Хүний нөөц — сар бүрийн оператор бүрийн ажилласан өдрүүд (календар)
+function HR() {
+  const now = new Date()
+  const [month, setMonth] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`)
+  const [ops, setOps] = useState([])
+  const [selected, setSelected] = useState(null)
+  useEffect(() => {
+    api(`/api/cashier/hr/worked-days?month=${month}`)
+      .then((d) => { setOps(d.operators); setSelected(null) }).catch(() => setOps([]))
+  }, [month])
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-slate-400">Сар:</span>
+        <input type="month" className="input w-auto" value={month} onChange={(e) => setMonth(e.target.value)} />
+        <span className="text-xs text-slate-500">Зөвхөн оператор ажилтнууд харагдана</span>
+      </div>
+      <div className="grid lg:grid-cols-2 gap-6 items-start">
+        <div className="card">
+          <h3 className="font-semibold mb-3">Операторууд</h3>
+          <Table headers={['Ажилтан', 'Ажилласан өдөр', '']} empty={ops.length === 0}>
+            {ops.map((o) => (
+              <tr key={o.user_id} onClick={() => setSelected(o)}
+                className={`cursor-pointer hover:bg-surface-muted/40 ${selected?.user_id === o.user_id ? 'bg-accent/5' : ''}`}>
+                <td className="td font-medium">{o.name}</td>
+                <td className="td font-mono">{o.days_count} өдөр</td>
+                <td className="td text-right text-xs text-accent">Календар →</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+        <div className="card">
+          {selected
+            ? <Calendar month={month} name={selected.name} days={selected.days} />
+            : <div className="text-sm text-slate-500 py-10 text-center">Ажилтан дээр дарж ажилласан өдрүүдийг календараар харна уу</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Calendar({ month, name, days }) {
+  const [y, m] = month.split('-').map(Number)
+  const daysInMonth = new Date(y, m, 0).getDate()
+  const startWeekday = (new Date(y, m - 1, 1).getDay() + 6) % 7 // Даваа=0
+  const worked = new Set(days)
+  const cells = [...Array(startWeekday).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)]
+  const WD = ['Да', 'Мя', 'Лх', 'Пү', 'Ба', 'Бя', 'Ня']
+  return (
+    <div>
+      <h3 className="font-semibold mb-1">{name}</h3>
+      <div className="text-xs text-slate-400 mb-3">{month} — <b className="text-accent">{days.length}</b> өдөр ажилласан</div>
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-slate-500 mb-1">
+        {WD.map((w) => <div key={w}>{w}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((d, i) => {
+          const ds = d ? `${month}-${String(d).padStart(2, '0')}` : null
+          const on = ds && worked.has(ds)
+          return (
+            <div key={i} title={on ? `${ds}: ажилласан` : ds || ''}
+              className={`aspect-square flex items-center justify-center rounded text-sm
+                ${!d ? '' : on ? 'bg-accent text-white font-bold' : 'bg-surface-muted/30 text-slate-500'}`}>
+              {d || ''}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
