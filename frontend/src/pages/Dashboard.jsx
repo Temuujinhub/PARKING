@@ -1,7 +1,7 @@
-import { Activity, Banknote, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, Wifi, WifiOff } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, Wifi } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
-import { Badge, StatCard } from '../components/ui'
+import { StatCard } from '../components/ui'
 
 const EVENT_LABELS = {
   ENTRY_EVENT: { label: 'Орлоо', color: 'text-accent', icon: LogIn },
@@ -29,12 +29,24 @@ export default function Dashboard() {
   }, [])
 
   if (!stats) return <div className="text-slate-500">Ачаалж байна…</div>
+
   const maxRev = Math.max(...stats.week_revenue.map((d) => d.revenue), 1)
+  const hourly = stats.hourly_load || []
+  const maxHour = Math.max(...hourly.map((h) => Math.max(h.entries, h.exits)), 1)
+  const topSites = [...(stats.sites || [])].sort((a, b) => b.today_revenue - a.today_revenue)
+  const maxSiteRev = Math.max(...topSites.map((s) => s.today_revenue), 1)
+  const devConnLabel = stats.devices_total
+    ? (stats.devices_online === stats.devices_total ? 'Бүгд холбогдсон'
+      : stats.devices_online === 0 ? 'Холболт алга' : 'Хэсэгчилсэн')
+    : 'Төхөөрөмжгүй'
+  const devConnColor = stats.devices_total && stats.devices_online === stats.devices_total
+    ? 'text-accent' : stats.devices_online === 0 ? 'text-red-400' : 'text-amber-400'
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Хяналтын самбар</h1>
 
+      {/* Үндсэн үзүүлэлт */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard icon={CarFront} label="Одоо зогсож буй" value={stats.open_sessions}
           sub={`Багтаамж: ${stats.total_capacity}`} />
@@ -44,55 +56,97 @@ export default function Dashboard() {
         <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
       </div>
 
-      {/* Төхөөрөмжийн холболтын статус */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="font-semibold">Төхөөрөмжийн холболт</h2>
-          <span className="text-sm text-slate-400">
-            <span className="text-accent font-mono font-semibold">{stats.devices_online ?? 0}</span>
-            {' / '}{stats.devices_total ?? 0} онлайн
-          </span>
-        </div>
-        {(!stats.device_status || stats.device_status.length === 0) ? (
-          <div className="text-sm text-slate-500 py-2">Төхөөрөмж бүртгэгдээгүй байна</div>
-        ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-            {stats.device_status.map((d) => {
-              const Icon = d.device_type === 'camera' ? Camera : d.device_type === 'barrier' ? DoorOpen : Activity
-              return (
-                <div key={d.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm
-                  ${d.online ? 'border-accent/40 bg-accent/5' : 'border-red-500/30 bg-red-500/5'}`}>
-                  <Icon size={15} className="text-slate-400 shrink-0" aria-hidden />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium">{d.name}</div>
-                    <div className="text-[10px] text-slate-500 truncate">{d.site_name}</div>
-                  </div>
-                  {d.online
-                    ? <Wifi size={14} className="text-accent shrink-0" aria-label="онлайн" />
-                    : <WifiOff size={14} className="text-red-400 shrink-0" aria-label="офлайн" />}
-                </div>
-              )
-            })}
-          </div>
-        )}
+      {/* Систем/төхөөрөмжийн товч үзүүлэлт — том тоогоор */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard icon={Building2} label="Зогсоол" value={stats.sites_total ?? 0} />
+        <StatCard icon={Camera} label="Камер" value={stats.cameras_total ?? 0}
+          sub={`${stats.devices_online ?? 0} онлайн`} color="text-blue-400" />
+        <StatCard icon={DoorOpen} label="Хаалт" value={stats.barriers_total ?? 0} />
+        <StatCard icon={Wifi} label="Холболт" value={`${stats.devices_online ?? 0}/${stats.devices_total ?? 0}`}
+          sub={devConnLabel} color={devConnColor} />
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">
+        {/* 7 хоногийн орлого — bar график (max-д нормчилсон) */}
         <div className="card">
           <h2 className="font-semibold mb-4">7 хоногийн орлого</h2>
-          <div className="flex items-end gap-2 h-40" role="img"
+          <div className="flex items-end gap-2 h-48 border-b border-surface-border/60 pb-0" role="img"
             aria-label={`Сүүлийн 7 хоногийн орлого: ${stats.week_revenue.map((d) => `${d.date} ${fmt(d.revenue)}₮`).join(', ')}`}>
             {stats.week_revenue.map((d) => (
-              <div key={d.date} className="flex-1 flex flex-col items-center gap-1">
-                <div className="text-[10px] text-slate-400 font-mono">{d.revenue > 0 ? fmt(d.revenue) : ''}</div>
-                <div className="w-full bg-accent/80 rounded-t transition-all hover:bg-accent"
-                  style={{ height: `${Math.max(2, (d.revenue / maxRev) * 100)}%` }} title={`${fmt(d.revenue)}₮`} />
-                <div className="text-[10px] text-slate-500 font-mono">{d.date}</div>
+              <div key={d.date} className="flex-1 flex flex-col items-center justify-end gap-1 h-full">
+                <div className="text-[10px] text-slate-300 font-mono whitespace-nowrap">
+                  {d.revenue > 0 ? fmt(d.revenue) : ''}
+                </div>
+                <div className="w-full flex items-end justify-center" style={{ height: '100%' }}>
+                  <div className="w-full max-w-[46px] bg-gradient-to-t from-accent to-accent/60 rounded-t-md transition-all hover:from-accent hover:to-accent"
+                    style={{ height: `${d.revenue > 0 ? Math.max(4, (d.revenue / maxRev) * 100) : 0}%` }}
+                    title={`${d.date}: ${fmt(d.revenue)}₮`} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2 mt-1.5">
+            {stats.week_revenue.map((d) => (
+              <div key={d.date} className="flex-1 text-center text-[10px] text-slate-500 font-mono">{d.date}</div>
+            ))}
+          </div>
+        </div>
+
+        {/* Цагийн ачаалал — орц/гарц (0–23 цаг) */}
+        <div className="card">
+          <h2 className="font-semibold mb-4">Өнөөдрийн цагийн ачаалал</h2>
+          <div className="flex items-end gap-[3px] h-48 border-b border-surface-border/60" role="img"
+            aria-label={`Цагийн ачаалал: ${hourly.filter((h) => h.entries || h.exits).map((h) => `${h.hour}ц орц ${h.entries} гарц ${h.exits}`).join(', ') || 'өнөөдөр хөдөлгөөнгүй'}`}>
+            {hourly.map((h) => (
+              <div key={h.hour} className="flex-1 flex flex-col justify-end items-center gap-[2px] h-full group relative">
+                <div className="w-full flex flex-col justify-end items-center h-full">
+                  <div className="w-full bg-accent/80 rounded-t-sm" style={{ height: `${(h.entries / maxHour) * 100}%` }} />
+                  <div className="w-full bg-amber-400/70 rounded-b-sm" style={{ height: `${(h.exits / maxHour) * 100}%` }} />
+                </div>
+                <div className="absolute -top-6 hidden group-hover:block bg-surface-muted text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap z-10 border border-surface-border">
+                  {h.hour}ц · орц {h.entries} · гарц {h.exits}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-between mt-1.5 text-[10px] text-slate-500 font-mono">
+            <span>0ц</span><span>6ц</span><span>12ц</span><span>18ц</span><span>23ц</span>
+          </div>
+          <div className="flex gap-4 mt-2 text-xs text-slate-400">
+            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-accent/80" /> Орц</span>
+            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-amber-400/70" /> Гарц</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-6">
+        {/* Топ орлоготой зогсоол */}
+        <div className="card">
+          <h2 className="font-semibold mb-4 flex items-center gap-2">
+            <TrendingUp size={16} className="text-accent" /> Хамгийн их орлоготой зогсоол (өнөөдөр)
+          </h2>
+          <div className="space-y-3">
+            {topSites.length === 0 && <div className="text-sm text-slate-500 py-2">Зогсоол бүртгэгдээгүй</div>}
+            {topSites.map((s, i) => (
+              <div key={s.id}>
+                <div className="flex justify-between text-sm mb-1">
+                  <span className="flex items-center gap-2">
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold
+                      ${i === 0 ? 'bg-accent text-white' : 'bg-surface-muted text-slate-400'}`}>{i + 1}</span>
+                    {s.name}
+                  </span>
+                  <span className="font-mono font-semibold text-accent">{fmt(s.today_revenue)}₮</span>
+                </div>
+                <div className="h-2 bg-surface-muted rounded-full overflow-hidden">
+                  <div className="h-full rounded-full bg-accent transition-all"
+                    style={{ width: `${(s.today_revenue / maxSiteRev) * 100}%` }} />
+                </div>
               </div>
             ))}
           </div>
         </div>
 
+        {/* Зогсоолын ачаалал (багтаамж) */}
         <div className="card">
           <h2 className="font-semibold mb-4">Зогсоолын ачаалал</h2>
           <div className="space-y-3">
@@ -103,7 +157,7 @@ export default function Dashboard() {
                   <div className="flex justify-between text-sm mb-1">
                     <span>{s.name}</span>
                     <span className="text-slate-400 font-mono text-xs">
-                      {s.occupied}/{s.capacity} · Сул: {s.free} · {fmt(s.today_revenue)}₮
+                      {s.occupied}/{s.capacity} · Сул: {s.free}
                     </span>
                   </div>
                   <div className="h-2 bg-surface-muted rounded-full overflow-hidden">
@@ -117,6 +171,7 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Шууд үйл явдал */}
       <div className="card">
         <h2 className="font-semibold mb-3 flex items-center gap-2">
           <span className="relative flex h-2.5 w-2.5">

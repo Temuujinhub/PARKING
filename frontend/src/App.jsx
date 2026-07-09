@@ -27,6 +27,15 @@ function Protected({ module, children }) {
   return children
 }
 
+// Нүүр хуудас: dashboard эрхтэй бол Хяналтын самбар, үгүй бол (жишээ OPERATOR) эхний
+// хүртээмжтэй хуудас руу шилжүүлнэ — 403 гацаанаас сэргийлнэ.
+function Home() {
+  const { can } = useAuth()
+  if (can('dashboard')) return <Dashboard />
+  const fallback = ['cashier', 'check', 'barriers', 'history', 'drivers'].find((m) => can(m))
+  return <Navigate to={fallback ? `/${fallback}` : '/login'} replace />
+}
+
 export default function App() {
   return (
     <AuthProvider>
@@ -37,7 +46,7 @@ export default function App() {
           <Route path="/pay" element={<Pay />} />
           <Route path="/login" element={<Login />} />
           <Route element={<Protected><Layout /></Protected>}>
-            <Route index element={<Dashboard />} />
+            <Route index element={<Home />} />
             <Route path="cashier" element={<Protected module="cashier"><Cashier /></Protected>} />
             <Route path="check" element={<Protected module="check"><Check /></Protected>} />
             <Route path="history" element={<Protected module="history"><History /></Protected>} />
@@ -45,11 +54,11 @@ export default function App() {
             <Route path="drivers" element={<Protected module="drivers"><Drivers /></Protected>} />
             <Route path="reports" element={<Protected module="reports"><Reports /></Protected>} />
             <Route path="vat" element={<Protected module="vat"><Vat /></Protected>} />
-            <Route path="compensations" element={<Protected module="cashier"><Compensations /></Protected>} />
+            <Route path="compensations" element={<Protected module="compensations"><Compensations /></Protected>} />
             <Route path="barriers" element={<Protected module="barriers"><Barriers /></Protected>} />
             <Route path="blacklist" element={<Protected module="blacklist"><Blacklist /></Protected>} />
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />
-            <Route path="users" element={<Users />} />
+            <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

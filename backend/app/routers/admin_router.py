@@ -309,16 +309,17 @@ def update_blacklist(entry_id: str, body: dict, db: Session = Depends(get_db),
 
 # ─────────────────────────── Хэрэглэгч (SUPER_ADMIN) ───────────────────────────
 @router.get("/users")
-def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
+def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     return [to_dict(u) for u in db.query(User).order_by(User.created_at).all()]
 
 
 @router.post("/users")
-def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
+def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     if db.query(User).filter(User.username == body["username"]).first():
         raise HTTPException(400, "Нэвтрэх нэр давхардаж байна")
-    if body.get("role") not in ("SUPER_ADMIN", "ADMIN", "FINANCE", "OPERATOR"):
-        raise HTTPException(400, "role буруу байна")
+    # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
+    if body.get("role") not in ("ADMIN", "FINANCE", "OPERATOR"):
+        raise HTTPException(400, "role буруу байна (SUPER_ADMIN-ыг зөвхөн DB-ээр үүсгэнэ)")
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),
              role=body["role"], site_id=body.get("site_id"))
@@ -331,10 +332,13 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
 
 @router.put("/users/{user_id}")
 def update_user(user_id: str, body: dict, db: Session = Depends(get_db),
-                user: User = Depends(require_role("SUPER_ADMIN"))):
+                user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     u = db.get(User, user_id)
     if not u:
         raise HTTPException(404, "Хэрэглэгч олдсонгүй")
+    # SUPER_ADMIN руу ахиулах, эсвэл SUPER_ADMIN-ыг API-аар засахыг хориглоно
+    if body.get("role") == "SUPER_ADMIN" or u.role == "SUPER_ADMIN":
+        raise HTTPException(403, "SUPER_ADMIN хэрэглэгчийг зөвхөн DB-ээр удирдана")
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])

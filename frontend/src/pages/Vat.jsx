@@ -44,6 +44,27 @@ export default function Vat() {
         </div>
       </div>
 
+      {/* e-Barimt-ийн 2 сувгийн тайлбар — MOCK асуултыг тодруулна */}
+      <div className="card border-blue-500/30 bg-blue-500/5 text-sm space-y-1.5">
+        <div className="flex items-start gap-2">
+          <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${info?.qpay_ebarimt ? 'bg-accent' : 'bg-amber-400'}`} />
+          <span><b>QR / QPay төлбөрийн баримт</b> — QPay ebarimt v3-аар{' '}
+            {info?.qpay_ebarimt
+              ? <span className="text-accent">бодит үүсдэг</span>
+              : <span className="text-amber-400">одоогоор MOCK</span>}.
+            Доорх жагсаалтад бодит ДДТД/сугалаатай харагдана. QPay ТЕГ рүү өөрөө илгээдэг тул
+            «Мэдээ илгээх» товч энэ баримтад хамаарахгүй.</span>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${info?.local_posapi_mock ? 'bg-amber-400' : 'bg-accent'}`} />
+          <span><b>Картын / бэлэн мөнгөний баримт</b> — локал татварын PosAPI-аар.
+            {info?.local_posapi_mock
+              ? <span className="text-amber-400"> Одоогоор MOCK (PosAPI сервис суулгаагүй)</span>
+              : <span className="text-accent"> Бодит</span>}.
+            Доорх «Сугалааны үлдэгдэл / Мэдээ илгээх» хэсэг зөвхөн ЭНЭ сувагт хамаарна.</span>
+        </div>
+      </div>
+
       {/* ТЕГ-ын анхааруулга (сугалаа дуусах, илгээх хугацаа) */}
       {info?.warnings?.length > 0 && (
         <div className="card border-amber-500/50 bg-amber-500/5 space-y-1" role="alert">

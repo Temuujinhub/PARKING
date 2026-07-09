@@ -18,9 +18,13 @@ ROLE_PERMISSIONS = {
     "ADMIN": {
         "dashboard", "cashier", "check", "history", "discounts", "settings",
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
+        "compensations", "users",  # users — SUPER_ADMIN-аас бусад хэрэглэгч удирдана
     },
-    "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs"},
-    "OPERATOR": {"dashboard", "cashier", "check", "history", "barriers", "drivers"},
+    # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
+    "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",
+                "compensations", "discounts", "blacklist"},
+    # OPERATOR зөвхөн 3 нүүр хардаг: Касс, Шалгах, Түүх (барьер нээх нь касс дотор ажиллана)
+    "OPERATOR": {"cashier", "check", "history"},
 }
 
 
@@ -84,3 +88,10 @@ def require_role(*roles: str):
             return user
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Танд энэ үйлдлийг хийх эрх байхгүй.")
     return checker
+
+
+def operator_site(user: User) -> str | None:
+    """Оператор бол хязгаарлагдах зогсоолын site_id, үгүй бол None (бүх зогсоол).
+    Endpoint-ууд энэ утгаар site_id-г албадан хязгаарлана — оператор өөр зогсоолын
+    өгөгдөл харах/өөрчлөхөөс сэргийлнэ."""
+    return user.site_id if user.role == "OPERATOR" and user.site_id else None

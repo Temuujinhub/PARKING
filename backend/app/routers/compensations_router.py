@@ -54,7 +54,7 @@ def create_compensation(db: Session, session: ParkingSession, reason: str, usern
 @router.get("")
 def list_compensations(status: str | None = None, plate: str | None = None,
                        limit: int = 200, db: Session = Depends(get_db),
-                       user: User = Depends(require("cashier", "reports", "history"))):
+                       user: User = Depends(require("compensations", "reports"))):
     q = db.query(Compensation)
     if status:
         q = q.filter(Compensation.status == status)
@@ -69,7 +69,7 @@ def list_compensations(status: str | None = None, plate: str | None = None,
 
 @router.post("/{comp_id}/pay")
 def pay_compensation(comp_id: str, db: Session = Depends(get_db),
-                     user: User = Depends(require("cashier"))):
+                     user: User = Depends(require("compensations"))):
     """Нөхөн төлбөрийг бэлнээр төлүүлж хаана."""
     comp = db.get(Compensation, comp_id)
     if not comp or comp.status != "PENDING":

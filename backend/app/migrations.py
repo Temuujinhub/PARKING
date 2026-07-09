@@ -15,6 +15,8 @@ MIGRATIONS = [
     # v1.2 — QPay-ээр дамжуулсан e-Barimt 3.0 (ebarimt_v3)
     "ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_payment_id VARCHAR(120)",
     "ALTER TABLE payments ADD COLUMN IF NOT EXISTS ebarimt_receiver_type VARCHAR(20)",
+    # v1.3 — операторын нэмэлт тэмдэглэл (касс)
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS note TEXT",
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

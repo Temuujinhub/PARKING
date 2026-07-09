@@ -7,10 +7,11 @@ import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 export default function Cashier() {
   const toast = useToast()
-  const { testMode } = useAuth()
+  const { testMode, user } = useAuth()
   const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [exits, setExits] = useState([])
+  const [overview, setOverview] = useState(null) // {capacity, occupied, free, rows: өнөөдөр гарсан}
   const [shift, setShift] = useState(null)
   const [selected, setSelected] = useState(null)
   const [searchPlate, setSearchPlate] = useState('')
@@ -36,17 +37,21 @@ export default function Cashier() {
   const loadExits = useCallback((sid) => {
     if (!sid) return
     api(`/api/sessions/recent-exits?site_id=${sid}`).then(setExits).catch(() => {})
+    api(`/api/sessions/today-exits?site_id=${sid}`).then(setOverview).catch(() => {})
   }, [])
   const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => {})
 
   useEffect(() => {
     api('/api/admin/sites').then((s) => {
-      setSites(s)
-      if (s.length) setSiteId(s[0].id)
+      // Оператор зөвхөн өөрийн хариуцах зогсоолыг сонгоно (site_id тохируулсан бол)
+      const scoped = user?.role === 'OPERATOR' && user?.site_id
+        ? s.filter((x) => x.id === user.site_id) : s
+      setSites(scoped)
+      if (scoped.length) setSiteId(scoped[0].id)
     })
     api('/api/admin/discounts').then((d) => setDiscounts(d.filter((x) => x.is_active))).catch(() => {})
     loadShift()
-  }, [])
+  }, [user])
 
   useEffect(() => {
     if (!siteId) return
@@ -164,6 +169,16 @@ export default function Cashier() {
   }
 
   const fee = selected?.fee
+  // Зөвхөн OPERATOR (болон SUPER_ADMIN) касс дээр үйлдэл хийнэ; бусад нь харна
+  const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
+
+  const saveNote = async () => {
+    if (!selected) return
+    try {
+      await api(`/api/sessions/${selected.id}/note`, { method: 'PUT', body: { note: selected.note || '' } })
+      toast('Тэмдэглэл хадгалагдлаа'); loadExits(siteId)
+    } catch (e) { toast(e.message, 'error') }
+  }
 
   return (
     <div className="space-y-5">
@@ -179,15 +194,43 @@ export default function Cashier() {
               <FlaskConical size={16} /> Тест машин
             </button>
           )}
-          <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
-            <CarFront size={16} /> Машин бүртгэх
-          </button>
-          <button onClick={toggleShift}
-            className={shift?.open ? 'btn-danger' : 'btn-primary'}>
-            {shift?.open ? 'Ээлж хаах' : 'Ээлж нээх'}
-          </button>
+          {canAct && (
+            <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
+              <CarFront size={16} /> Машин бүртгэх
+            </button>
+          )}
+          {canAct && (
+            <button onClick={toggleShift}
+              className={shift?.open ? 'btn-danger' : 'btn-primary'}>
+              {shift?.open ? 'Ээлж хаах' : 'Ээлж нээх'}
+            </button>
+          )}
         </div>
       </div>
+
+      {!canAct && (
+        <div className="card border-blue-500/30 bg-blue-500/5 text-sm text-blue-300 py-2.5">
+          Та зөвхөн <b>харах</b> эрхтэй. Кассын үйлдэл (төлбөр авах, ээлж) зөвхөн оператор эрхтэй ажилтан хийнэ.
+        </div>
+      )}
+
+      {/* Зогсоолын багтаамжийн тоолуур */}
+      {overview && (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono">{overview.occupied}<span className="text-lg text-slate-500">/{overview.capacity}</span></div>
+            <div className="text-xs text-slate-400 mt-1">Зогсож буй / Багтаамж</div>
+          </div>
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono text-accent">{overview.free}</div>
+            <div className="text-xs text-slate-400 mt-1">Сул зай</div>
+          </div>
+          <div className="card py-4 text-center">
+            <div className="text-3xl font-bold font-mono text-amber-400">{overview.rows.length}</div>
+            <div className="text-xs text-slate-400 mt-1">Өнөөдөр гарсан</div>
+          </div>
+        </div>
+      )}
 
       {shift?.open && (
         <div className="card py-3 flex flex-wrap gap-6 text-sm">
@@ -287,27 +330,40 @@ export default function Cashier() {
                 <span className="font-mono text-right text-xl font-bold text-accent">{fmt(fee?.total_fee)}₮</span>
               </div>
               <Field label="Хөнгөлөлт хэрэглэх">
-                <select className="input" value={selected.discount_id || ''} onChange={(e) => applyDiscount(e.target.value)}>
+                <select className="input" value={selected.discount_id || ''} onChange={(e) => applyDiscount(e.target.value)} disabled={!canAct}>
                   <option value="">Хөнгөлөлтгүй</option>
                   {discounts.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
               </Field>
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={() => pay('CASH')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
-                  <Banknote size={16} /> Бэлнээр
-                </button>
-                <button onClick={() => pay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
-                  <QrCode size={16} /> QPay
-                </button>
-              </div>
+              {/* Нэмэлт тэмдэглэл */}
+              <Field label="Нэмэлт тэмдэглэл">
+                <textarea className="input min-h-[60px] resize-y" placeholder="Жишээ: гэрээт машин, тусгай нөхцөл, гомдол…"
+                  value={selected.note || ''} disabled={!canAct}
+                  onChange={(e) => setSelected({ ...selected, note: e.target.value })} />
+                {canAct && (
+                  <button type="button" onClick={saveNote} className="btn-secondary py-1 text-xs mt-1">Тэмдэглэл хадгалах</button>
+                )}
+              </Field>
+              {canAct && (
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => pay('CASH')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
+                    <Banknote size={16} /> Бэлнээр
+                  </button>
+                  <button onClick={() => pay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
+                    <QrCode size={16} /> QPay
+                  </button>
+                </div>
+              )}
               {fee?.is_free && (
                 <div className="text-sm text-cyan-400 bg-cyan-500/10 rounded-lg px-3 py-2">
                   Төлбөргүй: {fee.reason || 'Үнэгүй хугацаанд байна'}
                 </div>
               )}
-              <button onClick={manualExit} className="btn-secondary w-full justify-center text-xs">
-                <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
-              </button>
+              {canAct && (
+                <button onClick={manualExit} className="btn-secondary w-full justify-center text-xs">
+                  <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
+                </button>
+              )}
             </div>
           ) : (
             <div className="text-sm text-slate-500 text-center py-10">
@@ -327,6 +383,42 @@ export default function Cashier() {
             </button>
           ))}
           {barriers.length === 0 && <span className="text-sm text-slate-500">Barrier төхөөрөмж бүртгэгдээгүй</span>}
+        </div>
+      </div>
+
+      {/* Өнөөдөр гарсан машинууд — гарах камерт уншсан бүх машин (төлбөргүй/үнэгүй ч) */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Өнөөдөр гарсан машинууд</h2>
+          <span className="text-sm text-slate-400">{overview?.rows.length || 0} машин</span>
+        </div>
+        <Table headers={['Дугаар', 'Орсон', 'Гарсан', 'Хугацаа', 'Төрөл', 'Төлбөр', 'Хэрэгсэл', 'Төлөв', 'НӨАТ']}
+          empty={!overview || overview.rows.length === 0}>
+          {overview?.rows.map((r) => (
+            <tr key={r.session_id}>
+              <td className="td font-mono font-bold">
+                {r.plate_number}
+                {r.note && <span className="ml-1 cursor-help" title={r.note}>📝</span>}
+              </td>
+              <td className="td font-mono text-xs">{r.entry_time ? fmtDate(r.entry_time).slice(5, 16) : '-'}</td>
+              <td className="td font-mono text-xs">{r.exit_time ? fmtDate(r.exit_time).slice(5, 16) : '—'}</td>
+              <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
+              <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
+                {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}
+              </td>
+              <td className="td font-mono">{r.total_fee > 0 ? `${fmt(r.total_fee)}₮` : <span className="text-slate-500">Үнэгүй</span>}</td>
+              <td className="td text-xs">{r.provider || <span className="text-slate-500">—</span>}</td>
+              <td className="td">
+                {r.paid ? <span className="text-accent text-xs">Төлсөн</span>
+                  : r.status === 'AWAITING_PAYMENT' ? <span className="text-amber-400 text-xs">Хүлээж буй</span>
+                  : <span className="text-slate-500 text-xs">Төлбөргүй</span>}
+              </td>
+              <td className="td text-xs">{r.ebarimt ? <span className="text-accent">✓</span> : <span className="text-slate-600">—</span>}</td>
+            </tr>
+          ))}
+        </Table>
+        <div className="text-xs text-slate-500 mt-2">
+          Гарах камерт дугаар нь уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч оруулав).
         </div>
       </div>
 

@@ -106,7 +106,7 @@ export default function Barriers() {
 
       <div className="card">
         <h2 className="font-semibold mb-3">Командын түүх</h2>
-        <Table headers={['Хаалт', 'Команд', 'Эх үүсвэр', 'Хэн', 'Огноо', 'Үр дүн']} empty={commands.length === 0}>
+        <Table headers={['Хаалт', 'Команд', 'Эх үүсвэр', 'Хэн', 'Огноо', 'Үр дүн', 'Шалтгаан / хариу']} empty={commands.length === 0}>
           {commands.map((c) => (
             <tr key={c.id}>
               <td className="td">{c.device_name}</td>
@@ -115,6 +115,8 @@ export default function Barriers() {
               <td className="td text-xs">{c.issued_by || 'систем'}</td>
               <td className="td font-mono text-xs">{fmtDate(c.created_at)}</td>
               <td className="td"><Badge value={c.status} /></td>
+              <td className={`td text-xs max-w-xs ${c.status === 'FAILED' ? 'text-red-400' : 'text-slate-400'}`}
+                title={c.response_text || ''}>{c.response_text || '—'}</td>
             </tr>
           ))}
         </Table>

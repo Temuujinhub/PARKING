@@ -155,6 +155,7 @@ class ParkingSession(Base):
     total_fee = Column(Numeric(12, 2), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
+    note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
