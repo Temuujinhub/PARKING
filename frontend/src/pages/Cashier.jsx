@@ -169,6 +169,16 @@ export default function Cashier() {
   }
 
   const fee = selected?.fee
+  // Зөвхөн OPERATOR (болон SUPER_ADMIN) касс дээр үйлдэл хийнэ; бусад нь харна
+  const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
+
+  const saveNote = async () => {
+    if (!selected) return
+    try {
+      await api(`/api/sessions/${selected.id}/note`, { method: 'PUT', body: { note: selected.note || '' } })
+      toast('Тэмдэглэл хадгалагдлаа'); loadExits(siteId)
+    } catch (e) { toast(e.message, 'error') }
+  }
 
   return (
     <div className="space-y-5">
@@ -184,15 +194,25 @@ export default function Cashier() {
               <FlaskConical size={16} /> Тест машин
             </button>
           )}
-          <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
-            <CarFront size={16} /> Машин бүртгэх
-          </button>
-          <button onClick={toggleShift}
-            className={shift?.open ? 'btn-danger' : 'btn-primary'}>
-            {shift?.open ? 'Ээлж хаах' : 'Ээлж нээх'}
-          </button>
+          {canAct && (
+            <button onClick={() => setManualEntry({ plate_number: '', entry_time: minutesAgo(0), offset: 0 })} className="btn-secondary">
+              <CarFront size={16} /> Машин бүртгэх
+            </button>
+          )}
+          {canAct && (
+            <button onClick={toggleShift}
+              className={shift?.open ? 'btn-danger' : 'btn-primary'}>
+              {shift?.open ? 'Ээлж хаах' : 'Ээлж нээх'}
+            </button>
+          )}
         </div>
       </div>
+
+      {!canAct && (
+        <div className="card border-blue-500/30 bg-blue-500/5 text-sm text-blue-300 py-2.5">
+          Та зөвхөн <b>харах</b> эрхтэй. Кассын үйлдэл (төлбөр авах, ээлж) зөвхөн оператор эрхтэй ажилтан хийнэ.
+        </div>
+      )}
 
       {/* Зогсоолын багтаамжийн тоолуур */}
       {overview && (
@@ -310,27 +330,40 @@ export default function Cashier() {
                 <span className="font-mono text-right text-xl font-bold text-accent">{fmt(fee?.total_fee)}₮</span>
               </div>
               <Field label="Хөнгөлөлт хэрэглэх">
-                <select className="input" value={selected.discount_id || ''} onChange={(e) => applyDiscount(e.target.value)}>
+                <select className="input" value={selected.discount_id || ''} onChange={(e) => applyDiscount(e.target.value)} disabled={!canAct}>
                   <option value="">Хөнгөлөлтгүй</option>
                   {discounts.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
               </Field>
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={() => pay('CASH')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
-                  <Banknote size={16} /> Бэлнээр
-                </button>
-                <button onClick={() => pay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
-                  <QrCode size={16} /> QPay
-                </button>
-              </div>
+              {/* Нэмэлт тэмдэглэл */}
+              <Field label="Нэмэлт тэмдэглэл">
+                <textarea className="input min-h-[60px] resize-y" placeholder="Жишээ: гэрээт машин, тусгай нөхцөл, гомдол…"
+                  value={selected.note || ''} disabled={!canAct}
+                  onChange={(e) => setSelected({ ...selected, note: e.target.value })} />
+                {canAct && (
+                  <button type="button" onClick={saveNote} className="btn-secondary py-1 text-xs mt-1">Тэмдэглэл хадгалах</button>
+                )}
+              </Field>
+              {canAct && (
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => pay('CASH')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
+                    <Banknote size={16} /> Бэлнээр
+                  </button>
+                  <button onClick={() => pay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
+                    <QrCode size={16} /> QPay
+                  </button>
+                </div>
+              )}
               {fee?.is_free && (
                 <div className="text-sm text-cyan-400 bg-cyan-500/10 rounded-lg px-3 py-2">
                   Төлбөргүй: {fee.reason || 'Үнэгүй хугацаанд байна'}
                 </div>
               )}
-              <button onClick={manualExit} className="btn-secondary w-full justify-center text-xs">
-                <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
-              </button>
+              {canAct && (
+                <button onClick={manualExit} className="btn-secondary w-full justify-center text-xs">
+                  <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
+                </button>
+              )}
             </div>
           ) : (
             <div className="text-sm text-slate-500 text-center py-10">
@@ -363,7 +396,10 @@ export default function Cashier() {
           empty={!overview || overview.rows.length === 0}>
           {overview?.rows.map((r) => (
             <tr key={r.session_id}>
-              <td className="td font-mono font-bold">{r.plate_number}</td>
+              <td className="td font-mono font-bold">
+                {r.plate_number}
+                {r.note && <span className="ml-1 cursor-help" title={r.note}>📝</span>}
+              </td>
               <td className="td font-mono text-xs">{r.entry_time ? fmtDate(r.entry_time).slice(5, 16) : '-'}</td>
               <td className="td font-mono text-xs">{r.exit_time ? fmtDate(r.exit_time).slice(5, 16) : '—'}</td>
               <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import require, require_role
 from ..database import get_db
 from ..models import AuditLog, CashierShift, Payment, User
 from ..serializers import to_dict
@@ -35,7 +35,8 @@ def current_shift(db: Session = Depends(get_db), user: User = Depends(require("c
 
 
 @router.post("/shift/open")
-def open_shift(body: dict, db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
+def open_shift(body: dict, db: Session = Depends(get_db),
+               user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
     if db.query(CashierShift).filter(CashierShift.user_id == user.id,
                                      CashierShift.status == "OPEN").first():
         raise HTTPException(400, "Танд нээлттэй ээлж байна. Эхлээд хаана уу.")
@@ -48,7 +49,8 @@ def open_shift(body: dict, db: Session = Depends(get_db), user: User = Depends(r
 
 
 @router.post("/shift/close")
-def close_shift(db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
+def close_shift(db: Session = Depends(get_db),
+                user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
     shift = db.query(CashierShift).filter(CashierShift.user_id == user.id,
                                           CashierShift.status == "OPEN").first()
     if not shift:

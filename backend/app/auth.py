@@ -85,3 +85,10 @@ def require_role(*roles: str):
             return user
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Танд энэ үйлдлийг хийх эрх байхгүй.")
     return checker
+
+
+def operator_site(user: User) -> str | None:
+    """Оператор бол хязгаарлагдах зогсоолын site_id, үгүй бол None (бүх зогсоол).
+    Endpoint-ууд энэ утгаар site_id-г албадан хязгаарлана — оператор өөр зогсоолын
+    өгөгдөл харах/өөрчлөхөөс сэргийлнэ."""
+    return user.site_id if user.role == "OPERATOR" and user.site_id else None

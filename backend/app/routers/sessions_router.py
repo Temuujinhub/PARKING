@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import operator_site, require
 from ..database import get_db
 from ..models import AuditLog, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
@@ -30,6 +30,7 @@ def list_sessions(
     limit: int = 100, offset: int = 0, with_fee: bool = False,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
+    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
     q = db.query(ParkingSession)
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
@@ -53,6 +54,7 @@ def check_plate(plate: str, site_id: str | None = None,
     plate = normalize_plate(plate)
     if len(plate) < 2:
         return []
+    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
     q = db.query(ParkingSession).filter(
         ParkingSession.plate_number.ilike(f"{plate}%"),
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
@@ -67,6 +69,7 @@ def check_plate(plate: str, site_id: str | None = None,
 def recent_exits(site_id: str, minutes: int = 30,
                  db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     """Касс/PAX: сүүлд гарах камерт уншигдсан, төлбөр хүлээж буй машинууд."""
+    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
     since = datetime.utcnow() - timedelta(minutes=minutes)
     sessions = (
         db.query(ParkingSession)
@@ -83,6 +86,23 @@ def recent_exits(site_id: str, minutes: int = 30,
             for s in sessions]
 
 
+@router.put("/{session_id}/note")
+def update_note(session_id: str, body: dict, db: Session = Depends(get_db),
+                user: User = Depends(require("cashier", "check"))):
+    """Операторын нэмэлт тэмдэглэл хадгална (касс)."""
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    osid = operator_site(user)
+    if osid and s.site_id != osid:
+        raise HTTPException(403, "Энэ зогсоол таны хариуцах зогсоол биш")
+    s.note = (body.get("note") or "")[:1000]
+    db.add(AuditLog(username=user.username, action="SESSION_NOTE", entity="session",
+                    entity_id=session_id, detail={"note": s.note[:100]}))
+    db.commit()
+    return {"ok": True, "note": s.note}
+
+
 @router.get("/today-exits")
 def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     """Касс: ӨНӨӨДӨР гарах камерт уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч).
@@ -90,6 +110,7 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
     машины төрөл, төлбөрийн хэрэгсэл, төлсөн эсэх, e-Barimt өгсөн эсэх."""
     from sqlalchemy import or_
     from ..models import ParkingSite, Payment, VatReceipt
+    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
     site = db.get(ParkingSite, site_id)
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     occupied = db.query(ParkingSession).filter(
@@ -123,6 +144,7 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
             "paid": s.status == "PAID" or bool(p),
             "status": s.status,
             "ebarimt": s.id in recs,
+            "note": s.note,
         })
     return {"capacity": site.capacity if site else 0, "occupied": occupied,
             "free": max(0, (site.capacity if site else 0) - occupied), "rows": rows}

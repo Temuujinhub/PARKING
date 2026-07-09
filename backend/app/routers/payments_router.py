@@ -12,7 +12,7 @@ def secrets_compare(a: str, b: str) -> bool:
     return hmac.compare_digest((a or "").encode(), (b or "").encode())
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import require, require_role
 from ..config import settings
 from ..database import get_db
 from ..models import AuditLog, CashierShift, ParkingSession, Payment, User, VatReceipt
@@ -295,7 +295,7 @@ async def qpay_check(payment_id: str, db: Session = Depends(get_db)):
 # ─────────────────────────── Касс (бэлэн мөнгө) ───────────────────────────
 @router.post("/cash")
 async def cash_payment(body: dict, db: Session = Depends(get_db),
-                       user: User = Depends(require("cashier"))):
+                       user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
     """Кассын бэлэн мөнгөний төлбөр. body: {session_id}"""
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
@@ -313,7 +313,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
 # ─────────────────────────── PAX A9000 POS ───────────────────────────
 @router.post("/pos/confirm")
 async def pos_confirm(body: dict, db: Session = Depends(get_db),
-                      user: User = Depends(require("cashier"))):
+                      user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
     """PAX A9000 апп картын төлбөр авсныг баталгаажуулна.
     body: {session_id, amount, auth_code, card_last4, card_brand, terminal_id, transaction_id}"""
     session = db.get(ParkingSession, body.get("session_id", ""))
