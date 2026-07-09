@@ -77,6 +77,7 @@ export default function Compensations() {
               <div className="text-lg font-semibold">{shift.shift?.cashier || user?.full_name || user?.username}
                 <span className="text-sm text-slate-400 font-normal ml-2">{ROLE_LABEL[user?.role] || ''}</span>
               </div>
+              <div className="text-sm text-accent font-medium">{shift.shift?.site_name || 'Зогсоол тодорхойгүй'}</div>
               <div className="text-xs text-slate-500">Ээлж нээсэн: {fmtDate(shift.shift?.opened_at)}</div>
             </div>
             <div className="text-right">

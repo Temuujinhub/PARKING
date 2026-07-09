@@ -35,7 +35,8 @@ def current_shift(db: Session = Depends(get_db), user: User = Depends(require("c
     remaining = db.query(ParkingSession).filter(
         ParkingSession.site_id == shift.site_id,
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"])).count() if shift.site_id else 0
-    return {"open": True, "shift": to_dict(shift), "remaining_cars": remaining, **_shift_totals(db, shift)}
+    shift_out = to_dict(shift, extra={"site_name": shift.site.name if shift.site else None})
+    return {"open": True, "shift": shift_out, "remaining_cars": remaining, **_shift_totals(db, shift)}
 
 
 @router.post("/shift/open")

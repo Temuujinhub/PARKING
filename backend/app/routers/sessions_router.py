@@ -2,11 +2,12 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..auth import operator_site, require
 from ..database import get_db
-from ..models import AuditLog, Device, LprEvent, ParkingSession, User
+from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
 from ..session_logic import get_open_session, normalize_plate, session_fee_info
 from ..services.barrier import open_barrier
@@ -21,6 +22,21 @@ def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict
     if with_fee and s.status in ("OPEN", "AWAITING_PAYMENT"):
         extra["fee"] = session_fee_info(db, s)
     return to_dict(s, extra=extra)
+
+
+def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
+    """Дугаар бүрийн ТӨЛӨГДӨӨГҮЙ нөхөн төлбөрийг (аль ч зогсоолын) хавсаргана.
+    Өр нь тусдаа `compensations` санд хадгалагддаг тул зогсоолоос үл хамааран харагдана."""
+    plates = {d["plate_number"] for d in dicts if d.get("plate_number")}
+    if not plates:
+        return dicts
+    debt = {plate: {"amount": float(amt), "count": cnt} for plate, amt, cnt in
+            db.query(Compensation.plate_number, func.sum(Compensation.amount), func.count())
+            .filter(Compensation.plate_number.in_(plates), Compensation.status == "PENDING")
+            .group_by(Compensation.plate_number).all()}
+    for d in dicts:
+        d["debt"] = debt.get(d["plate_number"])
+    return dicts
 
 
 @router.get("")
@@ -44,7 +60,8 @@ def list_sessions(
         q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(date_to) + timedelta(days=1))
     total = q.count()
     rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
-    return {"total": total, "rows": [_session_out(db, s, with_fee=with_fee) for s in rows]}
+    return {"total": total,
+            "rows": _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])}
 
 
 @router.get("/check")
@@ -62,7 +79,7 @@ def check_plate(plate: str, site_id: str | None = None,
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
     sessions = q.order_by(ParkingSession.updated_at.desc()).limit(10).all()
-    return [_session_out(db, s, with_fee=True) for s in sessions]
+    return _attach_debt(db, [_session_out(db, s, with_fee=True) for s in sessions])
 
 
 @router.get("/recent-exits")
