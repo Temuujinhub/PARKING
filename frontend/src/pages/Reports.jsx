@@ -57,9 +57,9 @@ export default function Reports() {
   const load = () => {
     const qs = `date_from=${from}&date_to=${to}`
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
-    else if (tab === 'daily') api(`/api/reports/daily?${qs}`).then(setDaily).catch(() => {})
-    else if (tab === 'monthly') api(`/api/reports/monthly?${qs}`).then(setMonthly).catch(() => {})
-    else if (tab === 'shifts') api(`/api/reports/by-shift?${qs}`).then(setByShift).catch(() => {})
+    else if (tab === 'daily') api(`/api/reports/daily?${qs}${siteQ(f.site_id)}`).then(setDaily).catch(() => {})
+    else if (tab === 'monthly') api(`/api/reports/monthly?${qs}${siteQ(f.site_id)}`).then(setMonthly).catch(() => {})
+    else if (tab === 'shifts') api(`/api/reports/by-shift?${qs}${siteQ(f.site_id)}`).then(setByShift).catch(() => {})
     else if (tab === 'bypayment') api(`/api/reports/by-payment?${qs}${f.site_id ? `&site_id=${f.site_id}` : ''}`).then(setByPay).catch(() => {})
     else if (tab === 'transactions') api(`/api/reports/transactions?${txnQs()}`).then(setTxns).catch(() => {})
   }
@@ -89,19 +89,19 @@ export default function Reports() {
           )}
           {tab === 'daily' && (
             <button className="btn-primary"
-              onClick={() => downloadBlob(`/api/reports/daily/excel?date_from=${from}&date_to=${to}`, `odriin_tailan_${from}_${to}.xlsx`)}>
+              onClick={() => downloadBlob(`/api/reports/daily/excel?date_from=${from}&date_to=${to}${siteQ(f.site_id)}`, `odriin_tailan_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
             </button>
           )}
           {tab === 'monthly' && (
             <button className="btn-primary"
-              onClick={() => downloadBlob(`/api/reports/monthly/excel?date_from=${from}&date_to=${to}`, `saraar_${from}_${to}.xlsx`)}>
+              onClick={() => downloadBlob(`/api/reports/monthly/excel?date_from=${from}&date_to=${to}${siteQ(f.site_id)}`, `saraar_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
             </button>
           )}
           {tab === 'shifts' && (
             <button className="btn-primary"
-              onClick={() => downloadBlob(`/api/reports/by-shift/excel?date_from=${from}&date_to=${to}`, `eeljeer_${from}_${to}.xlsx`)}>
+              onClick={() => downloadBlob(`/api/reports/by-shift/excel?date_from=${from}&date_to=${to}${siteQ(f.site_id)}`, `eeljeer_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
             </button>
           )}
@@ -130,6 +130,17 @@ export default function Reports() {
           </button>
         ))}
       </div>
+
+      {/* Зогсоол сонгох filter — Сараар/Өдрөөр/Ээлжээр/Төлбөрийн төрлөөр таб-уудад */}
+      {['monthly', 'daily', 'shifts', 'bypayment'].includes(tab) && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">Зогсоол:</span>
+          <select className="input w-auto" value={f.site_id} onChange={(e) => setF({ ...f, site_id: e.target.value })} aria-label="Зогсоол шүүх">
+            <option value="">Бүх зогсоол</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+      )}
 
       {tab === 'revenue' && revenue && (
         <>
