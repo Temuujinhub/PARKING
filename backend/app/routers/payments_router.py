@@ -197,6 +197,7 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
         db.flush()
 
     payment = _create_payment(db, session, "QPAY", "QR")
+    payment.source = "POS" if body.get("source") == "POS" else "QR"  # кассын пос эсвэл утас
     # НӨАТ-ийн баримтын хүлээн авагчийн төрөл: ТТД өгвөл ААН (COMPANY), үгүй бол иргэн (CITIZEN)
     receiver_data = None
     if body.get("customer_tin"):

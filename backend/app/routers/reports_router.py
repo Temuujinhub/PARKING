@@ -486,9 +486,10 @@ def by_shift_report(date_from: str | None = None, date_to: str | None = None,
 @router.get("/settlement")
 def settlement(site_id: str, date_from: str | None = None, date_to: str | None = None,
                db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Санхүүгийн өдрийн тооцоо — тухайн зогсоолын өдөр бүрийн системийн борлуулалт
-    (карт/QPay/бэлэн) ба санхүүгийн баталгаажуулсан дүн, зөрүү, төлөв."""
-    from ..models import DailySettlement
+    """Санхүүгийн өдрийн тооцоо — pos-Карт / pos-QPay / QR-QPay / Бэлэн задаргаатай.
+    Карт ба QPay нь электрон баталгаажсан тул систем=баталгаа (засахгүй); зөвхөн бэлэнг
+    санхүү дансны хуулгаас баталгаажуулна. Мөн ажилтан + тухайн өдөр үүссэн өрийн дүн."""
+    from ..models import CashierShift, Compensation, DailySettlement
     start, end = _range(date_from, date_to)
     setts = {s.date: s for s in db.query(DailySettlement).filter(
         DailySettlement.site_id == site_id).all()}
@@ -497,22 +498,44 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
     while day < end:
         nxt = day + timedelta(days=1)
         ds = day.strftime("%Y-%m-%d")
-        prov = dict(db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-                    .join(ParkingSession, Payment.session_id == ParkingSession.id)
-                    .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt,
-                            ParkingSession.site_id == site_id).group_by(Payment.provider).all())
-        sc, sq, scash = (float(prov.get(k, 0)) for k in ("POS", "QPAY", "CASH"))
+        # Төлбөрийг provider+source-оор
+        rows = (db.query(Payment.provider, Payment.source, func.coalesce(func.sum(Payment.amount), 0))
+                .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt,
+                        ParkingSession.site_id == site_id)
+                .group_by(Payment.provider, Payment.source).all())
+        card = pos_qpay = qr_qpay = cash = 0.0
+        for prov, src, amt in rows:
+            amt = float(amt)
+            if prov == "POS":
+                card += amt
+            elif prov == "QPAY":
+                if src == "POS":
+                    pos_qpay += amt
+                else:
+                    qr_qpay += amt
+            elif prov == "CASH":
+                cash += amt
+        st_total = card + pos_qpay + qr_qpay + cash
+        # Тухайн өдөр үүссэн өр (нөхөн төлбөр)
+        debt = float(db.query(func.coalesce(func.sum(Compensation.amount), 0)).filter(
+            Compensation.site_id == site_id, Compensation.created_at >= day,
+            Compensation.created_at < nxt).scalar() or 0)
+        # Ажилласан ажилтнууд (тухайн өдөр ээлж нээсэн)
+        workers = sorted({(sh.user.full_name or sh.user.username) for sh in db.query(CashierShift).filter(
+            CashierShift.site_id == site_id, CashierShift.opened_at >= day,
+            CashierShift.opened_at < nxt).all() if sh.user})
         st = setts.get(ds)
-        cc, cq, ccash = ((float(st.confirmed_card), float(st.confirmed_qpay), float(st.confirmed_cash))
-                         if st else (0.0, 0.0, 0.0))
-        st_total, cf_total = sc + sq + scash, cc + cq + ccash
-        if st_total <= 0 and not st:
+        if st_total <= 0 and debt <= 0 and not st:
             day = nxt
             continue
-        out.append({"date": ds, "system_card": sc, "system_qpay": sq, "system_cash": scash,
-                    "system_total": st_total, "confirmed_card": cc, "confirmed_qpay": cq,
-                    "confirmed_cash": ccash, "confirmed_total": cf_total,
-                    "difference": st_total - cf_total,
+        confirmed_cash = float(st.confirmed_cash) if st else 0.0
+        # Карт/QPay электрон баталгаажсан = систем; зөвхөн бэлэн санхүү баталгаажуулна
+        confirmed_total = card + pos_qpay + qr_qpay + confirmed_cash
+        out.append({"date": ds, "card": card, "pos_qpay": pos_qpay, "qr_qpay": qr_qpay,
+                    "cash": cash, "system_total": st_total, "confirmed_cash": confirmed_cash,
+                    "confirmed_total": confirmed_total, "difference": st_total - confirmed_total,
+                    "debt": debt, "workers": workers,
                     "status": st.status if st else "OPEN", "note": (st.note if st else "") or "",
                     "closed_by": st.closed_by if st else None,
                     "closed_at": st.closed_at.isoformat() if st and st.closed_at else None})
@@ -557,17 +580,16 @@ def settlement_excel(site_id: str, date_from: str | None = None, date_to: str | 
     from openpyxl.styles import Font
     data = settlement(site_id, date_from, date_to, db, user)
     wb = Workbook(); ws = wb.active; ws.title = "Мөнгөн тооцоо"
-    ws.append(["Огноо", "Систем карт", "Систем QPay", "Систем бэлэн", "Систем нийт",
-               "Баталгаа карт", "Баталгаа QPay", "Баталгаа бэлэн", "Баталгаа нийт",
-               "Зөрүү", "Төлөв", "Хаасан"])
+    ws.append(["Огноо", "pos-Карт", "pos-QPay", "QR-QPay", "Бэлэн", "Систем нийт",
+               "Баталгаа бэлэн", "Баталгаа нийт", "Зөрүү", "Өр (үүссэн)", "Ажилтан", "Төлөв", "Хаасан"])
     for c in ws[1]:
         c.font = Font(bold=True)
     for r in data["rows"]:
-        ws.append([r["date"], r["system_card"], r["system_qpay"], r["system_cash"], r["system_total"],
-                   r["confirmed_card"], r["confirmed_qpay"], r["confirmed_cash"], r["confirmed_total"],
-                   r["difference"], "Хаагдсан" if r["status"] == "CLOSED" else "Нээлттэй",
+        ws.append([r["date"], r["card"], r["pos_qpay"], r["qr_qpay"], r["cash"], r["system_total"],
+                   r["confirmed_cash"], r["confirmed_total"], r["difference"], r["debt"],
+                   ", ".join(r["workers"]), "Хаагдсан" if r["status"] == "CLOSED" else "Нээлттэй",
                    r["closed_by"] or ""])
-    for col, w in zip("ABCDEFGHIJKL", (12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 14)):
+    for col, w in zip("ABCDEFGHIJKLM", (12, 11, 11, 11, 11, 12, 13, 13, 12, 12, 20, 11, 14)):
         ws.column_dimensions[col].width = w
     return _excel_response(wb, "monggon_tootsoo")
 
