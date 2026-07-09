@@ -58,13 +58,23 @@ function QrImage({ code, alt }) {
   )
 }
 
-// Wizard-ийн стандарт төхөөрөмжийн загвар — зогсоол бүр орох/гарах төхөөрөмжтэй
-const STD_DEVICES = [
-  { key: 'entry_cam', name: 'Орох камер', device_type: 'camera', lane_dir: 'entry', lane_no: 1, auto_open: true, icon: Camera },
-  { key: 'exit_cam', name: 'Гарах камер', device_type: 'camera', lane_dir: 'exit', lane_no: 2, auto_open: false, icon: Camera },
-  { key: 'entry_bar', name: 'Орох хаалт', device_type: 'barrier', lane_dir: 'entry', lane_no: 1, auto_open: false, icon: DoorOpen },
-  { key: 'exit_bar', name: 'Гарах хаалт', device_type: 'barrier', lane_dir: 'exit', lane_no: 2, auto_open: false, icon: DoorOpen },
-]
+// Орох/гарах хаалтын тоогоор төхөөрөмжийн загварыг динамикаар үүсгэнэ.
+// Эгнээ бүр өөрийн камер + хаалттай, ижил lane_no-той (barrier камерынхаа реле-ээр нээгддэг).
+function genDevices(entryLanes, exitLanes) {
+  const list = []
+  for (let i = 1; i <= entryLanes; i++) {
+    const suf = entryLanes > 1 ? ` ${i}` : ''
+    list.push({ key: `entry_cam_${i}`, name: `Орох камер${suf}`, device_type: 'camera', lane_dir: 'entry', lane_no: i, auto_open: true, icon: Camera })
+    list.push({ key: `entry_bar_${i}`, name: `Орох хаалт${suf}`, device_type: 'barrier', lane_dir: 'entry', lane_no: i, auto_open: false, icon: DoorOpen })
+  }
+  for (let j = 1; j <= exitLanes; j++) {
+    const lane = entryLanes + j
+    const suf = exitLanes > 1 ? ` ${j}` : ''
+    list.push({ key: `exit_cam_${j}`, name: `Гарах камер${suf}`, device_type: 'camera', lane_dir: 'exit', lane_no: lane, auto_open: false, icon: Camera })
+    list.push({ key: `exit_bar_${j}`, name: `Гарах хаалт${suf}`, device_type: 'barrier', lane_dir: 'exit', lane_no: lane, auto_open: false, icon: DoorOpen })
+  }
+  return list
+}
 
 function Sites() {
   const toast = useToast()
@@ -91,10 +101,20 @@ function Sites() {
   const openWizard = () => setWizard({
     step: 1,
     site: { name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: templates[0]?.id || '' },
-    devices: Object.fromEntries(STD_DEVICES.map((d) => [d.key, { enabled: true, ip_address: '' }])),
+    entryLanes: 1, exitLanes: 1,
+    devices: Object.fromEntries(genDevices(1, 1).map((d) => [d.key, { enabled: true, ip_address: '' }])),
     created: null,
     createdDevices: [],
   })
+
+  // Орох/гарах хаалтын тоо өөрчлөгдөхөд төхөөрөмжийн жагсаалтыг дахин үүсгэнэ (IP-г хадгалж)
+  const setLanes = (entryLanes, exitLanes) => {
+    const e = Math.max(1, Math.min(6, +entryLanes || 1))
+    const x = Math.max(1, Math.min(6, +exitLanes || 1))
+    const devices = Object.fromEntries(
+      genDevices(e, x).map((d) => [d.key, wizard.devices[d.key] || { enabled: true, ip_address: '' }]))
+    setWizard({ ...wizard, entryLanes: e, exitLanes: x, devices })
+  }
 
   // Алхам 1 → зогсоол үүсгэх
   const wizardCreateSite = async (e) => {
@@ -115,7 +135,7 @@ function Sites() {
     e.preventDefault()
     try {
       const createdDevices = []
-      for (const tpl of STD_DEVICES) {
+      for (const tpl of genDevices(wizard.entryLanes, wizard.exitLanes)) {
         const cfg = wizard.devices[tpl.key]
         if (!cfg.enabled) continue
         const d = await api('/api/admin/devices', {
@@ -217,6 +237,21 @@ function Sites() {
                     {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </Field>
+                {/* Хэдэн хаалттай вэ — орох/гарах эгнээ тус бүрт камер+хаалт үүснэ */}
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Орох хаалт (эгнээ) хэд вэ?">
+                    <input className="input" type="number" min="1" max="6" value={wizard.entryLanes} onKeyDown={enterToNext}
+                      onChange={(e) => setLanes(e.target.value, wizard.exitLanes)} />
+                  </Field>
+                  <Field label="Гарах хаалт (эгнээ) хэд вэ?">
+                    <input className="input" type="number" min="1" max="6" value={wizard.exitLanes} onKeyDown={enterToNext}
+                      onChange={(e) => setLanes(wizard.entryLanes, e.target.value)} />
+                  </Field>
+                </div>
+                <div className="text-xs text-slate-500">
+                  Эгнээ тус бүрт нэг камер + нэг хаалт үүснэ (нийт {(wizard.entryLanes + wizard.exitLanes) * 2} төхөөрөмж).
+                  Дараагийн алхамд IP хаяг оруулна.
+                </div>
                 <button className="btn-primary w-full justify-center">Үргэлжлүүлэх →</button>
               </form>
             )}
@@ -228,7 +263,7 @@ function Sites() {
                   <b className="text-slate-200">{wizard.created?.name}</b> зогсоолын орох/гарах төхөөрөмжүүдийг сонгоно уу.
                   IP хаягийг дараа нь ч оруулж болно.
                 </div>
-                {STD_DEVICES.map((tpl) => {
+                {genDevices(wizard.entryLanes, wizard.exitLanes).map((tpl) => {
                   const cfg = wizard.devices[tpl.key]
                   const Icon = tpl.icon
                   return (
@@ -527,25 +562,50 @@ function Devices() {
           model: '', ip_address: '', lane_no: 1, lane_dir: 'entry', auto_open: true,
         })}><Plus size={16} /> Төхөөрөмж нэмэх</button>
       </div>
-      <Table headers={['Нэр', 'Төрөл', 'Зогсоол', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', '']}
-        empty={rows.length === 0}>
-        {rows.map((d) => (
-          <tr key={d.id}>
-            <td className="td font-medium">{d.name}</td>
-            <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
-            <td className="td text-xs">{d.site_name}</td>
-            <td className="td text-xs">{d.model}</td>
-            <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
-            <td className="td font-mono">{d.lane_no}</td>
-            <td className="td text-xs">{d.lane_dir === 'entry' ? 'Орох' : d.lane_dir === 'exit' ? 'Гарах' : 'Хоёулаа'}</td>
-            <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
-            <td className="td text-right whitespace-nowrap">
-              <button className="btn-secondary py-1 text-xs mr-1" onClick={() => setEditing(d)}>Засах</button>
-              <button className="btn-danger py-1 text-xs" onClick={() => remove(d)}>Устгах</button>
-            </td>
-          </tr>
-        ))}
-      </Table>
+      {/* Зогсоол тус бүрээр бүлэглэн харуулна */}
+      {rows.length === 0 ? (
+        <div className="card text-sm text-slate-500 py-6 text-center">Төхөөрөмж бүртгэгдээгүй байна</div>
+      ) : (() => {
+        const bySite = {}
+        for (const d of rows) {
+          const key = d.site_name || 'Зогсоолгүй'
+          ;(bySite[key] = bySite[key] || []).push(d)
+        }
+        const order = sites.map((s) => s.name).filter((n) => bySite[n])
+          .concat(Object.keys(bySite).filter((n) => !sites.some((s) => s.name === n)))
+        return order.map((siteName) => {
+          const list = bySite[siteName]
+          const cams = list.filter((d) => d.device_type === 'camera').length
+          const bars = list.filter((d) => d.device_type === 'barrier').length
+          return (
+            <div key={siteName} className="space-y-2">
+              <div className="flex items-center gap-2 mt-3">
+                <h3 className="font-semibold text-accent">{siteName}</h3>
+                <span className="text-xs text-slate-500">
+                  {list.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}{bars ? ` · ${bars} хаалт` : ''}
+                </span>
+              </div>
+              <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', '']} empty={false}>
+                {list.map((d) => (
+                  <tr key={d.id}>
+                    <td className="td font-medium">{d.name}</td>
+                    <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
+                    <td className="td text-xs">{d.model}</td>
+                    <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
+                    <td className="td font-mono">{d.lane_no}</td>
+                    <td className="td text-xs">{d.lane_dir === 'entry' ? 'Орох' : d.lane_dir === 'exit' ? 'Гарах' : 'Хоёулаа'}</td>
+                    <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
+                    <td className="td text-right whitespace-nowrap">
+                      <button className="btn-secondary py-1 text-xs mr-1" onClick={() => setEditing(d)}>Засах</button>
+                      <button className="btn-danger py-1 text-xs" onClick={() => remove(d)}>Устгах</button>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )
+        })
+      })()}
 
       <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Төхөөрөмж засах' : 'Төхөөрөмж нэмэх'}>
         {editing && (

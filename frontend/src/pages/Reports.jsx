@@ -45,6 +45,12 @@ export default function Reports() {
           {tab === 'revenue' && (
             <button className="btn-primary" onClick={downloadExcel}><Download size={16} /> Excel</button>
           )}
+          {tab === 'daily' && (
+            <button className="btn-primary"
+              onClick={() => downloadBlob(`/api/reports/daily/excel?date_from=${from}&date_to=${to}`, `odriin_tailan_${from}_${to}.xlsx`)}>
+              <Download size={16} /> Excel
+            </button>
+          )}
           {tab === 'shifts' && (
             <button className="btn-primary"
               onClick={() => downloadBlob(`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `kass_${from}_${to}.xlsx`)}>

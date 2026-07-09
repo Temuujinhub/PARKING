@@ -226,6 +226,48 @@ def _excel_response(wb, prefix: str):
         headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+@router.get("/daily/excel")
+def daily_excel(date_from: str | None = None, date_to: str | None = None,
+                site_id: str | None = None,
+                db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Өдөр өдрөөр задарсан тайлангийн Excel."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    start, end = _range(date_from, date_to)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Өдрийн тайлан"
+    ws.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    tot = {"entered": 0, "exited": 0, "cash": 0.0, "qpay": 0.0, "pos": 0.0}
+    while day < end:
+        nxt = day + timedelta(days=1)
+        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
+                                             ParkingSession.entry_time < nxt)
+        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+              .join(ParkingSession, Payment.session_id == ParkingSession.id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
+        if site_id:
+            sq = sq.filter(ParkingSession.site_id == site_id)
+            pq = pq.filter(ParkingSession.site_id == site_id)
+        prov = dict(pq.group_by(Payment.provider).all())
+        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        entered, exited = sq.count(), sq.filter(ParkingSession.exit_time.isnot(None)).count()
+        ws.append([day.strftime("%Y-%m-%d"), entered, exited, cash, qpay_amt, pos, cash + qpay_amt + pos])
+        tot["entered"] += entered; tot["exited"] += exited
+        tot["cash"] += cash; tot["qpay"] += qpay_amt; tot["pos"] += pos
+        day = nxt
+    ws.append(["НИЙТ", tot["entered"], tot["exited"], tot["cash"], tot["qpay"], tot["pos"],
+               tot["cash"] + tot["qpay"] + tot["pos"]])
+    for c in ws[ws.max_row]:
+        c.font = Font(bold=True)
+    for col, w in zip("ABCDEFG", (14, 10, 10, 14, 14, 14, 16)):
+        ws.column_dimensions[col].width = w
+    return _excel_response(wb, "daily")
+
+
 @router.get("/site-sessions/excel")
 def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
                         db: Session = Depends(get_db), user: User = Depends(require("reports"))):
@@ -311,6 +353,7 @@ def shifts_excel(date_from: str | None = None, date_to: str | None = None,
 async def vat_info(user: User = Depends(require("vat", "reports"))):
     """PosAPI getInformation — сугалааны үлдэгдэл, илгээгдээгүй мэдээ (ТЕГ шаардлага №6).
     Frontend үүнийг ашиглан анхааруулга харуулна."""
+    from ..config import settings
     from ..services import ebarimt
     info = await ebarimt.get_information()
     warnings = []
@@ -320,7 +363,11 @@ async def vat_info(user: User = Depends(require("vat", "reports"))):
     if int(info.get("unsentCount") or 0) > 0:
         warnings.append(f"Илгээгдээгүй {info.get('unsentCount')} баримт байна — "
                         "3 хоногийн дотор илгээх хуультай.")
-    return {**info, "warnings": warnings}
+    # e-Barimt-ийн 2 суваг: (1) QR/QPay — ebarimt_v3 (бодит, QPay ТЕГ рүү өөрөө илгээнэ),
+    # (2) локал PosAPI — картын/бэлэн баримтад (энэ хуудасны сугалаа/мэдээ илгээх хэсэг).
+    return {**info, "warnings": warnings,
+            "qpay_ebarimt": settings.qpay_ebarimt and not settings.qpay_mock,
+            "local_posapi_mock": settings.ebarimt_mock}
 
 
 @router.post("/vat-send")
