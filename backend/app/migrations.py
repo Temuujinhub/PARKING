@@ -17,6 +17,10 @@ MIGRATIONS = [
     "ALTER TABLE payments ADD COLUMN IF NOT EXISTS ebarimt_receiver_type VARCHAR(20)",
     # v1.3 — операторын нэмэлт тэмдэглэл (касс)
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS note TEXT",
+    # v1.4 — ээлж хаах тооцоо
+    "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS cash_confirmed NUMERIC(12,2)",
+    "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS closed_cars INTEGER",
+    "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS note TEXT",
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

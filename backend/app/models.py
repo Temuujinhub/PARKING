@@ -248,6 +248,10 @@ class CashierShift(Base):
     closed_at = Column(DateTime, nullable=True)
     opening_amount = Column(Numeric(12, 2), nullable=False, default=0)
     status = Column(String(20), nullable=False, default="OPEN")  # OPEN, CLOSED
+    # Ээлж хаах тооцоо: операторын данс руу шилжүүлэхээр баталгаажуулсан бэлэн + тэмдэглэл
+    cash_confirmed = Column(Numeric(12, 2), nullable=True)
+    closed_cars = Column(Integer, nullable=True)  # ээлж хаахад гаргасан машины тоо
+    note = Column(Text, nullable=True)
 
     user = relationship("User", lazy="joined")
     site = relationship("ParkingSite", lazy="joined")
