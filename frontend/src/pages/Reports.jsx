@@ -15,15 +15,30 @@ export default function Reports() {
   const [daily, setDaily] = useState(null)
   const [monthly, setMonthly] = useState(null)
   const [shifts, setShifts] = useState([])
+  const [txns, setTxns] = useState(null)
+  const [byPay, setByPay] = useState(null)
+  const [sites, setSites] = useState([])
+  // Бичилт таб-ын шүүлтүүд
+  const [f, setF] = useState({ site_id: '', provider: '', car_type: '', status: '' })
+
+  useEffect(() => { api('/api/admin/sites').then(setSites).catch(() => {}) }, [])
+
+  const txnQs = () => {
+    const p = new URLSearchParams({ date_from: from, date_to: to })
+    for (const k of ['site_id', 'provider', 'car_type', 'status']) if (f[k]) p.set(k, f[k])
+    return p.toString()
+  }
 
   const load = () => {
     const qs = `date_from=${from}&date_to=${to}`
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
     else if (tab === 'daily') api(`/api/reports/daily?${qs}`).then(setDaily).catch(() => {})
     else if (tab === 'monthly') api(`/api/reports/monthly?${qs}`).then(setMonthly).catch(() => {})
-    else api(`/api/cashier/shifts?${qs}`).then(setShifts).catch(() => {})
+    else if (tab === 'shifts') api(`/api/cashier/shifts?${qs}`).then(setShifts).catch(() => {})
+    else if (tab === 'bypayment') api(`/api/reports/by-payment?${qs}${f.site_id ? `&site_id=${f.site_id}` : ''}`).then(setByPay).catch(() => {})
+    else if (tab === 'transactions') api(`/api/reports/transactions?${txnQs()}`).then(setTxns).catch(() => {})
   }
-  useEffect(load, [tab, from, to])
+  useEffect(load, [tab, from, to, f])
 
   const downloadBlob = async (path, filename) => {
     try {
@@ -59,11 +74,18 @@ export default function Reports() {
               <Download size={16} /> Excel
             </button>
           )}
+          {tab === 'transactions' && (
+            <button className="btn-primary"
+              onClick={() => downloadBlob(`/api/reports/transactions/excel?${txnQs()}`, `bichilt_${from}_${to}.xlsx`)}>
+              <Download size={16} /> Excel (шүүлтээр)
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
-        {[['revenue', 'Зогсоолоор'], ['daily', 'Өдрөөр'], ['shifts', 'Ээлжээр'], ['monthly', 'Сараар']].map(([v, l]) => (
+      <div className="flex gap-1 border-b border-surface-border/60 overflow-x-auto" role="tablist">
+        {[['revenue', 'Зогсоолоор'], ['monthly', 'Сараар'], ['daily', 'Өдрөөр'], ['shifts', 'Ээлжээр'],
+          ['bypayment', 'Төлбөрийн төрлөөр'], ['transactions', 'Бичилт']].map(([v, l]) => (
           <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer
               ${tab === v ? 'border-accent text-accent' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>
@@ -172,6 +194,87 @@ export default function Reports() {
             <span>Карт: <b className="font-mono">{fmt(monthly.totals.pos)}₮</b></span>
             <span>Нийт: <b className="font-mono text-accent">{fmt(monthly.totals.total)}₮</b></span>
           </div>
+        </>
+      )}
+
+      {/* Төлбөрийн төрлөөр — хэрэгсэл ба машины төрлөөр */}
+      {tab === 'bypayment' && byPay && (
+        <div className="grid lg:grid-cols-2 gap-6">
+          <div className="card">
+            <h2 className="font-semibold mb-3">Төлбөрийн хэрэгслээр</h2>
+            <Table headers={['Хэрэгсэл', 'Гүйлгээ', 'Дүн (₮)']} empty={byPay.by_method.length === 0}>
+              {byPay.by_method.map((r) => (
+                <tr key={r.key}>
+                  <td className="td font-medium">{r.key}</td>
+                  <td className="td font-mono">{r.count}</td>
+                  <td className="td font-mono text-accent font-semibold">{fmt(r.amount)}₮</td>
+                </tr>
+              ))}
+            </Table>
+          </div>
+          <div className="card">
+            <h2 className="font-semibold mb-3">Машины төрлөөр (гэрээт / хөнгөлөлт / энгийн / үнэгүй)</h2>
+            <Table headers={['Төрөл', 'Тоо', 'Дүн (₮)']} empty={byPay.by_car.length === 0}>
+              {byPay.by_car.map((r) => (
+                <tr key={r.key}>
+                  <td className={`td font-medium ${r.key === 'Гэрээт' ? 'text-cyan-400' : r.key === 'Хөнгөлөлттэй' ? 'text-amber-400' : r.key === 'Үнэгүй' ? 'text-slate-400' : ''}`}>{r.key}</td>
+                  <td className="td font-mono">{r.count}</td>
+                  <td className="td font-mono">{fmt(r.amount)}₮</td>
+                </tr>
+              ))}
+            </Table>
+          </div>
+        </div>
+      )}
+
+      {/* Бичилт — дэлгэрэнгүй, олон шүүлттэй, шүүлтээр Excel татна */}
+      {tab === 'transactions' && (
+        <>
+          <div className="flex flex-wrap gap-2 items-center">
+            <select className="input w-auto" value={f.site_id} onChange={(e) => setF({ ...f, site_id: e.target.value })} aria-label="Зогсоол">
+              <option value="">Бүх зогсоол</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <select className="input w-auto" value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })} aria-label="Төлбөрийн хэрэгсэл">
+              <option value="">Бүх хэрэгсэл</option>
+              <option value="CASH">Бэлэн</option>
+              <option value="QPAY">QPay</option>
+              <option value="POS">Банкны карт</option>
+            </select>
+            <select className="input w-auto" value={f.car_type} onChange={(e) => setF({ ...f, car_type: e.target.value })} aria-label="Машины төрөл">
+              <option value="">Бүх төрөл</option>
+              <option value="normal">Энгийн</option>
+              <option value="contract">Гэрээт</option>
+              <option value="discount">Хөнгөлөлттэй</option>
+            </select>
+            <select className="input w-auto" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })} aria-label="Төлөв">
+              <option value="">Бүх төлөв</option>
+              <option value="PAID">Төлсөн</option>
+              <option value="FREE">Үнэгүй</option>
+              <option value="AWAITING_PAYMENT">Төлбөр хүлээж буй</option>
+            </select>
+            {txns && <span className="text-sm text-slate-400 ml-auto">Нийт <b className="text-slate-200">{txns.total}</b> бичилт · <b className="font-mono text-accent">{fmt(txns.totals.total_fee)}₮</b></span>}
+          </div>
+          <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Төрөл', 'Нийт (₮)', 'Хэрэгсэл', 'Төлөв', 'Кассчин', 'ДДТД']}
+            empty={!txns || txns.rows.length === 0}>
+            {txns?.rows.map((r) => (
+              <tr key={r.session_id}>
+                <td className="td font-mono font-semibold">{r.plate_number}</td>
+                <td className="td text-xs">{r.site_name}</td>
+                <td className="td font-mono text-xs">{(r.entry_time || '').replace('T', ' ').slice(5, 16)}</td>
+                <td className="td font-mono text-xs">{(r.exit_time || '').replace('T', ' ').slice(5, 16)}</td>
+                <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
+                <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
+                  {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}
+                </td>
+                <td className="td font-mono">{fmt(r.total_fee)}</td>
+                <td className="td text-xs">{r.provider || '-'}</td>
+                <td className="td text-xs">{r.status}</td>
+                <td className="td text-xs">{r.cashier || '-'}</td>
+                <td className="td font-mono text-[10px] max-w-[10rem] truncate" title={r.ebarimt_id || ''}>{r.ebarimt_id || '-'}</td>
+              </tr>
+            ))}
+          </Table>
         </>
       )}
     </div>
