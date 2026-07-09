@@ -33,7 +33,7 @@ function Protected({ module, children }) {
 function Home() {
   const { can } = useAuth()
   if (can('dashboard')) return <Dashboard />
-  const fallback = ['cashier', 'check', 'barriers', 'history', 'drivers'].find((m) => can(m))
+  const fallback = ['cashier', 'check', 'barriers', 'history', 'drivers', 'users', 'reports'].find((m) => can(m))
   return <Navigate to={fallback ? `/${fallback}` : '/login'} replace />
 }
 

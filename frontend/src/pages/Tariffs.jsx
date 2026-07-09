@@ -23,10 +23,21 @@ export default function Tariffs() {
   )
 }
 
-// Аль зогсоол ямар тариф мөрдөж байгааг жагсаалтаар
+// Аль зогсоол ямар тариф мөрдөж байгааг жагсаалт + шууд засах
 function SiteTariffs() {
+  const toast = useToast()
   const [rows, setRows] = useState([])
-  useEffect(() => { api('/api/admin/sites').then(setRows).catch(() => {}) }, [])
+  const [templates, setTemplates] = useState([])
+  const load = () => api('/api/admin/sites').then(setRows).catch(() => {})
+  useEffect(() => { load(); api('/api/admin/tariff-templates').then(setTemplates).catch(() => {}) }, [])
+
+  const changeTariff = async (siteId, tariff_template_id) => {
+    try {
+      await api(`/api/admin/sites/${siteId}/tariff`, { method: 'PUT', body: { tariff_template_id } })
+      toast('Тариф солигдлоо'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   return (
     <Table headers={['Зогсоол', 'Код', 'Бүс', 'Багтаамж', 'Мөрдөж буй тариф']} empty={rows.length === 0}>
       {rows.map((s) => (
@@ -36,9 +47,11 @@ function SiteTariffs() {
           <td className="td">{s.zone_code}</td>
           <td className="td font-mono">{s.capacity}</td>
           <td className="td">
-            {s.tariff_template_name
-              ? <span className="text-accent">{s.tariff_template_name}</span>
-              : <span className="text-amber-400">Тариф холбоогүй</span>}
+            <select className="input w-auto py-1 text-sm" value={s.tariff_template_id || ''}
+              onChange={(e) => changeTariff(s.id, e.target.value)} aria-label="Тариф солих">
+              <option value="">Тариф холбоогүй</option>
+              {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
           </td>
         </tr>
       ))}

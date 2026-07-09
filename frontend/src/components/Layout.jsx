@@ -43,7 +43,7 @@ const NAV = [
 ]
 
 const ROLE_LABELS = {
-  SUPER_ADMIN: 'Супер админ', ADMIN: 'Админ', FINANCE: 'Санхүү', OPERATOR: 'Оператор',
+  SUPER_ADMIN: 'Супер админ', ADMIN: 'Админ', FINANCE: 'Санхүү', HR: 'Хүний нөөц', OPERATOR: 'Оператор',
 }
 
 export default function Layout() {

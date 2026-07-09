@@ -8,10 +8,13 @@ const ROLES = {
   SUPER_ADMIN: 'Супер админ (бүх эрх)',
   ADMIN: 'Админ (тохиргоо)',
   FINANCE: 'Санхүү (тайлан, төлбөр)',
+  HR: 'Хүний нөөц (ажилтан)',
   OPERATOR: 'Оператор (касс, зогсоол)',
 }
 // UI-аас үүсгэж болох эрхүүд — SUPER_ADMIN-ыг оруулахгүй (зөвхөн DB-ээр)
-const CREATABLE_ROLES = { ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, OPERATOR: ROLES.OPERATOR }
+const CREATABLE_ROLES = {
+  ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, HR: ROLES.HR, OPERATOR: ROLES.OPERATOR,
+}
 
 export default function Users() {
   const toast = useToast()
@@ -57,8 +60,9 @@ export default function Users() {
       </div>
 
       <div className="card py-3 text-sm text-slate-400 grid gap-1">
-        <span><b className="text-slate-200">Админ</b> — зогсоол, тариф, төхөөрөмжийн тохиргоо + бүх үйл ажиллагаа</span>
-        <span><b className="text-slate-200">Санхүү</b> — тайлан, төлбөр, НӨАТ баримт харах</span>
+        <span><b className="text-slate-200">Админ</b> — зогсоол, төхөөрөмжийн тохиргоо + бүх үйл ажиллагаа</span>
+        <span><b className="text-slate-200">Санхүү</b> — тайлан, төлбөр, НӨАТ, хөнгөлөлт, тариф, хар жагсаалт</span>
+        <span><b className="text-slate-200">Хүний нөөц</b> — зөвхөн ажилтан нэмж/хасах, ажилласан өдрийн тайлан</span>
         <span><b className="text-slate-200">Оператор</b> — өөрийн хариуцах зогсоолын касс, шалгах, түүх</span>
       </div>
 

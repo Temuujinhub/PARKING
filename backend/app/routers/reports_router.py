@@ -612,7 +612,14 @@ def by_payment_excel(date_from: str | None = None, date_to: str | None = None, s
     from openpyxl import Workbook
     from openpyxl.styles import Font
     data = by_payment(date_from, date_to, site_id, db, user)
+    start, end = _range(date_from, date_to)
     wb = Workbook(); ws = wb.active; ws.title = "Төлбөрийн төрлөөр"
+    # Хамрах хугацаа (хэднээс хэд хүртэлх өдрүүд)
+    period = ws.cell(row=1, column=1,
+                     value=f"Хугацаа: {start:%Y-%m-%d} – {(end - timedelta(days=1)):%Y-%m-%d}  "
+                           f"({(end - start).days} хоног)")
+    period.font = Font(bold=True)
+    ws.append([])
     ws.append(["Төлбөрийн хэрэгсэл", "Гүйлгээ", "Дүн (₮)"])
     for c in ws[1]:
         c.font = Font(bold=True)
