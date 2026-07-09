@@ -169,7 +169,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         database = {"ok": False, "error": str(e)[:120]}
 
     # ── Харилцан холболт: камер/хаалт TCP амьд + last_seen ──
-    devices = db.query(Device).filter(Device.is_active.is_(True)).all()
+    devices = db.query(Device).filter(Device.status == "active").all()
     dev_targets = [(d, d.ip_address) for d in devices if d.ip_address]
     alive_map = {}
     if dev_targets:
