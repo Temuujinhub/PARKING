@@ -165,16 +165,41 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="exit", confidence=confidence, accepted=True, raw=raw))
 
+    # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
+    from .models import Compensation
+    debts = db.query(Compensation).filter(Compensation.plate_number == plate,
+                                          Compensation.status == "PENDING").all()
+    debt_amount = float(sum(c.amount for c in debts))
+    if debts:
+        await manager.broadcast(site_id, "DEBT_ALERT", {
+            "plate": plate, "debt_count": len(debts), "debt_amount": debt_amount})
+
     if not session:
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
         db.commit()
-        await manager.broadcast(site_id, "EXIT_NO_SESSION", {"plate": plate})
+        await manager.broadcast(site_id, "EXIT_NO_SESSION",
+                                {"plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount})
         return {"action": "no_session", "plate": plate}
 
     session.exit_device_id = device.id
     session.confidence_exit = confidence
 
     fee = session_fee_info(db, session, at=now)
+
+    # #7 3+ төлөгдөөгүй өртэй машин — автоматаар хаалт нээхгүй, оператор өрийг цуглуулна
+    if len(debts) >= 3:
+        session.status = "AWAITING_PAYMENT"
+        session.duration_minutes = fee["duration_minutes"]
+        session.base_fee, session.vat_amount, session.total_fee = (
+            fee["base_fee"], fee["vat_amount"], fee["total_fee"])
+        db.commit()
+        await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
+            "session_id": session.id, "plate": plate,
+            "entry_time": session.entry_time.isoformat(),
+            "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
+            "amount_due": amount_due(db, session, fee),
+            "has_debt": True, "debt_amount": debt_amount, "blocked": True})
+        return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
 
     # Төлчихсөн — grace хугацаа дотор гарч байна
     if session.status == "PAID":
