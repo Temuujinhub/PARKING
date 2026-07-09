@@ -133,7 +133,7 @@ export default function Pay() {
           <CheckCircle2 size={64} className="mx-auto text-accent" aria-hidden />
           <h2 className="text-2xl font-bold">Төлбөр төлөгдлөө!</h2>
           <p className="text-slate-300">
-            Хаалт нээгдэнэ — <b>сайн замаараа яваарай!</b>
+            Хаалт нээгдэнэ — <b>Аяан замдаа сайн яваарай!</b>
           </p>
           {receipt && (
             <div className="text-left bg-surface-muted/40 rounded-xl p-4 space-y-2">
