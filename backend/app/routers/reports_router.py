@@ -536,16 +536,48 @@ def monthly_excel(date_from: str | None = None, date_to: str | None = None, site
     """Сараар тайлангийн Excel (төлбөрийн хэрэгслээр)."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
+    start, end = _range(date_from, date_to)
     data = monthly_report(date_from, date_to, site_id, db, user)
-    wb = Workbook(); ws = wb.active; ws.title = "Сараар"
+    wb = Workbook()
+    # Sheet 1 — сарын нэгтгэл
+    ws = wb.active
+    ws.title = "Сарын нэгтгэл"
     ws.append(["Сар", "Гүйлгээ", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
     for c in ws[1]:
         c.font = Font(bold=True)
     for r in data["rows"]:
         ws.append([r["month"], r["count"], r["cash"], r["qpay"], r["pos"], r["total"]])
+    t = data["totals"]
+    ws.append(["НИЙТ", t["count"], t["cash"], t["qpay"], t["pos"], t["total"]])
+    for c in ws[ws.max_row]:
+        c.font = Font(bold=True)
     for col, w in zip("ABCDEF", (12, 10, 14, 14, 14, 16)):
         ws.column_dimensions[col].width = w
-    return _excel_response(wb, "saraar")
+    # Sheet 2 — доторх өдрийн задаргаа (нэгтгэлийн дэлгэрэнгүй)
+    ws2 = wb.create_sheet("Өдрөөр задаргаа")
+    ws2.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+    for c in ws2[1]:
+        c.font = Font(bold=True)
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < end:
+        nxt = day + timedelta(days=1)
+        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
+                                             ParkingSession.entry_time < nxt)
+        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+              .join(ParkingSession, Payment.session_id == ParkingSession.id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
+        if site_id:
+            sq = sq.filter(ParkingSession.site_id == site_id)
+            pq = pq.filter(ParkingSession.site_id == site_id)
+        prov = dict(pq.group_by(Payment.provider).all())
+        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        ws2.append([day.strftime("%Y-%m-%d"), sq.count(),
+                    sq.filter(ParkingSession.exit_time.isnot(None)).count(),
+                    cash, qpay_amt, pos, cash + qpay_amt + pos])
+        day = nxt
+    for col, w in zip("ABCDEFG", (12, 10, 10, 14, 14, 14, 16)):
+        ws2.column_dimensions[col].width = w
+    return _excel_response(wb, "sariin_negtgel")
 
 
 @router.get("/by-payment/excel")
