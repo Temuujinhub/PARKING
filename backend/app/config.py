@@ -28,8 +28,9 @@ class Settings(BaseSettings):
     qpay_ebarimt: bool = True
     # tax_type: "1"=НӨАТ тооцогдох, "2"=чөлөөлөгдөх, "3"=0% (2,3 үед VAT тооцохгүй)
     qpay_tax_type: str = "1"
-    # Нэхэмжлэх/баримтын мөрийн ангиллын код (зогсоолын үйлчилгээ) — GS1 ангиллаас
-    qpay_classification_code: str = "5221190"
+    # Нэхэмжлэх/баримтын мөрийн ангиллын код — GS1: 6743000 "Автомашины зогсоолын үйлчилгээ"
+    # (QPay баталгаажуулсан; 5221190 буруу → CLASSIFICATION_CODE_INVALID)
+    qpay_classification_code: str = "6743000"
     # Нэхэмжлэх хүлээн авагчийн салбарын код (QPay гэрээнд бүртгэсэн салбар)
     qpay_branch_code: str = "PARKING"
     # Баримтын district_code (үйл ажиллагаа явуулж буй байршил, 4 орон)
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     ebarimt_pos_no: str = "10000001"
     ebarimt_branch_no: str = "001"
     ebarimt_district_code: str = "3420"
-    ebarimt_classification_code: str = "5221190"  # Зогсоолын үйлчилгээний ангиллын код (бүртгэлээр тодруулна)
+    ebarimt_classification_code: str = "6743000"  # GS1: Автомашины зогсоолын үйлчилгээ
     ebarimt_mock: bool = True
 
     # НӨАТ
