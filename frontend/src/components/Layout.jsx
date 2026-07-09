@@ -1,5 +1,5 @@
 import {
-  Banknote, Car, ChevronDown, ClipboardList, DoorOpen, FileText, History, KeyRound,
+  Activity, Banknote, Car, ChevronDown, ClipboardList, DoorOpen, FileText, History, KeyRound,
   LayoutDashboard, LogOut, Moon, Percent, ReceiptText, ScrollText, Settings, ShieldAlert,
   Sun, Tag, Users, Wallet,
 } from 'lucide-react'
@@ -39,6 +39,7 @@ const NAV = [
       { to: '/barriers', label: 'Хаалтны удирдлага', icon: DoorOpen, module: 'barriers' },
       { to: '/users', label: 'Ажилтан', icon: Users, module: 'users' },
       { to: '/logs', label: 'Лог', icon: ScrollText, module: 'logs' },
+      { to: '/health', label: 'Системийн эрүүл мэнд', icon: Activity, module: 'health' },
     ],
   },
 ]

@@ -10,6 +10,7 @@ import Compensations from './pages/Compensations'
 import Dashboard from './pages/Dashboard'
 import Discounts from './pages/Discounts'
 import Drivers from './pages/Drivers'
+import Health from './pages/Health'
 import History from './pages/History'
 import Login from './pages/Login'
 import Logs from './pages/Logs'
@@ -64,6 +65,7 @@ export default function App() {
             <Route path="settlement" element={<Protected module="reports"><Settlement /></Protected>} />
             <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
+            <Route path="health" element={<Protected module="health"><Health /></Protected>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -39,11 +39,19 @@ def _login_shift(db: Session, user: User):
 
 @router.post("/login")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    from ..ratelimit import record_failure, reset, retry_after
+    ip = request.client.host if request.client else "?"
+    rl_key = f"login:{form.username}:{ip}"
+    wait = retry_after(rl_key)
+    if wait:
+        raise HTTPException(429, f"Хэт олон удаа буруу оролдлоо. {wait} секундын дараа дахин оролдоно уу.")
     user = db.query(User).filter(User.username == form.username).first()
     if not user or not verify_password(form.password, user.password_hash):
+        record_failure(rl_key)  # brute-force тоолуур
         raise HTTPException(401, "Нэвтрэх нэр эсвэл нууц үг буруу байна.")
     if not user.is_active:
         raise HTTPException(403, "Таны эрх идэвхгүй байна. Админд хандана уу.")
+    reset(rl_key)  # амжилттай нэвтэрлээ — тоолуур цэвэрлэнэ
     db.add(AuditLog(username=user.username, action="LOGIN", entity="user", entity_id=user.id,
                     ip_address=request.client.host if request.client else None))
     _login_shift(db, user)

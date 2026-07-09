@@ -7,4 +7,5 @@ pyjwt
 bcrypt
 httpx
 openpyxl
+psutil
 python-multipart

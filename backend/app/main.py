@@ -1,11 +1,27 @@
+import logging
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import settings
+from .config import DEFAULT_SECRET_KEY, settings
 from .database import Base, engine
+
+log = logging.getLogger("parking")
+
+# ── Production аюулгүй байдлын шалгуур (debug=False үед) ──
+# Кодын default secret-ээр токен гарын үсэг зурахаас сэргийлж startup-д зогсооно.
+if not settings.debug:
+    if settings.secret_key == DEFAULT_SECRET_KEY or len(settings.secret_key) < 32:
+        raise RuntimeError(
+            "PARKING_SECRET_KEY тохируулаагүй/сул байна. .env-д CSPRNG түлхүүр тавина уу: "
+            'python3 -c "import secrets;print(secrets.token_urlsafe(48))"')
+    if settings.cors_origins == "*":
+        log.warning("CORS origins '*' байна — production-д PARKING_CORS_ORIGINS-д домэйноо зааж өгнө үү.")
+    if settings.allow_simulate:
+        log.warning("PARKING_ALLOW_SIMULATE=true — /api/lpr/simulate нээлттэй. Production-д унтраана уу.")
 from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
-    lpr_router, payments_router, public_router, reports_router, sessions_router,
+    health_router, lpr_router, payments_router, public_router, reports_router, sessions_router,
 )
 from .ws import manager
 
@@ -14,7 +30,13 @@ Base.metadata.create_all(bind=engine)
 from .migrations import run_migrations  # noqa: E402
 run_migrations()
 
-app = FastAPI(title=settings.app_name, docs_url="/api/docs", openapi_url="/api/openapi.json")
+# API баримт (Swagger) зөвхөн debug үед нээлттэй — production-д API гадаргууг ил гаргахгүй
+app = FastAPI(
+    title=settings.app_name,
+    docs_url="/api/docs" if settings.debug else None,
+    redoc_url=None,
+    openapi_url="/api/openapi.json" if settings.debug else None,
+)
 
 # CORS: default "*" (nginx-ийн ард same-origin). Production-д PARKING_CORS_ORIGINS-оор домэйн зааж өгнө.
 # "*" үед credentials-ийг унтраана (стандарт шаардлага — wildcard + credentials зөрчилддөг).
@@ -28,7 +50,8 @@ app.add_middleware(
 )
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
-          public_router, barriers_router, cashier_router, reports_router, compensations_router):
+          public_router, barriers_router, cashier_router, reports_router, compensations_router,
+          health_router):
     app.include_router(r.router)
 
 

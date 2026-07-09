@@ -18,7 +18,7 @@ ROLE_PERMISSIONS = {
     "ADMIN": {
         "dashboard", "cashier", "check", "history", "discounts", "settings",
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
-        "compensations", "users",  # users — SUPER_ADMIN-аас бусад хэрэглэгч удирдана
+        "compensations", "users", "health",  # health — системийн эрүүл мэнд мониторинг
     },
     # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
     "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",
@@ -97,3 +97,13 @@ def operator_site(user: User) -> str | None:
     Endpoint-ууд энэ утгаар site_id-г албадан хязгаарлана — оператор өөр зогсоолын
     өгөгдөл харах/өөрчлөхөөс сэргийлнэ."""
     return user.site_id if user.role == "OPERATOR" and user.site_id else None
+
+
+def enforce_site(user: User, site_id: str | None):
+    """Оператор өөрийн зогсоолоос ӨӨР зогсоолын өгөгдлийг өөрчлөхийг хориглоно.
+    Мутаци хийдэг endpoint бүр (хаалт нээх, session засах, төлбөр авах) дуудна —
+    device_id/session_id таамаглаж өөр зогсоол руу IDOR хийхээс сэргийлнэ."""
+    osid = operator_site(user)
+    if osid and site_id and site_id != osid:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Энэ үйлдэл таны хариуцах зогсоолынх биш байна.")

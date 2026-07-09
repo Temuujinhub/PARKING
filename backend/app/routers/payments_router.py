@@ -5,14 +5,15 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy.orm import Session
+
+from ..auth import enforce_site, require, require_role
 
 
 def secrets_compare(a: str, b: str) -> bool:
     """Цагийн зөрүүнд суурилсан халдлагаас хамгаалсан харьцуулалт."""
     return hmac.compare_digest((a or "").encode(), (b or "").encode())
-from sqlalchemy.orm import Session
 
-from ..auth import require, require_role
 from ..config import settings
 from ..database import get_db
 from ..models import AuditLog, CashierShift, ParkingSession, Payment, User, VatReceipt
@@ -301,6 +302,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
     payment = _create_payment(db, session, "CASH", "CASH", cashier=user)
@@ -320,6 +322,7 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
 

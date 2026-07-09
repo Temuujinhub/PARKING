@@ -21,6 +21,16 @@ def _audit(db: Session, user: User, action: str, entity: str, entity_id: str, de
                     entity_id=str(entity_id), detail=detail or {}))
 
 
+# API/UI-аас үүсгэж болох дүрүүд (SUPER_ADMIN зөвхөн DB-ээр)
+CREATABLE_ROLES = ("ADMIN", "FINANCE", "HR", "OPERATOR")
+
+
+def _check_password(pw: str):
+    """Нууц үгийн доод шаардлага (M6) — admin/HR сул нууц үгтэй хэрэглэгч үүсгэхээс сэргийлнэ."""
+    if not pw or len(pw) < 8:
+        raise HTTPException(400, "Нууц үг дор хаяж 8 тэмдэгт байх ёстой.")
+
+
 # ─────────────────────────── Зогсоол ───────────────────────────
 @router.get("/sites")
 def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -335,8 +345,9 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
     if db.query(User).filter(User.username == body["username"]).first():
         raise HTTPException(400, "Нэвтрэх нэр давхардаж байна")
     # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
-    if body.get("role") not in ("ADMIN", "FINANCE", "HR", "OPERATOR"):
+    if body.get("role") not in CREATABLE_ROLES:
         raise HTTPException(400, "role буруу байна (SUPER_ADMIN-ыг зөвхөн DB-ээр үүсгэнэ)")
+    _check_password(body.get("password", ""))
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),
              role=body["role"], site_id=body.get("site_id"))
@@ -356,10 +367,13 @@ def update_user(user_id: str, body: dict, db: Session = Depends(get_db),
     # SUPER_ADMIN руу ахиулах, эсвэл SUPER_ADMIN-ыг API-аар засахыг хориглоно
     if body.get("role") == "SUPER_ADMIN" or u.role == "SUPER_ADMIN":
         raise HTTPException(403, "SUPER_ADMIN хэрэглэгчийг зөвхөн DB-ээр удирдана")
+    if "role" in body and body["role"] not in CREATABLE_ROLES:
+        raise HTTPException(400, "role буруу байна")
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])
     if body.get("password"):
+        _check_password(body["password"])
         u.password_hash = hash_password(body["password"])
     _audit(db, user, "UPDATE", "user", user_id, {k: v for k, v in body.items() if k != "password"})
     db.commit()

@@ -2,6 +2,7 @@
 
 Ажиллуулах: venv/bin/python -m app.seed
 """
+import secrets
 from datetime import datetime, timedelta
 
 from .auth import hash_password
@@ -50,19 +51,21 @@ def run():
         db.flush()
 
         # Төхөөрөмж (Dahua ANPR kit — орох/гарах камер + barrier)
+        # device_key нь ХАЛДЛАГААС хамгаалах нууц — таамаглаж болдоггүй санамсаргүй утга
+        # (өмнө нь "cam-entry-site01" гэх мэт таамаглаж болох утгатай байсан → аюулгүй биш).
         db.add_all([
             Device(site_id=site.id, name="Орох камер", device_type="camera",
                    model="ITC436-PW9H-IZ / IPMECS-2234-IZ", lane_no=1, lane_dir="entry",
-                   auto_open=True, device_key="cam-entry-site01"),
+                   auto_open=True, device_key=secrets.token_hex(16)),
             Device(site_id=site.id, name="Гарах камер", device_type="camera",
                    model="ITC436-PW9H-IZ / IPMECS-2234-IZ", lane_no=2, lane_dir="exit",
-                   auto_open=False, device_key="cam-exit-site01"),
+                   auto_open=False, device_key=secrets.token_hex(16)),
             Device(site_id=site.id, name="Орох хаалт", device_type="barrier",
                    model="DZBL-A / DZE-BL", lane_no=1, lane_dir="entry",
-                   device_key="bar-entry-site01"),
+                   device_key=secrets.token_hex(16)),
             Device(site_id=site.id, name="Гарах хаалт", device_type="barrier",
                    model="DZBL-A / DZE-BL", lane_no=2, lane_dir="exit",
-                   device_key="bar-exit-site01"),
+                   device_key=secrets.token_hex(16)),
         ])
 
         # Хөнгөлөлт

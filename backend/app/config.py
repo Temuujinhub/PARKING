@@ -1,10 +1,16 @@
 from pydantic_settings import BaseSettings
 
+# Кодод бичсэн default secret — production-д энэ утга үлдвэл startup зогсоно (main.py)
+DEFAULT_SECRET_KEY = "change-me-in-production-9f8a7b6c5d4e"
+
 
 class Settings(BaseSettings):
     # Ерөнхий
     app_name: str = "Easy Parking"
     debug: bool = False
+    # ⚠️ Production-д ЗААВАЛ .env-д PARKING_SECRET_KEY-г CSPRNG-ээр тавина
+    # (`python3 -c "import secrets;print(secrets.token_urlsafe(48))"`).
+    # Доорх default утга үлдвэл main.py startup дээр (debug=False үед) алдаа өгч зогсоно.
     secret_key: str = "change-me-in-production-9f8a7b6c5d4e"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 12  # 12 цаг
@@ -45,8 +51,9 @@ class Settings(BaseSettings):
     qpay_webhook_secret: str = ""
 
     # Аюулгүй байдал
-    # /api/lpr/simulate туршилтын endpoint-ийг production-д хаах (barrier бодит болмогц автоматаар хаагдана)
-    allow_simulate: bool = True
+    # /api/lpr/simulate туршилтын endpoint. Default=False (production аюулгүй).
+    # Хөгжүүлэлт/демо серверт л .env-д PARKING_ALLOW_SIMULATE=true гэж тодорхой асаана.
+    allow_simulate: bool = False
     # CORS: production-д домэйноо зааж өгнө (жишээ: "https://test.easy-parking.mn")
     cors_origins: str = "*"
 

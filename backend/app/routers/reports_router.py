@@ -2,7 +2,7 @@
 import io
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -756,7 +756,6 @@ def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str
     start, end = _range(date_from, date_to)
     site = db.get(ParkingSite, site_id)
     if not site:
-        from fastapi import HTTPException
         raise HTTPException(404, "Зогсоол олдсонгүй")
     rows = (db.query(ParkingSession)
             .filter(ParkingSession.site_id == site_id,
