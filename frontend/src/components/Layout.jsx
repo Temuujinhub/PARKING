@@ -19,6 +19,7 @@ const NAV = [
       { to: '/cashier', label: 'Касс', icon: Banknote, module: 'cashier' },
       { to: '/check', label: 'Шалгах', icon: Car, module: 'check' },
       { to: '/history', label: 'Түүх', icon: History, module: 'history' },
+      { to: '/compensations', label: 'Нөхөн төлбөр', icon: Banknote, module: 'compensations' },
     ],
   },
   {
@@ -28,7 +29,6 @@ const NAV = [
       { to: '/drivers', label: 'Бүртгэлтэй жолооч', icon: ClipboardList, module: 'drivers' },
       { to: '/reports', label: 'Тайлан', icon: FileText, module: 'reports' },
       { to: '/vat', label: 'Ибаримт', icon: ReceiptText, module: 'vat' },
-      { to: '/compensations', label: 'Нөхөн төлбөр', icon: Banknote, module: 'compensations' },
       { to: '/blacklist', label: 'Хар жагсаалт', icon: ShieldAlert, module: 'blacklist' },
     ],
   },

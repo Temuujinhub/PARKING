@@ -12,7 +12,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import operator_site, require
 from ..database import get_db
 from ..models import AuditLog, BlacklistEntry, Compensation, ParkingSession, User
 from ..serializers import to_dict
@@ -55,14 +55,19 @@ def create_compensation(db: Session, session: ParkingSession, reason: str, usern
 def list_compensations(status: str | None = None, plate: str | None = None,
                        limit: int = 200, db: Session = Depends(get_db),
                        user: User = Depends(require("compensations", "reports"))):
+    osid = operator_site(user)  # оператор зөвхөн өөрийн зогсоолын өр
     q = db.query(Compensation)
+    if osid:
+        q = q.filter(Compensation.site_id == osid)
     if status:
         q = q.filter(Compensation.status == status)
     if plate:
         q = q.filter(Compensation.plate_number.ilike(f"%{plate.upper().strip()}%"))
     rows = q.order_by(Compensation.created_at.desc()).limit(min(limit, 1000)).all()
-    total_pending = float(sum(
-        c.amount for c in db.query(Compensation).filter(Compensation.status == "PENDING").all()))
+    pq = db.query(Compensation).filter(Compensation.status == "PENDING")
+    if osid:
+        pq = pq.filter(Compensation.site_id == osid)
+    total_pending = float(sum(c.amount for c in pq.all()))
     return {"rows": [to_dict(c, extra={"site_name": c.site.name if c.site else None}) for c in rows],
             "total_pending": total_pending}
 
@@ -74,6 +79,9 @@ def pay_compensation(comp_id: str, db: Session = Depends(get_db),
     comp = db.get(Compensation, comp_id)
     if not comp or comp.status != "PENDING":
         raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
+    osid = operator_site(user)
+    if osid and comp.site_id != osid:
+        raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
     comp.status = "PAID"
     comp.paid_at = datetime.utcnow()
     comp.paid_by = user.username
