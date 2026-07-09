@@ -24,6 +24,57 @@ def _range(date_from: str | None, date_to: str | None):
     return start, end
 
 
+def _daily_rows(db, start, end, site_id):
+    """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
+    daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов."""
+    out = []
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < end:
+        nxt = day + timedelta(days=1)
+        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
+                                             ParkingSession.entry_time < nxt)
+        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+              .join(ParkingSession, Payment.session_id == ParkingSession.id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
+        if site_id:
+            sq = sq.filter(ParkingSession.site_id == site_id)
+            pq = pq.filter(ParkingSession.site_id == site_id)
+        prov = dict(pq.group_by(Payment.provider).all())
+        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        out.append({"date": day.strftime("%Y-%m-%d"), "entered": sq.count(),
+                    "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
+                    "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
+                    "paid_amount": cash + qpay_amt + pos})
+        day = nxt
+    totals = {k: sum(r[k] for r in out) for k in
+              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
+    return out, totals
+
+
+def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
+    """Нэг хуудастай Excel файл үүсгэх стандарт helper — header тод, мөрүүд, нийлбэр мөр,
+    баганы өргөн. 9 Excel endpoint-ийн давхардсан boilerplate-ийг орлоно."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = title[:31]
+    ws.append(list(headers))
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for r in rows:
+        ws.append(list(r))
+    if total_row is not None:
+        ws.append(list(total_row))
+        for c in ws[ws.max_row]:
+            c.font = Font(bold=True)
+    if widths:
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+    return _excel_response(wb, prefix)
+
+
 @router.get("/dashboard")
 def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
     """Нүүр хуудасны статистик."""
@@ -167,35 +218,17 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
 @router.get("/revenue/excel")
 def revenue_excel(date_from: str | None = None, date_to: str | None = None,
                   db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     data = revenue_report(date_from, date_to, None, db, user)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Орлогын тайлан"
-    headers = ["Зогсоол", "Орсон", "Гарсан", "Нийт минут",
-               "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"]
-    ws.append(headers)
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in data["rows"]:
-        ws.append([r["site_name"], r["entered"], r["exited"], r["total_minutes"],
-                   r["cash_amount"], r["qpay_amount"], r["pos_amount"],
-                   r["paid_amount"], r["unpaid_amount"]])
+    rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"], r["cash_amount"],
+             r["qpay_amount"], r["pos_amount"], r["paid_amount"], r["unpaid_amount"]]
+            for r in data["rows"]]
     t = data["totals"]
-    ws.append(["НИЙТ", t["entered"], t["exited"], t["total_minutes"],
-               t["cash_amount"], t["qpay_amount"], t["pos_amount"],
-               t["paid_amount"], t["unpaid_amount"]])
-    ws[f"A{ws.max_row}"].font = Font(bold=True)
-    for col, w in zip("ABCDEFGHI", (30, 10, 10, 12, 14, 14, 14, 18, 16)):
-        ws.column_dimensions[col].width = w
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    fname = f"revenue_{datetime.utcnow():%Y%m%d_%H%M}.xlsx"
-    return StreamingResponse(
-        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={fname}"})
+    total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"], t["cash_amount"],
+                 t["qpay_amount"], t["pos_amount"], t["paid_amount"], t["unpaid_amount"]]
+    return _xlsx("revenue", "Орлогын тайлан",
+                 ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
+                  "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"],
+                 rows, widths=(30, 10, 10, 12, 14, 14, 14, 18, 16), total_row=total_row)
 
 
 @router.get("/daily")
@@ -204,28 +237,7 @@ def daily_report(date_from: str | None = None, date_to: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Өдөр өдрөөр задарсан тайлан (easy-park UAT item 3)."""
     start, end = _range(date_from, date_to)
-    out = []
-    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    while day < end:
-        nxt = day + timedelta(days=1)
-        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
-                                             ParkingSession.entry_time < nxt)
-        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-              .join(ParkingSession, Payment.session_id == ParkingSession.id)
-              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
-        if site_id:
-            sq = sq.filter(ParkingSession.site_id == site_id)
-            pq = pq.filter(ParkingSession.site_id == site_id)
-        prov = dict(pq.group_by(Payment.provider).all())
-        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        out.append({"date": day.strftime("%Y-%m-%d"),
-                    "entered": sq.count(),
-                    "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
-                    "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
-                    "paid_amount": cash + qpay_amt + pos})
-        day = nxt
-    totals = {k: sum(r[k] for r in out) for k in
-              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
+    out, totals = _daily_rows(db, start, end, site_id)
     return {"rows": out, "totals": totals}
 
 
@@ -609,41 +621,15 @@ def daily_excel(date_from: str | None = None, date_to: str | None = None,
                 site_id: str | None = None,
                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Өдөр өдрөөр задарсан тайлангийн Excel."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Өдрийн тайлан"
-    ws.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    tot = {"entered": 0, "exited": 0, "cash": 0.0, "qpay": 0.0, "pos": 0.0}
-    while day < end:
-        nxt = day + timedelta(days=1)
-        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
-                                             ParkingSession.entry_time < nxt)
-        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-              .join(ParkingSession, Payment.session_id == ParkingSession.id)
-              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
-        if site_id:
-            sq = sq.filter(ParkingSession.site_id == site_id)
-            pq = pq.filter(ParkingSession.site_id == site_id)
-        prov = dict(pq.group_by(Payment.provider).all())
-        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        entered, exited = sq.count(), sq.filter(ParkingSession.exit_time.isnot(None)).count()
-        ws.append([day.strftime("%Y-%m-%d"), entered, exited, cash, qpay_amt, pos, cash + qpay_amt + pos])
-        tot["entered"] += entered; tot["exited"] += exited
-        tot["cash"] += cash; tot["qpay"] += qpay_amt; tot["pos"] += pos
-        day = nxt
-    ws.append(["НИЙТ", tot["entered"], tot["exited"], tot["cash"], tot["qpay"], tot["pos"],
-               tot["cash"] + tot["qpay"] + tot["pos"]])
-    for c in ws[ws.max_row]:
-        c.font = Font(bold=True)
-    for col, w in zip("ABCDEFG", (14, 10, 10, 14, 14, 14, 16)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "daily")
+    out, tot = _daily_rows(db, start, end, site_id)
+    rows = [[r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
+             r["pos_amount"], r["paid_amount"]] for r in out]
+    total_row = ["НИЙТ", tot["entered"], tot["exited"], tot["cash_amount"], tot["qpay_amount"],
+                 tot["pos_amount"], tot["paid_amount"]]
+    return _xlsx("daily", "Өдрийн тайлан",
+                 ["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"],
+                 rows, widths=(14, 10, 10, 14, 14, 14, 16), total_row=total_row)
 
 
 @router.get("/by-shift/excel")
