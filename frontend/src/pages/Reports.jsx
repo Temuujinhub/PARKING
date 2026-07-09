@@ -18,14 +18,14 @@ export default function Reports() {
   const [txns, setTxns] = useState(null)
   const [byPay, setByPay] = useState(null)
   const [sites, setSites] = useState([])
-  // Бичилт таб-ын шүүлтүүд
-  const [f, setF] = useState({ site_id: '', provider: '', car_type: '', status: '' })
+  // Бичилт таб-ын шүүлтүүд (date_field: entry=орсноор, paid=төлсөнөөр)
+  const [f, setF] = useState({ site_id: '', provider: '', car_type: '', status: '', date_field: 'entry' })
 
   useEffect(() => { api('/api/admin/sites').then(setSites).catch(() => {}) }, [])
 
   const txnQs = () => {
     const p = new URLSearchParams({ date_from: from, date_to: to })
-    for (const k of ['site_id', 'provider', 'car_type', 'status']) if (f[k]) p.set(k, f[k])
+    for (const k of ['site_id', 'provider', 'car_type', 'status', 'date_field']) if (f[k]) p.set(k, f[k])
     return p.toString()
   }
 
@@ -303,8 +303,14 @@ export default function Reports() {
         </div>
       )}
 
-      {/* Төлбөрийн төрлөөр — хэрэгсэл ба машины төрлөөр */}
+      {/* Төлбөрийн төрлөөр — хэрэгсэл ба машины төрлөөр (бүгд төлсөн гүйлгээгээр, тэнцвэржинэ) */}
       {tab === 'bypayment' && byPay && (
+        <>
+        <div className="card py-3 flex flex-wrap gap-6 text-sm">
+          <span className="text-slate-400">Нийт орлого (төлсөн): <b className="font-mono text-accent">{fmt(byPay.total)}₮</b></span>
+          <span className="text-slate-500 text-xs">Хэрэгслээр ба машины төрлөөр 2 задаргаа энэ дүнд тэнцвэржинэ (бүгд ТӨЛСӨН гүйлгээгээр).</span>
+          <span className="text-slate-400 ml-auto">Үнэгүй гарсан: <b className="font-mono">{byPay.free_count}</b> <span className="text-xs text-slate-500">(орлогогүй)</span></span>
+        </div>
         <div className="grid lg:grid-cols-2 gap-6">
           <div className="card">
             <h2 className="font-semibold mb-3">Төлбөрийн хэрэгслээр</h2>
@@ -319,11 +325,11 @@ export default function Reports() {
             </Table>
           </div>
           <div className="card">
-            <h2 className="font-semibold mb-3">Машины төрлөөр (гэрээт / хөнгөлөлт / энгийн / үнэгүй)</h2>
-            <Table headers={['Төрөл', 'Тоо', 'Дүн (₮)']} empty={byPay.by_car.length === 0}>
+            <h2 className="font-semibold mb-3">Машины төрлөөр (төлсөн гүйлгээ)</h2>
+            <Table headers={['Төрөл', 'Гүйлгээ', 'Дүн (₮)']} empty={byPay.by_car.length === 0}>
               {byPay.by_car.map((r) => (
                 <tr key={r.key}>
-                  <td className={`td font-medium ${r.key === 'Гэрээт' ? 'text-cyan-400' : r.key === 'Хөнгөлөлттэй' ? 'text-amber-400' : r.key === 'Үнэгүй' ? 'text-slate-400' : ''}`}>{r.key}</td>
+                  <td className={`td font-medium ${r.key === 'Гэрээт' ? 'text-cyan-400' : r.key === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>{r.key}</td>
                   <td className="td font-mono">{r.count}</td>
                   <td className="td font-mono">{fmt(r.amount)}₮</td>
                 </tr>
@@ -331,12 +337,17 @@ export default function Reports() {
             </Table>
           </div>
         </div>
+        </>
       )}
 
       {/* Бичилт — дэлгэрэнгүй, олон шүүлттэй, шүүлтээр Excel татна */}
       {tab === 'transactions' && (
         <>
           <div className="flex flex-wrap gap-2 items-center">
+            <select className="input w-auto" value={f.date_field} onChange={(e) => setF({ ...f, date_field: e.target.value })} aria-label="Огнооны төрөл" title="Огноог аль үйл явдлаар шүүх">
+              <option value="entry">Орсон огноогоор</option>
+              <option value="paid">Төлсөн огноогоор (орлого)</option>
+            </select>
             <select className="input w-auto" value={f.site_id} onChange={(e) => setF({ ...f, site_id: e.target.value })} aria-label="Зогсоол">
               <option value="">Бүх зогсоол</option>
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}

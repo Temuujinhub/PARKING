@@ -392,10 +392,11 @@ def transactions_excel(date_from: str | None = None, date_to: str | None = None,
 @router.get("/by-payment")
 def by_payment(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Төлбөрийн төрлөөр — хэрэгсэл (бэлэн/QPay/карт) ба машины төрөл (гэрээт/хөнгөлөлт/энгийн/үнэгүй)
-    хосоор задарсан дүн."""
+    """Төлбөрийн төрлөөр — бүгд ТӨЛӨГДСӨН гүйлгээгээр (paid_at), тул хэрэгслээр ба
+    машины төрлөөр 2 задаргаа ИЖИЛ нийлбэрт нийлнэ (тэнцвэржинэ).
+    Үнэгүй гарсан нь орлогогүй тул тусад нь тоогоор (info) харуулна."""
     start, end = _range(date_from, date_to)
-    # Хэрэгслээр
+    # Хэрэгслээр — төлсөн гүйлгээ
     pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0), func.count())
           .join(ParkingSession, Payment.session_id == ParkingSession.id)
           .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
@@ -403,21 +404,25 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
         pq = pq.filter(ParkingSession.site_id == site_id)
     by_method = [{"key": PROVIDER_MN.get(p, p), "amount": float(a), "count": int(c)}
                  for p, a, c in pq.group_by(Payment.provider).all()]
-    # Машины төрлөөр (session-оор)
-    sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
-                                         ParkingSession.entry_time < end)
+    # Машины төрлөөр — ИЖИЛ төлсөн гүйлгээг session-ий төрлөөр бүлэглэнэ (тэнцвэржинэ)
+    payq = (db.query(Payment).join(ParkingSession, Payment.session_id == ParkingSession.id)
+            .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
     if site_id:
-        sq = sq.filter(ParkingSession.site_id == site_id)
-    buckets = {"Гэрээт": [0, 0.0], "Хөнгөлөлттэй": [0, 0.0], "Энгийн": [0, 0.0], "Үнэгүй": [0, 0.0]}
-    for s in sq.all():
-        if s.status == "FREE":
-            k = "Үнэгүй"
-        else:
-            k = _car_type(s)
-        buckets[k][0] += 1
-        buckets[k][1] += float(s.total_fee or 0)
+        payq = payq.filter(ParkingSession.site_id == site_id)
+    buckets = {"Гэрээт": [0, 0.0], "Хөнгөлөлттэй": [0, 0.0], "Энгийн": [0, 0.0]}
+    for p in payq.all():
+        buckets[_car_type(p.session)][0] += 1
+        buckets[_car_type(p.session)][1] += float(p.amount)
     by_car = [{"key": k, "count": v[0], "amount": v[1]} for k, v in buckets.items()]
-    return {"by_method": by_method, "by_car": by_car}
+    # Үнэгүй гарсан машин (орлогогүй — тусад нь тоо) — гарсан огноогоор
+    free_q = db.query(ParkingSession).filter(ParkingSession.status == "FREE",
+                                             ParkingSession.exit_time >= start,
+                                             ParkingSession.exit_time < end)
+    if site_id:
+        free_q = free_q.filter(ParkingSession.site_id == site_id)
+    total = sum(m["amount"] for m in by_method)
+    return {"by_method": by_method, "by_car": by_car,
+            "total": total, "free_count": free_q.count()}
 
 
 def _shift_rows(db, start, end, site_id):
