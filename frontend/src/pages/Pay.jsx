@@ -102,6 +102,17 @@ export default function Pay() {
     } catch {}
   }
 
+  // Гар шалгалт — жолооч төлөөд "Төлбөр шалгах" дарахад шууд шалгана (polling-ийг хүлээхгүй)
+  const checkNow = async () => {
+    if (!payment) return
+    setBusy(true); setError('')
+    try {
+      const st = await publicApi(`/api/payments/qpay/check/${payment.payment_id}`, { method: 'POST' })
+      if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(payment.payment_id) }
+      else setError('Төлбөр хараахан баталгаажаагүй байна. Төлсөн бол хэдэн секундын дараа дахин дарна уу.')
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+
   // Туршилтын горим: QPay-г алгасаж төлөгдсөн болгоно (зөвхөн mock үед харагдана)
   const mockPay = async () => {
     setBusy(true)
@@ -197,6 +208,11 @@ export default function Pay() {
           <div className="flex items-center justify-center gap-2 text-sm text-slate-400">
             <Loader2 size={15} className="animate-spin" aria-hidden /> Төлбөр хүлээж байна…
           </div>
+          {/* Гар шалгалт — авто-шалгалт ажиллаж байгаа ч төлсний дараа шууд баталгаажуулах товч */}
+          <button onClick={checkNow} disabled={busy}
+            className="btn w-full justify-center bg-surface-muted/60 border border-surface-border hover:border-accent">
+            {busy ? <Loader2 className="animate-spin" size={16} /> : <CheckCircle2 size={16} />} Төлбөр төлсөн — шалгах
+          </button>
           {payment.mock && (
             <div className="space-y-2">
               <div className="text-xs text-amber-400">Туршилтын горим (QPay холбогдоогүй)</div>

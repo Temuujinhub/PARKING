@@ -41,18 +41,33 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар
     use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
                    and bool(payment.provider_payment_id))
-    if use_qpay_eb:
-        receipt_raw = await qpay.create_ebarimt(
-            payment.provider_payment_id, receiver_type,
-            # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
-            receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
-        )
-    else:
-        receipt_raw = await ebarimt.create_receipt(
-            float(payment.amount), float(payment.vat_amount),
-            "CASH" if payment.payment_method == "CASH" else "CARD",
-            customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
-        )
+    # ВАЖНО: e-Barimt амжилтгүй болсон ч төлбөрийг PAID болгож ХААЛТЫГ НЭЭНЭ —
+    # жолооч төлсөн атлаа гацахгүй. Баримтыг FAILED болгож дараа дахин үүсгэж болно.
+    receipt_raw, ebarimt_error = {}, None
+    try:
+        if use_qpay_eb:
+            receipt_raw = await qpay.create_ebarimt(
+                payment.provider_payment_id, receiver_type,
+                # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
+                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+            )
+        else:
+            receipt_raw = await ebarimt.create_receipt(
+                float(payment.amount), float(payment.vat_amount),
+                "CASH" if payment.payment_method == "CASH" else "CARD",
+                customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
+            )
+    except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
+        import httpx as _httpx
+        if isinstance(e, _httpx.HTTPStatusError):
+            try:
+                ebarimt_error = e.response.json().get("message") or e.response.text[:200]
+            except Exception:
+                ebarimt_error = e.response.text[:200]
+        else:
+            ebarimt_error = str(e)[:200]
+        print(f"[ebarimt FAILED] payment={payment.id}: {ebarimt_error}")
+
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
     ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
     db.add(VatReceipt(
@@ -62,7 +77,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
         amount=payment.amount, vat_amount=payment.vat_amount,
         customer_tin=payment.customer_tin,
+        # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа
         status="SENT" if receipt_raw.get("billId") else "FAILED",
+        receipt_url=ebarimt_error,
     ))
     session = db.get(ParkingSession, payment.session_id)
     await mark_paid_and_open(db, session)
