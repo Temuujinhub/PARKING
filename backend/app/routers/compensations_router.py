@@ -64,18 +64,46 @@ def list_compensations(status: str | None = None, plate: str | None = None,
     if plate:
         q = q.filter(Compensation.plate_number.ilike(f"%{plate.upper().strip()}%"))
     rows = q.order_by(Compensation.created_at.desc()).limit(min(limit, 1000)).all()
+    now = datetime.utcnow()
+
+    def _age(c):
+        return (now - c.created_at).days
+
+    def _bucket(days):
+        return "0-7" if days <= 7 else "8-30" if days <= 30 else "31-90" if days <= 90 else "90+"
+
+    out_rows = []
+    for c in rows:
+        d = _age(c)
+        out_rows.append(to_dict(c, extra={"site_name": c.site.name if c.site else None,
+                                          "days_old": d, "age_bucket": _bucket(d),
+                                          "pending_count": pending_count(db, c.plate_number)}))
+    # Нийлбэрүүд: төлөгдөөгүй нийт + настжуулалт (aging) + цугларсан
     pq = db.query(Compensation).filter(Compensation.status == "PENDING")
+    paidq = db.query(Compensation).filter(Compensation.status == "PAID")
     if osid:
         pq = pq.filter(Compensation.site_id == osid)
-    total_pending = float(sum(c.amount for c in pq.all()))
-    return {"rows": [to_dict(c, extra={"site_name": c.site.name if c.site else None}) for c in rows],
-            "total_pending": total_pending}
+        paidq = paidq.filter(Compensation.site_id == osid)
+    pending = pq.all()
+    aging = {"0-7": 0.0, "8-30": 0.0, "31-90": 0.0, "90+": 0.0}
+    for c in pending:
+        aging[_bucket(_age(c))] += float(c.amount)
+    return {"rows": out_rows,
+            "total_pending": float(sum(c.amount for c in pending)),
+            "pending_count": len(pending),
+            "total_collected": float(sum(c.amount for c in paidq.all())),
+            "aging": aging}
 
 
 @router.post("/{comp_id}/pay")
-def pay_compensation(comp_id: str, db: Session = Depends(get_db),
-                     user: User = Depends(require("compensations"))):
-    """Нөхөн төлбөрийг бэлнээр төлүүлж хаана."""
+async def pay_compensation(comp_id: str, body: dict | None = None, db: Session = Depends(get_db),
+                           user: User = Depends(require("compensations"))):
+    """Нөхөн төлбөрийг бэлэн/картаар төлүүлж хаах + e-Barimt үүсгэнэ.
+    body: {method: CASH|CARD, customer_tin?}."""
+    from ..config import settings
+    from ..services import ebarimt
+    body = body or {}
+    method = body.get("method", "CASH")
     comp = db.get(Compensation, comp_id)
     if not comp or comp.status != "PENDING":
         raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
@@ -85,10 +113,24 @@ def pay_compensation(comp_id: str, db: Session = Depends(get_db),
     comp.status = "PAID"
     comp.paid_at = datetime.utcnow()
     comp.paid_by = user.username
+    # e-Barimt (амжилтгүй байсан ч төлбөрийг хаана) — локал PosAPI, НӨАТ үнэд багтсан
+    amount = float(comp.amount)
+    vat = round(amount * settings.vat_rate / (1 + settings.vat_rate))
+    tin = str(body.get("customer_tin") or "").strip()[:20] or None
+    receipt = {}
+    try:
+        receipt = await ebarimt.create_receipt(amount, vat, "CASH" if method == "CASH" else "CARD",
+                                                customer_tin=tin)
+        ebarimt.cache_qr(comp.id, receipt.get("qrData"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[compensation ebarimt FAILED] {comp_id}: {e}")
     db.add(AuditLog(username=user.username, action="COMPENSATION_PAID", entity="compensation",
-                    entity_id=comp_id, detail={"plate": comp.plate_number, "amount": float(comp.amount)}))
+                    entity_id=comp_id,
+                    detail={"plate": comp.plate_number, "amount": amount, "method": method}))
     db.commit()
-    return to_dict(comp)
+    return {**to_dict(comp), "method": method, "ebarimt_id": receipt.get("billId"),
+            "lottery_code": receipt.get("lottery"),
+            "qr_data": ebarimt.get_cached_qr(comp.id)}
 
 
 @router.post("/{comp_id}/cancel")

@@ -58,7 +58,12 @@ export default function Cashier() {
     loadExits(siteId)
     api(`/api/admin/devices?site_id=${siteId}`).then((d) =>
       setBarriers(d.filter((x) => x.device_type === 'barrier' && x.status === 'active')))
-    const close = wsConnect(siteId, () => loadExits(siteId))
+    const close = wsConnect(siteId, (ev) => {
+      loadExits(siteId)
+      if (ev?.type === 'DEBT_ALERT') {
+        toast(`⚠ ${ev.data?.plate} — ${fmt(ev.data?.debt_amount || 0)}₮ өртэй машин гарах хаалтанд ирлээ!`, 'error')
+      }
+    })
     return close
   }, [siteId, loadExits])
 
