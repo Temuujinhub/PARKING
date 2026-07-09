@@ -35,6 +35,12 @@ export default function Dashboard() {
   const maxHour = Math.max(...hourly.map((h) => Math.max(h.entries, h.exits)), 1)
   const topSites = [...(stats.sites || [])].sort((a, b) => b.today_revenue - a.today_revenue)
   const maxSiteRev = Math.max(...topSites.map((s) => s.today_revenue), 1)
+  // Зогсоол бүрийн байдал — кассчин + камеруудын онлайн статус
+  const siteStatus = (stats.sites || []).map((site) => ({
+    ...site,
+    cashier: (stats.active_shifts || []).find((s) => s.site_name === site.name)?.cashier || null,
+    cams: (stats.device_status || []).filter((d) => d.site_name === site.name && d.device_type === 'camera'),
+  }))
   const devConnLabel = stats.devices_total
     ? (stats.devices_online === stats.devices_total ? 'Бүгд холбогдсон'
       : stats.devices_online === 0 ? 'Холболт алга' : 'Хэсэгчилсэн')
@@ -54,49 +60,23 @@ export default function Dashboard() {
         <StatCard icon={LogIn} label="Өнөөдөр орсон" value={stats.today_entries} color="text-blue-400"
           sub={`Гарсан: ${stats.today_exits}`} />
         <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
-        {/* Систем — зогсоол/камер/хаалт/холболт нэг картад */}
+        {/* Систем — зогсоол/камер/холболт (хаалт нь камертай хамт тул тусад нь харуулахгүй) */}
         <div className="card py-3 col-span-2 lg:col-span-1">
           <div className="text-xs text-slate-400 mb-2">Систем / төхөөрөмж</div>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          <div className="space-y-2">
             <div className="flex items-center gap-1.5"><Building2 size={15} className="text-slate-400" />
               <span className="font-mono font-bold">{stats.sites_total ?? 0}</span><span className="text-[11px] text-slate-500">зогсоол</span></div>
             <div className="flex items-center gap-1.5"><Camera size={15} className="text-blue-400" />
               <span className="font-mono font-bold">{stats.cameras_total ?? 0}</span><span className="text-[11px] text-slate-500">камер</span></div>
-            <div className="flex items-center gap-1.5"><DoorOpen size={15} className="text-slate-400" />
-              <span className="font-mono font-bold">{stats.barriers_total ?? 0}</span><span className="text-[11px] text-slate-500">хаалт</span></div>
             <div className="flex items-center gap-1.5"><Wifi size={15} className={devConnColor} />
               <span className={`font-mono font-bold ${devConnColor}`}>{stats.devices_online ?? 0}/{stats.devices_total ?? 0}</span>
-              <span className="text-[11px] text-slate-500">холбол</span></div>
+              <span className="text-[11px] text-slate-500">холболт</span></div>
           </div>
-          <div className={`text-[11px] mt-1.5 ${devConnColor}`}>{devConnLabel}</div>
         </div>
       </div>
 
-      {/* Ажиллаж буй ээлж — хэн аль зогсоолд POS/системд нэвтэрч ажиллаж байгаа */}
-      <div className="card">
-        <h2 className="font-semibold mb-3 flex items-center gap-2"><UserCheck size={16} className="text-accent" /> Одоо ажиллаж буй ажилтан / ээлж</h2>
-        {(!stats.active_shifts || stats.active_shifts.length === 0) ? (
-          <div className="text-sm text-slate-500 py-2">Одоогоор нээлттэй ээлж алга (кассчин нэвтэрмэгц энд гарна)</div>
-        ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {stats.active_shifts.map((s, i) => (
-              <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-accent/30 bg-accent/5">
-                <span className="w-8 h-8 rounded-full bg-accent/20 text-accent flex items-center justify-center font-bold text-sm">
-                  {(s.cashier || '?')[0]}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate">{s.cashier}</div>
-                  <div className="text-xs text-slate-400 truncate">{s.site_name} · {fmtDate(s.opened_at).split(' ')[1] || ''}-с</div>
-                </div>
-                <div className="text-right">
-                  <div className="font-mono text-sm text-accent font-semibold">{fmt(s.revenue)}₮</div>
-                  <div className="text-[10px] text-slate-500">ээлжийн орлого</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <div className="grid xl:grid-cols-[1fr_20rem] gap-6 items-start">
+        <div className="space-y-6 min-w-0">{/* ── Үндсэн багана ── */}
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* 7 хоногийн орлого — bar график (max-д нормчилсон) */}
@@ -228,6 +208,52 @@ export default function Dashboard() {
             )
           })}
         </div>
+      </div>
+        </div>{/* ── Үндсэн багана төгсгөл ── */}
+
+        {/* ── Баруун талын босоо панель: зогсоол бүрийн байдал ── */}
+        <aside className="space-y-3">
+          <h2 className="font-semibold flex items-center gap-2">
+            <UserCheck size={16} className="text-accent" /> Зогсоол бүрийн байдал
+          </h2>
+          <div className="space-y-3 xl:max-h-[calc(100vh-9rem)] xl:overflow-y-auto pr-1">
+            {siteStatus.length === 0 && <div className="card text-sm text-slate-500 py-4 text-center">Зогсоол бүртгэгдээгүй</div>}
+            {siteStatus.map((site) => {
+              const camsOn = site.cams.filter((d) => d.online).length
+              return (
+                <div key={site.id} className="card p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm truncate">{site.name}</span>
+                    <span className="text-[11px] text-slate-500 font-mono">{site.occupied}/{site.capacity}</span>
+                  </div>
+                  {/* Кассчин (сүүлд нэвтэрч ажиллаж буй оператор) */}
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${site.cashier ? 'bg-accent' : 'bg-slate-600'}`} />
+                    {site.cashier
+                      ? <span className="text-slate-200 truncate">{site.cashier}</span>
+                      : <span className="text-slate-500">Ажилтан нэвтрээгүй</span>}
+                  </div>
+                  {/* Камеруудын онлайн/офлайн цэгэн гэрэл */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {site.cams.length === 0 && <span className="text-[11px] text-slate-600">Камер бүртгэгдээгүй</span>}
+                    {site.cams.map((d) => (
+                      <span key={d.id} title={`${d.name}: ${d.online ? 'онлайн' : 'офлайн'}`}
+                        className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-surface-muted/50 border border-surface-border/50">
+                        <span className={`w-2 h-2 rounded-full ${d.online ? 'bg-accent' : 'bg-red-500'}`} />
+                        {d.name}
+                      </span>
+                    ))}
+                  </div>
+                  {site.cams.length > 0 && (
+                    <div className={`text-[10px] ${camsOn === site.cams.length ? 'text-accent' : camsOn === 0 ? 'text-red-400' : 'text-amber-400'}`}>
+                      {camsOn}/{site.cams.length} камер онлайн
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </aside>
       </div>
     </div>
   )
