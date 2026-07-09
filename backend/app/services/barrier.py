@@ -108,16 +108,26 @@ class DahuaRpc:
 
 def _resolve_ip(db: Session, device: Device) -> str | None:
     """Команд илгээх IP. Бүх-нэг-дор ITC камер хаалтаа өөрийн реле (NO1/NO2)-ээр
-    нээдэг тул хаалт төхөөрөмжид IP байхгүй бол тухайн эгнээний (эсвэл зогсоолын)
-    камерын IP-г ашиглана."""
+    нээдэг тул хаалт төхөөрөмжид IP байхгүй бол тухайн эгнээний камерын IP-г ашиглана.
+
+    ЧУХАЛ: ижил эгнээний камер олдоогүй үед БУСАД эгнээний камер руу шилжихийг
+    хориглоно (өмнө нь тэгдэг байсан) — эс бол орох хаалтын команд гарах камер руу
+    очиж БУРУУ хаалт нээнэ. Олон камертай зогсоолд ижил эгнээнийх заавал байх ёстой."""
     if device.ip_address:
         return device.ip_address
-    cam_q = db.query(Device).filter(
+    cams = db.query(Device).filter(
         Device.site_id == device.site_id, Device.device_type == "camera",
-        Device.status == "active", Device.ip_address.isnot(None), Device.ip_address != "",
-    )
-    cam = cam_q.filter(Device.lane_no == device.lane_no).first() or cam_q.first()
-    return cam.ip_address if cam else None
+        Device.ip_address.isnot(None), Device.ip_address != "",
+    ).all()
+    # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв
+    same_lane = [c for c in cams if c.lane_no == device.lane_no]
+    if same_lane:
+        return same_lane[0].ip_address
+    # 2) Зогсоолд ЯГ НЭГ камертай (нэг all-in-one төхөөрөмж орох/гарах хоёуланд) бол түүнийг
+    if len(cams) == 1:
+        return cams[0].ip_address
+    # 3) Олон камертай ч энэ эгнээнийх алга — буруу хаалт нээхээс сэргийлж унана
+    return None
 
 
 async def _execute(db: Session, device: Device, command: str, session_id: str | None,
@@ -141,8 +151,13 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     if not ip:
         # IP тодорхойгүй бол команд явуулах газаргүй — SUCCESS гэж хуурамчаар
         # тэмдэглэвэл barrier_opened=true болж оператор андуурна.
+        lane_ru = "орох" if device.lane_dir == "entry" else "гарах"
         cmd.status = "FAILED"
-        cmd.response_text = "IP тодорхойлогдсонгүй (хаалт/камерын IP бүртгэнэ үү)"
+        cmd.response_text = (
+            f"IP олдсонгүй: энэ хаалт ({device.name}) өөрийн IP-гүй бөгөөд ижил "
+            f"эгнээний ({lane_ru}) камерын IP ч бүртгэлгүй байна. Тохиргоо → Төхөөрөмж "
+            f"дээр {lane_ru} камерын IP-г бүртгэнэ үү (эсвэл хаалтад шууд IP өгнө үү)."
+        )
         cmd.executed_at = datetime.utcnow()
         db.commit()
         return cmd

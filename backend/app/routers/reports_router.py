@@ -60,6 +60,21 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
             Payment.paid_at < day + timedelta(days=1)).scalar())
         week.append({"date": day.strftime("%m-%d"), "revenue": rev})
 
+    # Өнөөдрийн цагийн ачаалал — цаг тус бүрийн орц/гарц (0–23)
+    from sqlalchemy import Integer, cast
+    hourly = {h: {"hour": h, "entries": 0, "exits": 0} for h in range(24)}
+    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.entry_time), Integer),
+                             func.count()).filter(ParkingSession.entry_time >= today)
+                    .group_by(func.extract("hour", ParkingSession.entry_time)).all()):
+        if hr is not None:
+            hourly[int(hr)]["entries"] = int(cnt)
+    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.exit_time), Integer),
+                             func.count()).filter(ParkingSession.exit_time >= today)
+                    .group_by(func.extract("hour", ParkingSession.exit_time)).all()):
+        if hr is not None:
+            hourly[int(hr)]["exits"] = int(cnt)
+    hourly_load = [hourly[h] for h in range(24)]
+
     # Төхөөрөмжийн холболтын статус (сүүлийн 3 минутад холбогдсон = онлайн)
     from ..models import Device
     online_cutoff = datetime.utcnow() - timedelta(minutes=3)
@@ -76,10 +91,15 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
             "online": online, "last_seen": d.last_seen.isoformat() if d.last_seen else None,
         })
 
+    # Төхөөрөмжийн төрлөөр (карт дээр том тоогоор харуулна)
+    cameras_total = sum(1 for d in device_status if d["device_type"] == "camera")
+    barriers_total = sum(1 for d in device_status if d["device_type"] == "barrier")
     return {"open_sessions": open_count, "awaiting_payment": awaiting,
             "today_entries": today_entries, "today_exits": today_exits,
             "today_revenue": today_revenue, "total_capacity": int(total_capacity or 0),
-            "sites": sites, "week_revenue": week,
+            "sites": sites, "week_revenue": week, "hourly_load": hourly_load,
+            "sites_total": len(sites),
+            "cameras_total": cameras_total, "barriers_total": barriers_total,
             "devices_online": online_n, "devices_total": len(devices),
             "device_status": device_status}
 

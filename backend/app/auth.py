@@ -20,7 +20,8 @@ ROLE_PERMISSIONS = {
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
     },
     "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs"},
-    "OPERATOR": {"dashboard", "cashier", "check", "history", "barriers", "drivers"},
+    # Хяналтын самбар (dashboard) зөвхөн ADMIN/FINANCE-д — OPERATOR-т өгөхгүй
+    "OPERATOR": {"cashier", "check", "history", "barriers", "drivers"},
 }
 
 
