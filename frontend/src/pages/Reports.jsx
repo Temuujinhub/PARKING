@@ -14,7 +14,7 @@ export default function Reports() {
   const [revenue, setRevenue] = useState(null)
   const [daily, setDaily] = useState(null)
   const [monthly, setMonthly] = useState(null)
-  const [byShift, setByShift] = useState(null)
+  const [shifts, setShifts] = useState(null)
   const [txns, setTxns] = useState(null)
   const [byPay, setByPay] = useState(null)
   const [sites, setSites] = useState([])
@@ -59,7 +59,7 @@ export default function Reports() {
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
     else if (tab === 'daily') api(`/api/reports/daily?${qs}${siteQ(f.site_id)}`).then(setDaily).catch(() => {})
     else if (tab === 'monthly') api(`/api/reports/monthly?${qs}${siteQ(f.site_id)}`).then(setMonthly).catch(() => {})
-    else if (tab === 'shifts') api(`/api/reports/by-shift?${qs}${siteQ(f.site_id)}`).then(setByShift).catch(() => {})
+    else if (tab === 'shifts') api(`/api/cashier/shifts?${qs}${siteQ(f.site_id)}`).then(setShifts).catch(() => {})
     else if (tab === 'bypayment') api(`/api/reports/by-payment?${qs}${f.site_id ? `&site_id=${f.site_id}` : ''}`).then(setByPay).catch(() => {})
     else if (tab === 'transactions') api(`/api/reports/transactions?${txnQs()}`).then(setTxns).catch(() => {})
   }
@@ -101,7 +101,7 @@ export default function Reports() {
           )}
           {tab === 'shifts' && (
             <button className="btn-primary"
-              onClick={() => downloadBlob(`/api/reports/by-shift/excel?date_from=${from}&date_to=${to}${siteQ(f.site_id)}`, `eeljeer_${from}_${to}.xlsx`)}>
+              onClick={() => downloadBlob(`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `eeljeer_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
             </button>
           )}
@@ -237,32 +237,29 @@ export default function Reports() {
         </>
       )}
 
-      {tab === 'shifts' && byShift && (
+      {tab === 'shifts' && shifts && (
         <>
           <div className="text-xs text-slate-400">
-            Ээлжийн өдрийг <b className="text-slate-200">{String(byShift.shift_hour).padStart(2, '0')}:00</b> цагаар тасалж бүлэглэв
-            (шөнө дунд биш). Тохиргоо: <span className="font-mono">PARKING_SHIFT_CHANGE_HOUR</span>.
+            Жинхэнэ ажилласан ээлж бүр (кассчин POS/системд нэвтэрснээр эхэлж, дараагийн хүн нэвтрэхэд/хаахад дуусна).
+            Дүн нь тухайн ээлжид тэр кассчны авсан бэлэн/картын гүйлгээ.
           </div>
-          <Table headers={['Ээлжийн өдөр', 'Зааг', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
-            empty={byShift.rows.length === 0}>
-            {byShift.rows.map((r) => (
-              <tr key={r.date}>
-                <td className="td font-mono font-medium">{r.date}</td>
-                <td className="td font-mono text-xs text-slate-500">{r.window}</td>
-                <td className="td font-mono">{fmt(r.entered)}</td>
-                <td className="td font-mono">{fmt(r.exited)}</td>
-                <td className="td font-mono">{fmt(r.cash_amount)}</td>
-                <td className="td font-mono">{fmt(r.qpay_amount)}</td>
-                <td className="td font-mono">{fmt(r.pos_amount)}</td>
-                <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
+          <Table headers={['Кассчин', 'Зогсоол', 'Эхэлсэн', 'Дууссан', 'Үргэлжилсэн', 'Гүйлгээ', 'Бэлэн (₮)', 'Карт (₮)', 'Нийт (₮)', 'Төлөв']}
+            empty={shifts.length === 0}>
+            {shifts.map((s) => (
+              <tr key={s.id}>
+                <td className="td font-medium">{s.cashier}</td>
+                <td className="td text-xs">{s.site_name}</td>
+                <td className="td font-mono text-xs">{fmtDate(s.opened_at)}</td>
+                <td className="td font-mono text-xs">{s.closed_at ? fmtDate(s.closed_at) : '—'}</td>
+                <td className="td font-mono text-xs">{fmtDur(s.duration_minutes)}</td>
+                <td className="td font-mono">{s.count}</td>
+                <td className="td font-mono">{fmt(s.by_provider?.CASH?.amount || 0)}</td>
+                <td className="td font-mono">{fmt(s.by_provider?.POS?.amount || 0)}</td>
+                <td className="td font-mono text-accent font-semibold">{fmt(s.total)}</td>
+                <td className="td"><Badge value={s.status === 'OPEN' ? 'active' : 'CLOSED'} /></td>
               </tr>
             ))}
           </Table>
-          <div className="card py-3 flex flex-wrap gap-5 text-sm">
-            <span>Орсон: <b className="font-mono">{fmt(byShift.totals.entered)}</b></span>
-            <span>Гарсан: <b className="font-mono">{fmt(byShift.totals.exited)}</b></span>
-            <span>Нийт орлого: <b className="font-mono text-accent">{fmt(byShift.totals.paid_amount)}₮</b></span>
-          </div>
         </>
       )}
 
@@ -304,8 +301,8 @@ export default function Reports() {
               <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)']}
                 empty={monthDays.rows.length === 0}>
                 {monthDays.rows.map((r) => (
-                  <tr key={r.date} onClick={() => openDay(r.date, monthDays.site_id)} className="cursor-pointer hover:bg-surface-muted/40">
-                    <td className="td font-mono text-accent underline decoration-dotted">{r.date}</td>
+                  <tr key={r.date}>
+                    <td className="td font-mono">{r.date}</td>
                     <td className="td font-mono">{fmt(r.entered)}</td>
                     <td className="td font-mono">{fmt(r.exited)}</td>
                     <td className="td font-mono">{fmt(r.cash_amount)}</td>

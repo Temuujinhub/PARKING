@@ -1,4 +1,4 @@
-import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, Wifi } from 'lucide-react'
+import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { StatCard } from '../components/ui'
@@ -70,6 +70,32 @@ export default function Dashboard() {
           </div>
           <div className={`text-[11px] mt-1.5 ${devConnColor}`}>{devConnLabel}</div>
         </div>
+      </div>
+
+      {/* Ажиллаж буй ээлж — хэн аль зогсоолд POS/системд нэвтэрч ажиллаж байгаа */}
+      <div className="card">
+        <h2 className="font-semibold mb-3 flex items-center gap-2"><UserCheck size={16} className="text-accent" /> Одоо ажиллаж буй ажилтан / ээлж</h2>
+        {(!stats.active_shifts || stats.active_shifts.length === 0) ? (
+          <div className="text-sm text-slate-500 py-2">Одоогоор нээлттэй ээлж алга (кассчин нэвтэрмэгц энд гарна)</div>
+        ) : (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {stats.active_shifts.map((s, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-accent/30 bg-accent/5">
+                <span className="w-8 h-8 rounded-full bg-accent/20 text-accent flex items-center justify-center font-bold text-sm">
+                  {(s.cashier || '?')[0]}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">{s.cashier}</div>
+                  <div className="text-xs text-slate-400 truncate">{s.site_name} · {fmtDate(s.opened_at).split(' ')[1] || ''}-с</div>
+                </div>
+                <div className="text-right">
+                  <div className="font-mono text-sm text-accent font-semibold">{fmt(s.revenue)}₮</div>
+                  <div className="text-[10px] text-slate-500">ээлжийн орлого</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">

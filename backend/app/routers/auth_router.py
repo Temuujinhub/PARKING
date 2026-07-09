@@ -10,6 +10,33 @@ from ..serializers import to_dict
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+def _login_shift(db: Session, user: User):
+    """Login-д суурилсан ээлж: оператор login хийхэд ээлж автоматаар нээгдэнэ.
+    Тухайн зогсоолд ӨӨР операторын нээлттэй ээлж байвал хаана (ээлж хүлээлцэх) —
+    'POS/системд дараагийн хүн login хийсэн = ээлж солигдсон' гэсэн логик."""
+    from datetime import datetime
+    from ..models import CashierShift
+    if user.role != "OPERATOR":
+        return
+    # Тухайн зогсоолд бусад операторын нээлттэй ээлжийг хаах (хүлээлцэх)
+    if user.site_id:
+        for sh in db.query(CashierShift).filter(
+                CashierShift.site_id == user.site_id, CashierShift.status == "OPEN",
+                CashierShift.user_id != user.id).all():
+            sh.closed_at = datetime.utcnow()
+            sh.status = "CLOSED"
+            db.add(AuditLog(username=user.username, action="SHIFT_HANDOVER",
+                            entity="shift", entity_id=sh.id,
+                            detail={"from": sh.user.username if sh.user else None,
+                                    "to": user.username, "site_id": user.site_id}))
+    # Энэ хэрэглэгчид нээлттэй ээлж байхгүй бол шинээр нээх
+    if not db.query(CashierShift).filter(CashierShift.user_id == user.id,
+                                         CashierShift.status == "OPEN").first():
+        db.add(CashierShift(user_id=user.id, site_id=user.site_id))
+        db.add(AuditLog(username=user.username, action="SHIFT_OPEN_LOGIN",
+                        entity="shift", entity_id="", detail={"site_id": user.site_id}))
+
+
 @router.post("/login")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == form.username).first()
@@ -19,6 +46,7 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
         raise HTTPException(403, "Таны эрх идэвхгүй байна. Админд хандана уу.")
     db.add(AuditLog(username=user.username, action="LOGIN", entity="user", entity_id=user.id,
                     ip_address=request.client.host if request.client else None))
+    _login_shift(db, user)
     db.commit()
     from ..config import settings
     return {

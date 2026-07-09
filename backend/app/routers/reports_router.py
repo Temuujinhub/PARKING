@@ -91,6 +91,19 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
             "online": online, "last_seen": d.last_seen.isoformat() if d.last_seen else None,
         })
 
+    # Ажиллаж буй ээлж — хэн аль зогсоолд POS/системд нэвтэрч ажиллаж байгаа
+    from ..models import CashierShift
+    active_shifts = []
+    for sh in (db.query(CashierShift).filter(CashierShift.status == "OPEN")
+               .order_by(CashierShift.opened_at.desc()).all()):
+        rev = float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
+            Payment.status == "PAID", Payment.cashier_id == sh.user_id,
+            Payment.paid_at >= sh.opened_at).scalar() or 0)
+        active_shifts.append({
+            "cashier": (sh.user.full_name or sh.user.username) if sh.user else "?",
+            "site_name": sh.site.name if sh.site else "Бүх зогсоол",
+            "opened_at": sh.opened_at.isoformat(), "revenue": rev})
+
     # Төхөөрөмжийн төрлөөр (карт дээр том тоогоор харуулна)
     cameras_total = sum(1 for d in device_status if d["device_type"] == "camera")
     barriers_total = sum(1 for d in device_status if d["device_type"] == "barrier")
@@ -98,7 +111,7 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
             "today_entries": today_entries, "today_exits": today_exits,
             "today_revenue": today_revenue, "total_capacity": int(total_capacity or 0),
             "sites": sites, "week_revenue": week, "hourly_load": hourly_load,
-            "sites_total": len(sites),
+            "sites_total": len(sites), "active_shifts": active_shifts,
             "cameras_total": cameras_total, "barriers_total": barriers_total,
             "devices_online": online_n, "devices_total": len(devices),
             "device_status": device_status}

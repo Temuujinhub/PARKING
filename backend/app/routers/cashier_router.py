@@ -65,14 +65,26 @@ def close_shift(db: Session = Depends(get_db),
 
 
 @router.get("/shifts")
-def shift_report(date_from: str | None = None, date_to: str | None = None,
+def shift_report(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports", "cashier"))):
     from datetime import timedelta
+    from ..auth import operator_site
+    site_id = operator_site(user) or site_id
     q = db.query(CashierShift)
+    if site_id:
+        q = q.filter(CashierShift.site_id == site_id)
     if date_from:
         q = q.filter(CashierShift.opened_at >= datetime.fromisoformat(date_from))
     if date_to:
         q = q.filter(CashierShift.opened_at < datetime.fromisoformat(date_to) + timedelta(days=1))
     shifts = q.order_by(CashierShift.opened_at.desc()).limit(200).all()
-    return [to_dict(s, extra={"cashier": s.user.username if s.user else None,
-                              **_shift_totals(db, s)}) for s in shifts]
+    out = []
+    for s in shifts:
+        end = s.closed_at or datetime.utcnow()
+        dur_min = int((end - s.opened_at).total_seconds() // 60)
+        out.append(to_dict(s, extra={
+            "cashier": (s.user.full_name or s.user.username) if s.user else None,
+            "site_name": s.site.name if s.site else "Бүх зогсоол",
+            "duration_minutes": dur_min,
+            **_shift_totals(db, s)}))
+    return out

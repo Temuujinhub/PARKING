@@ -250,6 +250,7 @@ class CashierShift(Base):
     status = Column(String(20), nullable=False, default="OPEN")  # OPEN, CLOSED
 
     user = relationship("User", lazy="joined")
+    site = relationship("ParkingSite", lazy="joined")
 
 
 class Compensation(Base):
