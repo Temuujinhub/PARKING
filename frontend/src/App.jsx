@@ -16,6 +16,8 @@ import Logs from './pages/Logs'
 import Pay from './pages/Pay'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
+import Settlement from './pages/Settlement'
+import Tariffs from './pages/Tariffs'
 import Users from './pages/Users'
 import Vat from './pages/Vat'
 
@@ -32,7 +34,7 @@ function Protected({ module, children }) {
 function Home() {
   const { can } = useAuth()
   if (can('dashboard')) return <Dashboard />
-  const fallback = ['cashier', 'check', 'barriers', 'history', 'drivers'].find((m) => can(m))
+  const fallback = ['cashier', 'check', 'barriers', 'history', 'drivers', 'users', 'reports'].find((m) => can(m))
   return <Navigate to={fallback ? `/${fallback}` : '/login'} replace />
 }
 
@@ -58,6 +60,8 @@ export default function App() {
             <Route path="barriers" element={<Protected module="barriers"><Barriers /></Protected>} />
             <Route path="blacklist" element={<Protected module="blacklist"><Blacklist /></Protected>} />
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />
+            <Route path="tariffs" element={<Protected module="discounts"><Tariffs /></Protected>} />
+            <Route path="settlement" element={<Protected module="reports"><Settlement /></Protected>} />
             <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
           </Route>

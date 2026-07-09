@@ -67,6 +67,19 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
     return to_dict(site)
 
 
+@router.put("/sites/{site_id}/tariff")
+def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
+                       user: User = Depends(require("settings", "discounts"))):
+    """Зогсоолд мөрдөх тарифыг өөрчлөх (Санхүү/Админ) — /tariffs Зогсоол-тариф таб."""
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site.tariff_template_id = body.get("tariff_template_id") or None
+    _audit(db, user, "UPDATE", "site_tariff", site_id, {"tariff_template_id": site.tariff_template_id})
+    db.commit()
+    return to_dict(site)
+
+
 # ─────────────────────────── Төхөөрөмж ───────────────────────────
 @router.get("/devices")
 def list_devices(site_id: str | None = None, db: Session = Depends(get_db),
@@ -159,7 +172,7 @@ def list_templates(db: Session = Depends(get_db), user: User = Depends(get_curre
 
 
 @router.post("/tariff-templates")
-def create_template(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+def create_template(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings", "discounts"))):
     t = TariffTemplate(
         name=body["name"],
         free_minutes=body.get("free_minutes", 0),
@@ -180,7 +193,7 @@ def create_template(body: dict, db: Session = Depends(get_db), user: User = Depe
 
 @router.put("/tariff-templates/{template_id}")
 def update_template(template_id: str, body: dict, db: Session = Depends(get_db),
-                    user: User = Depends(require("settings"))):
+                    user: User = Depends(require("settings", "discounts"))):
     t = db.get(TariffTemplate, template_id)
     if not t:
         raise HTTPException(404, "Загвар олдсонгүй")
@@ -318,7 +331,7 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
     if db.query(User).filter(User.username == body["username"]).first():
         raise HTTPException(400, "Нэвтрэх нэр давхардаж байна")
     # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
-    if body.get("role") not in ("ADMIN", "FINANCE", "OPERATOR"):
+    if body.get("role") not in ("ADMIN", "FINANCE", "HR", "OPERATOR"):
         raise HTTPException(400, "role буруу байна (SUPER_ADMIN-ыг зөвхөн DB-ээр үүсгэнэ)")
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),

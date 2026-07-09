@@ -1,4 +1,4 @@
-import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, Wifi } from 'lucide-react'
+import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { StatCard } from '../components/ui'
@@ -35,6 +35,12 @@ export default function Dashboard() {
   const maxHour = Math.max(...hourly.map((h) => Math.max(h.entries, h.exits)), 1)
   const topSites = [...(stats.sites || [])].sort((a, b) => b.today_revenue - a.today_revenue)
   const maxSiteRev = Math.max(...topSites.map((s) => s.today_revenue), 1)
+  // Зогсоол бүрийн байдал — кассчин + камеруудын онлайн статус
+  const siteStatus = (stats.sites || []).map((site) => ({
+    ...site,
+    cashier: (stats.active_shifts || []).find((s) => s.site_name === site.name)?.cashier || null,
+    cams: (stats.device_status || []).filter((d) => d.site_name === site.name && d.device_type === 'camera'),
+  }))
   const devConnLabel = stats.devices_total
     ? (stats.devices_online === stats.devices_total ? 'Бүгд холбогдсон'
       : stats.devices_online === 0 ? 'Холболт алга' : 'Хэсэгчилсэн')
@@ -46,25 +52,31 @@ export default function Dashboard() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Хяналтын самбар</h1>
 
-      {/* Үндсэн үзүүлэлт */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Үндсэн үзүүлэлт — нэг эгнээ: 4 KPI + систем/төхөөрөмжийн нэгтгэсэн карт */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard icon={CarFront} label="Одоо зогсож буй" value={stats.open_sessions}
           sub={`Багтаамж: ${stats.total_capacity}`} />
         <StatCard icon={Clock} label="Төлбөр хүлээж буй" value={stats.awaiting_payment} color="text-amber-400" />
         <StatCard icon={LogIn} label="Өнөөдөр орсон" value={stats.today_entries} color="text-blue-400"
           sub={`Гарсан: ${stats.today_exits}`} />
         <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
+        {/* Систем — зогсоол/камер/холболт (хаалт нь камертай хамт тул тусад нь харуулахгүй) */}
+        <div className="card py-3 col-span-2 lg:col-span-1">
+          <div className="text-xs text-slate-400 mb-2">Систем / төхөөрөмж</div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5"><Building2 size={15} className="text-slate-400" />
+              <span className="font-mono font-bold">{stats.sites_total ?? 0}</span><span className="text-[11px] text-slate-500">зогсоол</span></div>
+            <div className="flex items-center gap-1.5"><Camera size={15} className="text-blue-400" />
+              <span className="font-mono font-bold">{stats.cameras_total ?? 0}</span><span className="text-[11px] text-slate-500">камер</span></div>
+            <div className="flex items-center gap-1.5"><Wifi size={15} className={devConnColor} />
+              <span className={`font-mono font-bold ${devConnColor}`}>{stats.devices_online ?? 0}/{stats.devices_total ?? 0}</span>
+              <span className="text-[11px] text-slate-500">холболт</span></div>
+          </div>
+        </div>
       </div>
 
-      {/* Систем/төхөөрөмжийн товч үзүүлэлт — том тоогоор */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={Building2} label="Зогсоол" value={stats.sites_total ?? 0} />
-        <StatCard icon={Camera} label="Камер" value={stats.cameras_total ?? 0}
-          sub={`${stats.devices_online ?? 0} онлайн`} color="text-blue-400" />
-        <StatCard icon={DoorOpen} label="Хаалт" value={stats.barriers_total ?? 0} />
-        <StatCard icon={Wifi} label="Холболт" value={`${stats.devices_online ?? 0}/${stats.devices_total ?? 0}`}
-          sub={devConnLabel} color={devConnColor} />
-      </div>
+      <div className="grid xl:grid-cols-[1fr_20rem] gap-6 items-start">
+        <div className="space-y-6 min-w-0">{/* ── Үндсэн багана ── */}
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* 7 хоногийн орлого — bar график (max-д нормчилсон) */}
@@ -196,6 +208,52 @@ export default function Dashboard() {
             )
           })}
         </div>
+      </div>
+        </div>{/* ── Үндсэн багана төгсгөл ── */}
+
+        {/* ── Баруун талын босоо панель: зогсоол бүрийн байдал ── */}
+        <aside className="space-y-3">
+          <h2 className="font-semibold flex items-center gap-2">
+            <UserCheck size={16} className="text-accent" /> Зогсоол бүрийн байдал
+          </h2>
+          <div className="space-y-3 xl:max-h-[calc(100vh-9rem)] xl:overflow-y-auto pr-1">
+            {siteStatus.length === 0 && <div className="card text-sm text-slate-500 py-4 text-center">Зогсоол бүртгэгдээгүй</div>}
+            {siteStatus.map((site) => {
+              const camsOn = site.cams.filter((d) => d.online).length
+              return (
+                <div key={site.id} className="card p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm truncate">{site.name}</span>
+                    <span className="text-[11px] text-slate-500 font-mono">{site.occupied}/{site.capacity}</span>
+                  </div>
+                  {/* Кассчин (сүүлд нэвтэрч ажиллаж буй оператор) */}
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${site.cashier ? 'bg-accent' : 'bg-slate-600'}`} />
+                    {site.cashier
+                      ? <span className="text-slate-200 truncate">{site.cashier}</span>
+                      : <span className="text-slate-500">Ажилтан нэвтрээгүй</span>}
+                  </div>
+                  {/* Камеруудын онлайн/офлайн цэгэн гэрэл */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {site.cams.length === 0 && <span className="text-[11px] text-slate-600">Камер бүртгэгдээгүй</span>}
+                    {site.cams.map((d) => (
+                      <span key={d.id} title={`${d.name}: ${d.online ? 'онлайн' : 'офлайн'}`}
+                        className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-surface-muted/50 border border-surface-border/50">
+                        <span className={`w-2 h-2 rounded-full ${d.online ? 'bg-accent' : 'bg-red-500'}`} />
+                        {d.name}
+                      </span>
+                    ))}
+                  </div>
+                  {site.cams.length > 0 && (
+                    <div className={`text-[10px] ${camsOn === site.cams.length ? 'text-accent' : camsOn === 0 ? 'text-red-400' : 'text-amber-400'}`}>
+                      {camsOn}/{site.cams.length} камер онлайн
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </aside>
       </div>
     </div>
   )

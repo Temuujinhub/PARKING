@@ -23,8 +23,10 @@ ROLE_PERMISSIONS = {
     # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
     "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",
                 "compensations", "discounts", "blacklist"},
-    # OPERATOR зөвхөн 3 нүүр хардаг: Касс, Шалгах, Түүх (барьер нээх нь касс дотор ажиллана)
-    "OPERATOR": {"cashier", "check", "history"},
+    # HR (Хүний нөөц) — зөвхөн ажилтан нэмж/хасах, ажилласан өдрийн тайлан
+    "HR": {"users"},
+    # OPERATOR: Касс, Шалгах, Түүх, Нөхөн төлбөр (өөрийн зогсоолын өрийг касс дээр цуглуулна)
+    "OPERATOR": {"cashier", "check", "history", "compensations"},
 }
 
 

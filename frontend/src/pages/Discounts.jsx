@@ -36,7 +36,7 @@ export default function Discounts() {
         <div className="grid md:grid-cols-3 gap-3 text-slate-400">
           <div className="bg-surface-muted/40 rounded-lg p-3">
             <div className="text-slate-200 font-medium mb-1">1. Хэн үүсгэх вэ</div>
-            Энэ хуудсан дээр <b className="text-slate-300">Админ / Супер админ / Санхүү</b> хөнгөлөлтийн
+            Энэ хуудсан дээр <b className="text-slate-300">Санхүү</b> хөнгөлөлтийн
             төрлүүдийг урьдчилан бүртгэнэ (жишээ: байгууллагын 20%, 1 цаг үнэгүй купон).
           </div>
           <div className="bg-surface-muted/40 rounded-lg p-3">
