@@ -1,31 +1,28 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
 import { AlertTriangle, QrCode, Send } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Badge, Modal, Table, useToast } from '../components/ui'
 
 export default function Vat() {
-  const [rows, setRows] = useState([])
   const today = new Date().toISOString().slice(0, 10)
   const monthAgo = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10)
   const [from, setFrom] = useState(monthAgo)
   const [to, setTo] = useState(today)
   const [qrReceipt, setQrReceipt] = useState(null)
-  const [info, setInfo] = useState(null)
   const [sending, setSending] = useState(false)
   const toast = useToast()
 
-  useEffect(() => {
-    api(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`).then(setRows).catch(() => {})
-  }, [from, to])
-  useEffect(() => { api('/api/reports/vat-info').then(setInfo).catch(() => {}) }, [])
+  const { data: rows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
+  const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
 
   const sendData = async () => {
     setSending(true)
     try {
       const r = await api('/api/reports/vat-send', { method: 'POST' })
       toast(r.message || 'Мэдээ илгээгдлээ')
-      api('/api/reports/vat-info').then(setInfo).catch(() => {})
+      reloadInfo()
     } catch (e) { toast(e.message, 'error') } finally { setSending(false) }
   }
 

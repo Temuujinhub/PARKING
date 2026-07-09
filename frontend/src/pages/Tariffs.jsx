@@ -2,6 +2,7 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Field, Modal, Table, useToast } from '../components/ui'
 
 export default function Tariffs() {
@@ -26,10 +27,8 @@ export default function Tariffs() {
 // Аль зогсоол ямар тариф мөрдөж байгааг жагсаалт + шууд засах
 function SiteTariffs() {
   const toast = useToast()
-  const [rows, setRows] = useState([])
-  const [templates, setTemplates] = useState([])
-  const load = () => api('/api/admin/sites').then(setRows).catch(() => {})
-  useEffect(() => { load(); api('/api/admin/tariff-templates').then(setTemplates).catch(() => {}) }, [])
+  const { data: rows, reload: load } = useFetch('/api/admin/sites', { initial: [] })
+  const { data: templates } = useFetch('/api/admin/tariff-templates', { initial: [] })
 
   const changeTariff = async (siteId, tariff_template_id) => {
     try {
