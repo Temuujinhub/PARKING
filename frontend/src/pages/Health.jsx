@@ -332,7 +332,7 @@ export default function Health() {
           {(sys.disk_io || sys.open_files) && (
             <div className="mt-3 pt-3 border-t border-surface-border/50 text-xs text-slate-500 flex flex-wrap gap-x-6 gap-y-1">
               {sys.disk_io && <span>Диск I/O: уншсан {fmtBytes(sys.disk_io.read_bytes)} · бичсэн {fmtBytes(sys.disk_io.write_bytes)}</span>}
-              {sys.open_files && <span>Нээлттэй файл: {sys.open_files.allocated.toLocaleString()} / {sys.open_files.max.toLocaleString()}</span>}
+              {sys.open_files && <span>Нээлттэй файл: {sys.open_files.allocated.toLocaleString()}{sys.open_files.max > 0 && sys.open_files.max < 1e9 ? ` / ${sys.open_files.max.toLocaleString()}` : ''}</span>}
             </div>
           )}
         </div>
