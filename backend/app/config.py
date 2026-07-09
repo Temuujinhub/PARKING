@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     ebarimt_classification_code: str = "6743000"  # GS1: Автомашины зогсоолын үйлчилгээ
     ebarimt_mock: bool = True
 
+    # Ээлж солигдох цаг (0–23) — "ээлжээр" тайланд өдрийг энэ цагаар тасалж бүлэглэнэ
+    # (жишээ: 9 = өглөө 9ц-аас маргааш 9ц хүртэл нэг ээлжийн өдөр). Шөнө дундаар биш.
+    shift_change_hour: int = 9
+
     # НӨАТ
     vat_rate: float = 0.10
     vat_inclusive: bool = True  # Тарифын үнэ НӨАТ багтсан эсэх

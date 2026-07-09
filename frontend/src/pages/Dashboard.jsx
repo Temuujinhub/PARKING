@@ -46,24 +46,30 @@ export default function Dashboard() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Хяналтын самбар</h1>
 
-      {/* Үндсэн үзүүлэлт */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Үндсэн үзүүлэлт — нэг эгнээ: 4 KPI + систем/төхөөрөмжийн нэгтгэсэн карт */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard icon={CarFront} label="Одоо зогсож буй" value={stats.open_sessions}
           sub={`Багтаамж: ${stats.total_capacity}`} />
         <StatCard icon={Clock} label="Төлбөр хүлээж буй" value={stats.awaiting_payment} color="text-amber-400" />
         <StatCard icon={LogIn} label="Өнөөдөр орсон" value={stats.today_entries} color="text-blue-400"
           sub={`Гарсан: ${stats.today_exits}`} />
         <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
-      </div>
-
-      {/* Систем/төхөөрөмжийн товч үзүүлэлт — том тоогоор */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={Building2} label="Зогсоол" value={stats.sites_total ?? 0} />
-        <StatCard icon={Camera} label="Камер" value={stats.cameras_total ?? 0}
-          sub={`${stats.devices_online ?? 0} онлайн`} color="text-blue-400" />
-        <StatCard icon={DoorOpen} label="Хаалт" value={stats.barriers_total ?? 0} />
-        <StatCard icon={Wifi} label="Холболт" value={`${stats.devices_online ?? 0}/${stats.devices_total ?? 0}`}
-          sub={devConnLabel} color={devConnColor} />
+        {/* Систем — зогсоол/камер/хаалт/холболт нэг картад */}
+        <div className="card py-3 col-span-2 lg:col-span-1">
+          <div className="text-xs text-slate-400 mb-2">Систем / төхөөрөмж</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+            <div className="flex items-center gap-1.5"><Building2 size={15} className="text-slate-400" />
+              <span className="font-mono font-bold">{stats.sites_total ?? 0}</span><span className="text-[11px] text-slate-500">зогсоол</span></div>
+            <div className="flex items-center gap-1.5"><Camera size={15} className="text-blue-400" />
+              <span className="font-mono font-bold">{stats.cameras_total ?? 0}</span><span className="text-[11px] text-slate-500">камер</span></div>
+            <div className="flex items-center gap-1.5"><DoorOpen size={15} className="text-slate-400" />
+              <span className="font-mono font-bold">{stats.barriers_total ?? 0}</span><span className="text-[11px] text-slate-500">хаалт</span></div>
+            <div className="flex items-center gap-1.5"><Wifi size={15} className={devConnColor} />
+              <span className={`font-mono font-bold ${devConnColor}`}>{stats.devices_online ?? 0}/{stats.devices_total ?? 0}</span>
+              <span className="text-[11px] text-slate-500">холбол</span></div>
+          </div>
+          <div className={`text-[11px] mt-1.5 ${devConnColor}`}>{devConnLabel}</div>
+        </div>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6">

@@ -14,7 +14,7 @@ export default function Reports() {
   const [revenue, setRevenue] = useState(null)
   const [daily, setDaily] = useState(null)
   const [monthly, setMonthly] = useState(null)
-  const [shifts, setShifts] = useState([])
+  const [byShift, setByShift] = useState(null)
   const [txns, setTxns] = useState(null)
   const [byPay, setByPay] = useState(null)
   const [sites, setSites] = useState([])
@@ -34,7 +34,7 @@ export default function Reports() {
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
     else if (tab === 'daily') api(`/api/reports/daily?${qs}`).then(setDaily).catch(() => {})
     else if (tab === 'monthly') api(`/api/reports/monthly?${qs}`).then(setMonthly).catch(() => {})
-    else if (tab === 'shifts') api(`/api/cashier/shifts?${qs}`).then(setShifts).catch(() => {})
+    else if (tab === 'shifts') api(`/api/reports/by-shift?${qs}`).then(setByShift).catch(() => {})
     else if (tab === 'bypayment') api(`/api/reports/by-payment?${qs}${f.site_id ? `&site_id=${f.site_id}` : ''}`).then(setByPay).catch(() => {})
     else if (tab === 'transactions') api(`/api/reports/transactions?${txnQs()}`).then(setTxns).catch(() => {})
   }
@@ -68,9 +68,21 @@ export default function Reports() {
               <Download size={16} /> Excel
             </button>
           )}
+          {tab === 'monthly' && (
+            <button className="btn-primary"
+              onClick={() => downloadBlob(`/api/reports/monthly/excel?date_from=${from}&date_to=${to}`, `saraar_${from}_${to}.xlsx`)}>
+              <Download size={16} /> Excel
+            </button>
+          )}
           {tab === 'shifts' && (
             <button className="btn-primary"
-              onClick={() => downloadBlob(`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `kass_${from}_${to}.xlsx`)}>
+              onClick={() => downloadBlob(`/api/reports/by-shift/excel?date_from=${from}&date_to=${to}`, `eeljeer_${from}_${to}.xlsx`)}>
+              <Download size={16} /> Excel
+            </button>
+          )}
+          {tab === 'bypayment' && (
+            <button className="btn-primary"
+              onClick={() => downloadBlob(`/api/reports/by-payment/excel?date_from=${from}&date_to=${to}${f.site_id ? `&site_id=${f.site_id}` : ''}`, `tolboriin_torol_${from}_${to}.xlsx`)}>
               <Download size={16} /> Excel
             </button>
           )}
@@ -156,21 +168,33 @@ export default function Reports() {
         </>
       )}
 
-      {tab === 'shifts' && (
-        <Table headers={['Кассчин', 'Төлөв', 'Нээсэн цаг', 'Хаасан цаг', 'Эхэлсэн дүн', 'Гүйлгээ', 'Нийт орлого']}
-          empty={shifts.length === 0}>
-          {shifts.map((s) => (
-            <tr key={s.id}>
-              <td className="td font-medium">{s.cashier}</td>
-              <td className="td"><Badge value={s.status === 'OPEN' ? 'active' : 'CLOSED'} /></td>
-              <td className="td font-mono text-xs">{fmtDate(s.opened_at)}</td>
-              <td className="td font-mono text-xs">{fmtDate(s.closed_at)}</td>
-              <td className="td font-mono">{fmt(s.opening_amount)}₮</td>
-              <td className="td font-mono">{s.count}</td>
-              <td className="td font-mono text-accent font-semibold">{fmt(s.total)}₮</td>
-            </tr>
-          ))}
-        </Table>
+      {tab === 'shifts' && byShift && (
+        <>
+          <div className="text-xs text-slate-400">
+            Ээлжийн өдрийг <b className="text-slate-200">{String(byShift.shift_hour).padStart(2, '0')}:00</b> цагаар тасалж бүлэглэв
+            (шөнө дунд биш). Тохиргоо: <span className="font-mono">PARKING_SHIFT_CHANGE_HOUR</span>.
+          </div>
+          <Table headers={['Ээлжийн өдөр', 'Зааг', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
+            empty={byShift.rows.length === 0}>
+            {byShift.rows.map((r) => (
+              <tr key={r.date}>
+                <td className="td font-mono font-medium">{r.date}</td>
+                <td className="td font-mono text-xs text-slate-500">{r.window}</td>
+                <td className="td font-mono">{fmt(r.entered)}</td>
+                <td className="td font-mono">{fmt(r.exited)}</td>
+                <td className="td font-mono">{fmt(r.cash_amount)}</td>
+                <td className="td font-mono">{fmt(r.qpay_amount)}</td>
+                <td className="td font-mono">{fmt(r.pos_amount)}</td>
+                <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
+              </tr>
+            ))}
+          </Table>
+          <div className="card py-3 flex flex-wrap gap-5 text-sm">
+            <span>Орсон: <b className="font-mono">{fmt(byShift.totals.entered)}</b></span>
+            <span>Гарсан: <b className="font-mono">{fmt(byShift.totals.exited)}</b></span>
+            <span>Нийт орлого: <b className="font-mono text-accent">{fmt(byShift.totals.paid_amount)}₮</b></span>
+          </div>
+        </>
       )}
 
       {tab === 'monthly' && monthly && (
