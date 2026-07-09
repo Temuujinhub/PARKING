@@ -52,6 +52,16 @@ def _service_status(name: str) -> str:
         return "unknown"
 
 
+def _service_list() -> list[tuple[str, str]]:
+    """Шалгах systemd сервисүүд. Docker-ийг ЗӨВХӨН суулгасан үед нэмнэ
+    (энэ систем docker ашигладаггүй, systemd-ээр шууд ажилладаг тул суулгаагүй бол харуулахгүй)."""
+    svc = [("Backend (API)", "parking-backend"), ("Database (PostgreSQL)", "postgresql"),
+           ("Web (nginx)", "nginx")]
+    if shutil.which("docker"):
+        svc.append(("Docker", "docker"))
+    return svc
+
+
 def _kernel() -> str:
     try:
         return os.uname().release
@@ -159,12 +169,9 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
             ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
         sessions_today = db.execute(text(
             "SELECT count(*) FROM parking_sessions WHERE entry_time >= date_trunc('day', now())")).scalar()
-        pay_today = db.execute(text(
-            "SELECT count(*), COALESCE(SUM(amount),0) FROM payments "
-            "WHERE status='PAID' AND paid_at >= date_trunc('day', now())")).first()
+        # Санхүүгийн дүн энд гаргахгүй — health бол ажиллагааны мониторинг (мөнгө нь Тайлан/Тооцоонд)
         database = {"ok": True, "size_bytes": int(size or 0), "active_connections": int(conns or 0),
-                    "sessions_open": open_sessions, "sessions_today": int(sessions_today or 0),
-                    "payments_today": int(pay_today[0] or 0), "revenue_today": float(pay_today[1] or 0)}
+                    "sessions_open": open_sessions, "sessions_today": int(sessions_today or 0)}
     except Exception as e:  # noqa: BLE001
         database = {"ok": False, "error": str(e)[:120]}
 
@@ -198,10 +205,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         "system": _system_metrics(),
         "kernel": _kernel(),
         "reboot_required": _reboot_required(),
-        "services": [{"name": n, "status": _service_status(s)} for n, s in [
-            ("Backend (API)", "parking-backend"), ("Database (PostgreSQL)", "postgresql"),
-            ("Web (nginx)", "nginx"), ("Docker", "docker"),
-        ]],
+        "services": [{"name": n, "status": _service_status(s)} for n, s in _service_list()],
         "database": database,
         "integrations": {
             "cameras": cameras,

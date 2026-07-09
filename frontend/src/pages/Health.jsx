@@ -63,7 +63,7 @@ export default function Health() {
   useEffect(() => { load() }, [])
   useEffect(() => {
     if (!auto) return
-    const id = setInterval(load, 5000)
+    const id = setInterval(load, 30000)
     return () => clearInterval(id)
   }, [auto])
 
@@ -186,7 +186,6 @@ export default function Health() {
               <Stat label="Идэвхтэй холболт" value={d.database.active_connections} />
               <Stat label="Зогсоолд машин" value={d.database.sessions_open} />
               <Stat label="Өнөөдрийн орц" value={d.database.sessions_today} />
-              <Stat label="Өнөөдөр төлсөн" value={`${d.database.payments_today} (${(d.database.revenue_today || 0).toLocaleString()}₮)`} />
             </div>
           ) : (
             <div className="text-red-400 text-sm flex items-center gap-2"><Dot ok={false} /> {d.database?.error || 'Холбогдсонгүй'}</div>

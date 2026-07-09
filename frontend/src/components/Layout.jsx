@@ -79,7 +79,7 @@ export default function Layout() {
 
   return (
     <div className="flex min-h-dvh">
-      <aside className="w-60 shrink-0 bg-surface-card border-r border-surface-border/60 flex flex-col">
+      <aside className="w-60 shrink-0 bg-surface-card border-r border-surface-border/60 flex flex-col h-dvh sticky top-0">
         <div className="px-5 py-5 border-b border-surface-border/60">
           <Logo size={30} textClass="text-base" />
           <div className="text-xs text-slate-500 mt-1.5">Зогсоолын удирдлага</div>
