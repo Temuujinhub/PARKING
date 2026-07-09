@@ -19,7 +19,7 @@ const NAV = [
       { to: '/cashier', label: 'Касс', icon: Banknote, module: 'cashier' },
       { to: '/check', label: 'Шалгах', icon: Car, module: 'check' },
       { to: '/history', label: 'Түүх', icon: History, module: 'history' },
-      { to: '/compensations', label: 'Нөхөн төлбөр', icon: Banknote, module: 'compensations' },
+      { to: '/compensations', label: 'Ээлж хаах', icon: LogOut, module: 'compensations' },
     ],
   },
   {
