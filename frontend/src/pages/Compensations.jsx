@@ -1,21 +1,26 @@
-// Нөхөн төлбөр — төлбөргүй гарсан машины нэхэмжлэл (JGA спек)
-// 3+ төлөгдөөгүй нэхэмжлэлтэй дугаар автоматаар хар жагсаалтад орно.
-import { Banknote, CreditCard, MoonStar, Search } from 'lucide-react'
+// Ээлж хаах — ажилтны ээлжийн орлого + хаагдах машин + шөнийн хаалт (ээлж хамт хаана)
+// + нөхөн төлбөр (өр) хэсэг. 3+ төлөгдөөгүй өртэй дугаар автоматаар хар жагсаалтад орно.
+import { Banknote, CreditCard, LogOut, MoonStar, Search } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, fmt, fmtDate } from '../api'
+import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 const REASONS = { unpaid_exit: 'Төлбөргүй гаргасан', night_close: 'Шөнийн хаалт', shift_close: 'Ээлж хаалт', manual: 'Гараар' }
 const AGE_LABEL = { '0-7': '0–7 хоног', '8-30': '8–30 хоног', '31-90': '31–90 хоног', '90+': '90+ хоног' }
+const ROLE_LABEL = { SUPER_ADMIN: 'Супер админ', ADMIN: 'Админ', FINANCE: 'Санхүү', OPERATOR: 'Оператор' }
 
 export default function Compensations() {
   const toast = useToast()
-  const { can } = useAuth()
+  const { can, user } = useAuth()
   const [data, setData] = useState({ rows: [], total_pending: 0, total_collected: 0, aging: {} })
   const [status, setStatus] = useState('PENDING')
   const [plate, setPlate] = useState('')
   const [payModal, setPayModal] = useState(null) // {comp, method, customer_tin}
+  const [shift, setShift] = useState(null)   // одоогийн ээлж
+  const [parked, setParked] = useState([])   // зогсоолд байгаа (хаагдах) машинууд
+  const [busy, setBusy] = useState(false)
+  const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
 
   const load = () => {
     const params = new URLSearchParams()
@@ -23,7 +28,11 @@ export default function Compensations() {
     if (plate.trim()) params.set('plate', plate.trim())
     api(`/api/compensations?${params}`).then(setData).catch(() => {})
   }
+  const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => setShift(null))
+  const loadParked = () => api('/api/sessions?status=OPEN,AWAITING_PAYMENT&with_fee=true&limit=200')
+    .then((d) => setParked(d.rows || [])).catch(() => {})
   useEffect(load, [status])
+  useEffect(() => { loadShift(); loadParked() }, [])
 
   const doPay = async () => {
     try {
@@ -42,31 +51,89 @@ export default function Compensations() {
     catch (e) { toast(e.message, 'error') }
   }
 
-  const nightClose = async () => {
-    if (!confirm('ШӨНИЙН ХААЛТ: Зогсоолд байгаа БҮХ машиныг гаргаж, төлбөртэй нь нөхөн төлбөрийн нэхэмжлэлтэй болно.\n\nЭнэ үйлдлийг БУЦААХ БОЛОМЖГҮЙ. Үргэлжлүүлэх үү?')) return
+  // Шөнийн хаалт = үлдсэн машиныг гаргаж өр үүсгэх + ЭЭЛЖ ХААХ (нэг үйлдэл)
+  const nightCloseShift = async () => {
+    if (!confirm(`ШӨНИЙН ХААЛТ + ЭЭЛЖ ХААХ:\n\n• Зогсоолд үлдсэн ${parked.length} машиныг гаргаж, төлбөртэйд нь өр (нөхөн төлбөр) үүснэ.\n• Таны ээлж хаагдана.\n\nҮргэлжлүүлэх үү?`)) return
+    setBusy(true)
     try {
-      const r = await api('/api/compensations/night-close', { method: 'POST', body: {} })
-      toast(`${r.closed_sessions} машин гаргаж, ${r.compensations_created} нэхэмжлэл үүслээ`)
-      load()
-    } catch (e) { toast(e.message, 'error') }
+      const r = await api('/api/cashier/shift/close', {
+        method: 'POST',
+        body: { close_cars: true, confirmed_cash: shift?.by_provider?.CASH?.amount || 0 },
+      })
+      toast(`Ээлж хаагдлаа · ${r.closed_cars || 0} машин гаргаж өр үүслээ`)
+      loadShift(); loadParked(); load()
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Нөхөн төлбөр</h1>
-        {can('settings') && (
-          <button className="btn-danger" onClick={nightClose}
-            title="00 цагийн хаалт — бүх машиныг гаргаж нэхэмжлэл үүсгэнэ">
-            <MoonStar size={15} /> Шөнийн хаалт
+      <h1 className="text-2xl font-bold">Ээлж хаах</h1>
+
+      {/* 1. Ээлжийн мэдээлэл — ажилтан, өдөр, орлого хэрэгслээр */}
+      {shift?.open ? (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div className="text-lg font-semibold">{shift.shift?.cashier || user?.full_name || user?.username}
+                <span className="text-sm text-slate-400 font-normal ml-2">{ROLE_LABEL[user?.role] || ''}</span>
+              </div>
+              <div className="text-xs text-slate-500">Ээлж нээсэн: {fmtDate(shift.shift?.opened_at)}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-bold font-mono text-accent">{fmt(shift.total)}₮</div>
+              <div className="text-xs text-slate-500">Ээлжийн нийт орлого · {shift.count} гүйлгээ</div>
+            </div>
+          </div>
+          {/* Орлого төлбөрийн хэрэгслээр — системд бүртгэгдсэнээр */}
+          <div className="grid grid-cols-3 gap-3">
+            {[['Бэлэн', 'CASH'], ['QPay', 'QPAY'], ['Банкны карт', 'POS']].map(([label, k]) => (
+              <div key={k} className="bg-surface-muted/30 rounded-lg p-3 text-center">
+                <div className="font-mono font-bold">{fmt(shift.by_provider?.[k]?.amount || 0)}₮</div>
+                <div className="text-[11px] text-slate-500">{label} · {shift.by_provider?.[k]?.count || 0}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="card text-sm text-slate-500 py-4 text-center">
+          Танд нээлттэй ээлж алга. Ээлж нь Касс хуудсанд эсвэл нэвтрэхэд автоматаар нээгддэг.
+        </div>
+      )}
+
+      {/* 2. Хаагдах машинууд — шөнийн хаалтаар өр болох */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">Зогсоолд үлдсэн машин (шөнийн хаалтаар өр болно)</h2>
+          <span className="text-sm text-slate-400">{parked.length} машин</span>
+        </div>
+        <Table headers={['Дугаар', 'Орсон', 'Хугацаа', 'Төлбөр', 'Төрөл', 'Төлөв']} empty={parked.length === 0}>
+          {parked.map((s) => (
+            <tr key={s.id}>
+              <td className="td font-mono font-bold">{s.plate_number}</td>
+              <td className="td font-mono text-xs">{fmtDate(s.entry_time).slice(5, 16)}</td>
+              <td className="td font-mono text-xs">{fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}</td>
+              <td className="td font-mono">{s.fee?.is_free ? <span className="text-slate-500">Үнэгүй</span> : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}</td>
+              <td className="td text-xs">{s.is_registered ? <span className="text-cyan-400">Гэрээт</span> : s.discount_name ? <span className="text-amber-400">{s.discount_name}</span> : 'Энгийн'}</td>
+              <td className="td"><Badge value={s.status} /></td>
+            </tr>
+          ))}
+        </Table>
+        {canAct && shift?.open && (
+          <button className="btn-danger w-full justify-center mt-3 py-3" onClick={nightCloseShift} disabled={busy}>
+            <MoonStar size={16} /> {busy ? 'Хааж байна…' : `Шөнийн хаалт — ${parked.length} машин гаргаж, ЭЭЛЖ ХААХ`}
           </button>
         )}
       </div>
 
+      {/* 3. Нөхөн төлбөр (өр) хэсэг */}
+      <div className="flex items-center gap-2 pt-2">
+        <LogOut size={16} className="text-slate-400" />
+        <h2 className="text-lg font-semibold">Нөхөн төлбөр (өр цуглуулах)</h2>
+      </div>
       <div className="card py-3 text-sm text-slate-400">
-        Төлбөргүй гарсан машинд нэхэмжлэл үүсдэг (Касс → Гараар гаргах → "нөхөн төлбөр үүсгэх").
-        Дараагийн ирэлтэд нь касс дээр <b className="text-red-400">улаанаар</b> тэмдэглэгдэж,
-        <b className="text-slate-200"> 3+ төлөгдөөгүй</b> нэхэмжлэлтэй дугаар автоматаар хар жагсаалтад орно.
+        Төлбөргүй гарсан/хаагдсан машинд өр үүсдэг. Дараагийн ирэлтэд нь касс дээр
+        <b className="text-red-400"> улаанаар</b> тэмдэглэгдэж, <b className="text-slate-200">3+ төлөгдөөгүй</b> дугаар
+        автоматаар хар жагсаалтад орно.
       </div>
 
       <div className="card grid grid-cols-2 md:grid-cols-4 gap-3 items-end">

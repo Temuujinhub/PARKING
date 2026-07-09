@@ -21,6 +21,8 @@ MIGRATIONS = [
     "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS cash_confirmed NUMERIC(12,2)",
     "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS closed_cars INTEGER",
     "ALTER TABLE cashier_shifts ADD COLUMN IF NOT EXISTS note TEXT",
+    # v1.5 — QPay эх сурвалж (POS/QR) — санхүүгийн тооцоонд ялгах
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS source VARCHAR(10)",
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

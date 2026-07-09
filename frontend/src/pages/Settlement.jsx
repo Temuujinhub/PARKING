@@ -1,4 +1,4 @@
-// Санхүүгийн мөнгөн тооцоо — зогсоол/өдрөөр систем vs дансны баталгаажсан дүн тулгах
+// Санхүүгийн мөнгөн тооцоо — pos-Карт/pos-QPay/QR-QPay/Бэлэн; зөвхөн бэлэнг санхүү тулгана
 import { Download, Lock, Unlock } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
@@ -13,7 +13,7 @@ export default function Settlement() {
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
   const [rows, setRows] = useState([])
-  const [edit, setEdit] = useState({}) // {date: {confirmed_card, confirmed_qpay, confirmed_cash, note}}
+  const [edit, setEdit] = useState({}) // {date: confirmed_cash}
 
   useEffect(() => {
     api('/api/admin/sites').then((s) => { setSites(s); if (s.length && !siteId) setSiteId(s[0].id) }).catch(() => {})
@@ -26,20 +26,13 @@ export default function Settlement() {
   }
   useEffect(load, [siteId, from, to])
 
-  const setField = (date, k, v) => setEdit((e) => ({ ...e, [date]: { ...(e[date] || {}), [k]: v } }))
-  const rowVal = (r, k) => (edit[r.date]?.[k] ?? r[k])
+  const cashVal = (r) => (edit[r.date] ?? r.confirmed_cash)
 
   const save = async (r, status) => {
     try {
       await api('/api/reports/settlement', {
         method: 'PUT',
-        body: {
-          site_id: siteId, date: r.date, status,
-          confirmed_card: +rowVal(r, 'confirmed_card') || 0,
-          confirmed_qpay: +rowVal(r, 'confirmed_qpay') || 0,
-          confirmed_cash: +rowVal(r, 'confirmed_cash') || 0,
-          note: rowVal(r, 'note') || '',
-        },
+        body: { site_id: siteId, date: r.date, status, confirmed_cash: +cashVal(r) || 0 },
       })
       toast(status === 'CLOSED' ? 'Тооцоо хаагдлаа' : 'Хадгалагдлаа'); load()
     } catch (e) { toast(e.message, 'error') }
@@ -73,35 +66,33 @@ export default function Settlement() {
       </div>
 
       <div className="text-xs text-slate-400">
-        <b className="text-slate-200">Систем</b> = POS/утаснаас төлөгдсөн (карт/QPay) + кассын бэлэн. {' '}
-        <b className="text-slate-200">Баталгаа</b> = санхүү дансны хуулгаас оруулна (бэлэн нь ATM-ээр дансанд орсон дүн). {' '}
-        Зөрүү 0 болмогц тухайн өдрийн тооцоог хаана.
+        <b className="text-accent">pos-Карт · pos-QPay · QR-QPay</b> нь банкаар электрон баталгаажсан тул засахгүй. {' '}
+        <b className="text-amber-400">Бэлэн</b>-г санхүү дансны хуулгаас (ATM-ээр орсон дүн) баталгаажуулж, зөрүү 0 болмогц тооцоог хаана.
       </div>
 
       <div className="overflow-x-auto">
-        <Table headers={['Огноо', 'Систем нийт', 'Баталгаа: Карт', 'QPay', 'Бэлэн', 'Баталгаа нийт', 'Зөрүү', 'Төлөв', 'Үйлдэл']}
+        <Table headers={['Огноо', 'pos-Карт', 'pos-QPay', 'QR-QPay', 'Систем бэлэн', 'Баталгаа бэлэн', 'Зөрүү', 'Өр (үүссэн)', 'Ажилтан', 'Төлөв', 'Үйлдэл']}
           empty={rows.length === 0}>
           {rows.map((r) => {
             const closed = r.status === 'CLOSED'
-            const confTotal = (+rowVal(r, 'confirmed_card') || 0) + (+rowVal(r, 'confirmed_qpay') || 0) + (+rowVal(r, 'confirmed_cash') || 0)
-            const diff = r.system_total - confTotal
+            const diff = r.cash - (+cashVal(r) || 0)
             return (
               <tr key={r.date}>
                 <td className="td font-mono font-medium">{r.date}</td>
-                <td className="td font-mono" title={`Карт ${fmt(r.system_card)} · QPay ${fmt(r.system_qpay)} · Бэлэн ${fmt(r.system_cash)}`}>
-                  {fmt(r.system_total)}₮
+                <td className="td font-mono text-slate-300">{fmt(r.card)}₮</td>
+                <td className="td font-mono text-slate-300">{fmt(r.pos_qpay)}₮</td>
+                <td className="td font-mono text-slate-300">{fmt(r.qr_qpay)}₮</td>
+                <td className="td font-mono">{fmt(r.cash)}₮</td>
+                <td className="td">
+                  <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
+                    value={cashVal(r)} placeholder={fmt(r.cash)}
+                    onChange={(e) => setEdit((x) => ({ ...x, [r.date]: e.target.value }))} />
                 </td>
-                {['confirmed_card', 'confirmed_qpay', 'confirmed_cash'].map((k) => (
-                  <td key={k} className="td">
-                    <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
-                      value={rowVal(r, k)} onChange={(e) => setField(r.date, k, e.target.value)}
-                      placeholder={fmt({ confirmed_card: r.system_card, confirmed_qpay: r.system_qpay, confirmed_cash: r.system_cash }[k])} />
-                  </td>
-                ))}
-                <td className="td font-mono">{fmt(confTotal)}₮</td>
-                <td className={`td font-mono font-semibold ${diff === 0 ? 'text-accent' : diff > 0 ? 'text-amber-400' : 'text-red-400'}`}>
+                <td className={`td font-mono font-semibold ${diff === 0 ? 'text-accent' : 'text-red-400'}`}>
                   {diff > 0 ? '+' : ''}{fmt(diff)}₮
                 </td>
+                <td className={`td font-mono text-xs ${r.debt > 0 ? 'text-red-400' : 'text-slate-500'}`}>{fmt(r.debt)}₮</td>
+                <td className="td text-xs">{r.workers.length ? r.workers.join(', ') : <span className="text-slate-600">—</span>}</td>
                 <td className="td"><Badge value={closed ? 'CLOSED' : 'active'} /></td>
                 <td className="td text-right whitespace-nowrap">
                   {closed ? (

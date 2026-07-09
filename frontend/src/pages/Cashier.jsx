@@ -93,7 +93,7 @@ export default function Cashier() {
         toast('Бэлэн мөнгөөр төлөгдлөө. Хаалт нээгдэж байна.')
         setSelected(null)
       } else if (method === 'QPAY') {
-        const inv = await api('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: selected.id } })
+        const inv = await api('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: selected.id, source: 'POS' } })
         setQpayInfo(inv)
       }
       loadExits(siteId); loadShift()

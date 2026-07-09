@@ -170,6 +170,8 @@ class Payment(Base):
     session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=False, index=True)
     provider = Column(String(30), nullable=False)        # QPAY, POS, CASH
     payment_method = Column(String(30), nullable=False)  # QR, CARD, CASH
+    # Эх сурвалж (QPay-д): POS=кассын пос дээр, QR=жолооч утаснаасаа. Тооцоонд ялгана.
+    source = Column(String(10), nullable=True)
     provider_invoice_id = Column(String(120), nullable=True)
     # QPay-ийн g_payment_id (payment/check-ээс) — QPay ebarimt_v3 үүсгэхэд ашиглана
     provider_payment_id = Column(String(120), nullable=True)
