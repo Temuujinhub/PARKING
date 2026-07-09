@@ -1,9 +1,11 @@
 // Лог: аудит + LPR event
+import { Download } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
-import { Badge, Table } from '../components/ui'
+import { Badge, Table, useToast } from '../components/ui'
 
 export default function Logs() {
+  const toast = useToast()
   const [tab, setTab] = useState('audit')
   const [audit, setAudit] = useState([])
   const [lpr, setLpr] = useState([])
@@ -13,9 +15,23 @@ export default function Logs() {
     else api('/api/reports/lpr-events').then(setLpr).catch(() => {})
   }, [tab])
 
+  const downloadAudit = async () => {
+    try {
+      const blob = await api('/api/reports/audit-logs/excel', { blob: true })
+      const url = URL.createObjectURL(blob)
+      const a = Object.assign(document.createElement('a'), { href: url, download: 'uildliin_log.xlsx' })
+      a.click(); URL.revokeObjectURL(url)
+    } catch (e) { toast(e.message, 'error') }
+  }
+
   return (
     <div className="space-y-5">
-      <h1 className="text-2xl font-bold">Лог</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Лог</h1>
+        {tab === 'audit' && (
+          <button className="btn-primary" onClick={downloadAudit}><Download size={16} /> Excel татах</button>
+        )}
+      </div>
       <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
         {[['audit', 'Үйлдлийн лог'], ['lpr', 'Камерын event лог']].map(([v, l]) => (
           <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}

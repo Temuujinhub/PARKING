@@ -18,9 +18,11 @@ ROLE_PERMISSIONS = {
     "ADMIN": {
         "dashboard", "cashier", "check", "history", "discounts", "settings",
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
-        "compensations",
+        "compensations", "users",  # users — SUPER_ADMIN-аас бусад хэрэглэгч удирдана
     },
-    "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs", "compensations"},
+    # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
+    "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",
+                "compensations", "discounts", "blacklist"},
     # OPERATOR зөвхөн 3 нүүр хардаг: Касс, Шалгах, Түүх (барьер нээх нь касс дотор ажиллана)
     "OPERATOR": {"cashier", "check", "history"},
 }

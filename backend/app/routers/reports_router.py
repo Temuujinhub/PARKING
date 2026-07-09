@@ -601,6 +601,34 @@ def audit_logs(username: str | None = None, action: str | None = None, limit: in
     return [to_dict(a) for a in q.order_by(AuditLog.created_at.desc()).limit(min(limit, 1000)).all()]
 
 
+@router.get("/audit-logs/excel")
+def audit_logs_excel(username: str | None = None, action: str | None = None,
+                     db: Session = Depends(get_db), user: User = Depends(require("logs"))):
+    """Үйлдлийн логийг Excel болгон татна (ADMIN/FINANCE)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    q = db.query(AuditLog)
+    if username:
+        q = q.filter(AuditLog.username == username)
+    if action:
+        q = q.filter(AuditLog.action == action)
+    rows = q.order_by(AuditLog.created_at.desc()).limit(10000).all()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Үйлдлийн лог"
+    ws.append(["Огноо", "Хэрэглэгч", "Үйлдэл", "Объект", "Объект ID", "Дэлгэрэнгүй"])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    import json as _json
+    for a in rows:
+        ws.append([a.created_at.strftime("%Y-%m-%d %H:%M:%S"), a.username, a.action,
+                   a.entity or "", a.entity_id or "",
+                   _json.dumps(a.detail, ensure_ascii=False) if a.detail else ""])
+    for col, w in zip("ABCDEF", (20, 14, 18, 12, 38, 50)):
+        ws.column_dimensions[col].width = w
+    return _excel_response(wb, "uildliin_log")
+
+
 @router.get("/lpr-events")
 def lpr_events(site_id: str | None = None, limit: int = 200,
                db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):

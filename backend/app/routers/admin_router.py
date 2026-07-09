@@ -309,12 +309,12 @@ def update_blacklist(entry_id: str, body: dict, db: Session = Depends(get_db),
 
 # ─────────────────────────── Хэрэглэгч (SUPER_ADMIN) ───────────────────────────
 @router.get("/users")
-def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
+def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     return [to_dict(u) for u in db.query(User).order_by(User.created_at).all()]
 
 
 @router.post("/users")
-def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
+def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     if db.query(User).filter(User.username == body["username"]).first():
         raise HTTPException(400, "Нэвтрэх нэр давхардаж байна")
     # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
@@ -332,7 +332,7 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
 
 @router.put("/users/{user_id}")
 def update_user(user_id: str, body: dict, db: Session = Depends(get_db),
-                user: User = Depends(require_role("SUPER_ADMIN"))):
+                user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     u = db.get(User, user_id)
     if not u:
         raise HTTPException(404, "Хэрэглэгч олдсонгүй")

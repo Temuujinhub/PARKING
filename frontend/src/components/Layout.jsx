@@ -38,7 +38,7 @@ export default function Layout() {
   const toast = useToast()
   const [dark, setDark] = useState(isDark())
   const [pwModal, setPwModal] = useState(null) // {old_password, new_password, confirm}
-  const items = MENU.filter((m) => (m.module === 'users' ? user?.role === 'SUPER_ADMIN' : can(m.module)))
+  const items = MENU.filter((m) => can(m.module))
 
   const changePassword = async (e) => {
     e.preventDefault()

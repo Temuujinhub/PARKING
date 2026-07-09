@@ -58,7 +58,7 @@ export default function App() {
             <Route path="barriers" element={<Protected module="barriers"><Barriers /></Protected>} />
             <Route path="blacklist" element={<Protected module="blacklist"><Blacklist /></Protected>} />
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />
-            <Route path="users" element={<Users />} />
+            <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
