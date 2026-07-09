@@ -27,11 +27,13 @@ export default function History() {
   return (
     <div className="space-y-5">
       <h1 className="text-2xl font-bold">Түүх</h1>
-      <div className="card grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <select className="input" value={filters.site_id} onChange={(e) => setFilters({ ...filters, site_id: e.target.value })} aria-label="Зогсоол">
-          <option value="">Бүх зогсоол</option>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+      <div className={`card grid grid-cols-2 gap-3 ${sites.length > 1 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'}`}>
+        {sites.length > 1 && (
+          <select className="input" value={filters.site_id} onChange={(e) => setFilters({ ...filters, site_id: e.target.value })} aria-label="Зогсоол">
+            <option value="">Бүх зогсоол</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
         <select className="input" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} aria-label="Төлөв">
           {STATUSES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>

@@ -77,6 +77,7 @@ export default function Compensations() {
               <div className="text-lg font-semibold">{shift.shift?.cashier || user?.full_name || user?.username}
                 <span className="text-sm text-slate-400 font-normal ml-2">{ROLE_LABEL[user?.role] || ''}</span>
               </div>
+              <div className="text-sm text-accent font-medium">{shift.shift?.site_name || 'Зогсоол тодорхойгүй'}</div>
               <div className="text-xs text-slate-500">Ээлж нээсэн: {fmtDate(shift.shift?.opened_at)}</div>
             </div>
             <div className="text-right">
@@ -106,10 +107,11 @@ export default function Compensations() {
           <h2 className="font-semibold">Зогсоолд үлдсэн машин (шөнийн хаалтаар өр болно)</h2>
           <span className="text-sm text-slate-400">{parked.length} машин</span>
         </div>
-        <Table headers={['Дугаар', 'Орсон', 'Хугацаа', 'Төлбөр', 'Төрөл', 'Төлөв']} empty={parked.length === 0}>
+        <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Төлбөр', 'Төрөл', 'Төлөв']} empty={parked.length === 0}>
           {parked.map((s) => (
             <tr key={s.id}>
               <td className="td font-mono font-bold">{s.plate_number}</td>
+              <td className="td text-xs">{s.site_name || <span className="text-slate-600">—</span>}</td>
               <td className="td font-mono text-xs">{fmtDate(s.entry_time).slice(5, 16)}</td>
               <td className="td font-mono text-xs">{fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}</td>
               <td className="td font-mono">{s.fee?.is_free ? <span className="text-slate-500">Үнэгүй</span> : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}</td>

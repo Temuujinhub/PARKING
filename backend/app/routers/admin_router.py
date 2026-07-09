@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, hash_password, require, require_role
+from ..auth import get_current_user, hash_password, operator_site, require, require_role
 from ..database import get_db
 from ..models import (
     AuditLog, BlacklistEntry, Device, Discount, ParkingSession, ParkingSite,
@@ -24,7 +24,11 @@ def _audit(db: Session, user: User, action: str, entity: str, entity_id: str, de
 # ─────────────────────────── Зогсоол ───────────────────────────
 @router.get("/sites")
 def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    sites = db.query(ParkingSite).order_by(ParkingSite.created_at).all()
+    q = db.query(ParkingSite)
+    osid = operator_site(user)  # оператор зөвхөн өөрийн зогсоолыг л харна
+    if osid:
+        q = q.filter(ParkingSite.id == osid)
+    sites = q.order_by(ParkingSite.created_at).all()
     out = []
     for s in sites:
         occupied = db.query(ParkingSession).filter(
