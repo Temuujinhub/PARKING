@@ -54,7 +54,7 @@ export default function App() {
             <Route path="drivers" element={<Protected module="drivers"><Drivers /></Protected>} />
             <Route path="reports" element={<Protected module="reports"><Reports /></Protected>} />
             <Route path="vat" element={<Protected module="vat"><Vat /></Protected>} />
-            <Route path="compensations" element={<Protected module="cashier"><Compensations /></Protected>} />
+            <Route path="compensations" element={<Protected module="compensations"><Compensations /></Protected>} />
             <Route path="barriers" element={<Protected module="barriers"><Barriers /></Protected>} />
             <Route path="blacklist" element={<Protected module="blacklist"><Blacklist /></Protected>} />
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />

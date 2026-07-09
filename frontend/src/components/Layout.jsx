@@ -20,7 +20,7 @@ const MENU = [
   { to: '/drivers', label: 'Бүртгэлтэй жолооч', icon: ClipboardList, module: 'drivers' },
   { to: '/reports', label: 'Тайлан', icon: FileText, module: 'reports' },
   { to: '/vat', label: 'Ибаримт', icon: ReceiptText, module: 'vat' },
-  { to: '/compensations', label: 'Нөхөн төлбөр', icon: Banknote, module: 'cashier' },
+  { to: '/compensations', label: 'Нөхөн төлбөр', icon: Banknote, module: 'compensations' },
   { to: '/barriers', label: 'Хаалтны удирдлага', icon: DoorOpen, module: 'barriers' },
   { to: '/blacklist', label: 'Хар жагсаалт', icon: ShieldAlert, module: 'blacklist' },
   { to: '/settings', label: 'Тохиргоо', icon: Settings, module: 'settings' },
