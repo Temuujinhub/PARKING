@@ -29,6 +29,25 @@ export default function Reports() {
     return p.toString()
   }
 
+  // Drill-down: өдөр → тухайн өдрийн бүх гүйлгээ; сар → тухайн сарын өдрүүд
+  const [dayTxns, setDayTxns] = useState(null)   // {date, rows}
+  const [monthDays, setMonthDays] = useState(null) // {month, rows}
+  const lastDayOf = (month) => { // "2026-07" → "2026-07-31"
+    const [y, m] = month.split('-').map(Number)
+    return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`
+  }
+  const openDay = (date) => {
+    setDayTxns({ date, rows: null })
+    api(`/api/reports/transactions?date_from=${date}&date_to=${date}&date_field=paid&limit=2000`)
+      .then((d) => setDayTxns({ date, rows: d.rows })).catch(() => setDayTxns({ date, rows: [] }))
+  }
+  const openMonth = (month) => {
+    const dfrom = `${month}-01`, dto = lastDayOf(month)
+    api(`/api/reports/daily?date_from=${dfrom}&date_to=${dto}`)
+      .then((d) => setMonthDays({ month, rows: d.rows })).catch(() => {})
+  }
+  const hm = (iso) => iso ? iso.replace('T', ' ').slice(11, 16) : '—'
+
   const load = () => {
     const qs = `date_from=${from}&date_to=${to}`
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
@@ -146,11 +165,13 @@ export default function Reports() {
 
       {tab === 'daily' && daily && (
         <>
+          <div className="text-xs text-slate-400">Өдөр дээр дарж тухайн өдрийн бүх гүйлгээг цаг:минутаар харна.</div>
           <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
             empty={daily.rows.length === 0}>
             {daily.rows.map((r) => (
-              <tr key={r.date}>
-                <td className="td font-mono font-medium">{r.date}</td>
+              <tr key={r.date} onClick={() => openDay(r.date)}
+                className="cursor-pointer hover:bg-surface-muted/40">
+                <td className="td font-mono font-medium text-accent underline decoration-dotted">{r.date}</td>
                 <td className="td font-mono">{fmt(r.entered)}</td>
                 <td className="td font-mono">{fmt(r.exited)}</td>
                 <td className="td font-mono">{fmt(r.cash_amount)}</td>
@@ -199,11 +220,12 @@ export default function Reports() {
 
       {tab === 'monthly' && monthly && (
         <>
+          <div className="text-xs text-slate-400">Сар дээр дарж тухайн сарын өдрүүдийг, дараа нь өдөр дээр дарж гүйлгээг харна.</div>
           <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
             empty={monthly.rows.length === 0}>
             {monthly.rows.map((r) => (
-              <tr key={r.month}>
-                <td className="td font-mono font-medium">{r.month}</td>
+              <tr key={r.month} onClick={() => openMonth(r.month)} className="cursor-pointer hover:bg-surface-muted/40">
+                <td className="td font-mono font-medium text-accent underline decoration-dotted">{r.month}</td>
                 <td className="td font-mono">{r.count}</td>
                 <td className="td font-mono">{fmt(r.cash)}</td>
                 <td className="td font-mono">{fmt(r.qpay)}</td>
@@ -218,7 +240,67 @@ export default function Reports() {
             <span>Карт: <b className="font-mono">{fmt(monthly.totals.pos)}₮</b></span>
             <span>Нийт: <b className="font-mono text-accent">{fmt(monthly.totals.total)}₮</b></span>
           </div>
+          {/* Drill: сарын доторх өдрүүд */}
+          {monthDays && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-accent">{monthDays.month} сарын өдрүүд</h3>
+                <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setMonthDays(null)}>Хаах</button>
+              </div>
+              <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)']}
+                empty={monthDays.rows.length === 0}>
+                {monthDays.rows.map((r) => (
+                  <tr key={r.date} onClick={() => openDay(r.date)} className="cursor-pointer hover:bg-surface-muted/40">
+                    <td className="td font-mono text-accent underline decoration-dotted">{r.date}</td>
+                    <td className="td font-mono">{fmt(r.entered)}</td>
+                    <td className="td font-mono">{fmt(r.exited)}</td>
+                    <td className="td font-mono">{fmt(r.cash_amount)}</td>
+                    <td className="td font-mono">{fmt(r.qpay_amount)}</td>
+                    <td className="td font-mono">{fmt(r.pos_amount)}</td>
+                    <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
         </>
+      )}
+
+      {/* Drill: тухайн өдрийн бүх гүйлгээ (цаг:минутаар) — Өдөрөөр/Сараар хоёулаас нээгдэнэ */}
+      {dayTxns && (
+        <div className="card border-accent/30">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-accent">{dayTxns.date} — өдрийн бүх гүйлгээ</h3>
+            <div className="flex items-center gap-3">
+              <button className="btn-secondary py-1 text-xs"
+                onClick={() => downloadBlob(`/api/reports/transactions/excel?date_from=${dayTxns.date}&date_to=${dayTxns.date}&date_field=paid`, `guilgee_${dayTxns.date}.xlsx`)}>
+                <Download size={13} /> Татах
+              </button>
+              <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setDayTxns(null)}>Хаах</button>
+            </div>
+          </div>
+          {dayTxns.rows === null
+            ? <div className="text-sm text-slate-500 py-4 text-center">Ачаалж байна…</div>
+            : (
+              <Table headers={['Дугаар', 'Орсон', 'Гарсан', 'Төлсөн', 'Хугацаа', 'Төрөл', 'Нийт (₮)', 'Хэрэгсэл', 'Төлөв', 'Кассчин']}
+                empty={dayTxns.rows.length === 0}>
+                {dayTxns.rows.map((r) => (
+                  <tr key={r.session_id}>
+                    <td className="td font-mono font-bold">{r.plate_number}</td>
+                    <td className="td font-mono text-xs">{hm(r.entry_time)}</td>
+                    <td className="td font-mono text-xs">{hm(r.exit_time)}</td>
+                    <td className="td font-mono text-xs text-accent">{hm(r.paid_at)}</td>
+                    <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
+                    <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>{r.car_type}</td>
+                    <td className="td font-mono">{fmt(r.total_fee)}</td>
+                    <td className="td text-xs">{r.provider || '—'}</td>
+                    <td className="td text-xs">{r.status}</td>
+                    <td className="td text-xs">{r.cashier || '—'}</td>
+                  </tr>
+                ))}
+              </Table>
+            )}
+        </div>
       )}
 
       {/* Төлбөрийн төрлөөр — хэрэгсэл ба машины төрлөөр */}

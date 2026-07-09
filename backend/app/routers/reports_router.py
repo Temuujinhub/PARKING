@@ -260,11 +260,17 @@ def _car_type(s) -> str:
     return "Энгийн"
 
 
-def _txn_query(db, start, end, site_id, provider, car_type, status):
-    """Бичилтийн шүүлттэй session query (provider шүүлт payments-аар)."""
-    from ..models import CashierShift
-    q = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
-                                        ParkingSession.entry_time < end)
+def _txn_query(db, start, end, site_id, provider, car_type, status, date_field="entry"):
+    """Бичилтийн шүүлттэй session query. date_field='entry'=орсон цагаар,
+    'paid'=төлбөрийн огноогоор (тухайн өдрийн ГҮЙЛГЭЭ — орлоготой таарна)."""
+    if date_field == "paid":
+        # Тухайн хугацаанд ТӨЛӨГДСӨН гүйлгээтэй session-ууд
+        paid_sub = (db.query(Payment.session_id).filter(
+            Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end).subquery())
+        q = db.query(ParkingSession).filter(ParkingSession.id.in_(db.query(paid_sub.c.session_id)))
+    else:
+        q = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
+                                            ParkingSession.entry_time < end)
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
     if status:
@@ -332,13 +338,13 @@ def _txn_rows(db, sessions):
 def transactions(date_from: str | None = None, date_to: str | None = None,
                  site_id: str | None = None, provider: str | None = None,
                  car_type: str | None = None, status: str | None = None,
-                 limit: int = 500, offset: int = 0,
+                 date_field: str = "entry", limit: int = 500, offset: int = 0,
                  db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Дэлгэрэнгүй бичилтийн тайлан — машин бүрийн бүрэн мөчлөг, олон талбараар шүүнэ.
-    Шүүлт: огноо (орсон), зогсоол, төлбөрийн хэрэгсэл (CASH/QPAY/POS), машины төрөл
-    (contract/discount/normal), төлөв. Багцалж татахад ижил шүүлтээр /transactions/excel."""
+    Шүүлт: огноо (date_field=entry орсон / paid төлсөн), зогсоол, төлбөрийн хэрэгсэл,
+    машины төрөл (contract/discount/normal), төлөв. Багцалж татахад /transactions/excel."""
     start, end = _range(date_from, date_to)
-    q = _txn_query(db, start, end, site_id, provider, car_type, status)
+    q = _txn_query(db, start, end, site_id, provider, car_type, status, date_field)
     total = q.count()
     paid_sum = float(q.with_entities(func.coalesce(func.sum(ParkingSession.total_fee), 0)).scalar() or 0)
     sessions = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 2000)).all()
@@ -351,12 +357,13 @@ def transactions(date_from: str | None = None, date_to: str | None = None,
 def transactions_excel(date_from: str | None = None, date_to: str | None = None,
                        site_id: str | None = None, provider: str | None = None,
                        car_type: str | None = None, status: str | None = None,
+                       date_field: str = "entry",
                        db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Шүүсэн бичилтүүдийг Excel болгон багцалж татна (одоогийн шүүлтээр)."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
-    sessions = (_txn_query(db, start, end, site_id, provider, car_type, status)
+    sessions = (_txn_query(db, start, end, site_id, provider, car_type, status, date_field)
                 .order_by(ParkingSession.entry_time.desc()).limit(20000).all())
     rows = _txn_rows(db, sessions)
     wb = Workbook()
