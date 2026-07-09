@@ -10,6 +10,8 @@ const ROLES = {
   FINANCE: 'Санхүү (тайлан, төлбөр)',
   OPERATOR: 'Оператор (касс, зогсоол)',
 }
+// UI-аас үүсгэж болох эрхүүд — SUPER_ADMIN-ыг оруулахгүй (зөвхөн DB-ээр)
+const CREATABLE_ROLES = { ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, OPERATOR: ROLES.OPERATOR }
 
 export default function Users() {
   const toast = useToast()
@@ -18,6 +20,8 @@ export default function Users() {
   const [editing, setEditing] = useState(null)
   const load = () => api('/api/admin/users').then(setRows)
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
+  // Супер админ мөрийг жагсаалтад харуулахгүй (зөвхөн DB-ээр удирддаг)
+  const visibleRows = rows.filter((u) => u.role !== 'SUPER_ADMIN')
 
   const save = async (e) => {
     e.preventDefault()
@@ -39,14 +43,13 @@ export default function Users() {
       </div>
 
       <div className="card py-3 text-sm text-slate-400 grid gap-1">
-        <span><b className="text-slate-200">Супер админ</b> — бүх эрх, хэрэглэгчийн удирдлага</span>
         <span><b className="text-slate-200">Админ</b> — зогсоол, тариф, төхөөрөмжийн тохиргоо + бүх үйл ажиллагаа</span>
         <span><b className="text-slate-200">Санхүү</b> — тайлан, төлбөр, НӨАТ баримт харах</span>
-        <span><b className="text-slate-200">Оператор</b> — касс, шалгах, түүх, хаалт нээх</span>
+        <span><b className="text-slate-200">Оператор</b> — өөрийн хариуцах зогсоолын касс, шалгах, түүх</span>
       </div>
 
-      <Table headers={['Нэвтрэх нэр', 'Нэр', 'Утас', 'Эрх', 'Зогсоол', 'Бүртгэсэн', 'Төлөв', '']} empty={rows.length === 0}>
-        {rows.map((u) => (
+      <Table headers={['Нэвтрэх нэр', 'Нэр', 'Утас', 'Эрх', 'Зогсоол', 'Бүртгэсэн', 'Төлөв', '']} empty={visibleRows.length === 0}>
+        {visibleRows.map((u) => (
           <tr key={u.id}>
             <td className="td font-mono font-semibold">{u.username}</td>
             <td className="td">{u.full_name}</td>
@@ -86,7 +89,7 @@ export default function Users() {
             <Field label="Эрхийн түвшин" required>
               <select className="input" value={editing.role}
                 onChange={(e) => setEditing({ ...editing, role: e.target.value })}>
-                {Object.entries(ROLES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                {Object.entries(CREATABLE_ROLES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </Field>
             {editing.role === 'OPERATOR' && (

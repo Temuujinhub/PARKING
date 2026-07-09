@@ -216,6 +216,37 @@ def daily_report(date_from: str | None = None, date_to: str | None = None,
     return {"rows": out, "totals": totals}
 
 
+@router.get("/monthly")
+def monthly_report(date_from: str | None = None, date_to: str | None = None,
+                   site_id: str | None = None,
+                   db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Сар сараар — төлбөрийн хэрэгслээр (бэлэн/QPay/карт) задарсан тайлан."""
+    from sqlalchemy import Integer, cast
+    start, end = _range(date_from, date_to)
+    ymexpr = (cast(func.extract("year", Payment.paid_at), Integer) * 100
+              + cast(func.extract("month", Payment.paid_at), Integer))
+    q = (db.query(ymexpr.label("ym"), Payment.provider,
+                  func.coalesce(func.sum(Payment.amount), 0), func.count())
+         .join(ParkingSession, Payment.session_id == ParkingSession.id)
+         .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
+    if site_id:
+        q = q.filter(ParkingSession.site_id == site_id)
+    months = {}
+    for ym, prov, amt, cnt in q.group_by("ym", Payment.provider).all():
+        m = months.setdefault(int(ym), {"cash": 0.0, "qpay": 0.0, "pos": 0.0, "count": 0})
+        key = {"CASH": "cash", "QPAY": "qpay", "POS": "pos"}.get(prov)
+        if key:
+            m[key] += float(amt)
+        m["count"] += int(cnt)
+    out = []
+    for ym in sorted(months, reverse=True):
+        m = months[ym]
+        out.append({"month": f"{ym // 100}-{ym % 100:02d}", **m,
+                    "total": m["cash"] + m["qpay"] + m["pos"]})
+    totals = {k: sum(r[k] for r in out) for k in ("cash", "qpay", "pos", "total", "count")}
+    return {"rows": out, "totals": totals}
+
+
 def _excel_response(wb, prefix: str):
     buf = io.BytesIO()
     wb.save(buf)

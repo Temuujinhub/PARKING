@@ -13,12 +13,14 @@ export default function Reports() {
   const [to, setTo] = useState(today)
   const [revenue, setRevenue] = useState(null)
   const [daily, setDaily] = useState(null)
+  const [monthly, setMonthly] = useState(null)
   const [shifts, setShifts] = useState([])
 
   const load = () => {
     const qs = `date_from=${from}&date_to=${to}`
     if (tab === 'revenue') api(`/api/reports/revenue?${qs}`).then(setRevenue).catch(() => {})
     else if (tab === 'daily') api(`/api/reports/daily?${qs}`).then(setDaily).catch(() => {})
+    else if (tab === 'monthly') api(`/api/reports/monthly?${qs}`).then(setMonthly).catch(() => {})
     else api(`/api/cashier/shifts?${qs}`).then(setShifts).catch(() => {})
   }
   useEffect(load, [tab, from, to])
@@ -61,7 +63,7 @@ export default function Reports() {
       </div>
 
       <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
-        {[['revenue', 'Зогсоолын орлого'], ['daily', 'Өдрөөр'], ['shifts', 'Касс хаалтын тайлан']].map(([v, l]) => (
+        {[['revenue', 'Зогсоолоор'], ['daily', 'Өдрөөр'], ['shifts', 'Ээлжээр'], ['monthly', 'Сараар']].map(([v, l]) => (
           <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer
               ${tab === v ? 'border-accent text-accent' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>
@@ -147,6 +149,30 @@ export default function Reports() {
             </tr>
           ))}
         </Table>
+      )}
+
+      {tab === 'monthly' && monthly && (
+        <>
+          <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']}
+            empty={monthly.rows.length === 0}>
+            {monthly.rows.map((r) => (
+              <tr key={r.month}>
+                <td className="td font-mono font-medium">{r.month}</td>
+                <td className="td font-mono">{r.count}</td>
+                <td className="td font-mono">{fmt(r.cash)}</td>
+                <td className="td font-mono">{fmt(r.qpay)}</td>
+                <td className="td font-mono">{fmt(r.pos)}</td>
+                <td className="td font-mono text-accent font-semibold">{fmt(r.total)}</td>
+              </tr>
+            ))}
+          </Table>
+          <div className="card py-3 flex flex-wrap gap-5 text-sm">
+            <span>Бэлэн: <b className="font-mono">{fmt(monthly.totals.cash)}₮</b></span>
+            <span>QPay: <b className="font-mono">{fmt(monthly.totals.qpay)}₮</b></span>
+            <span>Карт: <b className="font-mono">{fmt(monthly.totals.pos)}₮</b></span>
+            <span>Нийт: <b className="font-mono text-accent">{fmt(monthly.totals.total)}₮</b></span>
+          </div>
+        </>
       )}
     </div>
   )
