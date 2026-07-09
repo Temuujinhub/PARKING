@@ -483,6 +483,95 @@ def by_shift_report(date_from: str | None = None, date_to: str | None = None,
     return {"rows": out, "shift_hour": settings.shift_change_hour, "totals": totals}
 
 
+@router.get("/settlement")
+def settlement(site_id: str, date_from: str | None = None, date_to: str | None = None,
+               db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Санхүүгийн өдрийн тооцоо — тухайн зогсоолын өдөр бүрийн системийн борлуулалт
+    (карт/QPay/бэлэн) ба санхүүгийн баталгаажуулсан дүн, зөрүү, төлөв."""
+    from ..models import DailySettlement
+    start, end = _range(date_from, date_to)
+    setts = {s.date: s for s in db.query(DailySettlement).filter(
+        DailySettlement.site_id == site_id).all()}
+    out = []
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < end:
+        nxt = day + timedelta(days=1)
+        ds = day.strftime("%Y-%m-%d")
+        prov = dict(db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+                    .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                    .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt,
+                            ParkingSession.site_id == site_id).group_by(Payment.provider).all())
+        sc, sq, scash = (float(prov.get(k, 0)) for k in ("POS", "QPAY", "CASH"))
+        st = setts.get(ds)
+        cc, cq, ccash = ((float(st.confirmed_card), float(st.confirmed_qpay), float(st.confirmed_cash))
+                         if st else (0.0, 0.0, 0.0))
+        st_total, cf_total = sc + sq + scash, cc + cq + ccash
+        if st_total <= 0 and not st:
+            day = nxt
+            continue
+        out.append({"date": ds, "system_card": sc, "system_qpay": sq, "system_cash": scash,
+                    "system_total": st_total, "confirmed_card": cc, "confirmed_qpay": cq,
+                    "confirmed_cash": ccash, "confirmed_total": cf_total,
+                    "difference": st_total - cf_total,
+                    "status": st.status if st else "OPEN", "note": (st.note if st else "") or "",
+                    "closed_by": st.closed_by if st else None,
+                    "closed_at": st.closed_at.isoformat() if st and st.closed_at else None})
+        day = nxt
+    out.reverse()
+    return {"rows": out}
+
+
+@router.put("/settlement")
+def settlement_upsert(body: dict, db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Санхүү тухайн өдрийн баталгаажсан дүнг оруулж/тооцоо хаана.
+    body: {site_id, date, confirmed_card?, confirmed_qpay?, confirmed_cash?, note?, status?}."""
+    from ..models import DailySettlement
+    if not body.get("site_id") or not body.get("date"):
+        raise HTTPException(400, "site_id болон date шаардлагатай")
+    st = (db.query(DailySettlement)
+          .filter(DailySettlement.site_id == body["site_id"], DailySettlement.date == body["date"]).first())
+    if not st:
+        st = DailySettlement(site_id=body["site_id"], date=body["date"])
+        db.add(st)
+    for k in ("confirmed_card", "confirmed_qpay", "confirmed_cash"):
+        if k in body:
+            setattr(st, k, body[k] or 0)
+    if "note" in body:
+        st.note = body["note"]
+    if body.get("status") == "CLOSED" and st.status != "CLOSED":
+        st.status, st.closed_by, st.closed_at = "CLOSED", user.username, datetime.utcnow()
+    elif body.get("status") == "OPEN":
+        st.status, st.closed_by, st.closed_at = "OPEN", None, None
+    db.add(AuditLog(username=user.username, action="SETTLEMENT", entity="settlement",
+                    entity_id=f"{body['site_id']}:{body['date']}",
+                    detail={"status": st.status}))
+    db.commit()
+    return to_dict(st)
+
+
+@router.get("/settlement/excel")
+def settlement_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
+                     db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Санхүүгийн тооцооны Excel."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    data = settlement(site_id, date_from, date_to, db, user)
+    wb = Workbook(); ws = wb.active; ws.title = "Мөнгөн тооцоо"
+    ws.append(["Огноо", "Систем карт", "Систем QPay", "Систем бэлэн", "Систем нийт",
+               "Баталгаа карт", "Баталгаа QPay", "Баталгаа бэлэн", "Баталгаа нийт",
+               "Зөрүү", "Төлөв", "Хаасан"])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for r in data["rows"]:
+        ws.append([r["date"], r["system_card"], r["system_qpay"], r["system_cash"], r["system_total"],
+                   r["confirmed_card"], r["confirmed_qpay"], r["confirmed_cash"], r["confirmed_total"],
+                   r["difference"], "Хаагдсан" if r["status"] == "CLOSED" else "Нээлттэй",
+                   r["closed_by"] or ""])
+    for col, w in zip("ABCDEFGHIJKL", (12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 14)):
+        ws.column_dimensions[col].width = w
+    return _excel_response(wb, "monggon_tootsoo")
+
+
 def _excel_response(wb, prefix: str):
     buf = io.BytesIO()
     wb.save(buf)

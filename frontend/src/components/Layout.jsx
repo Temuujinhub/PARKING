@@ -28,6 +28,7 @@ const NAV = [
       { to: '/tariffs', label: 'Тарифын загвар', icon: Tag, module: 'discounts' },
       { to: '/drivers', label: 'Бүртгэлтэй жолооч', icon: ClipboardList, module: 'drivers' },
       { to: '/reports', label: 'Тайлан', icon: FileText, module: 'reports' },
+      { to: '/settlement', label: 'Мөнгөн тооцоо', icon: Wallet, module: 'reports' },
       { to: '/vat', label: 'Ибаримт', icon: ReceiptText, module: 'vat' },
       { to: '/blacklist', label: 'Хар жагсаалт', icon: ShieldAlert, module: 'blacklist' },
     ],

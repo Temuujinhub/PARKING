@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -274,6 +275,28 @@ class Compensation(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     site = relationship("ParkingSite", lazy="joined")
+
+
+class DailySettlement(Base):
+    """Санхүүгийн өдрийн мөнгөн тооцоо — зогсоол/өдрөөр системийн борлуулалт ба дансны
+    бодит орлогыг тулгах. Системийн дүн (карт/QPay/бэлэн) төлбөрөөс тооцогдоно; санхүү
+    ажилтан дансны хуулгаас баталгаажсан дүнг оруулж, зөрүүг тулгаад тооцоог хаадаг."""
+    __tablename__ = "daily_settlements"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False, index=True)
+    date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD (тухайн өдөр)
+    # Санхүүгийн баталгаажуулсан бодит дүн (дансны хуулгаас)
+    confirmed_card = Column(Numeric(12, 2), nullable=False, default=0)
+    confirmed_qpay = Column(Numeric(12, 2), nullable=False, default=0)
+    confirmed_cash = Column(Numeric(12, 2), nullable=False, default=0)
+    note = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default="OPEN")  # OPEN, CLOSED
+    closed_by = Column(String(60), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    site = relationship("ParkingSite", lazy="joined")
+    __table_args__ = (UniqueConstraint("site_id", "date", name="uq_settlement_site_date"),)
 
 
 class AuditLog(Base):
