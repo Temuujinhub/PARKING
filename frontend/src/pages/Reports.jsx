@@ -29,22 +29,28 @@ export default function Reports() {
     return p.toString()
   }
 
-  // Drill-down: өдөр → тухайн өдрийн бүх гүйлгээ; сар → тухайн сарын өдрүүд
-  const [dayTxns, setDayTxns] = useState(null)   // {date, rows}
-  const [monthDays, setMonthDays] = useState(null) // {month, rows}
+  // Drill-down: зогсоол→сарууд, сар→өдрүүд, өдөр→гүйлгээ
+  const [dayTxns, setDayTxns] = useState(null)     // {date, rows, site_id?}
+  const [monthDays, setMonthDays] = useState(null) // {month, rows, site_id?}
+  const [siteMonths, setSiteMonths] = useState(null) // {site_id, name, rows}
   const lastDayOf = (month) => { // "2026-07" → "2026-07-31"
     const [y, m] = month.split('-').map(Number)
     return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`
   }
-  const openDay = (date) => {
-    setDayTxns({ date, rows: null })
-    api(`/api/reports/transactions?date_from=${date}&date_to=${date}&date_field=paid&limit=2000`)
-      .then((d) => setDayTxns({ date, rows: d.rows })).catch(() => setDayTxns({ date, rows: [] }))
+  const siteQ = (sid) => sid ? `&site_id=${sid}` : ''
+  const openDay = (date, sid) => {
+    setDayTxns({ date, rows: null, site_id: sid })
+    api(`/api/reports/transactions?date_from=${date}&date_to=${date}&date_field=paid&limit=2000${siteQ(sid)}`)
+      .then((d) => setDayTxns({ date, rows: d.rows, site_id: sid })).catch(() => setDayTxns({ date, rows: [], site_id: sid }))
   }
-  const openMonth = (month) => {
+  const openMonth = (month, sid) => {
     const dfrom = `${month}-01`, dto = lastDayOf(month)
-    api(`/api/reports/daily?date_from=${dfrom}&date_to=${dto}`)
-      .then((d) => setMonthDays({ month, rows: d.rows })).catch(() => {})
+    api(`/api/reports/daily?date_from=${dfrom}&date_to=${dto}${siteQ(sid)}`)
+      .then((d) => setMonthDays({ month, rows: d.rows, site_id: sid })).catch(() => {})
+  }
+  const openSiteMonths = (site_id, name) => {
+    api(`/api/reports/monthly?date_from=${from}&date_to=${to}${siteQ(site_id)}`)
+      .then((d) => setSiteMonths({ site_id, name, rows: d.rows })).catch(() => {})
   }
   const hm = (iso) => iso ? iso.replace('T', ' ').slice(11, 16) : '—'
 
@@ -127,11 +133,13 @@ export default function Reports() {
 
       {tab === 'revenue' && revenue && (
         <>
+          <div className="text-xs text-slate-400">Зогсоол дээр дарж тухайн зогсоолын сар бүрийн дүнг харна.</div>
           <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Төлөгдөөгүй (₮)', 'Нийт (₮)', 'Үйлдэл']}
             empty={revenue.rows.length === 0}>
             {revenue.rows.map((r) => (
               <tr key={r.site_id}>
-                <td className="td font-medium">{r.site_name}</td>
+                <td className="td font-medium text-accent underline decoration-dotted cursor-pointer"
+                  onClick={() => openSiteMonths(r.site_id, r.site_name)}>{r.site_name}</td>
                 <td className="td font-mono">{fmt(r.entered)}</td>
                 <td className="td font-mono">{fmt(r.exited)}</td>
                 <td className="td font-mono">{fmtDur(r.total_minutes)}</td>
@@ -160,6 +168,35 @@ export default function Reports() {
             <span>Төлөгдөөгүй: <b className="font-mono text-amber-400">{fmt(revenue.totals.unpaid_amount)}₮</b></span>
             <span>Нийт орлого: <b className="font-mono text-accent">{fmt(revenue.totals.paid_amount)}₮</b></span>
           </div>
+          {/* Drill: зогсоолын сар бүрийн дүн */}
+          {siteMonths && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-accent">{siteMonths.name} — сар бүрийн дүн</h3>
+                <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setSiteMonths(null)}>Хаах</button>
+              </div>
+              <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)', '']}
+                empty={siteMonths.rows.length === 0}>
+                {siteMonths.rows.map((r) => (
+                  <tr key={r.month}>
+                    <td className="td font-mono text-accent underline decoration-dotted cursor-pointer"
+                      onClick={() => openMonth(r.month, siteMonths.site_id)}>{r.month}</td>
+                    <td className="td font-mono">{r.count}</td>
+                    <td className="td font-mono">{fmt(r.cash)}</td>
+                    <td className="td font-mono">{fmt(r.qpay)}</td>
+                    <td className="td font-mono">{fmt(r.pos)}</td>
+                    <td className="td font-mono text-accent font-semibold">{fmt(r.total)}</td>
+                    <td className="td text-right">
+                      <button className="btn-secondary py-1 px-2 text-xs"
+                        onClick={() => downloadBlob(`/api/reports/monthly/excel?date_from=${r.month}-01&date_to=${lastDayOf(r.month)}&site_id=${siteMonths.site_id}`, `${siteMonths.name}_${r.month}.xlsx`)}>
+                        <Download size={13} /> Татах
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          )}
         </>
       )}
 
@@ -245,12 +282,18 @@ export default function Reports() {
             <div className="card">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-semibold text-accent">{monthDays.month} сарын өдрүүд</h3>
-                <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setMonthDays(null)}>Хаах</button>
+                <div className="flex items-center gap-3">
+                  <button className="btn-secondary py-1 text-xs"
+                    onClick={() => downloadBlob(`/api/reports/daily/excel?date_from=${monthDays.month}-01&date_to=${lastDayOf(monthDays.month)}${siteQ(monthDays.site_id)}`, `odriin_${monthDays.month}.xlsx`)}>
+                    <Download size={13} /> Сарын бүх өдрүүд татах
+                  </button>
+                  <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setMonthDays(null)}>Хаах</button>
+                </div>
               </div>
               <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)']}
                 empty={monthDays.rows.length === 0}>
                 {monthDays.rows.map((r) => (
-                  <tr key={r.date} onClick={() => openDay(r.date)} className="cursor-pointer hover:bg-surface-muted/40">
+                  <tr key={r.date} onClick={() => openDay(r.date, monthDays.site_id)} className="cursor-pointer hover:bg-surface-muted/40">
                     <td className="td font-mono text-accent underline decoration-dotted">{r.date}</td>
                     <td className="td font-mono">{fmt(r.entered)}</td>
                     <td className="td font-mono">{fmt(r.exited)}</td>
@@ -273,7 +316,7 @@ export default function Reports() {
             <h3 className="font-semibold text-accent">{dayTxns.date} — өдрийн бүх гүйлгээ</h3>
             <div className="flex items-center gap-3">
               <button className="btn-secondary py-1 text-xs"
-                onClick={() => downloadBlob(`/api/reports/transactions/excel?date_from=${dayTxns.date}&date_to=${dayTxns.date}&date_field=paid`, `guilgee_${dayTxns.date}.xlsx`)}>
+                onClick={() => downloadBlob(`/api/reports/transactions/excel?date_from=${dayTxns.date}&date_to=${dayTxns.date}&date_field=paid${siteQ(dayTxns.site_id)}`, `guilgee_${dayTxns.date}.xlsx`)}>
                 <Download size={13} /> Татах
               </button>
               <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setDayTxns(null)}>Хаах</button>
