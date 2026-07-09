@@ -1,19 +1,15 @@
 // Лог: аудит + LPR event
 import { Download } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api, fmtDate } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
 export default function Logs() {
   const toast = useToast()
   const [tab, setTab] = useState('audit')
-  const [audit, setAudit] = useState([])
-  const [lpr, setLpr] = useState([])
-
-  useEffect(() => {
-    if (tab === 'audit') api('/api/reports/audit-logs').then(setAudit).catch(() => {})
-    else api('/api/reports/lpr-events').then(setLpr).catch(() => {})
-  }, [tab])
+  const { data: audit } = useFetch(tab === 'audit' ? '/api/reports/audit-logs' : null, { initial: [] })
+  const { data: lpr } = useFetch(tab === 'lpr' ? '/api/reports/lpr-events' : null, { initial: [] })
 
   const downloadAudit = async () => {
     try {

@@ -1,6 +1,7 @@
 // Түүх — бүх session-ийн жагсаалт, шүүлтүүр
 import { useEffect, useState } from 'react'
-import { api, fmt, fmtDate, fmtDur } from '../api'
+import { fmt, fmtDate, fmtDur } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Badge, Table } from '../components/ui'
 
 const STATUSES = [
@@ -9,20 +10,18 @@ const STATUSES = [
 ]
 
 export default function History() {
-  const [sites, setSites] = useState([])
   const [filters, setFilters] = useState({ site_id: '', status: '', plate: '', date_from: '', date_to: '' })
-  const [data, setData] = useState({ total: 0, rows: [] })
   const [page, setPage] = useState(0)
   const limit = 50
 
-  useEffect(() => { api('/api/admin/sites').then(setSites) }, [])
+  const { data: sites } = useFetch('/api/admin/sites', { initial: [], silent: true })
 
-  const load = (p = page) => {
-    const params = new URLSearchParams({ limit, offset: p * limit })
-    Object.entries(filters).forEach(([k, v]) => v && params.set(k, v))
-    api(`/api/sessions?${params}`).then(setData).catch(() => {})
-  }
-  useEffect(() => { load(0); setPage(0) }, [filters])
+  const params = new URLSearchParams({ limit, offset: page * limit })
+  Object.entries(filters).forEach(([k, v]) => v && params.set(k, v))
+  const { data } = useFetch(`/api/sessions?${params}`, { initial: { total: 0, rows: [] } })
+
+  // Шүүлтүүр өөрчлөгдвөл эхний хуудас руу (path өөрчлөгдмөгц автоматаар дахин татна)
+  useEffect(() => { setPage(0) }, [filters])
 
   return (
     <div className="space-y-5">
@@ -65,9 +64,9 @@ export default function History() {
         <span>Нийт: {fmt(data.total)} мөр</span>
         <div className="flex gap-2">
           <button className="btn-secondary py-1" disabled={page === 0}
-            onClick={() => { setPage(page - 1); load(page - 1) }}>Өмнөх</button>
+            onClick={() => setPage(page - 1)}>Өмнөх</button>
           <button className="btn-secondary py-1" disabled={(page + 1) * limit >= data.total}
-            onClick={() => { setPage(page + 1); load(page + 1) }}>Дараах</button>
+            onClick={() => setPage(page + 1)}>Дараах</button>
         </div>
       </div>
     </div>

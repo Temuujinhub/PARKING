@@ -2,8 +2,8 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, JSON,
-    UniqueConstraint,
+    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
+    UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -163,6 +163,15 @@ class ParkingSession(Base):
     site = relationship("ParkingSite", lazy="joined")
     discount = relationship("Discount", lazy="joined")
 
+    __table_args__ = (
+        Index("ix_sessions_entry_time", "entry_time"),
+        Index("ix_sessions_exit_time", "exit_time"),
+        Index("ix_sessions_site_plate_status", "site_id", "plate_number", "status"),
+        # Нэг зогсоолд дугаараар нэгэн зэрэг ганц идэвхтэй session (LPR race хамгаалалт)
+        Index("uq_active_session", "site_id", "plate_number", unique=True,
+              postgresql_where=text("status IN ('OPEN','AWAITING_PAYMENT','PAID')")),
+    )
+
 
 class Payment(Base):
     __tablename__ = "payments"
@@ -195,6 +204,13 @@ class Payment(Base):
 
     session = relationship("ParkingSession", lazy="joined")
 
+    __table_args__ = (
+        Index("ix_payments_status_paid_at", "status", "paid_at"),  # орлогын тайлангийн hot path
+        Index("ix_payments_created_at", "created_at"),
+        Index("ix_payments_shift_id", "shift_id"),
+        Index("ix_payments_provider", "provider"),
+    )
+
 
 class VatReceipt(Base):
     __tablename__ = "vat_receipts"
@@ -209,6 +225,11 @@ class VatReceipt(Base):
     customer_tin = Column(String(20), nullable=True)  # байгууллагаар авах бол
     status = Column(String(30), nullable=False, default="PENDING")  # PENDING, SENT, FAILED
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_vat_receipts_session", "session_id"),
+        Index("ix_vat_receipts_payment", "payment_id"),
+    )
 
 
 class BarrierCommand(Base):
@@ -258,6 +279,13 @@ class CashierShift(Base):
 
     user = relationship("User", lazy="joined")
     site = relationship("ParkingSite", lazy="joined")
+
+    __table_args__ = (
+        Index("ix_shifts_status", "status"),
+        Index("ix_shifts_opened_at", "opened_at"),
+        Index("ix_shifts_user", "user_id"),
+        Index("ix_shifts_site", "site_id"),
+    )
 
 
 class Compensation(Base):
@@ -311,3 +339,8 @@ class AuditLog(Base):
     detail = Column(JSON, nullable=False, default=dict)
     ip_address = Column(String(50), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_audit_username", "username"),
+        Index("ix_audit_action", "action"),
+    )

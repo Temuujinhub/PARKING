@@ -6,5 +6,7 @@ pydantic-settings
 pyjwt
 bcrypt
 httpx
+alembic
 openpyxl
+psutil
 python-multipart

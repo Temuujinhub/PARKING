@@ -1,19 +1,14 @@
 // Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх/хаах, командын лог
 import { DoorClosed, DoorOpen, PlugZap, RefreshCw, ShieldAlert } from 'lucide-react'
-import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
 export default function Barriers() {
   const toast = useToast()
-  const [devices, setDevices] = useState([])
-  const [commands, setCommands] = useState([])
-
-  const load = () => {
-    api('/api/admin/devices').then(setDevices).catch(() => {})
-    api('/api/barriers/commands?limit=50').then(setCommands).catch(() => {})
-  }
-  useEffect(load, [])
+  const { data: devices, reload: reloadDevices } = useFetch('/api/admin/devices', { initial: [] })
+  const { data: commands, reload: reloadCommands } = useFetch('/api/barriers/commands?limit=50', { initial: [] })
+  const load = () => { reloadDevices(); reloadCommands() }
 
   const command = async (id, action, body = {}, okMsg = 'Амжилттай') => {
     try {

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import enforce_site, require
 from ..database import get_db
 from ..models import AuditLog, BarrierCommand, Device, User
 from ..serializers import to_dict
@@ -20,6 +20,7 @@ async def manual_open(device_id: str, body: dict | None = None, db: Session = De
     device = db.get(Device, device_id)
     if not device or device.device_type != "barrier":
         raise HTTPException(404, "Barrier төхөөрөмж олдсонгүй")
+    enforce_site(user, device.site_id)  # оператор зөвхөн өөрийн зогсоолын хаалт
     force = bool((body or {}).get("force"))
     cmd = await open_barrier(db, device, (body or {}).get("session_id"),
                              "manual", issued_by=user.username, force=force)
@@ -41,6 +42,7 @@ async def manual_close(device_id: str, body: dict | None = None, db: Session = D
     device = db.get(Device, device_id)
     if not device or device.device_type != "barrier":
         raise HTTPException(404, "Barrier төхөөрөмж олдсонгүй")
+    enforce_site(user, device.site_id)  # оператор зөвхөн өөрийн зогсоолын хаалт
     cmd = await close_barrier(db, device, (body or {}).get("session_id"),
                               "manual", issued_by=user.username)
     db.add(AuditLog(username=user.username, action="BARRIER_CLOSE", entity="device",

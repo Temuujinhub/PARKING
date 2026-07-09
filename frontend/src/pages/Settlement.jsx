@@ -2,29 +2,25 @@
 import { Download, Lock, Unlock } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
+import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
 export default function Settlement() {
   const toast = useToast()
   const today = new Date().toISOString().slice(0, 10)
   const weekAgo = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10)
-  const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
-  const [rows, setRows] = useState([])
   const [edit, setEdit] = useState({}) // {date: confirmed_cash}
 
-  useEffect(() => {
-    api('/api/admin/sites').then((s) => { setSites(s); if (s.length && !siteId) setSiteId(s[0].id) }).catch(() => {})
-  }, [])
-
-  const load = () => {
-    if (!siteId) return
-    api(`/api/reports/settlement?site_id=${siteId}&date_from=${from}&date_to=${to}`)
-      .then((d) => { setRows(d.rows); setEdit({}) }).catch(() => {})
-  }
-  useEffect(load, [siteId, from, to])
+  const { data: sites } = useFetch('/api/admin/sites', { initial: [], silent: true })
+  useEffect(() => { if (sites.length && !siteId) setSiteId(sites[0].id) }, [sites]) // анхны зогсоол сонгох
+  const { data: settlement, reload: load } = useFetch(
+    siteId ? `/api/reports/settlement?site_id=${siteId}&date_from=${from}&date_to=${to}` : null,
+    { initial: { rows: [] } })
+  const rows = settlement?.rows || []
+  useEffect(() => { setEdit({}) }, [settlement]) // шинэ өгөгдөл ирэхэд гараар засварыг цэвэрлэнэ
 
   const cashVal = (r) => (edit[r.date] ?? r.confirmed_cash)
 

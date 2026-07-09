@@ -10,16 +10,25 @@
 import io
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
 from ..models import ParkingSession, ParkingSite
+from ..ratelimit import throttle
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/public", tags=["public"])
+
+
+def _throttle_public(request: Request, name: str, limit: int = 60):
+    """Нэвтрэлтгүй public хайлтыг IP-ээр хязгаарлана — дугаар цуглуулах (enumeration)-аас
+    хамгаална. Жолоочийн энгийн хэрэглээнд саад болохгүй (минутад 60 хүсэлт)."""
+    ip = request.client.host if request.client else "?"
+    if throttle(f"pub:{name}:{ip}", limit=limit, window=60):
+        raise HTTPException(429, "Хэт олон хүсэлт. Хэсэг хүлээгээд дахин оролдоно уу.")
 
 
 def _mask(plate: str) -> str:
@@ -114,8 +123,9 @@ def get_site(site_code: str, db: Session = Depends(get_db)):
 
 
 @router.get("/recent-exits/{site_code}")
-def recent_exits(site_code: str, db: Session = Depends(get_db)):
+def recent_exits(site_code: str, request: Request, db: Session = Depends(get_db)):
     """Гарах камерт сүүлийн 15 минутад уншигдсан, төлбөр хүлээж буй дугаарууд (масктай)."""
+    _throttle_public(request, "recent", limit=120)
     site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -132,9 +142,10 @@ def recent_exits(site_code: str, db: Session = Depends(get_db)):
 
 
 @router.get("/search")
-def search_plates(site: str, q: str, db: Session = Depends(get_db)):
+def search_plates(site: str, q: str, request: Request, db: Session = Depends(get_db)):
     """Хялбар хайлт: дугаарын эхний тоогоор (үсэг оруулахгүйгээр) нээлттэй
     session-уудаас таарах машинуудын жагсаалт буцаана. Жолооч жагсаалтаас сонгоно."""
+    _throttle_public(request, "search")
     q = normalize_plate(q)
     if len(q) < 2:
         return []
@@ -162,8 +173,9 @@ def search_plates(site: str, q: str, db: Session = Depends(get_db)):
 
 
 @router.get("/sessions")
-def find_session(plate: str, site: str, db: Session = Depends(get_db)):
+def find_session(plate: str, site: str, request: Request, db: Session = Depends(get_db)):
     """Дугаараар нээлттэй session хайна (төлбөрийн задаргаатай)."""
+    _throttle_public(request, "sessions")
     plate = normalize_plate(plate)
     if not plate:
         raise HTTPException(400, "Дугаараа оруулна уу")

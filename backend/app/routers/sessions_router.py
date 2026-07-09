@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import operator_site, require
+from ..auth import enforce_site, operator_site, require
 from ..database import get_db
 from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
@@ -176,7 +176,7 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
            оруулах бол орсон гэж үзэх цаг, default = одоо}"""
     from ..session_logic import find_registered, is_blacklisted, is_valid_plate
     plate = normalize_plate(body.get("plate_number", ""))
-    site_id = body.get("site_id")
+    site_id = operator_site(user) or body.get("site_id")  # оператор зөвхөн өөрийн зогсоол
     if not plate or not site_id:
         raise HTTPException(400, "plate_number болон site_id шаардлагатай")
     # force=true — дипломат/тусгай дугаар (стандарт форматад тохирохгүй) гэдгийг оператор баталгаажуулсан
@@ -221,7 +221,7 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
     from ..config import settings
     if not settings.allow_simulate:
         raise HTTPException(403, "Тест горим идэвхгүй (production)")
-    site_id = body.get("site_id")
+    site_id = operator_site(user) or body.get("site_id")  # оператор зөвхөн өөрийн зогсоол
     if not site_id:
         raise HTTPException(400, "site_id шаардлагатай")
     letters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЭЮЯӨҮ"
@@ -252,6 +252,7 @@ def get_session(session_id: str, db: Session = Depends(get_db),
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын session
     return _session_out(db, s, with_fee=True)
 
 
@@ -261,6 +262,7 @@ def apply_discount(session_id: str, body: dict, db: Session = Depends(get_db),
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
     if s.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-д хөнгөлөлт хэрэглэнэ")
     s.discount_id = body.get("discount_id")
@@ -285,6 +287,7 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
     if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-ий дугаарыг засна")
     new_plate = normalize_plate(body.get("plate_number", ""))
@@ -314,6 +317,7 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын машиныг гаргана
     now = datetime.utcnow()
     fee = session_fee_info(db, s, at=now)
     s.exit_time = now
