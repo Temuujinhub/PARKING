@@ -44,7 +44,7 @@ function SiteTariffs() {
           <td className="td font-medium">{s.name}</td>
           <td className="td font-mono">{s.site_code}</td>
           <td className="td">{s.zone_code}</td>
-          <td className="td font-mono">{s.capacity}</td>
+          <td className="td font-mono">{s.capacity || 'Хязгааргүй'}</td>
           <td className="td">
             <select className="input w-auto py-1 text-sm" value={s.tariff_template_id || ''}
               onChange={(e) => changeTariff(s.id, e.target.value)} aria-label="Тариф солих">

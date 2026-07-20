@@ -99,7 +99,9 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
                         .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
                                 Payment.paid_at >= today).scalar())
         sites.append({"id": s.id, "name": s.name, "capacity": s.capacity,
-                      "occupied": occupied, "free": max(0, (s.capacity or 0) - occupied),
+                      # capacity=0 → дүүргэлтгүй: сул тоо null
+                      "occupied": occupied,
+                      "free": max(0, s.capacity - occupied) if s.capacity else None,
                       "today_revenue": revenue})
 
     # Сүүлийн 7 хоногийн орлого (график)

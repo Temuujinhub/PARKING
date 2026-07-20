@@ -163,8 +163,10 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
             "ebarimt": s.id in recs,
             "note": s.note,
         })
-    return {"capacity": site.capacity if site else 0, "occupied": occupied,
-            "free": max(0, (site.capacity if site else 0) - occupied), "rows": rows}
+    cap = site.capacity if site else 0
+    # capacity=0 → дүүргэлтгүй зогсоол: сул тоо тооцохгүй (null)
+    return {"capacity": cap, "occupied": occupied,
+            "free": max(0, cap - occupied) if cap else None, "rows": rows}
 
 
 @router.post("/manual-entry")
