@@ -117,7 +117,8 @@ def delete_site(site_id: str, force: bool = False, db: Session = Depends(get_db)
     db.query(CashierShift).filter(CashierShift.site_id == site_id).update(
         {"site_id": None}, synchronize_session=False)
     db.query(User).filter(User.site_id == site_id).update({"site_id": None}, synchronize_session=False)
-    db.query(Discount).filter(Discount.site_id == site_id).update({"site_id": None}, synchronize_session=False)
+    db.query(RegisteredDriver).filter(RegisteredDriver.site_id == site_id).update(
+        {"site_id": None}, synchronize_session=False)
     db.delete(site)
     _audit(db, user, "DELETE", "site", site_id,
            {"name": site.name, "site_code": site.site_code, "force": force, "sessions": sess_count})

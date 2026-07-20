@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { fmt, fmtDate, fmtDur } from '../api'
 import { useFetch } from '../hooks/useFetch'
+import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Table } from '../components/ui'
 
 const STATUSES = [
@@ -44,7 +45,7 @@ export default function History() {
           onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} aria-label="Дуусах огноо" />
       </div>
 
-      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Хөнгөлөлт', 'Төлөв']}
+      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Хөнгөлөлт', 'Төлөв', 'Зураг']}
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
           <tr key={s.id} className="hover:bg-surface-muted/30">
@@ -56,6 +57,7 @@ export default function History() {
             <td className="td font-mono font-semibold">{s.total_fee !== null ? `${fmt(s.total_fee)}₮` : '-'}</td>
             <td className="td text-xs">{s.discount_name || '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
+            <td className="td"><SnapshotButton session={s} /></td>
           </tr>
         ))}
       </Table>

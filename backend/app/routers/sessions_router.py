@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, operator_site, require
+from ..auth import enforce_site, get_current_user, operator_site, require
 from ..database import get_db
 from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
@@ -246,6 +246,32 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"], "test": True,
     })
     return _session_out(db, s, with_fee=True)
+
+
+@router.get("/{session_id}/snapshot/{kind}")
+def get_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """Орох/гарах камерын хадгалсан зургийг буцаана. kind: entry | exit."""
+    import os
+
+    from fastapi.responses import FileResponse
+
+    from ..config import settings as cfg
+    if kind not in ("entry", "exit"):
+        raise HTTPException(404, "kind нь entry эсвэл exit байна")
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    osid = operator_site(user)
+    if osid and s.site_id != osid:
+        raise HTTPException(403, "Өөр зогсоолын мэдээлэл")
+    rel = s.entry_snapshot if kind == "entry" else s.exit_snapshot
+    if not rel:
+        raise HTTPException(404, "Зураг хадгалагдаагүй байна")
+    path = os.path.join(cfg.snapshot_dir, rel)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Зургийн файл олдсонгүй")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @router.get("/{session_id}")

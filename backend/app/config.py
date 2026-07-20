@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     camera_username: str = "admin"   # камерын web admin нэвтрэх нэр
     camera_password: str = ""        # камерын web admin нууц үг (.env-д)
 
+    # LPR snapshot — event бүрд камераас зураг татаж хадгална (нотолгоо/маргаан шийдэхэд)
+    snapshot_enabled: bool = True
+    snapshot_dir: str = "/var/lib/parking/snapshots"
+
     class Config:
         env_file = ".env"
         env_prefix = "PARKING_"

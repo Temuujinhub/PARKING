@@ -157,6 +157,8 @@ class ParkingSession(Base):
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
+    entry_snapshot = Column(String(255), nullable=True)  # орох камерын зураг (snapshot_dir доторх зам)
+    exit_snapshot = Column(String(255), nullable=True)   # гарах камерын зураг
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -10,6 +10,7 @@ from .models import (
     RegisteredDriver,
 )
 from .services.barrier import open_barrier
+from .services.snapshot import schedule_capture
 from .ws import manager
 
 
@@ -119,6 +120,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="entry", confidence=confidence, accepted=True, raw=raw))
     db.commit()
+    # Зургийг ард нь татаж хадгална (хаалт нээхийг хүлээлгэхгүй)
+    schedule_capture(session.id, device.ip_address, plate, "entry", raw)
 
     barrier_opened = False
     if black:
@@ -183,6 +186,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     session.exit_device_id = device.id
     session.confidence_exit = confidence
+    # Гарах зургийг ард нь татаж хадгална (маргаан/нотолгоонд — ялангуяа төлбөргүй гарсан үед)
+    schedule_capture(session.id, device.ip_address, plate, "exit", raw)
 
     fee = session_fee_info(db, session, at=now)
 

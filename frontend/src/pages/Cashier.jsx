@@ -3,6 +3,7 @@ import { Banknote, CarFront, CreditCard, DoorOpen, FlaskConical, QrCode, Refresh
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { useAuth } from '../auth'
+import { SnapshotImg } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 export default function Cashier() {
@@ -351,6 +352,11 @@ export default function Cashier() {
                 <span className="text-slate-400">НӨАТ (10%)</span><span className="font-mono text-right">{fmt(fee?.vat_amount)}₮</span>
                 <span className="text-slate-300 font-semibold">Нийт дүн</span>
                 <span className="font-mono text-right text-xl font-bold text-accent">{fmt(fee?.total_fee)}₮</span>
+              </div>
+              {/* Камерын зураг — машин таарч байгааг нүдээр баталгаажуулна */}
+              <div className="grid grid-cols-2 gap-2">
+                <SnapshotImg sessionId={selected.id} kind="entry" label="Орох зураг" />
+                <SnapshotImg sessionId={selected.id} kind="exit" label="Гарах зураг" />
               </div>
               <Field label="Хөнгөлөлт хэрэглэх">
                 <select className="input" value={selected.discount_id || ''} onChange={(e) => applyDiscount(e.target.value)} disabled={!canAct}>

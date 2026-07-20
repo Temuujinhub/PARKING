@@ -3,6 +3,7 @@
 import { RefreshCw } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
+import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Table } from '../components/ui'
 
 const STATUSES = [
@@ -63,7 +64,7 @@ export default function Check() {
         </select>
       </div>
 
-      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв']}
+      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв', 'Зураг']}
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
           <tr key={s.id} className={s.debt ? 'bg-red-500/10' : 'hover:bg-surface-muted/30'}>
@@ -83,6 +84,7 @@ export default function Check() {
             </td>
             <td className="td text-xs">{s.is_registered ? <span className="text-accent">Тийм</span> : '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
+            <td className="td"><SnapshotButton session={s} /></td>
           </tr>
         ))}
       </Table>

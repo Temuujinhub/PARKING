@@ -50,6 +50,10 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_session ON parking_sessions (site_id, plate_number) "
     "WHERE status IN ('OPEN','AWAITING_PAYMENT','PAID')",
 
+    # v1.8 — LPR snapshot (орох/гарах камерын зураг)
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot VARCHAR(255)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot VARCHAR(255)",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 
