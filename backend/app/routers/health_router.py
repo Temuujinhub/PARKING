@@ -123,7 +123,9 @@ def _ssl_expiry() -> dict | None:
     from datetime import datetime, timezone
     try:
         ctx = ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=3) as sock:
+        # nginx локалдоо ижил сертификатыг serve хийдэг тул 127.0.0.1 руу холбогдоно —
+        # дотоод сүлжээнээс гадаад IP руу hairpin NAT ажиллахгүй байсан ч зөв шалгана
+        with socket.create_connection(("127.0.0.1", 443), timeout=3) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ss:
                 cert = ss.getpeercert()
         exp = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)

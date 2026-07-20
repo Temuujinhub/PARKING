@@ -12,6 +12,7 @@ from ..models import (
     Device, Discount, LprEvent, ParkingSession, ParkingSite, Payment,
     RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
 )
+from ..config import settings
 from ..serializers import to_dict
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -51,6 +52,8 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
             # capacity=0 → дүүргэлтгүй (хязгааргүй) зогсоол: сул тоо тооцохгүй
             "free_spaces": max(0, s.capacity - occupied) if s.capacity else None,
             "tariff_template_name": s.tariff_template.name if s.tariff_template else None,
+            # Жолоочийн төлбөрийн линк — QR-т кодлогдсонтой ЯГ ижил (public_base_url домэйн)
+            "pay_url": f"{settings.public_base_url}/pay?site={s.site_code}",
         }))
     return out
 
@@ -66,7 +69,7 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
     db.flush()
     _audit(db, user, "CREATE", "site", site.id, body)
     db.commit()
-    return to_dict(site)
+    return to_dict(site, extra={"pay_url": f"{settings.public_base_url}/pay?site={site.site_code}"})
 
 
 @router.put("/sites/{site_id}")

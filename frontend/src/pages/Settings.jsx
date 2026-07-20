@@ -115,7 +115,8 @@ function Sites() {
     }
   }
 
-  const payUrl = (code) => `${location.origin}/pay?site=${code}`
+  // QR-т кодлогдсонтой ижил линк — backend public_base_url (домэйн) ашиглана
+  const payUrl = (s) => s?.pay_url || `${location.origin}/pay?site=${s?.site_code}`
   const qrUrl = (code) => `/api/public/qr/${code}.png`
 
   const openWizard = () => setWizard({
@@ -333,8 +334,8 @@ function Sites() {
                     <Download size={16} /> QR зураг татах (хэвлэхэд бэлэн)
                   </a>
                   <div className="flex items-center gap-2 bg-surface-muted rounded-lg px-3 py-2 mt-2">
-                    <code className="text-xs flex-1 text-left break-all">{payUrl(wizard.created.site_code)}</code>
-                    <button className="btn-secondary py-1 px-2" onClick={() => copy(payUrl(wizard.created.site_code))} aria-label="URL хуулах">
+                    <code className="text-xs flex-1 text-left break-all">{payUrl(wizard.created)}</code>
+                    <button className="btn-secondary py-1 px-2" onClick={() => copy(payUrl(wizard.created))} aria-label="URL хуулах">
                       <Copy size={13} />
                     </button>
                   </div>
@@ -424,9 +425,9 @@ function Sites() {
             <a href={qrUrl(qrSite.site_code)} download={`${qrSite.site_code}-pay-qr.png`}
               className="btn-primary justify-center w-full">Хэвлэх PNG татах (өндөр нягтрал)</a>
             <div className="flex items-center gap-2 bg-surface-muted rounded-lg px-3 py-2">
-              <code className="text-xs flex-1 text-left break-all">{payUrl(qrSite.site_code)}</code>
+              <code className="text-xs flex-1 text-left break-all">{payUrl(qrSite)}</code>
               <button className="btn-secondary py-1 px-2" aria-label="Хуулах"
-                onClick={() => { navigator.clipboard.writeText(payUrl(qrSite.site_code)); useToast()('Хуулагдлаа') }}>
+                onClick={() => { navigator.clipboard.writeText(payUrl(qrSite)); useToast()('Хуулагдлаа') }}>
                 <Copy size={13} />
               </button>
             </div>
