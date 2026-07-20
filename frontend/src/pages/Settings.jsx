@@ -88,10 +88,31 @@ function Sites() {
   const save = async (e) => {
     e.preventDefault()
     try {
-      const body = { ...editing, capacity: +editing.capacity, tariff_template_id: editing.tariff_template_id || null }
+      const body = {
+        ...editing,
+        capacity: editing.unlimited ? 0 : +editing.capacity,
+        tariff_template_id: editing.tariff_template_id || null,
+      }
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
     } catch (err) { toast(err.message, 'error') }
+  }
+
+  // Зогсоол устгах — түүхтэй бол сервер 409 буцаана → force дахин баталгаажуулна
+  const removeSite = async (s) => {
+    if (!confirm(`"${s.name}" (${s.site_code}) зогсоолыг устгах уу?`)) return
+    try {
+      await api(`/api/admin/sites/${s.id}`, { method: 'DELETE' })
+      toast('Устгагдлаа'); load()
+    } catch (err) {
+      if (/бүртгэл/.test(err.message)) {
+        if (!confirm(`${err.message}\n\nБүх түүх, төлбөрийн бичлэгийн хамт БҮРМӨСӨН устгах уу? Буцаах боломжгүй!`)) return
+        try {
+          const r = await api(`/api/admin/sites/${s.id}?force=true`, { method: 'DELETE' })
+          toast(`Устгагдлаа (${r.deleted_sessions} бүртгэлийн хамт)`); load()
+        } catch (e2) { toast(e2.message, 'error') }
+      } else toast(err.message, 'error')
+    }
   }
 
   const payUrl = (code) => `${location.origin}/pay?site=${code}`
@@ -99,6 +120,7 @@ function Sites() {
 
   const openWizard = () => setWizard({
     step: 1,
+    unlimited: false,
     site: { name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: templates[0]?.id || '' },
     entryLanes: 1, exitLanes: 1,
     devices: Object.fromEntries(genDevices(1, 1).map((d) => [d.key, { enabled: true, ip_address: '' }])),
@@ -122,7 +144,7 @@ function Sites() {
       const s = wizard.site
       const created = await api('/api/admin/sites', {
         method: 'POST',
-        body: { ...s, capacity: +s.capacity, tariff_template_id: s.tariff_template_id || null },
+        body: { ...s, capacity: wizard.unlimited ? 0 : +s.capacity, tariff_template_id: s.tariff_template_id || null },
       })
       setWizard({ ...wizard, step: 2, created })
       load()
@@ -168,17 +190,22 @@ function Sites() {
             <td className="td font-medium">{s.name}</td>
             <td className="td font-mono">{s.site_code}</td>
             <td className="td">{s.zone_code}</td>
-            <td className="td font-mono">{s.capacity}</td>
+            <td className="td font-mono">{s.capacity ? s.capacity : <span className="text-slate-500">Хязгааргүй</span>}</td>
             <td className="td font-mono">{s.occupied}</td>
-            <td className="td font-mono text-accent">{s.free_spaces}</td>
+            <td className="td font-mono text-accent">{s.free_spaces ?? '—'}</td>
             <td className="td text-xs">{s.tariff_template_name || '-'}</td>
             <td className="td">
               <button className="btn-secondary py-1 text-xs" onClick={() => setQrSite(s)} aria-label="QR код харах">
                 <QrCode size={14} />
               </button>
             </td>
-            <td className="td text-right">
-              <button className="btn-secondary py-1 text-xs" onClick={() => setEditing(s)}>Засах</button>
+            <td className="td text-right whitespace-nowrap">
+              <button className="btn-secondary py-1 text-xs mr-1"
+                onClick={() => setEditing({ ...s, unlimited: !s.capacity })}>Засах</button>
+              <button className="btn-secondary py-1 text-xs text-red-400 hover:text-red-300"
+                onClick={() => removeSite(s)} aria-label={`${s.name} зогсоолыг устгах`}>
+                <Trash2 size={14} />
+              </button>
             </td>
           </tr>
         ))}
@@ -221,8 +248,14 @@ function Sites() {
                     </select>
                   </Field>
                   <Field label="Багтаамж">
-                    <input className="input" type="number" min="0" value={wizard.site.capacity} onKeyDown={enterToNext}
+                    <input className="input" type="number" min="1" value={wizard.unlimited ? '' : wizard.site.capacity}
+                      disabled={wizard.unlimited} placeholder={wizard.unlimited ? 'Хязгааргүй' : ''} onKeyDown={enterToNext}
                       onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, capacity: e.target.value } })} />
+                    <label className="flex items-center gap-2 mt-1.5 text-xs text-slate-400 cursor-pointer">
+                      <input type="checkbox" className="cursor-pointer" checked={wizard.unlimited}
+                        onChange={(e) => setWizard({ ...wizard, unlimited: e.target.checked })} />
+                      Дүүргэлтгүй (багтаамжийн хязгааргүй)
+                    </label>
                   </Field>
                 </div>
                 <Field label="Хаяг">
@@ -357,8 +390,14 @@ function Sites() {
                 </select>
               </Field>
               <Field label="Багтаамж">
-                <input className="input" type="number" min="0" value={editing.capacity}
+                <input className="input" type="number" min="1" value={editing.unlimited ? '' : editing.capacity}
+                  disabled={editing.unlimited} placeholder={editing.unlimited ? 'Хязгааргүй' : ''}
                   onChange={(e) => setEditing({ ...editing, capacity: e.target.value })} />
+                <label className="flex items-center gap-2 mt-1.5 text-xs text-slate-400 cursor-pointer">
+                  <input type="checkbox" className="cursor-pointer" checked={!!editing.unlimited}
+                    onChange={(e) => setEditing({ ...editing, unlimited: e.target.checked, capacity: e.target.checked ? 0 : (editing.capacity || 50) })} />
+                  Дүүргэлтгүй (багтаамжийн хязгааргүй)
+                </label>
               </Field>
             </div>
             <Field label="Хаяг">

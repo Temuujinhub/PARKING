@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user, hash_password, operator_site, require, require_role
 from ..database import get_db
 from ..models import (
-    AuditLog, BlacklistEntry, Device, Discount, ParkingSession, ParkingSite,
-    RegisteredDriver, TariffTemplate, TariffTier, User,
+    AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
+    Device, Discount, LprEvent, ParkingSession, ParkingSite, Payment,
+    RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
 )
 from ..serializers import to_dict
 
@@ -47,7 +48,8 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         ).count()
         out.append(to_dict(s, extra={
             "occupied": occupied,
-            "free_spaces": max(0, (s.capacity or 0) - occupied),
+            # capacity=0 → дүүргэлтгүй (хязгааргүй) зогсоол: сул тоо тооцохгүй
+            "free_spaces": max(0, s.capacity - occupied) if s.capacity else None,
             "tariff_template_name": s.tariff_template.name if s.tariff_template else None,
         }))
     return out
@@ -79,6 +81,48 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
     return to_dict(site)
+
+
+@router.delete("/sites/{site_id}")
+def delete_site(site_id: str, force: bool = False, db: Session = Depends(get_db),
+                user: User = Depends(require_role("SUPER_ADMIN", "ADMIN"))):
+    """Зогсоол устгах. Сешн түүхтэй бол force=true шаардана (тест дата цэвэрлэхэд).
+    force үед тухайн зогсоолын бүх хамаарах бичлэг (сешн, төлбөр, НӨАТ, LPR лог,
+    хаалтны команд, нөхөн төлбөр, тооцоо, төхөөрөмж) бүрмөсөн устна."""
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+
+    sess_ids = db.query(ParkingSession.id).filter(ParkingSession.site_id == site_id)
+    sess_count = sess_ids.count()
+    if sess_count and not force:
+        raise HTTPException(409, f"Энэ зогсоолд {sess_count} зогсолтын бүртгэл (түүх) байна. "
+                                 "Түүхийн хамт бүрмөсөн устгах бол дахин баталгаажуулна уу.")
+
+    dev_ids = db.query(Device.id).filter(Device.site_id == site_id)
+    sq = sess_ids.scalar_subquery()
+    dq = dev_ids.scalar_subquery()
+    # FK дарааллаар: эхлээд сешнээс хамаардаг хүснэгтүүд, дараа нь сешн, төхөөрөмж, зогсоол
+    db.query(VatReceipt).filter(VatReceipt.session_id.in_(sq)).delete(synchronize_session=False)
+    db.query(Payment).filter(Payment.session_id.in_(sq)).delete(synchronize_session=False)
+    db.query(BarrierCommand).filter(
+        (BarrierCommand.session_id.in_(sq)) | (BarrierCommand.device_id.in_(dq))
+    ).delete(synchronize_session=False)
+    db.query(LprEvent).filter(LprEvent.site_id == site_id).delete(synchronize_session=False)
+    db.query(Compensation).filter(Compensation.site_id == site_id).delete(synchronize_session=False)
+    db.query(DailySettlement).filter(DailySettlement.site_id == site_id).delete(synchronize_session=False)
+    db.query(ParkingSession).filter(ParkingSession.site_id == site_id).delete(synchronize_session=False)
+    db.query(Device).filter(Device.site_id == site_id).delete(synchronize_session=False)
+    # Хамааралтай боловч устгах шаардлагагүй бичлэгүүдийн холбоосыг салгана
+    db.query(CashierShift).filter(CashierShift.site_id == site_id).update(
+        {"site_id": None}, synchronize_session=False)
+    db.query(User).filter(User.site_id == site_id).update({"site_id": None}, synchronize_session=False)
+    db.query(Discount).filter(Discount.site_id == site_id).update({"site_id": None}, synchronize_session=False)
+    db.delete(site)
+    _audit(db, user, "DELETE", "site", site_id,
+           {"name": site.name, "site_code": site.site_code, "force": force, "sessions": sess_count})
+    db.commit()
+    return {"ok": True, "deleted_sessions": sess_count}
 
 
 @router.put("/sites/{site_id}/tariff")

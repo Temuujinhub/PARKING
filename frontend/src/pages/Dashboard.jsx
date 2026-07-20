@@ -169,7 +169,7 @@ export default function Dashboard() {
                   <div className="flex justify-between text-sm mb-1">
                     <span>{s.name}</span>
                     <span className="text-slate-400 font-mono text-xs">
-                      {s.occupied}/{s.capacity} · Сул: {s.free}
+                      {s.capacity ? `${s.occupied}/${s.capacity} · Сул: ${s.free}` : `${s.occupied} · Хязгааргүй`}
                     </span>
                   </div>
                   <div className="h-2 bg-surface-muted rounded-full overflow-hidden">
@@ -224,7 +224,9 @@ export default function Dashboard() {
                 <div key={site.id} className="card p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-sm truncate">{site.name}</span>
-                    <span className="text-[11px] text-slate-500 font-mono">{site.occupied}/{site.capacity}</span>
+                    <span className="text-[11px] text-slate-500 font-mono">
+                      {site.capacity ? `${site.occupied}/${site.capacity}` : `${site.occupied}/∞`}
+                    </span>
                   </div>
                   {/* Кассчин (сүүлд нэвтэрч ажиллаж буй оператор) */}
                   <div className="flex items-center gap-2 text-xs">
