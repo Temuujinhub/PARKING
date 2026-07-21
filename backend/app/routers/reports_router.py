@@ -16,11 +16,21 @@ from ..serializers import to_dict
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
+# DB бүх цагийг UTC-ээр хадгалдаг; хэрэглэгч локал (УБ, UTC+8) өдрөөр сэтгэдэг тул
+# өдрийн зааг, цагийн бүлэглэлтийг TZ-ээр хөрвүүлнэ.
+from ..config import settings as _cfg  # noqa: E402
+TZ = timedelta(hours=_cfg.tz_offset_hours)
+
+
+def _local_midnight_utc(dt_utc: datetime) -> datetime:
+    """Тухайн UTC моментын ЛОКАЛ өдрийн 00:00-ийг UTC-ээр буцаана."""
+    return (dt_utc + TZ).replace(hour=0, minute=0, second=0, microsecond=0) - TZ
+
 
 def _range(date_from: str | None, date_to: str | None):
-    start = datetime.fromisoformat(date_from) if date_from else datetime.utcnow().replace(
-        hour=0, minute=0, second=0, microsecond=0)
-    end = (datetime.fromisoformat(date_to) + timedelta(days=1)) if date_to else datetime.utcnow() + timedelta(days=1)
+    """UI-ийн огноог ЛОКАЛ өдөр гэж ойлгож UTC зааг руу хөрвүүлнэ."""
+    start = (datetime.fromisoformat(date_from) - TZ) if date_from else _local_midnight_utc(datetime.utcnow())
+    end = (datetime.fromisoformat(date_to) + timedelta(days=1) - TZ) if date_to         else datetime.utcnow() + timedelta(days=1)
     return start, end
 
 
@@ -28,7 +38,7 @@ def _daily_rows(db, start, end, site_id):
     """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
     daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов."""
     out = []
-    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    day = _local_midnight_utc(start)
     while day < end:
         nxt = day + timedelta(days=1)
         sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
@@ -41,7 +51,7 @@ def _daily_rows(db, start, end, site_id):
             pq = pq.filter(ParkingSession.site_id == site_id)
         prov = dict(pq.group_by(Payment.provider).all())
         cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        out.append({"date": day.strftime("%Y-%m-%d"), "entered": sq.count(),
+        out.append({"date": (day + TZ).strftime("%Y-%m-%d"), "entered": sq.count(),
                     "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
                     "paid_amount": cash + qpay_amt + pos})
@@ -78,7 +88,7 @@ def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
 @router.get("/dashboard")
 def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
     """Нүүр хуудасны статистик."""
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = _local_midnight_utc(datetime.utcnow())
     open_count = db.query(ParkingSession).filter(
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
     awaiting = db.query(ParkingSession).filter(ParkingSession.status == "AWAITING_PAYMENT").count()
@@ -111,19 +121,19 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
         rev = float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
             Payment.status == "PAID", Payment.paid_at >= day,
             Payment.paid_at < day + timedelta(days=1)).scalar())
-        week.append({"date": day.strftime("%m-%d"), "revenue": rev})
+        week.append({"date": (day + TZ).strftime("%m-%d"), "revenue": rev})
 
     # Өнөөдрийн цагийн ачаалал — цаг тус бүрийн орц/гарц (0–23)
     from sqlalchemy import Integer, cast
     hourly = {h: {"hour": h, "entries": 0, "exits": 0} for h in range(24)}
-    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.entry_time), Integer),
+    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.entry_time + TZ), Integer),
                              func.count()).filter(ParkingSession.entry_time >= today)
-                    .group_by(func.extract("hour", ParkingSession.entry_time)).all()):
+                    .group_by(func.extract("hour", ParkingSession.entry_time + TZ)).all()):
         if hr is not None:
             hourly[int(hr)]["entries"] = int(cnt)
-    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.exit_time), Integer),
+    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.exit_time + TZ), Integer),
                              func.count()).filter(ParkingSession.exit_time >= today)
-                    .group_by(func.extract("hour", ParkingSession.exit_time)).all()):
+                    .group_by(func.extract("hour", ParkingSession.exit_time + TZ)).all()):
         if hr is not None:
             hourly[int(hr)]["exits"] = int(cnt)
     hourly_load = [hourly[h] for h in range(24)]
@@ -250,8 +260,8 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
     """Сар сараар — төлбөрийн хэрэгслээр (бэлэн/QPay/карт) задарсан тайлан."""
     from sqlalchemy import Integer, cast
     start, end = _range(date_from, date_to)
-    ymexpr = (cast(func.extract("year", Payment.paid_at), Integer) * 100
-              + cast(func.extract("month", Payment.paid_at), Integer))
+    ymexpr = (cast(func.extract("year", Payment.paid_at + TZ), Integer) * 100
+              + cast(func.extract("month", Payment.paid_at + TZ), Integer))
     q = (db.query(ymexpr.label("ym"), Payment.provider,
                   func.coalesce(func.sum(Payment.amount), 0), func.count())
          .join(ParkingSession, Payment.session_id == ParkingSession.id)
@@ -458,7 +468,8 @@ def _shift_rows(db, start, end, site_id):
     from ..config import settings
     h = settings.shift_change_hour
     out = []
-    day = start.replace(hour=h, minute=0, second=0, microsecond=0)
+    # Ээлж солигдох цаг H нь ЛОКАЛ цаг — локал өдрийн эхлэл дээр H нэмж UTC зааг гаргана
+    day = _local_midnight_utc(start) + timedelta(hours=h)
     if start < day:
         day -= timedelta(days=1)
     while day < end:
@@ -473,7 +484,7 @@ def _shift_rows(db, start, end, site_id):
             pq = pq.filter(ParkingSession.site_id == site_id)
         prov = dict(pq.group_by(Payment.provider).all())
         cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        out.append({"date": day.strftime("%Y-%m-%d"),
+        out.append({"date": (day + TZ).strftime("%Y-%m-%d"),
                     "window": f"{h:02d}:00–{h:02d}:00",
                     "entered": sq.count(),
                     "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
@@ -508,10 +519,10 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
     setts = {s.date: s for s in db.query(DailySettlement).filter(
         DailySettlement.site_id == site_id).all()}
     out = []
-    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    day = _local_midnight_utc(start)
     while day < end:
         nxt = day + timedelta(days=1)
-        ds = day.strftime("%Y-%m-%d")
+        ds = (day + TZ).strftime("%Y-%m-%d")
         # Төлбөрийг provider+source-оор
         rows = (db.query(Payment.provider, Payment.source, func.coalesce(func.sum(Payment.amount), 0))
                 .join(ParkingSession, Payment.session_id == ParkingSession.id)
@@ -749,8 +760,8 @@ def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str
     for s in rows:
         ws.append([
             s.plate_number,
-            s.entry_time.strftime("%Y-%m-%d %H:%M"),
-            s.exit_time.strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
+            (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
+            (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
             s.duration_minutes or "",
             float(s.total_fee or 0), float(s.vat_amount or 0), float(s.discount_amount or 0),
             "Тийм" if s.is_registered else "",
@@ -791,8 +802,8 @@ def shifts_excel(date_from: str | None = None, date_to: str | None = None,
         total = cash + qpay_amt + pos
         grand += total
         ws.append([s.user.username if s.user else "", "Нээлттэй" if s.status == "OPEN" else "Хаагдсан",
-                   s.opened_at.strftime("%Y-%m-%d %H:%M"),
-                   s.closed_at.strftime("%Y-%m-%d %H:%M") if s.closed_at else "",
+                   (s.opened_at + TZ).strftime("%Y-%m-%d %H:%M"),
+                   (s.closed_at + TZ).strftime("%Y-%m-%d %H:%M") if s.closed_at else "",
                    float(s.opening_amount or 0), count, cash, qpay_amt, pos, total])
     ws.append(["НИЙТ", "", "", "", "", "", "", "", "", grand])
     ws[f"A{ws.max_row}"].font = Font(bold=True)
@@ -877,7 +888,7 @@ def audit_logs_excel(username: str | None = None, action: str | None = None,
         c.font = Font(bold=True)
     import json as _json
     for a in rows:
-        ws.append([a.created_at.strftime("%Y-%m-%d %H:%M:%S"), a.username, a.action,
+        ws.append([(a.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S"), a.username, a.action,
                    a.entity or "", a.entity_id or "",
                    _json.dumps(a.detail, ensure_ascii=False) if a.detail else ""])
     for col, w in zip("ABCDEF", (20, 14, 18, 12, 38, 50)):

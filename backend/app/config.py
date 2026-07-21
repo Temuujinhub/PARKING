@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # Тохируулсан үед "нээх" команд RPC2-ийн оронд энэ CGI-гээр явна.
     barrier_open_path: str = ""
 
+    # Цагийн бүс — DB бүх цагийг UTC-ээр хадгалдаг; тайлан/графикт локал цаг руу
+    # хөрвүүлэхэд ашиглана (Улаанбаатар = UTC+8)
+    tz_offset_hours: int = 8
+
     # LPR
     lpr_min_confidence: float = 90.0
     # Гарсны дараах давхар event хамгаалалт (секунд)
