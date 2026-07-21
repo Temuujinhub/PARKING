@@ -572,8 +572,19 @@ function Devices() {
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [editing, setEditing] = useState(null)
-  const load = () => api('/api/admin/devices').then((d) => setRows(d.filter((x) => x.status !== 'deleted')))
+  const [showDeleted, setShowDeleted] = useState(false)
+  const load = (withDeleted = showDeleted) =>
+    api(`/api/admin/devices${withDeleted ? '?include_deleted=true' : ''}`).then(setRows)
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => { load(showDeleted) }, [showDeleted])
+
+  // Санамсаргүй устгасан төхөөрөмжийг status='active' болгож сэргээнэ (түлхүүр, тохиргоо хэвээр)
+  const restore = async (d) => {
+    try {
+      await api(`/api/admin/devices/${d.id}`, { method: 'PUT', body: { status: 'active' } })
+      toast(`"${d.name}" сэргээгдлээ`); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
 
   const TYPES = { camera: 'LPR камер', barrier: 'Хаалт (barrier)', pax_terminal: 'PAX POS терминал', led: 'LED дэлгэц' }
 
@@ -595,7 +606,12 @@ function Devices() {
 
   return (
     <>
-      <div className="flex justify-end">
+      <div className="flex justify-between items-center">
+        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+          <input type="checkbox" className="cursor-pointer" checked={showDeleted}
+            onChange={(e) => setShowDeleted(e.target.checked)} />
+          Устгагдсан төхөөрөмж харуулах (сэргээх боломжтой)
+        </label>
         <button className="btn-primary" onClick={() => setEditing({
           site_id: sites[0]?.id || '', name: '', device_type: 'camera', vendor: 'Dahua',
           model: '', ip_address: '', lane_no: 1, lane_dir: 'entry', auto_open: true,
@@ -626,8 +642,11 @@ function Devices() {
               </div>
               <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', '']} empty={false}>
                 {list.map((d) => (
-                  <tr key={d.id}>
-                    <td className="td font-medium">{d.name}</td>
+                  <tr key={d.id} className={d.status === 'deleted' ? 'opacity-50' : ''}>
+                    <td className="td font-medium">
+                      {d.name}
+                      {d.status === 'deleted' && <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded">устгагдсан</span>}
+                    </td>
                     <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
                     <td className="td text-xs">{d.model}</td>
                     <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
@@ -635,8 +654,14 @@ function Devices() {
                     <td className="td text-xs">{d.lane_dir === 'entry' ? 'Орох' : d.lane_dir === 'exit' ? 'Гарах' : 'Хоёулаа'}</td>
                     <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
                     <td className="td text-right whitespace-nowrap">
-                      <button className="btn-secondary py-1 text-xs mr-1" onClick={() => setEditing(d)}>Засах</button>
-                      <button className="btn-danger py-1 text-xs" onClick={() => remove(d)}>Устгах</button>
+                      {d.status === 'deleted' ? (
+                        <button className="btn-primary py-1 text-xs" onClick={() => restore(d)}>Сэргээх</button>
+                      ) : (
+                        <>
+                          <button className="btn-secondary py-1 text-xs mr-1" onClick={() => setEditing(d)}>Засах</button>
+                          <button className="btn-danger py-1 text-xs" onClick={() => remove(d)}>Устгах</button>
+                        </>
+                      )}
                     </td>
                   </tr>
                 ))}
