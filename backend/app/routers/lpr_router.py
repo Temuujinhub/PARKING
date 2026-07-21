@@ -71,12 +71,14 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     device = None
     if device_key:
         device = db.query(Device).filter(Device.device_key == device_key,
-                                         Device.device_type == "camera").first()
+                                         Device.device_type == "camera",
+                                         Device.status != "deleted").first()
     if not device:
         # device_key байхгүй бол эх IP-ээр таних (nginx-ийн ард X-Forwarded-For)
         client_ip = _client_ip(request)
         device = db.query(Device).filter(Device.ip_address == client_ip,
-                                         Device.device_type == "camera").first()
+                                         Device.device_type == "camera",
+                                         Device.status != "deleted").first()
     if not device:
         raise HTTPException(404, "Камер бүртгэлгүй байна. Device.device_key тохируулна уу.")
 
@@ -112,11 +114,13 @@ async def lpr_keepalive(request: Request, device_key: str = "", db: Session = De
     200 буцаана. Камерыг device_key ЭСВЭЛ эх IP-ээр таньж last_seen шинэчилнэ (онлайн статус)."""
     dev = None
     if device_key:
-        dev = db.query(Device).filter(Device.device_key == device_key).first()
+        dev = db.query(Device).filter(Device.device_key == device_key,
+                                      Device.status != "deleted").first()
     if not dev:
         # Heartbeat Interface-д device_key байхгүй бол эх IP-ээр таних
         dev = db.query(Device).filter(Device.ip_address == _client_ip(request),
-                                      Device.device_type == "camera").first()
+                                      Device.device_type == "camera",
+                                      Device.status != "deleted").first()
     if dev:
         dev.last_seen = datetime.utcnow()
         db.commit()

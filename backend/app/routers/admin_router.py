@@ -144,10 +144,12 @@ def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
 
 # ─────────────────────────── Төхөөрөмж ───────────────────────────
 @router.get("/devices")
-def list_devices(site_id: str | None = None, db: Session = Depends(get_db),
-                 user: User = Depends(get_current_user)):
+def list_devices(site_id: str | None = None, include_deleted: bool = False,
+                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     from datetime import timedelta
     q = db.query(Device)
+    if not include_deleted:  # устгасан төхөөрөмж UI-д харагдахгүй (Хаалт/Тохиргоо/Камер)
+        q = q.filter(Device.status != "deleted")
     if site_id:
         q = q.filter(Device.site_id == site_id)
     # Онлайн = сүүлийн 3 минутад холбогдсон (heartbeat эсвэл LPR event)
