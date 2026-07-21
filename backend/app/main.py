@@ -30,6 +30,17 @@ Base.metadata.create_all(bind=engine)
 from .migrations import run_migrations  # noqa: E402
 run_migrations()
 
+# Камер бүрд хос хаалт байгааг баталгаажуулна (устгагдсаныг сэргээх / дутууг үүсгэх) —
+# admin гараар хаалт бүртгэх шаардлагагүй, startup бүрт өөрөө засна.
+from .database import SessionLocal  # noqa: E402
+from .services.device_auto import ensure_lane_barriers  # noqa: E402
+try:
+    _db = SessionLocal()
+    ensure_lane_barriers(_db)
+    _db.close()
+except Exception as _e:  # noqa: BLE001 — баталгаажуулалт унасан ч серверийг унагахгүй
+    print(f"[device_auto] startup шалгалт алдаа: {_e}")
+
 # API баримт (Swagger) зөвхөн debug үед нээлттэй — production-д API гадаргууг ил гаргахгүй
 app = FastAPI(
     title=settings.app_name,

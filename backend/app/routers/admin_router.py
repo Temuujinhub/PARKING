@@ -175,9 +175,17 @@ def create_device(body: dict, db: Session = Depends(get_db), user: User = Depend
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
                         "lane_no", "lane_dir", "auto_open") if k in body})
     device.device_key = f"{body.get('device_type','dev')}-{secrets.token_hex(8)}"
+    if device.device_type == "camera" and device.ip_address and not device.model:
+        # Загварыг камераас нь автоматаар татна (magicBox CGI, 4с timeout)
+        from ..services.device_auto import fetch_camera_model
+        device.model = fetch_camera_model(device.ip_address) or ""
     db.add(device)
     db.flush()
     _audit(db, user, "CREATE", "device", device.id, body)
+    if device.device_type == "camera":
+        # Камер бүртгэмэгц ижил эгнээнд хаалт автоматаар үүснэ/сэргэнэ — админ гараар нэмэхгүй
+        from ..services.device_auto import ensure_lane_barriers
+        ensure_lane_barriers(db)
     db.commit()
     return to_dict(device)
 
