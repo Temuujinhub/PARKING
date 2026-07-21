@@ -37,7 +37,8 @@ function Bar({ percent, color, hex }) {
 
 // Дата ангиллын өнгө (донат + бар) — гэрэл/бараан хоёуланд тод харагдана
 const CAT_COLORS = {
-  'Мөнгөн урсгал': '#34d399', 'Лог/түүх': '#fbbf24', 'Тохиргоо': '#60a5fa', 'Бусад': '#94a3b8',
+  'Зогсолт/төлбөр': '#34d399', 'Камер/хаалт': '#a78bfa', 'Лог/түүх': '#fbbf24',
+  'Тохиргоо': '#60a5fa', 'Бусад': '#94a3b8',
 }
 
 function Donut({ categories }) {
@@ -250,6 +251,17 @@ export default function Health() {
                   <Bar percent={cat.percent} hex={CAT_COLORS[cat.name] || '#94a3b8'} />
                 </div>
               ))}
+              {d.database.storage.snapshots && (
+                <div className="pt-2 mt-2 border-t border-surface-border/50 flex justify-between text-sm">
+                  <span className="flex items-center gap-2 text-slate-300">
+                    <span className="w-3 h-3 rounded-sm bg-pink-400" />
+                    Камерын зураг (snapshot, диск дээр)
+                  </span>
+                  <span className="font-mono text-slate-300">
+                    {d.database.storage.snapshots.files} файл · {fmtBytes(d.database.storage.snapshots.bytes)}
+                  </span>
+                </div>
+              )}
               {d.database.storage.top_tables?.length > 0 && (
                 <div className="pt-2 mt-2 border-t border-surface-border/50 text-xs text-slate-500">
                   Хамгийн том хүснэгт: {d.database.storage.top_tables.slice(0, 4).map((t) => `${t.table} (${t.percent}%)`).join(' · ')}

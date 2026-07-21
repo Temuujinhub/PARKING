@@ -30,18 +30,40 @@ router = APIRouter(prefix="/api/health", tags=["health"])
 
 # Хүснэгт → ангилал (өгөгдлийн сан ямар төрлийн датагаар хэдэн хувь дүүрснийг харуулна)
 TABLE_CATEGORY = {
-    # Мөнгөн урсгал / бичилт (гүйлгээ, төлбөр, баримт)
-    "payments": "Мөнгөн урсгал", "parking_sessions": "Мөнгөн урсгал",
-    "vat_receipts": "Мөнгөн урсгал", "compensations": "Мөнгөн урсгал",
-    "daily_settlements": "Мөнгөн урсгал", "cashier_shifts": "Мөнгөн урсгал",
+    # Зогсолт ба төлбөр (session, гүйлгээ, баримт, тооцоо)
+    "payments": "Зогсолт/төлбөр", "parking_sessions": "Зогсолт/төлбөр",
+    "vat_receipts": "Зогсолт/төлбөр", "compensations": "Зогсолт/төлбөр",
+    "daily_settlements": "Зогсолт/төлбөр", "cashier_shifts": "Зогсолт/төлбөр",
+    # Камер, хаалтын мэдээлэл (LPR event, хаалтны команд)
+    "lpr_events": "Камер/хаалт", "barrier_commands": "Камер/хаалт",
     # Лог / түүх
-    "audit_logs": "Лог/түүх", "lpr_events": "Лог/түүх", "barrier_commands": "Лог/түүх",
+    "audit_logs": "Лог/түүх",
     # Техникийн тохиргоо
     "users": "Тохиргоо", "parking_sites": "Тохиргоо", "devices": "Тохиргоо",
     "tariff_templates": "Тохиргоо", "tariff_tiers": "Тохиргоо", "discounts": "Тохиргоо",
     "registered_drivers": "Тохиргоо", "blacklist": "Тохиргоо",
 }
-CATEGORY_ORDER = ["Мөнгөн урсгал", "Лог/түүх", "Тохиргоо", "Бусад"]
+CATEGORY_ORDER = ["Зогсолт/төлбөр", "Камер/хаалт", "Лог/түүх", "Тохиргоо", "Бусад"]
+
+
+def _snapshot_storage() -> dict | None:
+    """LPR snapshot зургийн хавтасны хэмжээ (файлын тоо + байт)."""
+    from ..config import settings as cfg
+    root = cfg.snapshot_dir
+    if not os.path.isdir(root):
+        return None
+    total, files = 0, 0
+    try:
+        for dirpath, _dirs, names in os.walk(root):
+            for n in names:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, n))
+                    files += 1
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return {"bytes": total, "files": files}
 
 
 def _db_storage(db) -> dict:
@@ -63,7 +85,8 @@ def _db_storage(db) -> dict:
     tops.sort(key=lambda x: x["bytes"], reverse=True)
     for t in tops:
         t["percent"] = round(t["bytes"] * 100 / total, 1) if total else 0
-    return {"total_bytes": total, "categories": categories, "top_tables": tops[:6]}
+    return {"total_bytes": total, "categories": categories, "top_tables": tops[:6],
+            "snapshots": _snapshot_storage()}
 
 _START = time.time()  # backend асаасан цаг (uptime тооцох)
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
