@@ -1,11 +1,16 @@
 // Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх/хаах, командын лог
 import { DoorClosed, DoorOpen, PlugZap, RefreshCw, ShieldAlert } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
 export default function Barriers() {
   const toast = useToast()
+  const { data: sites } = useFetch('/api/admin/sites', { initial: [] })
+  const [siteId, setSiteId] = useState('')
+  // Эхний зогсоолыг автоматаар сонгоно (оператор 1 зогсоолтой тул шууд өөрийнх нь гарна)
+  useEffect(() => { if (!siteId && sites.length) setSiteId(sites[0].id) }, [sites])
   const { data: devices, reload: reloadDevices } = useFetch('/api/admin/devices', { initial: [] })
   const { data: commands, reload: reloadCommands } = useFetch('/api/barriers/commands?limit=50', { initial: [] })
   const load = () => { reloadDevices(); reloadCommands() }
@@ -32,8 +37,10 @@ export default function Barriers() {
     } catch (e) { toast(e.message, 'error') }
   }
 
-  const barriers = devices.filter((d) => d.device_type === 'barrier')
-  const cameras = devices.filter((d) => d.device_type === 'camera')
+  // Сонгосон зогсоолын төхөөрөмжүүд л харагдана
+  const siteDevices = devices.filter((d) => d.site_id === siteId)
+  const barriers = siteDevices.filter((d) => d.device_type === 'barrier')
+  const cameras = siteDevices.filter((d) => d.device_type === 'camera')
 
   return (
     <div className="space-y-5">
@@ -41,6 +48,24 @@ export default function Barriers() {
         <h1 className="text-2xl font-bold">Хаалтны удирдлага</h1>
         <button className="btn-secondary" onClick={load}><RefreshCw size={15} /> Шинэчлэх</button>
       </div>
+
+      {/* Зогсоол сонгох — сонгосон зогсоолын хаалт/камерууд л харагдана */}
+      {sites.length > 1 && (
+        <select className="input max-w-xs" value={siteId} onChange={(e) => setSiteId(e.target.value)}
+          aria-label="Зогсоол сонгох">
+          {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
+        </select>
+      )}
+
+      {barriers.length === 0 && (
+        <div className="card text-sm text-slate-400 py-6 text-center">
+          Энэ зогсоолд идэвхтэй хаалт бүртгэлгүй байна.
+          <span className="block mt-1 text-xs text-slate-500">
+            Тохиргоо → Төхөөрөмж хэсгээс "barrier" төрөлтэй төхөөрөмж нэмнэ үү
+            (орох хаалт = орох камертай ижил эгнээ, гарах хаалт = гарах камертай ижил эгнээ).
+          </span>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
         {barriers.map((b) => (
