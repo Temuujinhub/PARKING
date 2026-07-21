@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { LogoMark, LogoText } from '../components/Logo'
+import { PasswordInput } from '../components/ui'
 
 export default function Login() {
   const { login } = useAuth()
@@ -41,7 +42,7 @@ export default function Login() {
         </div>
         <div>
           <label className="label" htmlFor="p">Нууц үг</label>
-          <input id="p" type="password" className="input" value={password}
+          <PasswordInput id="p" value={password}
             onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
         </div>
         {error && <div role="alert" className="text-sm text-red-400 bg-red-500/10 rounded-lg px-3 py-2">{error}</div>}

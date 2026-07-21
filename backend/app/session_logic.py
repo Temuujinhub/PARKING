@@ -106,6 +106,31 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     registered = find_registered(db, plate, site_id)
 
     existing = get_open_session(db, plate, site_id)
+    if existing and existing.exit_device_id and existing.status == "AWAITING_PAYMENT":
+        # Машин өмнө нь гарах камерт уншигдаад ТӨЛБӨРГҮЙ гарсан байж — одоо дахин орж ирэв.
+        # Хуучин session дээр наалдвал шинэ зогсолт огт бүртгэгдэхгүй (7/12, 7/20-ны гацаа).
+        # Тиймээс: хуучныг өр (нөхөн төлбөр) үүсгэн хааж, шинэ session нээнэ.
+        from .routers.compensations_router import create_compensation
+        existing.exit_time = existing.updated_at or now
+        old_fee = session_fee_info(db, existing, at=existing.exit_time)
+        existing.duration_minutes = old_fee["duration_minutes"]
+        if existing.total_fee is None:
+            existing.base_fee = old_fee["base_fee"]
+            existing.vat_amount = old_fee["vat_amount"]
+            existing.total_fee = old_fee["total_fee"]
+        existing.status = "MANUAL_CLOSED"
+        due = amount_due(db, existing, old_fee)
+        if due > 0:
+            comp = create_compensation(db, existing, "unpaid_exit", "system")
+            comp.amount = due
+        # uq_active_session: шинэ OPEN session оруулахын ӨМНӨ хаалтыг DB-д тулгана
+        db.flush()
+        if due > 0:
+            await manager.broadcast(site_id, "DEBT_ALERT", {
+                "plate": plate, "debt_count": 1, "debt_amount": float(due),
+                "note": "Төлбөргүй гарсан машин дахин орж ирлээ — өр үүсгэв",
+            })
+        existing = None
     if existing:
         session = existing  # давхар орох event — session хэвээр
     else:

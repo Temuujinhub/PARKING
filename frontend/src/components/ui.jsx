@@ -1,6 +1,6 @@
 // Дундын UI компонентууд
-import { X } from 'lucide-react'
-import { useEffect } from 'react'
+import { Eye, EyeOff, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 export function Modal({ open, onClose, title, children, wide }) {
   useEffect(() => {
@@ -113,4 +113,20 @@ export function ToastHost() {
     }
   }, [])
   return null
+}
+
+// Нууц үг — харах/нуух нүдний товчтой input (бүх нууц үгийн талбарт ашиглана)
+export function PasswordInput(props) {
+  const [show, setShow] = useState(false)
+  const { className, ...rest } = props
+  return (
+    <div className="relative">
+      <input {...rest} type={show ? 'text' : 'password'} className={`${className || 'input'} w-full pr-10`} />
+      <button type="button" tabIndex={-1} onClick={() => setShow(!show)}
+        aria-label={show ? 'Нууц үг нуух' : 'Нууц үг харах'}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer p-1">
+        {show ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+    </div>
+  )
 }

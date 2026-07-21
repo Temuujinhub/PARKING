@@ -9,7 +9,7 @@ import { api } from '../api'
 import { useAuth } from '../auth'
 import { isDark, toggleTheme } from '../theme'
 import Logo from './Logo'
-import { Field, Modal, useToast } from './ui'
+import { Field, Modal, PasswordInput, useToast } from './ui'
 
 // Бүлэглэсэн цэс: standalone item эсвэл {group, children[]}. module = эрхийн түлхүүр.
 const NAV = [
@@ -135,15 +135,15 @@ export default function Layout() {
           {pwModal && (
             <form onSubmit={changePassword} className="space-y-3">
               <Field label="Одоогийн нууц үг" required>
-                <input className="input" type="password" required autoComplete="current-password"
+                <PasswordInput required autoComplete="current-password"
                   value={pwModal.old_password} onChange={(e) => setPwModal({ ...pwModal, old_password: e.target.value })} />
               </Field>
               <Field label="Шинэ нууц үг (8+ тэмдэгт)" required>
-                <input className="input" type="password" required minLength={8} autoComplete="new-password"
+                <PasswordInput required minLength={8} autoComplete="new-password"
                   value={pwModal.new_password} onChange={(e) => setPwModal({ ...pwModal, new_password: e.target.value })} />
               </Field>
               <Field label="Шинэ нууц үг давтах" required>
-                <input className="input" type="password" required autoComplete="new-password"
+                <PasswordInput required autoComplete="new-password"
                   value={pwModal.confirm} onChange={(e) => setPwModal({ ...pwModal, confirm: e.target.value })} />
               </Field>
               <button className="btn-primary w-full justify-center">Солих</button>

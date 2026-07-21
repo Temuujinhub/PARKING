@@ -2,7 +2,7 @@
 import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
-import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import { Badge, Field, Modal, PasswordInput, Table, useToast } from '../components/ui'
 
 const ROLES = {
   SUPER_ADMIN: 'Супер админ (бүх эрх)',
@@ -93,7 +93,7 @@ export default function Users() {
                   onChange={(e) => setEditing({ ...editing, username: e.target.value })} autoComplete="off" />
               </Field>
               <Field label={editing.id ? 'Шинэ нууц үг (хоосон=өөрчлөхгүй)' : 'Нууц үг'} required={!editing.id}>
-                <input className="input" type="password" value={editing.password} required={!editing.id}
+                <PasswordInput value={editing.password} required={!editing.id}
                   onChange={(e) => setEditing({ ...editing, password: e.target.value })} autoComplete="new-password" />
               </Field>
               <Field label="Бүтэн нэр">
