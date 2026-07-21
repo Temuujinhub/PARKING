@@ -155,8 +155,15 @@ def list_devices(site_id: str | None = None, db: Session = Depends(get_db),
     out = []
     for d in q.order_by(Device.created_at).all():
         online = bool(d.last_seen and d.last_seen >= online_cutoff)
+        # Сүүлд дугаар уншсан цаг — "онлайн боловч танихаа больсон" гацааг илрүүлнэ
+        last_plate = None
+        if d.device_type == "camera":
+            from sqlalchemy import func
+            last_plate = db.query(func.max(LprEvent.created_at)).filter(
+                LprEvent.device_id == d.id, LprEvent.accepted.is_(True)).scalar()
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
-                                     "online": online}))
+                                     "online": online,
+                                     "last_plate_at": last_plate.isoformat() if last_plate else None}))
     return out
 
 

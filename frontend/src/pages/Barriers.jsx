@@ -75,13 +75,17 @@ export default function Barriers() {
           <b>Онлайн</b> = камер серверт дата/heartbeat илгээж байна (камер→сервер).
           <b>Холболт шалгах</b> = сервер камер руу хүрч байгаа эсэх (сервер→камер, хаалт нээхэд хэрэгтэй).
         </div>
-        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Онлайн', 'Сервер→камер']} empty={cameras.length === 0}>
+        <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Сүүлд дугаар уншсан', 'Онлайн', 'Сервер→камер']} empty={cameras.length === 0}>
           {cameras.map((c) => (
             <tr key={c.id}>
               <td className="td">{c.name}</td>
               <td className="td">{c.lane_dir === 'entry' ? 'Орох' : 'Гарах'}</td>
               <td className="td font-mono text-xs">{c.ip_address || '-'}</td>
               <td className="td font-mono text-xs">{fmtDate(c.last_seen)}</td>
+              {/* 1 цагаас хойш дугаар уншаагүй бол улаанаар — "онлайн ч танихгүй" гацааг шууд харуулна */}
+              <td className={`td font-mono text-xs ${c.last_plate_at && Date.now() - new Date(c.last_plate_at + 'Z') > 3600e3 ? 'text-red-400 font-semibold' : ''}`}>
+                {fmtDate(c.last_plate_at)}
+              </td>
               <td className="td">
                 <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium
                   ${c.online ? 'bg-accent/15 text-accent' : 'bg-red-500/15 text-red-400'}`}>
