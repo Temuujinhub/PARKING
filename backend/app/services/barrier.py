@@ -244,6 +244,9 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None) -
                     await rpc.set_voice(voice_text)
             finally:
                 await rpc.logout()
+        # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
+        # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
+        print(f"[screen] {ip}: OK «{text}»")
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
