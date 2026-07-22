@@ -9,7 +9,7 @@ from .models import (
     BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite, Payment,
     RegisteredDriver,
 )
-from .services.barrier import open_barrier
+from .services.barrier import open_barrier, render_screen_text, schedule_display
 from .services.snapshot import schedule_capture
 from .ws import manager
 
@@ -207,6 +207,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         db.commit()
         await manager.broadcast(site_id, "EXIT_NO_SESSION",
                                 {"plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount})
+        schedule_display(device.ip_address,
+                         render_screen_text(settings.screen_nosession_text, plate=plate))
         return {"action": "no_session", "plate": plate}
 
     session.exit_device_id = device.id
@@ -223,12 +225,20 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         session.base_fee, session.vat_amount, session.total_fee = (
             fee["base_fee"], fee["vat_amount"], fee["total_fee"])
         db.commit()
+        due_now = amount_due(db, session, fee)
         await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
             "session_id": session.id, "plate": plate,
             "entry_time": session.entry_time.isoformat(),
             "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
-            "amount_due": amount_due(db, session, fee),
+            "amount_due": due_now,
             "has_debt": True, "debt_amount": debt_amount, "blocked": True})
+        # Дэлгэцэнд өнөөдрийн төлбөр + өмнөх өрийн нийлбэрийг харуулна
+        schedule_display(device.ip_address,
+                         render_screen_text(settings.screen_fee_text,
+                                            amount=due_now + debt_amount, plate=plate),
+                         render_screen_text(settings.screen_fee_text,
+                                            amount=due_now + debt_amount, plate=plate)
+                         if settings.screen_voice else None)
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
 
     # Төлчихсөн — grace хугацаа дотор гарч байна
@@ -263,6 +273,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
         "amount_due": due,
     })
+    # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй)
+    fee_text = render_screen_text(settings.screen_fee_text, amount=due, plate=plate)
+    schedule_display(device.ip_address, fee_text,
+                     fee_text if settings.screen_voice else None)
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due}
 
@@ -289,6 +303,10 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         "status": session.status, "barrier_opened": barrier_opened,
         "total_fee": float(session.total_fee or 0),
     })
+    # Дэлгэцэнд мэндчилгээ (төлбөр төлөгдсөн/үнэгүй — хаалт нээгдэж байна)
+    schedule_display(exit_device.ip_address,
+                     render_screen_text(settings.screen_bye_text,
+                                        plate=session.plate_number))
     return {"action": "exit_completed", "session_id": session.id, "barrier_opened": barrier_opened}
 
 

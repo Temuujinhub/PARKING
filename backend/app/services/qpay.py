@@ -111,6 +111,21 @@ def build_lines(items: list[dict]) -> list[dict]:
     return lines
 
 
+def pick_qpay_deeplink(urls: list[dict]) -> str:
+    """ЗӨВХӨН qPay хэтэвчний өөрийнх нь deeplink-ийг сонгоно. АНХААР: банк бүрийн
+    линк "...://q?qPay_QRcode=..." хэлбэртэй тул "qpay" substring-ээр хайвал
+    ЭХНИЙ ДУРЫН апп (ж: eBarimt) таарч утсан дээр буруу апп руу үсэргэдэг байсан —
+    scheme (://-ийн өмнөх хэсэг) болон нэрээр нь шүүнэ. Тохирох нь олдоогүй бол
+    хоосон буцаана — frontend автоматаар үсэргэхгүй, QR + жагсаалтаас сонгуулна."""
+    for u in urls:
+        link = u.get("link") or ""
+        scheme = link.split("://", 1)[0].lower() if "://" in link else ""
+        name = (u.get("name") or "").lower().replace(" ", "")
+        if "qpay" in scheme or "qpay" in name:
+            return link
+    return ""
+
+
 async def create_invoice(sender_invoice_no: str, description: str, receiver_code: str,
                          callback_url: str, lines: list[dict],
                          receiver_data: dict | None = None) -> dict:
@@ -143,13 +158,7 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
         data = resp.json()
 
     urls = data.get("urls") or []
-    deep_link = ""
-    for u in urls:
-        if "qpay" in (u.get("link") or "").lower():
-            deep_link = u["link"]
-            break
-    if not deep_link and urls:
-        deep_link = urls[0].get("link", "")
+    deep_link = pick_qpay_deeplink(urls)
     return {
         "invoice_id": data.get("invoice_id"),
         "qr_text": data.get("qr_text", ""),

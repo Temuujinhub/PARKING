@@ -105,6 +105,24 @@ class Settings(BaseSettings):
     snapshot_enabled: bool = True
     snapshot_dir: str = "/var/lib/parking/snapshots"
 
+    # Гарах хаалтны LED дэлгэц (trafficParking.setScreenDisplay) — гарах камерын
+    # LED-д төлбөрийн дүн/мэндчилгээ харуулна. Template-д {amount}, {plate} орлуулна.
+    # Анхдагч нь латинаар — LED-ийн фонт кирилл дэмжих эсэхийг "Дэлгэц тест"
+    # товчоор шалгаад .env-ээс кирилл болгож болно.
+    screen_enabled: bool = True
+    screen_fee_text: str = "Tulbur: {amount}"      # AWAITING_PAYMENT үед
+    screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
+    screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
+    # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай
+    # (TTS хөдөлгүүр латин/кирилл текстийг зөв уншихгүй байж болзошгүй)
+    screen_voice: bool = False
+
+    # e-Barimt нээлттэй лавлагаа — байгууллагын регистрээр нэр шалгах
+    # (зөвхөн Монголын IP-ээс хандагдана; гаднаас timeout өгвөл frontend
+    # "шалгаж чадсангүй" гэж зөөлөн анхааруулна)
+    org_info_url: str = "https://info.ebarimt.mn/rest/merchant/info"
+    org_info_timeout_sec: float = 6.0
+
     class Config:
         env_file = ".env"
         env_prefix = "PARKING_"

@@ -34,8 +34,12 @@ export default function Pay() {
   const [receipt, setReceipt] = useState(null)
   const [vatType, setVatType] = useState('PERSON') // PERSON | ORG
   const [orgTin, setOrgTin] = useState('')
+  // Регистрээр олдсон байгууллагын нэр: {found: true|false|null, name}
+  const [orgInfo, setOrgInfo] = useState(null)
+  const [orgChecking, setOrgChecking] = useState(false)
   const pollRef = useRef(null)
   const debounceRef = useRef(null)
+  const orgDebounceRef = useRef(null)
 
   useEffect(() => {
     if (!siteCode) { setError('QR код буруу байна — зогсоолын код олдсонгүй.'); return }
@@ -43,7 +47,27 @@ export default function Pay() {
     publicApi(`/api/public/recent-exits/${siteCode}`).then(setRecent).catch(() => {})
   }, [siteCode])
 
-  useEffect(() => () => { clearInterval(pollRef.current); clearTimeout(debounceRef.current) }, [])
+  useEffect(() => () => {
+    clearInterval(pollRef.current)
+    clearTimeout(debounceRef.current)
+    clearTimeout(orgDebounceRef.current)
+  }, [])
+
+  // Байгууллагын регистр бичихэд нэрийг нь ebarimt лавлагаанаас шалгаж харуулна
+  const onOrgTinChange = (value) => {
+    const v = value.replace(/\D/g, '')
+    setOrgTin(v)
+    setOrgInfo(null)
+    clearTimeout(orgDebounceRef.current)
+    if (v.length !== 7 && v.length < 10) return
+    setOrgChecking(true)
+    orgDebounceRef.current = setTimeout(async () => {
+      try {
+        const info = await publicApi(`/api/public/org-info?reg=${v}`)
+        setOrgInfo(info)
+      } catch { setOrgInfo(null) } finally { setOrgChecking(false) }
+    }, 400)
+  }
 
   // Хялбар хайлт: 2+ тэмдэгт бичихэд таарах машинуудыг live харуулна
   const onPlateChange = (value) => {
@@ -82,8 +106,10 @@ export default function Pay() {
       if (vatType === 'ORG') body.customer_tin = orgTin.trim()
       const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
       setPayment(inv)
-      // Утасны QPay апп руу шилжүүлнэ
-      if (inv.deep_link && !inv.mock) window.location.href = inv.deep_link
+      // Утасны qPay хэтэвч рүү шилжүүлнэ — зөвхөн qPay-ийн өөрийн deeplink байвал,
+      // зөвхөн утсан дээр (өмнө нь banks жагсаалтын эхний дурын апп руу үсэрдэг байсан)
+      const isMobile = /android|iphone|ipad|ipod/i.test(navigator.userAgent)
+      if (inv.deep_link && !inv.mock && isMobile) window.location.href = inv.deep_link
       // Төлөлт шалгах polling (5 сек тутам)
       pollRef.current = setInterval(async () => {
         try {
@@ -274,9 +300,32 @@ export default function Pay() {
                   ))}
                 </div>
                 {vatType === 'ORG' && (
-                  <input className="input mt-2 font-mono text-center" inputMode="numeric"
-                    placeholder="Байгууллагын ТТД (регистр)" value={orgTin} maxLength={14}
-                    onChange={(e) => setOrgTin(e.target.value.replace(/\D/g, ''))} aria-label="Байгууллагын ТТД" />
+                  <>
+                    <input className="input mt-2 font-mono text-center" inputMode="numeric"
+                      placeholder="Байгууллагын ТТД (регистр)" value={orgTin} maxLength={14}
+                      onChange={(e) => onOrgTinChange(e.target.value)} aria-label="Байгууллагын ТТД" />
+                    {orgChecking && (
+                      <div className="mt-2 text-xs text-slate-400 flex items-center gap-1.5">
+                        <Loader2 className="animate-spin" size={13} aria-hidden /> Нэр шалгаж байна…
+                      </div>
+                    )}
+                    {!orgChecking && orgInfo?.found === true && (
+                      <div className="mt-2 text-sm text-accent bg-accent/10 rounded-lg px-3 py-2 flex items-center gap-2">
+                        <CheckCircle2 size={15} className="shrink-0" aria-hidden />
+                        <span className="font-medium">{orgInfo.name}</span>
+                      </div>
+                    )}
+                    {!orgChecking && orgInfo?.found === false && (
+                      <div className="mt-2 text-sm text-red-400 bg-red-500/10 rounded-lg px-3 py-2">
+                        Ийм регистртэй байгууллага олдсонгүй — регистрээ нягтална уу.
+                      </div>
+                    )}
+                    {!orgChecking && orgInfo && orgInfo.found == null && (
+                      <div className="mt-2 text-xs text-amber-400/90">
+                        Нэр шалгах лавлагаа түр хүрэхгүй байна — регистрээ зөв эсэхийг өөрөө нягтална уу.
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
               <button onClick={payQpay} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">

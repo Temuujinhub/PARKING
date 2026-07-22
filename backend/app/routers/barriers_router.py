@@ -55,6 +55,32 @@ async def manual_close(device_id: str, body: dict | None = None, db: Session = D
     return {"status": cmd.status, "response": cmd.response_text}
 
 
+@router.post("/{device_id}/display")
+async def screen_display(device_id: str, body: dict, db: Session = Depends(get_db),
+                         user: User = Depends(require("barriers", "cashier"))):
+    """LED дэлгэц тест — камерын дэлгэцэнд текст харуулна.
+    body: {text, voice?} — voice=true үед дуут зарлал давхар явуулна.
+    Камер эсвэл хаалт төхөөрөмжийн аль алиныг зааж болно (IP-г ижил дүрмээр олно)."""
+    from ..services.barrier import _resolve_ip, display_on_screen
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Төхөөрөмж олдсонгүй")
+    enforce_site(user, device.site_id)
+    text = str(body.get("text") or "").strip()
+    if not text or len(text) > 64:
+        raise HTTPException(400, "text талбар шаардлагатай (1-64 тэмдэгт)")
+    ip = _resolve_ip(db, device)
+    if not ip:
+        raise HTTPException(400, "Төхөөрөмжид IP бүртгэлгүй байна")
+    err = await display_on_screen(ip, text, text if body.get("voice") else None)
+    db.add(AuditLog(username=user.username, action="SCREEN_DISPLAY", entity="device",
+                    entity_id=device_id, detail={"text": text, "error": err or None}))
+    db.commit()
+    if err:
+        raise HTTPException(502, f"Дэлгэц рүү илгээж чадсангүй: {err}")
+    return {"status": "SUCCESS", "ip": ip, "text": text}
+
+
 @router.get("/commands")
 def command_log(site_id: str | None = None, limit: int = 100,
                 db: Session = Depends(get_db), user: User = Depends(require("barriers"))):

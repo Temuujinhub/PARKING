@@ -31,6 +31,52 @@ def _throttle_public(request: Request, name: str, limit: int = 60):
         raise HTTPException(429, "Хэт олон хүсэлт. Хэсэг хүлээгээд дахин оролдоно уу.")
 
 
+# Регистр → байгууллагын нэр кэш (ebarimt лавлагаа удаан өөрчлөгддөг тул 24 цаг)
+_ORG_CACHE: dict[str, tuple[float, dict]] = {}
+_ORG_CACHE_TTL = 86400.0
+_ORG_CACHE_MAX = 5000
+
+
+@router.get("/org-info")
+async def org_info(request: Request, reg: str = ""):
+    """Байгууллагын регистрээр (ТТД) нэр шалгах — e-Barimt нээлттэй лавлагааны
+    proxy (info.ebarimt.mn нь зөвхөн Монголын IP-ээс хандагддаг тул frontend
+    шууд дуудаж чадахгүй, CORS-гүй). Жолооч НӨАТ-аа байгууллага руу явуулахын
+    өмнө нэрээ нүдээр баталгаажуулна.
+
+    Буцаах: {found: true, name} | {found: false} | {found: null, error} (лавлагаа
+    хүрэхгүй үед — төлбөрийг блоклохгүй, зөвхөн анхааруулна)."""
+    import time
+
+    import httpx
+
+    _throttle_public(request, "orginfo", limit=30)
+    reg = reg.strip()
+    if not reg.isdigit() or not (len(reg) == 7 or 10 <= len(reg) <= 14):
+        raise HTTPException(400, "Регистр 7 (ААН) эсвэл 10+ оронтой тоо байна")
+
+    now = time.monotonic()
+    hit = _ORG_CACHE.get(reg)
+    if hit and now - hit[0] < _ORG_CACHE_TTL:
+        return hit[1]
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.org_info_timeout_sec) as client:
+            resp = await client.get(settings.org_info_url, params={"regno": reg})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        # Лавлагаа хүрэхгүй (гадаад IP, сүлжээ) — кэшлэхгүй, зөөлөн буцаана
+        return {"found": None, "error": "unreachable"}
+
+    result = {"found": bool(data.get("found")), "name": data.get("name") or "",
+              "vatpayer": data.get("vatpayer")}
+    if len(_ORG_CACHE) >= _ORG_CACHE_MAX:
+        _ORG_CACHE.clear()
+    _ORG_CACHE[reg] = (now, result)
+    return result
+
+
 def _mask(plate: str) -> str:
     """Нууцлал: 1234АБВ → 12**АБВ"""
     if len(plate) <= 4:

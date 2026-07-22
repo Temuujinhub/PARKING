@@ -30,6 +30,17 @@ export default function Barriers() {
       command(id, 'open', { force: true }, 'Албадан нээгдлээ')
   }
 
+  const [screenText, setScreenText] = useState('')
+  const [screenDev, setScreenDev] = useState('')
+  const sendScreen = async () => {
+    const dev = screenDev || cameras.find((c) => c.lane_dir === 'exit')?.id || cameras[0]?.id
+    if (!dev || !screenText.trim()) return
+    try {
+      await api(`/api/barriers/${dev}/display`, { method: 'POST', body: { text: screenText.trim() } })
+      toast.success('Дэлгэцэнд илгээлээ — LED дээр шалгана уу')
+    } catch (e) { toast.error(e.message) }
+  }
+
   const testConn = async (id) => {
     try {
       const r = await api(`/api/admin/devices/${id}/test-connection`, { method: 'POST' })
@@ -126,6 +137,30 @@ export default function Barriers() {
             </tr>
           ))}
         </Table>
+      </div>
+
+      {/* LED дэлгэц тест — камерын LED-д дурын текст илгээж фонт/кирилл дэмжлэгийг шалгана */}
+      <div className="card">
+        <h2 className="font-semibold mb-3">LED дэлгэц тест</h2>
+        <div className="text-xs text-slate-500 mb-2">
+          Гарах хаалтны LED дэлгэцэнд текст илгээж шалгана. Кирилл текст гаргаж чадвал
+          .env-ийн PARKING_SCREEN_FEE_TEXT-ийг кирилл болгож болно.
+        </div>
+        <div className="flex flex-wrap gap-2 items-center">
+          <select className="input w-auto" value={screenDev} onChange={(e) => setScreenDev(e.target.value)}
+            aria-label="Камер сонгох">
+            <option value="">{cameras.find((c) => c.lane_dir === 'exit') ? 'Гарах камер (автоматаар)' : 'Камер сонгох'}</option>
+            {cameras.map((c) => (
+              <option key={c.id} value={c.id}>{c.name} ({c.lane_dir === 'entry' ? 'орох' : 'гарах'})</option>
+            ))}
+          </select>
+          <input className="input flex-1 min-w-48" maxLength={64} placeholder="Ж: Tulbur: 2500"
+            value={screenText} onChange={(e) => setScreenText(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && sendScreen()} aria-label="Дэлгэцний текст" />
+          <button className="btn-primary py-2" onClick={sendScreen} disabled={!screenText.trim() || cameras.length === 0}>
+            Илгээх
+          </button>
+        </div>
       </div>
 
       <div className="card">

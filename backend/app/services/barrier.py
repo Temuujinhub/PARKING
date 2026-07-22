@@ -16,7 +16,9 @@ header гурвуулангаар нь дамжуулах шаардлагата
 barrier_mock=True үед бодит төхөөрөмж рүү хүсэлт явуулахгүй, амжилттай гэж
 бүртгэнэ (төхөөрөмж холбогдоогүй хөгжүүлэлтийн орчинд).
 """
+import asyncio
 import hashlib
+import logging
 from datetime import datetime
 
 import httpx
@@ -24,6 +26,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import BarrierCommand, Device
+
+logger = logging.getLogger("parking.barrier")
 
 RPC_METHODS = {
     "open": "trafficSnap.openStrobe",
@@ -92,6 +96,23 @@ class DahuaRpc:
             await self._call("global.logout")
         except Exception:
             pass  # logout бүтэлгүйтэх нь командын үр дүнд нөлөөгүй
+
+    async def set_screen(self, text: str) -> dict:
+        """LED дэлгэцэнд текст харуулах — trafficParking.setScreenDisplay {Custom}.
+        Камерын Web 5.0 клиентийн InoutGeneralConfig/DeviceTest хуудас яг ийм
+        дуудлага хийдэг (клиент JS-ээс батлагдсан). Дэлгэц "Managed Mode
+        (Platform)" горимд байх шаардлагатай."""
+        res = await self._call("trafficParking.setScreenDisplay", {"Custom": text})
+        if not res.get("result"):
+            raise DahuaRpcError(f"setScreenDisplay амжилтгүй: {res}")
+        return res
+
+    async def set_voice(self, text: str) -> dict:
+        """Дуут зарлал — trafficParking.setVoiceBroadcast {Custom}."""
+        res = await self._call("trafficParking.setVoiceBroadcast", {"Custom": text})
+        if not res.get("result"):
+            raise DahuaRpcError(f"setVoiceBroadcast амжилтгүй: {res}")
+        return res
 
     async def strobe(self, method: str, channel: int, plate: str = "") -> dict:
         inst = await self._call("trafficSnap.factory.instance", {"channel": channel})
@@ -204,3 +225,49 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
     """Хаалт хаах (closeStrobe). Ихэвчлэн гараар — авто хаалт нь газрын
     мэдрэгч/радараар төхөөрөмж талдаа хийгддэг."""
     return await _execute(db, device, "close", session_id, source, issued_by)
+
+
+# ─── LED дэлгэц / дуут зарлал ────────────────────────────────────────────────
+
+async def display_on_screen(ip: str, text: str, voice_text: str | None = None) -> str:
+    """Камерын LED дэлгэцэнд текст харуулна (шаардлагатай бол дуут зарлал).
+    Амжилттай бол хоосон мөр, алдаатай бол алдааны тайлбар буцаана."""
+    if settings.barrier_mock:
+        logger.info("MOCK screen [%s]: %s", ip, text)
+        return ""
+    username = settings.barrier_username or settings.camera_username
+    password = settings.barrier_password or settings.camera_password
+    try:
+        async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
+            rpc = DahuaRpc(client, ip, username, password)
+            await rpc.login()
+            try:
+                await rpc.set_screen(text)
+                if voice_text:
+                    await rpc.set_voice(voice_text)
+            finally:
+                await rpc.logout()
+        return ""
+    except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        logger.warning("Дэлгэц рүү бичиж чадсангүй [%s]: %s", ip, err)
+        return err
+
+
+def schedule_display(ip: str | None, text: str, voice_text: str | None = None):
+    """Event боловсруулалтын дараа дуудна — дэлгэцний командыг АРД НЬ явуулна
+    (хаалт нээх/WS broadcast-ыг хэзээ ч хүлээлгэхгүй, snapshot-той ижил хэв маяг)."""
+    if not settings.screen_enabled or not ip or not text:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return  # event loop-гүй орчин (тест г.м) — алгасна
+    asyncio.create_task(display_on_screen(ip, text, voice_text))
+
+
+def render_screen_text(template: str, amount: float | int | None = None,
+                       plate: str = "") -> str:
+    """Template-ийн {amount}/{plate}-ийг орлуулна. Дүн бүхэл тоогоор."""
+    amt = "" if amount is None else f"{int(round(float(amount)))}"
+    return template.replace("{amount}", amt).replace("{plate}", plate or "").strip()
