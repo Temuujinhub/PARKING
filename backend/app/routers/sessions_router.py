@@ -5,11 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, get_current_user, operator_site, operator_sites, require, scoped_site
+from ..auth import (enforce_site, get_current_user, operator_site, operator_sites,
+                    require, require_role, scoped_site)
 from ..database import get_db
 from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
-from ..session_logic import get_open_session, normalize_plate, session_fee_info
+from ..session_logic import (close_session_forced, get_open_session, normalize_plate,
+                             session_fee_info)
 from ..services.barrier import open_barrier
 from ..ws import manager
 
@@ -221,6 +223,37 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
         "barrier_opened": False, "manual": True, "by": user.username,
     })
     return _session_out(db, s, with_fee=True)
+
+
+@router.post("/bulk-remove")
+async def bulk_remove(body: dict, db: Session = Depends(get_db),
+                      user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Админ: зогсоолд гацсан машидыг бүртгэлээс хасна (хаалт нээхгүй).
+    body: {session_ids: [..], create_compensation: bool=true, reason?: str}
+    Өрийн дүн: гарах оролдлоготой машинд тэр үеийн дүн, бусдад одоог хүртэлх дүн."""
+    ids = body.get("session_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "session_ids жагсаалт шаардлагатай")
+    create_comp = bool(body.get("create_compensation", True))
+    note = (body.get("reason") or "").strip()[:300]
+    removed, skipped, debt_total = [], 0, 0.0
+    for sid in ids[:200]:
+        s = db.get(ParkingSession, sid)
+        if not s or s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+            skipped += 1
+            continue
+        debt = close_session_forced(db, s, "admin_remove", user.username, create_comp)
+        if note:
+            s.note = f"{s.note + ' | ' if s.note else ''}Хассан: {note}"[:1000]
+        removed.append({"session_id": s.id, "plate": s.plate_number, "debt": debt})
+        debt_total += debt
+    db.add(AuditLog(username=user.username, action="ADMIN_REMOVE", entity="session",
+                    entity_id=removed[0]["session_id"] if removed else "",
+                    detail={"count": len(removed), "skipped": skipped,
+                            "debt_total": debt_total, "reason": note,
+                            "plates": [r["plate"] for r in removed][:50]}))
+    db.commit()
+    return {"removed": len(removed), "skipped": skipped, "debt_total": debt_total, "rows": removed}
 
 
 @router.post("/test-awaiting")

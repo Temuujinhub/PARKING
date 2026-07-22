@@ -92,7 +92,8 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
     if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"]).first():
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
-                          ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id")
+                          ("name", "site_code", "zone_code", "address", "capacity",
+                           "tariff_template_id", "auto_close_hours")
                           if k in body})
     db.add(site)
     db.flush()
@@ -107,7 +108,8 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
-    for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id", "is_active"):
+    for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
+              "auto_close_hours", "is_active"):
         if k in body:
             setattr(site, k, body[k])
     _audit(db, user, "UPDATE", "site", site_id, body)

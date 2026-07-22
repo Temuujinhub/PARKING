@@ -46,6 +46,8 @@ class ParkingSite(Base):
     zone_code = Column(String(10), nullable=False, default="A")
     address = Column(Text, default="")
     capacity = Column(Integer, nullable=False, default=0)
+    # Авто цэвэрлэгээний босго (цаг): null = глобал default (72), 0 = энэ зогсоолд унтраах
+    auto_close_hours = Column(Integer, nullable=True)
     tariff_template_id = Column(UUID(as_uuid=False), ForeignKey("tariff_templates.id"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

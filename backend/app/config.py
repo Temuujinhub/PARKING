@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     # Анхдагч нь латинаар — LED-ийн фонт кирилл дэмжих эсэхийг "Дэлгэц тест"
     # товчоор шалгаад .env-ээс кирилл болгож болно.
     screen_enabled: bool = True
+    # Авто цэвэрлэгээ: X цагаас дээш идэвхтэй үлдсэн session-ийг авто хаах
+    # (зогсоол бүрээр site.auto_close_hours-аар дарж болно; 0 = унтраах)
+    auto_close_hours: int = 72
+    auto_close_create_debt: bool = True  # авто хаахад төлөгдөөгүй дүнгээр өр үүсгэх
+
     screen_fee_text: str = "{plate} Tulbur: {amount}"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед

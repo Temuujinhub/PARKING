@@ -92,6 +92,9 @@ function Sites() {
         ...editing,
         capacity: editing.unlimited ? 0 : +editing.capacity,
         tariff_template_id: editing.tariff_template_id || null,
+        // '' = глобал default (72ц), 0 = унтраах, N = тухайн зогсоолын босго
+        auto_close_hours: editing.auto_close_hours === '' || editing.auto_close_hours == null
+          ? null : +editing.auto_close_hours,
       }
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -411,6 +414,15 @@ function Sites() {
                 <option value="">Сонгоогүй</option>
                 {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
+            </Field>
+            <Field label="Гацсан машины авто хаалт (цаг)">
+              <input className="input" type="number" min="0" placeholder="72 (default)"
+                value={editing.auto_close_hours ?? ''}
+                onChange={(e) => setEditing({ ...editing, auto_close_hours: e.target.value })} />
+              <div className="text-[11px] text-slate-500 mt-1">
+                Энэ цагаас дээш идэвхтэй үлдсэн машиныг систем автоматаар хасаж, төлөгдөөгүй
+                дүнгээр өр үүсгэнэ. Хоосон = 72ц, 0 = унтраах.
+              </div>
             </Field>
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>

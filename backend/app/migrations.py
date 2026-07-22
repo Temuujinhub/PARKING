@@ -58,6 +58,9 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSON",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS site_ids JSON",
 
+    # v2.0 — Гацсан session-ийн авто цэвэрлэгээ (зогсоол бүрийн босго)
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS auto_close_hours INTEGER",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

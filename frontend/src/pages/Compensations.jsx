@@ -6,7 +6,7 @@ import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
-const REASONS = { unpaid_exit: 'Төлбөргүй гаргасан', night_close: 'Шөнийн хаалт', shift_close: 'Ээлж хаалт', manual: 'Гараар' }
+const REASONS = { unpaid_exit: 'Төлбөргүй гаргасан', night_close: 'Шөнийн хаалт', shift_close: 'Ээлж хаалт', manual: 'Гараар', admin_remove: 'Админ хассан', auto_close: 'Авто хаалт (хугацаа хэтэрсэн)' }
 const AGE_LABEL = { '0-7': '0–7 хоног', '8-30': '8–30 хоног', '31-90': '31–90 хоног', '90+': '90+ хоног' }
 const ROLE_LABEL = { SUPER_ADMIN: 'Супер админ', ADMIN: 'Админ', FINANCE: 'Санхүү', OPERATOR: 'Оператор' }
 

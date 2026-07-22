@@ -92,6 +92,30 @@ def amount_due(db: Session, s: ParkingSession, fee: dict) -> float:
     return max(0.0, round(fee["total_fee"] - paid_total(db, s), 2))
 
 
+def close_session_forced(db: Session, s: ParkingSession, reason: str, username: str,
+                         create_comp: bool = True) -> float:
+    """Админ/авто цэвэрлэгээ: гацсан session-ийг хааж, төлөгдөөгүй дүнгээр өр үүсгэнэ.
+
+    Өрийн дүнгийн дүрэм: гарах оролдлоготой (AWAITING_PAYMENT + exit_time) машин
+    тэр үедээ л төлөлгүй явсан гэж үзэж ТЭР ҮЕИЙН дүнгээр (шударга дүн, exit_time хэвээр);
+    гарах оролдлогогүй (OPEN) бол одоог хүртэлх дүнгээр (daily_cap хамгаална).
+    Буцаах: үүсгэсэн өрийн дүн (0 бол өр үүсээгүй). commit хийхгүй — caller хийнэ."""
+    now = datetime.utcnow()
+    at = s.exit_time if (s.status == "AWAITING_PAYMENT" and s.exit_time) else now
+    fee = session_fee_info(db, s, at=at)
+    due = amount_due(db, s, fee)
+    s.exit_time = at
+    s.duration_minutes = fee["duration_minutes"]
+    s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+    s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+    if create_comp and due > 0 and not fee["is_free"]:
+        from .routers.compensations_router import create_compensation
+        comp = create_compensation(db, s, reason, username)
+        comp.amount = due
+        return due
+    return 0.0
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол)."""
     site_id = device.site_id
