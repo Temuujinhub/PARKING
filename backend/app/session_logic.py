@@ -66,8 +66,15 @@ def get_open_session(db: Session, plate: str, site_id: str) -> ParkingSession | 
 def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None) -> dict:
     site: ParkingSite = s.site
     template = site.tariff_template if site else None
+    if at is None:
+        # AWAITING_PAYMENT машин зогсоолд байгаа хэвээр (гарч чадаагүй) тул төлбөр
+        # exit_time дээр царцахгүй — одоог хүртэл үргэлжлэн бодогдоно.
+        if s.status in ("OPEN", "AWAITING_PAYMENT"):
+            at = datetime.utcnow()
+        else:
+            at = s.exit_time or datetime.utcnow()
     return calculate_fee(
-        template, s.entry_time, at or s.exit_time or datetime.utcnow(),
+        template, s.entry_time, at,
         discount=s.discount, is_registered=s.is_registered,
     )
 

@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     # Анхдагч нь латинаар — LED-ийн фонт кирилл дэмжих эсэхийг "Дэлгэц тест"
     # товчоор шалгаад .env-ээс кирилл болгож болно.
     screen_enabled: bool = True
-    screen_fee_text: str = "Tulbur: {amount}"      # AWAITING_PAYMENT үед
+    screen_fee_text: str = "{plate} Tulbur: {amount}"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай

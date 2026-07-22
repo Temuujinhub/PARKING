@@ -12,7 +12,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import operator_site, require
+from ..auth import operator_sites, require
 from ..database import get_db
 from ..models import AuditLog, BlacklistEntry, Compensation, ParkingSession, User
 from ..serializers import to_dict
@@ -55,10 +55,10 @@ def create_compensation(db: Session, session: ParkingSession, reason: str, usern
 def list_compensations(status: str | None = None, plate: str | None = None,
                        limit: int = 200, db: Session = Depends(get_db),
                        user: User = Depends(require("compensations", "reports"))):
-    osid = operator_site(user)  # оператор зөвхөн өөрийн зогсоолын өр
+    allowed = operator_sites(user)  # оператор зөвхөн өөрийн зогсоолуудын өр
     q = db.query(Compensation)
-    if osid:
-        q = q.filter(Compensation.site_id == osid)
+    if allowed:
+        q = q.filter(Compensation.site_id.in_(allowed))
     if status:
         q = q.filter(Compensation.status == status)
     if plate:
@@ -107,8 +107,8 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
     comp = db.get(Compensation, comp_id)
     if not comp or comp.status != "PENDING":
         raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
-    osid = operator_site(user)
-    if osid and comp.site_id != osid:
+    allowed = operator_sites(user)
+    if allowed and comp.site_id not in allowed:
         raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
     comp.status = "PAID"
     comp.paid_at = datetime.utcnow()

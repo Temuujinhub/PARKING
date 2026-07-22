@@ -29,6 +29,9 @@ ROLE_PERMISSIONS = {
     "OPERATOR": {"cashier", "check", "history", "compensations"},
 }
 
+# UI-ийн чекбокс матриц + create/update_user validation-д ашиглах бүх модуль
+ALL_MODULES = sorted({m for perms in ROLE_PERMISSIONS.values() for m in perms if m != "*"})
+
 
 def hash_password(password: str) -> str:
     # bcrypt 72 байтын хязгаартай — UTF-8 болгож таслана
@@ -70,15 +73,25 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
-def has_permission(role: str, module: str) -> bool:
-    perms = ROLE_PERMISSIONS.get(role, set())
+def effective_permissions(user: User) -> set[str]:
+    """Хэрэглэгчийн бодит эрхүүд: permissions матриц тохируулсан бол түүгээр,
+    үгүй бол role-ийн default. SUPER_ADMIN ямагт бүх эрхтэй."""
+    if user.role == "SUPER_ADMIN":
+        return {"*"}
+    if user.permissions is not None:
+        return set(user.permissions)
+    return set(ROLE_PERMISSIONS.get(user.role, set()))
+
+
+def has_permission(user: User, module: str) -> bool:
+    perms = effective_permissions(user)
     return "*" in perms or module in perms
 
 
 def require(*modules: str):
     """Тухайн модулиудын аль нэгэнд хандах эрх шаардана."""
     def checker(user: User = Depends(get_current_user)) -> User:
-        if any(has_permission(user.role, m) for m in modules):
+        if any(has_permission(user, m) for m in modules):
             return user
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Танд энэ үйлдлийг хийх эрх байхгүй.")
     return checker
@@ -92,18 +105,45 @@ def require_role(*roles: str):
     return checker
 
 
+def operator_sites(user: User) -> list[str] | None:
+    """Оператор бол хандах эрхтэй зогсоолуудын жагсаалт, үгүй бол None (бүх зогсоол).
+    site_ids (олон сонголт) тохируулсан бол түүгээр, үгүй бол [site_id]."""
+    if user.role != "OPERATOR":
+        return None
+    ids = [s for s in (user.site_ids or []) if s]
+    if not ids and user.site_id:
+        ids = [user.site_id]
+    return ids or None
+
+
 def operator_site(user: User) -> str | None:
-    """Оператор бол хязгаарлагдах зогсоолын site_id, үгүй бол None (бүх зогсоол).
-    Endpoint-ууд энэ утгаар site_id-г албадан хязгаарлана — оператор өөр зогсоолын
-    өгөгдөл харах/өөрчлөхөөс сэргийлнэ."""
-    return user.site_id if user.role == "OPERATOR" and user.site_id else None
+    """Оператор бол ҮНДСЭН зогсоолын site_id (ганц site шаардлагатай газарт —
+    ээлж, кассын default). Олон зогсоолын шүүлтэд operator_sites/scoped_site ашиглана."""
+    if user.role == "OPERATOR" and user.site_id:
+        return user.site_id
+    ids = operator_sites(user)
+    return ids[0] if ids else None
+
+
+def scoped_site(user: User, site_id: str | None) -> tuple[str | None, list[str] | None]:
+    """Жагсаалт/тайлангийн endpoint-д зориулсан site шүүлт:
+    (site_id, site_ids) буцаана — site_id байвал `== site_id`, үгүй бол site_ids
+    байвал `in_(site_ids)` шүүлт хийнэ. Оператор эрхгүй site сонговол өөрийнх рүү буцаана."""
+    allowed = operator_sites(user)
+    if not allowed:
+        return site_id, None
+    if site_id and site_id in allowed:
+        return site_id, None
+    if len(allowed) == 1:
+        return allowed[0], None
+    return None, allowed
 
 
 def enforce_site(user: User, site_id: str | None):
-    """Оператор өөрийн зогсоолоос ӨӨР зогсоолын өгөгдлийг өөрчлөхийг хориглоно.
+    """Оператор өөрийн зогсоолуудаас ӨӨР зогсоолын өгөгдлийг өөрчлөхийг хориглоно.
     Мутаци хийдэг endpoint бүр (хаалт нээх, session засах, төлбөр авах) дуудна —
     device_id/session_id таамаглаж өөр зогсоол руу IDOR хийхээс сэргийлнэ."""
-    osid = operator_site(user)
-    if osid and site_id and site_id != osid:
+    allowed = operator_sites(user)
+    if allowed and site_id and site_id not in allowed:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "Энэ үйлдэл таны хариуцах зогсоолынх биш байна.")

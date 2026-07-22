@@ -54,6 +54,10 @@ MIGRATIONS = [
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot VARCHAR(255)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot VARCHAR(255)",
 
+    # v1.9 — Хэрэглэгчийн эрхийн матриц (чекбокс) + операторын олон зогсоол
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSON",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS site_ids JSON",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

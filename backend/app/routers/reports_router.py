@@ -363,6 +363,8 @@ def _txn_rows(db, sessions):
             "payment_method": primary.payment_method if primary else None,
             "status": STATUS_MN2.get(s.status, s.status),
             "cashier": cashiers.get(primary.cashier_id) if primary and primary.cashier_id else None,
+            # QPay портал/банкны хуулгатай тулгах гүйлгээний утга (машины дугаартай)
+            "invoice_no": primary.sender_invoice_no if primary else None,
             "ebarimt_id": rec.ebarimt_id if rec else None,
             "lottery_code": rec.lottery_code if rec else None,
             "customer_tin": rec.customer_tin if rec else (primary.customer_tin if primary else None),
@@ -408,7 +410,7 @@ def transactions_excel(date_from: str | None = None, date_to: str | None = None,
     ws.title = "Бичилт"
     headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа(мин)", "Машины төрөл",
                "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)", "НӨАТ(₮)", "Нийт(₮)", "Төлсөн(₮)",
-               "Төлбөрийн хэрэгсэл", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
+               "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True)
@@ -418,10 +420,12 @@ def transactions_excel(date_from: str | None = None, date_to: str | None = None,
                    (r["exit_time"] or "").replace("T", " ")[:16], r["duration_minutes"],
                    r["car_type"], r["discount_name"] or "", r["base_fee"], r["discount_amount"],
                    r["vat_amount"], r["total_fee"], r["paid_amount"], r["provider"] or "",
+                   r["invoice_no"] or "",
                    r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
                    r["customer_tin"] or ""])
-    for col, w in zip("ABCDEFGHIJKLMNOPQR",
-                      (11, 14, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 15, 14, 20, 12, 12)):
+    for col, w in zip(["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N",
+                       "O", "P", "Q", "R", "S"],
+                      (11, 14, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 26, 15, 14, 20, 12, 12)):
         ws.column_dimensions[col].width = w
     return _excel_response(wb, "bichilt")
 

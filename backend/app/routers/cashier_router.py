@@ -117,11 +117,13 @@ def hr_worked_days(month: str, db: Session = Depends(get_db), user: User = Depen
 def shift_report(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports", "cashier"))):
     from datetime import timedelta
-    from ..auth import operator_site
-    site_id = operator_site(user) or site_id
+    from ..auth import scoped_site
+    site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(CashierShift)
     if site_id:
         q = q.filter(CashierShift.site_id == site_id)
+    elif site_ids:
+        q = q.filter(CashierShift.site_id.in_(site_ids))
     if date_from:
         q = q.filter(CashierShift.opened_at >= datetime.fromisoformat(date_from))
     if date_to:

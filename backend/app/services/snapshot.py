@@ -44,17 +44,26 @@ def _payload_picture(raw: dict) -> bytes | None:
 
 
 async def _fetch_from_camera(ip: str) -> bytes | None:
-    """Камерын snapshot.cgi-ээс одоогийн кадрыг татна (digest auth)."""
+    """Камерын snapshot.cgi-ээс одоогийн кадрыг татна (digest auth).
+
+    Камер event-ийн дараахан завгүй (encoder ачаалалтай) үед нэг удаагийн
+    оролдлого амархан бүтэлгүйтдэг тул богино зайтай 3 удаа оролдоно —
+    машин хаалтан дээр зогсож байгаа тул 1-2 секундын дотор кадр хүчинтэй хэвээр."""
     url = f"http://{ip}/cgi-bin/snapshot.cgi"
     auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(url, auth=auth)
-            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
-                return r.content
-            print(f"[snapshot] {ip}: HTTP {r.status_code} эсвэл JPEG биш")
-    except Exception as e:
-        print(f"[snapshot] {ip}: татаж чадсангүй ({e})")
+    last_err = ""
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=6) as client:
+                r = await client.get(url, auth=auth)
+                if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
+                    return r.content
+                last_err = f"HTTP {r.status_code} эсвэл JPEG биш ({len(r.content)}b)"
+        except Exception as e:
+            last_err = str(e)
+        if attempt < 3:
+            await asyncio.sleep(1.5)
+    print(f"[snapshot] {ip}: 3 оролдлогод татаж чадсангүй ({last_err})")
     return None
 
 
@@ -78,25 +87,35 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                              lane_dir: str, raw: dict):
     data = _payload_picture(raw)
+    source = "payload"
     if data is None and camera_ip:
         data = await _fetch_from_camera(camera_ip)
+        source = "snapshot.cgi"
     if data is None:
+        print(f"[snapshot] {plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
         return
     rel = _save(data, plate, lane_dir)
     if not rel:
         return
-    db = SessionLocal()
-    try:
-        from ..models import ParkingSession
-        s = db.get(ParkingSession, session_id)
-        if s:
-            if lane_dir == "exit":
-                s.exit_snapshot = rel
-            else:
-                s.entry_snapshot = rel
-            db.commit()
-    finally:
-        db.close()
+    # Session мөр commit хийгдэж амжаагүй байж болзошгүй (payload зурагтай үед
+    # capture агшин зуур дуусдаг) — олдохгүй бол багахан хүлээгээд дахин оролдоно.
+    from ..models import ParkingSession
+    for attempt in range(3):
+        db = SessionLocal()
+        try:
+            s = db.get(ParkingSession, session_id)
+            if s:
+                if lane_dir == "exit":
+                    s.exit_snapshot = rel
+                else:
+                    s.entry_snapshot = rel
+                db.commit()
+                print(f"[snapshot] {plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
+                return
+        finally:
+            db.close()
+        await asyncio.sleep(1)
+    print(f"[snapshot] {plate} {lane_dir}: session {session_id} DB-д олдсонгүй — зам бичигдээгүй")
 
 
 def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,

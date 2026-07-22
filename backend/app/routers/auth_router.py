@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from ..auth import ROLE_PERMISSIONS, create_access_token, get_current_user, verify_password
+from ..auth import create_access_token, effective_permissions, get_current_user, verify_password
 from ..database import get_db
 from ..models import AuditLog, User
 from ..serializers import to_dict
@@ -61,7 +61,7 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
         "access_token": create_access_token(user),
         "token_type": "bearer",
         "user": to_dict(user),
-        "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set())),
+        "permissions": sorted(effective_permissions(user)),
         "test_mode": settings.allow_simulate,
     }
 
@@ -69,7 +69,7 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
     from ..config import settings
-    return {"user": to_dict(user), "permissions": sorted(ROLE_PERMISSIONS.get(user.role, set())),
+    return {"user": to_dict(user), "permissions": sorted(effective_permissions(user)),
             "test_mode": settings.allow_simulate}
 
 

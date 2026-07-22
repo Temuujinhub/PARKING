@@ -19,7 +19,6 @@ export default function Cashier() {
   const [searchResults, setSearchResults] = useState(null)
   const searchDebounce = useRef(null)
   const [discounts, setDiscounts] = useState([])
-  const [barriers, setBarriers] = useState([])
   const [busy, setBusy] = useState(false)
   const [qpayInfo, setQpayInfo] = useState(null)
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
@@ -57,8 +56,6 @@ export default function Cashier() {
   useEffect(() => {
     if (!siteId) return
     loadExits(siteId)
-    api(`/api/admin/devices?site_id=${siteId}`).then((d) =>
-      setBarriers(d.filter((x) => x.device_type === 'barrier' && x.status === 'active')))
     const close = wsConnect(siteId, (ev) => {
       loadExits(siteId)
       if (ev?.type === 'DEBT_ALERT') {
@@ -112,13 +109,6 @@ export default function Cashier() {
         { method: 'POST', body: { discount_id: discountId || null, note } })
       setSelected(updated)
       toast('Хөнгөлөлт шинэчлэгдлээ')
-    } catch (e) { toast(e.message, 'error') }
-  }
-
-  const openBarrier = async (deviceId) => {
-    try {
-      await api(`/api/barriers/${deviceId}/open`, { method: 'POST', body: {} })
-      toast('Хаалт нээх команд илгээгдлээ')
     } catch (e) { toast(e.message, 'error') }
   }
 
@@ -399,19 +389,6 @@ export default function Cashier() {
               Зүүн талаас машин сонгох эсвэл дугаараар хайна уу
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Хаалт шууд удирдах */}
-      <div className="card">
-        <h2 className="font-semibold mb-3">Хаалт удирдлага</h2>
-        <div className="flex flex-wrap gap-2">
-          {barriers.map((b) => (
-            <button key={b.id} onClick={() => openBarrier(b.id)} className="btn-secondary">
-              <DoorOpen size={15} /> {b.name} нээх
-            </button>
-          ))}
-          {barriers.length === 0 && <span className="text-sm text-slate-500">Barrier төхөөрөмж бүртгэгдээгүй</span>}
         </div>
       </div>
 

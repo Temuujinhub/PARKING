@@ -16,6 +16,36 @@ const CREATABLE_ROLES = {
   ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, HR: ROLES.HR, OPERATOR: ROLES.OPERATOR,
 }
 
+// Хуудас/модулийн эрхийн матриц — backend auth.ALL_MODULES-тай ижил түлхүүрүүд
+const MODULE_GROUPS = [
+  ['Үйл ажиллагаа', [
+    ['dashboard', 'Хянах самбар'], ['cashier', 'Касс'], ['check', 'Шалгах'],
+    ['history', 'Түүх'], ['compensations', 'Ээлж хаах / Нөхөн төлбөр'],
+  ]],
+  ['Санхүү', [
+    ['reports', 'Тайлан + Мөнгөн тооцоо'], ['discounts', 'Хөнгөлөлт + Тариф'],
+    ['drivers', 'Бүртгэлтэй жолооч'], ['vat', 'Ибаримт'], ['payments', 'Төлбөрийн үйлдэл'],
+    ['blacklist', 'Хар жагсаалт'],
+  ]],
+  ['Админ', [
+    ['settings', 'Тохиргоо'], ['devices', 'Төхөөрөмж'], ['barriers', 'Хаалтны удирдлага'],
+    ['users', 'Ажилтан'], ['logs', 'Лог'], ['health', 'Системийн эрүүл мэнд'],
+  ]],
+]
+// Role бүрийн default эрх — backend auth.ROLE_PERMISSIONS-той ижил
+const ROLE_DEFAULTS = {
+  ADMIN: ['dashboard', 'cashier', 'check', 'history', 'discounts', 'settings', 'reports',
+    'drivers', 'vat', 'barriers', 'blacklist', 'logs', 'devices', 'compensations', 'users', 'health'],
+  FINANCE: ['dashboard', 'history', 'reports', 'vat', 'payments', 'logs',
+    'compensations', 'discounts', 'blacklist'],
+  HR: ['users'],
+  OPERATOR: ['cashier', 'check', 'history', 'compensations'],
+}
+const isDefaultPerms = (role, perms) => {
+  const d = new Set(ROLE_DEFAULTS[role] || [])
+  return perms.length === d.size && perms.every((p) => d.has(p))
+}
+
 export default function Users() {
   const toast = useToast()
   const [tab, setTab] = useState('staff')
@@ -27,10 +57,24 @@ export default function Users() {
   // Супер админ мөрийг жагсаалтад харуулахгүй (зөвхөн DB-ээр удирддаг)
   const visibleRows = rows.filter((u) => u.role !== 'SUPER_ADMIN')
 
+  // Засах/нэмэх modal нээхэд эрхийн матриц + зогсоолуудыг бэлдэнэ
+  const openEdit = (u) => setEditing(u.id
+    ? { ...u, password: '', perms: u.permissions || ROLE_DEFAULTS[u.role] || [], site_ids: u.site_ids || (u.site_id ? [u.site_id] : []) }
+    : { username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '', perms: ROLE_DEFAULTS.OPERATOR, site_ids: [] })
+
   const save = async (e) => {
     e.preventDefault()
     try {
-      const body = { ...editing, site_id: editing.site_id || null }
+      const siteIds = editing.role === 'OPERATOR' ? editing.site_ids : []
+      const primary = editing.role === 'OPERATOR'
+        ? (siteIds.includes(editing.site_id) ? editing.site_id : siteIds[0] || null) : null
+      const body = {
+        ...editing, perms: undefined,
+        site_id: primary,
+        site_ids: siteIds.length ? siteIds : null,
+        // default-той ижил бол null — role-ийн эрх өөрчлөгдвөл автоматаар дагана
+        permissions: isDefaultPerms(editing.role, editing.perms) ? null : editing.perms,
+      }
       if (editing.id) await api(`/api/admin/users/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/users', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -54,7 +98,7 @@ export default function Users() {
 
       {tab === 'staff' && (<>
       <div className="flex justify-end">
-        <button className="btn-primary" onClick={() => setEditing({ username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '' })}>
+        <button className="btn-primary" onClick={() => openEdit({})}>
           <Plus size={16} /> Ажилтан нэмэх
         </button>
       </div>
@@ -72,12 +116,19 @@ export default function Users() {
             <td className="td font-mono font-semibold">{u.username}</td>
             <td className="td">{u.full_name}</td>
             <td className="td font-mono">{u.phone}</td>
-            <td className="td text-xs">{ROLES[u.role]?.split(' (')[0] || u.role}</td>
-            <td className="td text-xs">{sites.find((s) => s.id === u.site_id)?.name || 'Бүгд'}</td>
+            <td className="td text-xs">
+              {ROLES[u.role]?.split(' (')[0] || u.role}
+              {u.permissions && <span className="ml-1 text-[10px] text-amber-400" title="Тусгай эрхийн матриц тохируулсан">тусгай</span>}
+            </td>
+            <td className="td text-xs">
+              {u.role !== 'OPERATOR' ? 'Бүгд'
+                : (u.site_ids?.length ? u.site_ids : (u.site_id ? [u.site_id] : []))
+                  .map((id) => sites.find((s) => s.id === id)?.name || '?').join(', ') || 'Бүгд'}
+            </td>
             <td className="td font-mono text-xs">{fmtDate(u.created_at).split(' ')[0]}</td>
             <td className="td"><Badge value={u.is_active ? 'active' : 'FAILED'} /></td>
             <td className="td text-right">
-              <button className="btn-secondary py-1 text-xs" onClick={() => setEditing({ ...u, password: '' })}>Засах</button>
+              <button className="btn-secondary py-1 text-xs" onClick={() => openEdit(u)}>Засах</button>
             </td>
           </tr>
         ))}
@@ -105,19 +156,74 @@ export default function Users() {
                   onChange={(e) => setEditing({ ...editing, phone: e.target.value })} />
               </Field>
             </div>
-            <Field label="Эрхийн түвшин" required>
+            <Field label="Эрхийн түвшин (загвар)" required>
               <select className="input" value={editing.role}
-                onChange={(e) => setEditing({ ...editing, role: e.target.value })}>
+                onChange={(e) => setEditing({ ...editing, role: e.target.value, perms: ROLE_DEFAULTS[e.target.value] || [] })}>
                 {Object.entries(CREATABLE_ROLES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </Field>
+
+            {/* Эрхийн чекбокс матриц — түвшин сонгоход default-оор бөглөгдөж, чөлөөтэй өөрчилж болно */}
+            <Field label="Хандах хуудсууд (чекбокс матриц)">
+              <div className="space-y-2 max-h-56 overflow-y-auto border border-surface-border/60 rounded-lg p-3">
+                {MODULE_GROUPS.map(([group, mods]) => (
+                  <div key={group}>
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">{group}</div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                      {mods.map(([key, label]) => (
+                        <label key={key} className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input type="checkbox" checked={editing.perms.includes(key)}
+                            onChange={(e) => setEditing({
+                              ...editing,
+                              perms: e.target.checked
+                                ? [...editing.perms, key]
+                                : editing.perms.filter((p) => p !== key),
+                            })} />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {!isDefaultPerms(editing.role, editing.perms) && (
+                <div className="text-[11px] text-amber-400 mt-1">
+                  Түвшний default-оос өөр (тусгай) эрх — хадгалахад энэ матриц үйлчилнэ
+                </div>
+              )}
+            </Field>
+
             {editing.role === 'OPERATOR' && (
-              <Field label="Хариуцах зогсоол">
-                <select className="input" value={editing.site_id || ''}
-                  onChange={(e) => setEditing({ ...editing, site_id: e.target.value })}>
-                  <option value="">Бүх зогсоол</option>
-                  {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+              <Field label="Хариуцах зогсоолууд (олон сонгож болно)">
+                <div className="grid grid-cols-2 gap-1 border border-surface-border/60 rounded-lg p-3">
+                  {sites.map((s) => (
+                    <label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <input type="checkbox" checked={editing.site_ids.includes(s.id)}
+                        onChange={(e) => setEditing({
+                          ...editing,
+                          site_ids: e.target.checked
+                            ? [...editing.site_ids, s.id]
+                            : editing.site_ids.filter((x) => x !== s.id),
+                        })} />
+                      {s.name}
+                    </label>
+                  ))}
+                  {sites.length === 0 && <span className="text-xs text-slate-500">Зогсоол бүртгэгдээгүй</span>}
+                </div>
+                {editing.site_ids.length === 0 && (
+                  <div className="text-[11px] text-slate-500 mt-1">Юу ч сонгоогүй бол бүх зогсоолд хандана</div>
+                )}
+                {editing.site_ids.length > 1 && (
+                  <div className="mt-2">
+                    <span className="text-xs text-slate-400">Үндсэн зогсоол (ээлж энд нээгдэнэ):</span>
+                    <select className="input mt-1" value={editing.site_ids.includes(editing.site_id) ? editing.site_id : editing.site_ids[0]}
+                      onChange={(e) => setEditing({ ...editing, site_id: e.target.value })}>
+                      {editing.site_ids.map((id) => (
+                        <option key={id} value={id}>{sites.find((s) => s.id === id)?.name || id}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </Field>
             )}
             {editing.id && (

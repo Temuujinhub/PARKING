@@ -1,5 +1,6 @@
 """Төлбөр: QPay invoice/webhook, e-Barimt 3.0, кассын бэлэн мөнгө, PAX POS баталгаажуулалт."""
 import hmac
+import re
 import uuid
 from datetime import datetime
 
@@ -25,8 +26,11 @@ router = APIRouter(prefix="/api/payments", tags=["payments"])
 
 
 def _invoice_no(session: ParkingSession) -> str:
+    """QPay/санхүүд харагдах гүйлгээний дугаар — машины дугаарыг шингээнэ
+    (банкны хуулга, QPay порталтай тулгахад дугаараар олоход амар)."""
     site_code = session.site.site_code if session.site else "SITE"
-    return f"{site_code}-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
+    plate = re.sub(r"[^0-9A-ZА-ЯЁӨҮ]", "", (session.plate_number or "").upper())[:12]
+    return f"{site_code}-{plate}-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
 
 
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None):

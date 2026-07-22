@@ -353,7 +353,7 @@ export function TransactionsTab({ from, to, sites }) {
         </select>
         {txns && <span className="text-sm text-slate-400 ml-auto">Нийт <b className="text-slate-200">{txns.total}</b> бичилт · <b className="font-mono text-accent">{fmt(txns.totals.total_fee)}₮</b></span>}
       </div>
-      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Төрөл', 'Нийт (₮)', 'Хэрэгсэл', 'Төлөв', 'Кассчин', 'ДДТД']}
+      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Төрөл', 'Нийт (₮)', 'Хэрэгсэл', 'Гүйлгээний утга', 'Төлөв', 'Кассчин', 'ДДТД']}
         empty={!txns || txns.rows.length === 0}>
         {txns?.rows.map((r) => (
           <tr key={r.session_id}>
@@ -367,6 +367,7 @@ export function TransactionsTab({ from, to, sites }) {
             </td>
             <td className="td font-mono">{fmt(r.total_fee)}</td>
             <td className="td text-xs">{r.provider || '-'}</td>
+            <td className="td font-mono text-[10px] max-w-[11rem] truncate" title={r.invoice_no || ''}>{r.invoice_no || '-'}</td>
             <td className="td text-xs">{r.status}</td>
             <td className="td text-xs">{r.cashier || '-'}</td>
             <td className="td font-mono text-[10px] max-w-[10rem] truncate" title={r.ebarimt_id || ''}>{r.ebarimt_id || '-'}</td>

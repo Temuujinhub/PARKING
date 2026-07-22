@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, hash_password, operator_site, require, require_role
+from ..auth import (ALL_MODULES, get_current_user, hash_password, operator_sites,
+                    require, require_role)
 from ..database import get_db
 from ..models import (
     AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
@@ -33,13 +34,41 @@ def _check_password(pw: str):
         raise HTTPException(400, "Нууц үг дор хаяж 8 тэмдэгт байх ёстой.")
 
 
+def _clean_permissions(perms, role: str) -> list | None:
+    """Эрхийн чекбокс матрицыг цэвэрлэнэ: зөвхөн мэдэгдэж буй модулиуд.
+    None эсвэл role-ийн default-той яг ижил бол null хадгална (default дагана)."""
+    if perms is None:
+        return None
+    if not isinstance(perms, list):
+        raise HTTPException(400, "permissions нь жагсаалт байх ёстой")
+    bad = [m for m in perms if m not in ALL_MODULES]
+    if bad:
+        raise HTTPException(400, f"Танигдахгүй модуль: {', '.join(bad)}")
+    from ..auth import ROLE_PERMISSIONS
+    if set(perms) == set(ROLE_PERMISSIONS.get(role, set())):
+        return None  # default-той ижил — матриц хадгалахгүй (role өөрчлөгдөхөд дагана)
+    return sorted(set(perms))
+
+
+def _clean_site_ids(site_ids, primary_site_id) -> list | None:
+    """Операторын олон зогсоолын жагсаалтыг цэвэрлэнэ; үндсэн site_id ямагт багтана."""
+    if site_ids is None:
+        return None
+    if not isinstance(site_ids, list):
+        raise HTTPException(400, "site_ids нь жагсаалт байх ёстой")
+    ids = [s for s in site_ids if s]
+    if primary_site_id and primary_site_id not in ids:
+        ids.insert(0, primary_site_id)
+    return ids or None
+
+
 # ─────────────────────────── Зогсоол ───────────────────────────
 @router.get("/sites")
 def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     q = db.query(ParkingSite)
-    osid = operator_site(user)  # оператор зөвхөн өөрийн зогсоолыг л харна
-    if osid:
-        q = q.filter(ParkingSite.id == osid)
+    allowed = operator_sites(user)  # оператор зөвхөн өөрийн зогсоолуудыг л харна
+    if allowed:
+        q = q.filter(ParkingSite.id.in_(allowed))
     sites = q.order_by(ParkingSite.created_at).all()
     out = []
     for s in sites:
@@ -415,7 +444,9 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
     _check_password(body.get("password", ""))
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),
-             role=body["role"], site_id=body.get("site_id"))
+             role=body["role"], site_id=body.get("site_id"),
+             permissions=_clean_permissions(body.get("permissions"), body["role"]),
+             site_ids=_clean_site_ids(body.get("site_ids"), body.get("site_id")))
     db.add(u)
     db.flush()
     _audit(db, user, "CREATE", "user", u.id, {"username": body["username"], "role": body["role"]})
@@ -437,6 +468,10 @@ def update_user(user_id: str, body: dict, db: Session = Depends(get_db),
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])
+    if "permissions" in body:
+        u.permissions = _clean_permissions(body["permissions"], body.get("role", u.role))
+    if "site_ids" in body:
+        u.site_ids = _clean_site_ids(body["site_ids"], body.get("site_id", u.site_id))
     if body.get("password"):
         _check_password(body["password"])
         u.password_hash = hash_password(body["password"])

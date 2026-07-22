@@ -29,7 +29,11 @@ class User(Base):
     full_name = Column(String(120), nullable=False, default="")
     phone = Column(String(20), default="")
     role = Column(String(20), nullable=False, default="OPERATOR")
-    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # OPERATOR-ийг нэг зогсоолд хязгаарлаж болно
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # үндсэн зогсоол (ээлж энд нээгдэнэ)
+    # Хуудасны эрхийн матриц (чекбокс) — null бол role-ийн default эрхүүд үйлчилнэ
+    permissions = Column(JSON, nullable=True)
+    # OPERATOR-ийн хандах зогсоолууд (олон сонголт) — null бол [site_id]
+    site_ids = Column(JSON, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, get_current_user, operator_site, require
+from ..auth import enforce_site, get_current_user, operator_site, operator_sites, require, scoped_site
 from ..database import get_db
 from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
@@ -46,10 +46,12 @@ def list_sessions(
     limit: int = 100, offset: int = 0, with_fee: bool = False,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
-    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
+    site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession)
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
+    elif site_ids:
+        q = q.filter(ParkingSession.site_id.in_(site_ids))
     if status:
         q = q.filter(ParkingSession.status.in_(status.split(",")))
     if plate:
@@ -71,13 +73,15 @@ def check_plate(plate: str, site_id: str | None = None,
     plate = normalize_plate(plate)
     if len(plate) < 2:
         return []
-    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
+    site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession).filter(
         ParkingSession.plate_number.ilike(f"{plate}%"),
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
     )
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
+    elif site_ids:
+        q = q.filter(ParkingSession.site_id.in_(site_ids))
     sessions = q.order_by(ParkingSession.updated_at.desc()).limit(10).all()
     return _attach_debt(db, [_session_out(db, s, with_fee=True) for s in sessions])
 
@@ -86,7 +90,9 @@ def check_plate(plate: str, site_id: str | None = None,
 def recent_exits(site_id: str, minutes: int = 30,
                  db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     """Касс/PAX: сүүлд гарах камерт уншигдсан, төлбөр хүлээж буй машинууд."""
-    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
+    allowed = operator_sites(user)
+    if allowed and site_id not in allowed:
+        site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
     since = datetime.utcnow() - timedelta(minutes=minutes)
     sessions = (
         db.query(ParkingSession)
@@ -110,9 +116,7 @@ def update_note(session_id: str, body: dict, db: Session = Depends(get_db),
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
-    osid = operator_site(user)
-    if osid and s.site_id != osid:
-        raise HTTPException(403, "Энэ зогсоол таны хариуцах зогсоол биш")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолууд
     s.note = (body.get("note") or "")[:1000]
     db.add(AuditLog(username=user.username, action="SESSION_NOTE", entity="session",
                     entity_id=session_id, detail={"note": s.note[:100]}))
@@ -127,7 +131,9 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
     машины төрөл, төлбөрийн хэрэгсэл, төлсөн эсэх, e-Barimt өгсөн эсэх."""
     from sqlalchemy import or_
     from ..models import ParkingSite, Payment, VatReceipt
-    site_id = operator_site(user) or site_id  # оператор зөвхөн өөрийн зогсоол
+    allowed = operator_sites(user)
+    if allowed and site_id not in allowed:
+        site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
     site = db.get(ParkingSite, site_id)
     today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     occupied = db.query(ParkingSession).filter(
@@ -178,7 +184,10 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
            оруулах бол орсон гэж үзэх цаг, default = одоо}"""
     from ..session_logic import find_registered, is_blacklisted, is_valid_plate
     plate = normalize_plate(body.get("plate_number", ""))
-    site_id = operator_site(user) or body.get("site_id")  # оператор зөвхөн өөрийн зогсоол
+    site_id = body.get("site_id")
+    allowed = operator_sites(user)
+    if allowed and site_id not in allowed:
+        site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
     if not plate or not site_id:
         raise HTTPException(400, "plate_number болон site_id шаардлагатай")
     # force=true — дипломат/тусгай дугаар (стандарт форматад тохирохгүй) гэдгийг оператор баталгаажуулсан
@@ -223,7 +232,10 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
     from ..config import settings
     if not settings.allow_simulate:
         raise HTTPException(403, "Тест горим идэвхгүй (production)")
-    site_id = operator_site(user) or body.get("site_id")  # оператор зөвхөн өөрийн зогсоол
+    site_id = body.get("site_id")
+    allowed = operator_sites(user)
+    if allowed and site_id not in allowed:
+        site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
     if not site_id:
         raise HTTPException(400, "site_id шаардлагатай")
     letters = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЭЮЯӨҮ"
@@ -262,9 +274,7 @@ def get_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
-    osid = operator_site(user)
-    if osid and s.site_id != osid:
-        raise HTTPException(403, "Өөр зогсоолын мэдээлэл")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолууд
     rel = s.entry_snapshot if kind == "entry" else s.exit_snapshot
     if not rel:
         raise HTTPException(404, "Зураг хадгалагдаагүй байна")
