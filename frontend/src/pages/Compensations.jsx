@@ -2,7 +2,7 @@
 // + нөхөн төлбөр (өр) хэсэг. 3+ төлөгдөөгүй өртэй дугаар автоматаар хар жагсаалтад орно.
 import { Banknote, CreditCard, LogOut, MoonStar, Search } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, fmt, fmtDate, fmtDur } from '../api'
+import { api, fmt, fmtDate, fmtDur, fmtShort } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
@@ -112,7 +112,7 @@ export default function Compensations() {
             <tr key={s.id}>
               <td className="td font-mono font-bold">{s.plate_number}</td>
               <td className="td text-xs">{s.site_name || <span className="text-slate-600">—</span>}</td>
-              <td className="td font-mono text-xs">{fmtDate(s.entry_time).slice(5, 16)}</td>
+              <td className="td font-mono text-xs">{fmtShort(s.entry_time)}</td>
               <td className="td font-mono text-xs">{fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}</td>
               <td className="td font-mono">{s.fee?.is_free ? <span className="text-slate-500">Үнэгүй</span> : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}</td>
               <td className="td text-xs">{s.is_registered ? <span className="text-cyan-400">Гэрээт</span> : s.discount_name ? <span className="text-amber-400">{s.discount_name}</span> : 'Энгийн'}</td>

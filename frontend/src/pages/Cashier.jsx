@@ -1,7 +1,7 @@
 // Касс — операторын гол дэлгэц: гарах машинууд real-time, төлбөр авах, хаалт нээх, ээлж
 import { Banknote, CarFront, CreditCard, DoorOpen, FlaskConical, QrCode, RefreshCw, Search } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
+import { api, fmt, fmtDate, fmtDur, fmtShort, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { SnapshotImg } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
@@ -406,8 +406,8 @@ export default function Cashier() {
                 {r.plate_number}
                 {r.note && <span className="ml-1 cursor-help" title={r.note}>📝</span>}
               </td>
-              <td className="td font-mono text-xs">{r.entry_time ? fmtDate(r.entry_time).slice(5, 16) : '-'}</td>
-              <td className="td font-mono text-xs">{r.exit_time ? fmtDate(r.exit_time).slice(5, 16) : '—'}</td>
+              <td className="td font-mono text-xs">{fmtShort(r.entry_time)}</td>
+              <td className="td font-mono text-xs">{r.exit_time ? fmtShort(r.exit_time) : '—'}</td>
               <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
               <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
                 {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}

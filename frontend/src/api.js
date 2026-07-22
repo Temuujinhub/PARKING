@@ -50,6 +50,13 @@ export function wsConnect(siteId = 'all', onMessage) {
 
 export const fmt = (n) => (n === null || n === undefined ? '-' : Number(n).toLocaleString('mn-MN'))
 export const fmtDate = (s) => (s ? new Date(s + (s.endsWith('Z') ? '' : 'Z')).toLocaleString('mn-MN', { hour12: false }) : '-')
+// Богино "сар/өдөр цаг:мин" (ж: 7/22 20:58) — locale-оос хамаарахгүй тогтмол формат
+export const fmtShort = (s) => {
+  if (!s) return '-'
+  const d = new Date(s + (s.endsWith('Z') ? '' : 'Z'))
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 export const fmtDur = (m) => {
   if (m === null || m === undefined) return '-'
   const h = Math.floor(m / 60), mm = m % 60
