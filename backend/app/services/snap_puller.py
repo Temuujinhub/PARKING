@@ -34,16 +34,18 @@ _tasks: dict[str, asyncio.Task] = {}
 
 _PLATE_JSON_RE = re.compile(r'"PlateNumber"\s*:\s*"([^"]+)"')
 
-ATTACH_FILTER = {
-    "Channels": [0],
-    "Events": ["All"],
-    "NeedData": True,          # зургийг notification-д шууд хавсаргаж өгнө
-    "Flags": ["Event", "Manual"],
-    "Internal": 1,
-    "OfflineParam": {"ClientIP": "", "ClientID": ""},
-    "Support": ["Ack"],
-    "Transfer": ["Realtime"],
-}
+# Firmware бүр filter-ийн өөр хэлбэр хүлээдэг — амжилттай болтол дарааллаар оролдоно
+# (production дээр бүрэн хэлбэрийг 268959743 алдаагаар гологдсон тохиолдол бүртгэгдсэн)
+ATTACH_FILTERS = [
+    {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"],
+     "Internal": 1, "OfflineParam": {"ClientIP": "", "ClientID": ""},
+     "Support": ["Ack"], "Transfer": ["Realtime"]},
+    {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
+    {"Channels": [0], "Events": ["TrafficJunction"], "NeedData": True, "Flags": ["Event"]},
+    {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event"]},
+    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
+    {"Channels": [0], "Events": ["All"], "Flags": ["Event", "Manual"]},
+]
 
 
 # ─── WS frame кодлол (клиент JS-ийн _send/_receiveMessage-ээс) ───────────────
@@ -158,12 +160,40 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                         print(f"  text frame: {str(raw)[:200]}")
                 if not obj:
                     raise RuntimeError("snapManager.factory.instance хариу ирсэнгүй (12с)")
-                msg_id += 1
-                await ws.send(ws_encode(sid, {"method": "snapManager.attachFileProc",
-                                              "params": {"filter": ATTACH_FILTER, "proc": 1},
-                                              "object": obj, "id": msg_id, "session": sid},
-                                        subscribe=True))
-                print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО")
+
+                # attachFileProc — filter-ийн хувилбаруудыг амжилттай болтол оролдоно
+                attached, last_err = False, ""
+                for flt in ATTACH_FILTERS:
+                    msg_id += 1
+                    await ws.send(ws_encode(sid, {"method": "snapManager.attachFileProc",
+                                                  "params": {"filter": flt, "proc": 1},
+                                                  "object": obj, "id": msg_id, "session": sid},
+                                            subscribe=True))
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                        except asyncio.TimeoutError:
+                            continue
+                        if not isinstance(raw, (bytes, bytearray)):
+                            continue
+                        _, payload, _ = ws_decode(bytes(raw))
+                        if not payload or payload.get("id") != msg_id:
+                            continue
+                        if payload.get("result") or (payload.get("params") or {}).get("SID"):
+                            attached = True
+                        else:
+                            last_err = json.dumps(payload.get("error") or payload,
+                                                  ensure_ascii=False)[:150]
+                            if test_mode:
+                                print(f"  filter {flt.get('Flags')}/{flt.get('Events')}"
+                                      f"{'/оffline' if 'OfflineParam' in flt else ''} → {last_err}")
+                        break
+                    if attached:
+                        break
+                if not attached:
+                    raise RuntimeError(f"attachFileProc бүх хувилбар гологдов: {last_err}")
+                print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK)")
 
                 # Дугааргүй notification-д хамгийн сүүлийн дугаарыг оноох (event-ийн
                 # зургууд хэдэн секундын дотор цувж ирдэг)
