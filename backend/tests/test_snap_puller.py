@@ -38,6 +38,7 @@ hlen = frame[0] | (frame[1] << 8)
 hdr = json.loads(frame[2:2 + hlen])
 body = json.loads(frame[2 + hlen:])
 check("Request header зөв", hdr["Type"] == "Request" and hdr["SessionID"] == "SESS1")
+check("Request-д URL:RPC2 ямагт явна", hdr["URL"] == "RPC2")
 check("TotalSize = body урт", hdr["TotalSize"] == len(frame) - 2 - hlen)
 check("payload зөв", body["method"] == "snapManager.factory.instance")
 

@@ -50,11 +50,12 @@ ATTACH_FILTER = {
 
 def ws_encode(session, payload: dict, subscribe: bool = False) -> bytes:
     body = json.dumps(payload, ensure_ascii=False).encode()
-    header: dict = {"TotalSize": len(body),
-                    "Type": "SubScribe" if subscribe else "Request",
-                    "SessionID": session}
-    if subscribe:
-        header["URL"] = "SubscribeNotify"
+    # ЧУХАЛ: URL талбар ямагт явна — Request үед "RPC2" (клиент JS-ийн default),
+    # үгүй бол камер frame-ийг чиглүүлж чадахгүй, хариу өгдөггүй
+    header = {"TotalSize": len(body),
+              "Type": "SubScribe" if subscribe else "Request",
+              "SessionID": session,
+              "URL": "SubscribeNotify" if subscribe else "RPC2"}
     h = json.dumps(header).encode()
     return bytes([len(h) & 255, (len(h) >> 8) & 255]) + h + body
 
@@ -141,15 +142,22 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                 await ws.send(ws_encode(sid, {"method": "snapManager.factory.instance",
                                               "id": msg_id, "session": sid}))
                 obj = None
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + 12
                 while obj is None and time.monotonic() < deadline:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    except asyncio.TimeoutError:
+                        continue
                     if isinstance(raw, (bytes, bytearray)):
                         _, payload, _ = ws_decode(bytes(raw))
+                        if test_mode:
+                            print(f"  frame: {json.dumps(payload, ensure_ascii=False)[:200]}")
                         if payload and payload.get("id") == msg_id:
                             obj = payload.get("result")
+                    elif test_mode:
+                        print(f"  text frame: {str(raw)[:200]}")
                 if not obj:
-                    raise RuntimeError("snapManager.factory.instance хариу ирсэнгүй")
+                    raise RuntimeError("snapManager.factory.instance хариу ирсэнгүй (12с)")
                 msg_id += 1
                 await ws.send(ws_encode(sid, {"method": "snapManager.attachFileProc",
                                               "params": {"filter": ATTACH_FILTER, "proc": 1},
@@ -177,9 +185,12 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                     if not isinstance(raw, (bytes, bytearray)):
                         continue
                     try:
-                        _, payload, binary = ws_decode(bytes(raw))
+                        hdr, payload, binary = ws_decode(bytes(raw))
                     except Exception:
                         continue
+                    if test_mode and payload:
+                        print(f"  frame[{hdr.get('Type')}]: bin={len(binary)}b "
+                              f"{json.dumps(payload, ensure_ascii=False)[:180]}")
                     if not payload or payload.get("method") != "client.notifySnapFile":
                         continue
                     plate = plate_from_notify(payload)
@@ -341,5 +352,7 @@ if __name__ == "__main__":
             await asyncio.wait_for(_ws_session(_ip, on_pic, test_mode=True), timeout=120)
         except asyncio.TimeoutError:
             print(f"\n120с дууслаа — {n} зураг ирэв.")
+        except Exception as e:
+            print(f"\nАЛДАА: {type(e).__name__}: {e}")
 
     asyncio.run(_test())
