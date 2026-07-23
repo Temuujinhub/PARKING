@@ -124,8 +124,13 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
 
 # ─── Лайв WS стрим ───────────────────────────────────────────────────────────
 
-async def _ws_session(ip: str, on_picture, test_mode: bool = False):
-    """Нэг WS холболтын амьдрал: login → attach → notification уншина.
+class AttachRejected(RuntimeError):
+    """Камер энэ filter хувилбарыг гологдуулав — дараагийн хувилбарыг шинэ
+    холболт дээр туршина (нэг холболтод эхний алдааны дараа камер дүлийрдэг)."""
+
+
+async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False):
+    """Нэг WS холболтын амьдрал: login → detach(хуучин) → attach → notification.
     on_picture(plate, jpeg_bytes) — plate-тай бүрэн jpeg бүрд дуудагдана."""
     import websockets
 
@@ -141,64 +146,53 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                     f"ws://{ip}/webappoverwebsocket", additional_headers=headers,
                     max_size=32 * 1024 * 1024, open_timeout=10, ping_interval=None) as ws:
                 msg_id = 100
-                await ws.send(ws_encode(sid, {"method": "snapManager.factory.instance",
-                                              "id": msg_id, "session": sid}))
-                obj = None
-                deadline = time.monotonic() + 12
-                while obj is None and time.monotonic() < deadline:
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                    except asyncio.TimeoutError:
-                        continue
-                    if isinstance(raw, (bytes, bytearray)):
-                        _, payload, _ = ws_decode(bytes(raw))
-                        if test_mode:
-                            print(f"  frame: {json.dumps(payload, ensure_ascii=False)[:200]}")
-                        if payload and payload.get("id") == msg_id:
-                            obj = payload.get("result")
-                    elif test_mode:
-                        print(f"  text frame: {str(raw)[:200]}")
-                if not obj:
-                    raise RuntimeError("snapManager.factory.instance хариу ирсэнгүй (12с)")
 
-                # attachFileProc — filter-ийн хувилбаруудыг амжилттай болтол оролдоно
-                attached, last_err = False, ""
-                for flt in ATTACH_FILTERS:
+                async def call(method: str, params=None, subscribe=False, wait=8,
+                               extra: dict | None = None):
+                    """Дуудлага явуулж ижил id-тэй хариуг хүлээнэ (None = хариугүй)."""
+                    nonlocal msg_id
                     msg_id += 1
-                    await ws.send(ws_encode(sid, {"method": "snapManager.attachFileProc",
-                                                  "params": {"filter": flt, "proc": 1},
-                                                  "object": obj, "id": msg_id, "session": sid},
-                                            subscribe=True))
-                    deadline = time.monotonic() + 8
+                    payload = {"method": method, "id": msg_id, "session": sid}
+                    if params is not None:
+                        payload["params"] = params
+                    if extra:
+                        payload.update(extra)
+                    await ws.send(ws_encode(sid, payload, subscribe=subscribe))
+                    want = msg_id
+                    deadline = time.monotonic() + wait
                     while time.monotonic() < deadline:
                         try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                            raw = await asyncio.wait_for(ws.recv(), timeout=2)
                         except asyncio.TimeoutError:
                             continue
                         if not isinstance(raw, (bytes, bytearray)):
                             continue
-                        _, payload, _ = ws_decode(bytes(raw))
-                        if not payload or payload.get("id") != msg_id:
-                            continue
-                        if payload.get("result") or (payload.get("params") or {}).get("SID"):
-                            attached = True
-                        else:
-                            last_err = json.dumps(payload.get("error") or payload,
-                                                  ensure_ascii=False)[:150]
-                            if test_mode:
-                                print(f"  filter {flt.get('Flags')}/{flt.get('Events')}"
-                                      f"{'/оffline' if 'OfflineParam' in flt else ''} → {last_err}")
-                        break
-                    if attached:
-                        break
-                if not attached:
-                    # Камер зургийн subscribe-ийг ганц сувагт өгдөг — өөр хэн нэгэн
-                    # (ажиллаж буй backend сервис, камерын web UI-ийн Live хуудас)
-                    # эзэлсэн үед яг ийм 268959743 алдаа өгдөг нь ажиглагдсан
-                    raise RuntimeError(
-                        f"attachFileProc гологдов (суваг эзлэгдсэн байж болзошгүй — "
-                        f"backend сервис/камерын web UI Live хуудас): {last_err}")
-                print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK)")
+                        _, resp, _ = ws_decode(bytes(raw))
+                        if test_mode and resp:
+                            print(f"  frame: {json.dumps(resp, ensure_ascii=False)[:180]}")
+                        if resp and resp.get("id") == want:
+                            return resp
+                    return None
+
+                inst = await call("snapManager.factory.instance", wait=12)
+                obj = inst.get("result") if inst else None
+                if not obj:
+                    raise RuntimeError("snapManager.factory.instance хариу ирсэнгүй (12с)")
+
+                # Хуучин гацсан бүртгэлийг цэвэрлэнэ (OfflineParam-тай бүртгэл
+                # session үхсэн ч үлдэж, шинэ attach-ийг 268959743-аар гологдуулдаг)
+                await call("snapManager.detachFileProc", {"filter": flt, "proc": 1},
+                           extra={"object": obj}, wait=3)
+
+                resp = await call("snapManager.attachFileProc", {"filter": flt, "proc": 1},
+                                  subscribe=True, extra={"object": obj}, wait=8)
+                ok = resp and (resp.get("result") or (resp.get("params") or {}).get("SID"))
+                if not ok:
+                    err = json.dumps((resp or {}).get("error") or resp or "хариугүй",
+                                     ensure_ascii=False)[:150]
+                    raise AttachRejected(err)
+                print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK, "
+                      f"filter={flt.get('Flags')}/{flt.get('Events')})")
 
                 # Дугааргүй notification-д хамгийн сүүлийн дугаарыг оноох (event-ийн
                 # зургууд хэдэн секундын дотор цувж ирдэг)
@@ -273,9 +267,18 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str):
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()
 
+    vi = 0  # амжилттай болсон filter хувилбар дээрээ тогтоно
     while True:
+        flt = ATTACH_FILTERS[vi % len(ATTACH_FILTERS)]
         try:
-            await _ws_session(ip, on_picture)
+            await _ws_session(ip, on_picture, flt)
+        except AttachRejected as e:
+            print(f"[snap_pull] {ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
+                  f"дараагийн хувилбар 10с дараа")
+            vi += 1
+            await flush_stale(force=True)
+            await asyncio.sleep(10)
+            continue
         except Exception as e:
             print(f"[snap_pull] {ip}: WS тасарлаа ({type(e).__name__}: {str(e)[:120]}) — 15с дараа дахин")
         await flush_stale(force=True)
@@ -396,11 +399,19 @@ if __name__ == "__main__":
             open(fn, "wb").write(data)
             print(f"  ЗУРАГ: {plate} {len(data)}b → {fn}")
 
-        try:
-            await asyncio.wait_for(_ws_session(_ip, on_pic, test_mode=True), timeout=120)
-        except asyncio.TimeoutError:
-            print(f"\n120с дууслаа — {n} зураг ирэв.")
-        except Exception as e:
-            print(f"\nАЛДАА: {type(e).__name__}: {e}")
+        for i, flt in enumerate(ATTACH_FILTERS, 1):
+            print(f"— filter #{i}: Flags={flt.get('Flags')} Events={flt.get('Events')}"
+                  f"{' +OfflineParam' if 'OfflineParam' in flt else ''}")
+            try:
+                await asyncio.wait_for(_ws_session(_ip, on_pic, flt, test_mode=True), timeout=120)
+            except asyncio.TimeoutError:
+                print(f"\n120с дууслаа — {n} зураг ирэв.")
+                break
+            except AttachRejected as e:
+                print(f"  гологдов: {e}\n")
+                await asyncio.sleep(3)
+            except Exception as e:
+                print(f"\nАЛДАА: {type(e).__name__}: {e}")
+                break
 
     asyncio.run(_test())
