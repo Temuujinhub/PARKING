@@ -123,7 +123,11 @@ async def _poll_one(device_id: str, ip: str):
     while True:
         buffer = ""
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=None)) as client:
+            # read=30: стрим heartbeat=5с тутам ирдэг тул 30с юу ч ирэхгүй бол холболт
+            # үхсэн гэж үзэж ReadTimeout шиднэ → reconnect. read=None үед TCP чимээгүй
+            # тасрахад (сүлжээний блип, NAT reset) aiter_text мөнхөд хүлээж, камер
+            # "Офлайн" болоод хэзээ ч сэргэдэггүй байсан.
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=30)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
                     if resp.status_code != 200:
                         print(f"[cgi_poll] {ip}: HTTP {resp.status_code} "
