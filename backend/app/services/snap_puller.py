@@ -38,10 +38,12 @@ _PLATE_JSON_RE = re.compile(r'"PlateNumber"\s*:\s*"([^"]+)"')
 # PRODUCTION ДЭЭР БАТЛАГДСАН (2026-07-23, ITC ANPR Web 5.0): Channels заавал [1]
 # (0-ээр 268959743 өгдөг) — тиймээс ялсан хувилбар эхэндээ.
 ATTACH_FILTERS = [
-    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
+    # Бүрэн хэлбэр эхэндээ: Transfer:["Realtime"] байхгүй бол attach амжилттай
+    # болсон ч камер зургаа бодит цагт илгээдэггүй байж болзошгүй
     {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"],
      "Internal": 1, "OfflineParam": {"ClientIP": "", "ClientID": ""},
      "Support": ["Ack"], "Transfer": ["Realtime"]},
+    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
     {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
     {"Channels": [0], "Events": ["TrafficJunction"], "NeedData": True, "Flags": ["Event"]},
     {"Channels": [1], "Events": ["TrafficJunction"], "NeedData": True, "Flags": ["Event"]},
@@ -200,6 +202,7 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False):
                 last_plate: str | None = None
                 last_plate_ts = 0.0
                 last_ka = time.monotonic()
+                seen_methods: set[str] = set()  # оношилгоо: анх ирсэн method бүрийг логлоно
                 while True:
                     # keepAlive: RPC2 session 60с-д хөрдөг тул 25с тутам сунгана
                     if time.monotonic() - last_ka > 25:
@@ -221,7 +224,16 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False):
                     if test_mode and payload:
                         print(f"  frame[{hdr.get('Type')}]: bin={len(binary)}b "
                               f"{json.dumps(payload, ensure_ascii=False)[:180]}")
-                    if not payload or payload.get("method") != "client.notifySnapFile":
+                    if not payload:
+                        continue
+                    # Оношилгоо: энэ холболтод анх удаа ирж буй notification method
+                    # бүрийг нэг удаа логлоно (юу ирж байгааг харахад)
+                    m = payload.get("method")
+                    if m and m not in seen_methods:
+                        seen_methods.add(m)
+                        print(f"[snap_pull] {ip}: notification «{m}» ирж эхлэв "
+                              f"(bin={len(binary)}b, эхлэл={binary[:4].hex() if binary else '-'})")
+                    if m != "client.notifySnapFile":
                         continue
                     # Support:["Ack"] амласан тул файл бүрийг хүлээж авснаа мэдэгдэнэ —
                     # эс бол камер дараагийн зургуудаа түр саатуулж болзошгүй
@@ -400,7 +412,10 @@ if __name__ == "__main__":
             open(fn, "wb").write(data)
             print(f"  ЗУРАГ: {plate} {len(data)}b → {fn}")
 
+        only = int(sys.argv[2]) if len(sys.argv) > 2 else None  # зөвхөн N-р filter-ийг турших
         for i, flt in enumerate(ATTACH_FILTERS, 1):
+            if only and i != only:
+                continue
             print(f"— filter #{i}: Flags={flt.get('Flags')} Events={flt.get('Events')}"
                   f"{' +OfflineParam' if 'OfflineParam' in flt else ''}")
             try:
