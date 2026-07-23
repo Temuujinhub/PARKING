@@ -1,24 +1,25 @@
-"""snap_puller: multipart стрим задлагч + mediaFileFind нөхөн таталт (DB шаардлагагүй).
+"""snap_puller v2 (WS/RPC2): frame кодлол + RPC2 нөхөн таталт (DB шаардлагагүй).
 
     cd backend && venv/bin/python tests/test_snap_puller.py
 
 Шалгах зүйл:
-  - MultipartParser: Content-Length-тэй/гүй хэсэг, chunk дундуур таслагдсан зураг
-  - parse_find_items: findNextFile текст хариу → items
-  - fetch_stored_picture: fake камер серверээс бүрэн урсгалаар хамгийн том jpg татна
+  - ws_encode/ws_decode: Request/SubScribe frame, бинари сүүлтэй Notification
+  - plate_from_notify: notification JSON-оос дугаар олох
+  - fetch_stored_picture: fake RPC2 камер серверээс login→findFile→Loadfile бүрэн урсгал
 """
 import asyncio
+import json
 import os
+import re
 import sys
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.services.snap_puller import (MultipartParser, fetch_stored_picture,
-                                      parse_find_items)
+from app.services.snap_puller import (plate_from_notify, ws_decode, ws_encode,
+                                      fetch_stored_picture)
 
 PASS = FAIL = 0
 
@@ -29,128 +30,138 @@ def check(name, cond):
     print(f"  {'✓' if cond else '✗ <<< FAIL'} {name}")
 
 
-# ─── MultipartParser ─────────────────────────────────────────────────────────
-print("MultipartParser:")
+# ─── ws_encode / ws_decode ───────────────────────────────────────────────────
+print("WS frame кодлол:")
 
-JPEG_BIG = b"\xff\xd8" + b"A" * 5000 + b"\xff\xd9"
-JPEG_SMALL = b"\xff\xd8" + b"B" * 300 + b"\xff\xd9"
-EVENT_TXT = ("Events[0].EventBaseInfo.Code=TrafficJunction\r\n"
-             "Events[0].TrafficCar.PlateNumber=9035УКУ\r\n").encode()
+frame = ws_encode("SESS1", {"method": "snapManager.factory.instance", "id": 1, "session": "SESS1"})
+hlen = frame[0] | (frame[1] << 8)
+hdr = json.loads(frame[2:2 + hlen])
+body = json.loads(frame[2 + hlen:])
+check("Request header зөв", hdr["Type"] == "Request" and hdr["SessionID"] == "SESS1")
+check("TotalSize = body урт", hdr["TotalSize"] == len(frame) - 2 - hlen)
+check("payload зөв", body["method"] == "snapManager.factory.instance")
 
+sub = ws_encode("S", {"method": "snapManager.attachFileProc", "id": 2}, subscribe=True)
+shlen = sub[0] | (sub[1] << 8)
+shdr = json.loads(sub[2:2 + shlen])
+check("SubScribe + SubscribeNotify", shdr["Type"] == "SubScribe" and shdr["URL"] == "SubscribeNotify")
 
-def part(ctype, body, with_len=True):
-    h = f"--myboundary\r\nContent-Type: {ctype}\r\n"
-    if with_len:
-        h += f"Content-Length: {len(body)}\r\n"
-    return h.encode() + b"\r\n" + body + (b"" if with_len else b"\r\n")
+# Notification + бинари зураг
+JPEG = b"\xff\xd8" + b"X" * 4000 + b"\xff\xd9"
+notify_payload = json.dumps({"method": "client.notifySnapFile",
+                             "params": {"Info": {"TrafficCar": {"PlateNumber": "9035УКУ"}}}},
+                            ensure_ascii=False).encode()
+notify_header = json.dumps({"Type": "Notification", "TotalSize": len(notify_payload) + len(JPEG),
+                            "BinSize": len(JPEG)}).encode()
+notify_frame = bytes([len(notify_header) & 255, len(notify_header) >> 8]) + notify_header + notify_payload + JPEG
+h, p, b = ws_decode(notify_frame)
+check("Notification задарна", h["Type"] == "Notification")
+check("JSON хэсэг зөв", p["method"] == "client.notifySnapFile")
+check("бинари зураг бүрэн", b == JPEG)
+check("plate_from_notify", plate_from_notify(p) == "9035УКУ")
+check("plate байхгүй үед None", plate_from_notify({"params": {}}) is None)
 
+# Response frame (бинаригүй)
+resp_payload = json.dumps({"id": 100, "result": 12345}).encode()
+resp_header = json.dumps({"Type": "Response", "TotalSize": len(resp_payload)}).encode()
+resp_frame = bytes([len(resp_header) & 255, len(resp_header) >> 8]) + resp_header + resp_payload
+h2, p2, b2 = ws_decode(resp_frame)
+check("Response задарна", p2["result"] == 12345 and b2 == b"")
 
-stream = part("text/plain", EVENT_TXT) + part("image/jpeg", JPEG_BIG) + part("image/jpeg", JPEG_SMALL)
+# ─── fetch_stored_picture (fake RPC2 камер) ─────────────────────────────────
+print("fetch_stored_picture (RPC2):")
 
-# Нэг дор бүхэлд нь
-p = MultipartParser("myboundary")
-parts = p.feed(stream + b"--myboundary\r\n")  # сүүлийн хэсгийг хаах boundary
-check("3 хэсэг задарна", len(parts) == 3)
-check("эхнийх text", parts[0][0] == "text/plain" and b"9035" in parts[0][1])
-check("том jpeg бүрэн", parts[1] == ("image/jpeg", JPEG_BIG))
-check("жижиг jpeg бүрэн", parts[2] == ("image/jpeg", JPEG_SMALL))
-
-# 7 байтын chunk-уудаар (зураг таслагдана)
-p = MultipartParser("myboundary")
-got = []
-data = stream + b"--myboundary\r\n"
-for i in range(0, len(data), 7):
-    got += p.feed(data[i:i + 7])
-check("жижиг chunk-уудад ижил үр дүн", len(got) == 3 and got[1][1] == JPEG_BIG)
-
-# Content-Length-гүй хэсэг (дараагийн boundary хүртэл)
-p = MultipartParser("myboundary")
-got = p.feed(part("text/plain", b"Heartbeat", with_len=False) + part("text/plain", EVENT_TXT))
-check("Content-Length-гүй heartbeat", len(got) == 2 and got[0][1] == b"Heartbeat")
-
-# ─── parse_find_items ────────────────────────────────────────────────────────
-print("parse_find_items:")
-FIND_TEXT = """found=2
-items[0].Channel=0
-items[0].StartTime=2026-07-23 14:31:47
-items[0].FilePath=/mnt/appdata1/userpic/a_cutout.jpg
-items[0].Length=4500
-items[0].Type=jpg
-items[1].Channel=0
-items[1].StartTime=2026-07-23 14:31:47
-items[1].FilePath=/mnt/appdata1/userpic/a_full.jpg
-items[1].Length=180000
-items[1].Type=jpg
-"""
-items = parse_find_items(FIND_TEXT)
-check("2 item", len(items) == 2)
-check("FilePath зөв", items[1]["FilePath"] == "/mnt/appdata1/userpic/a_full.jpg")
-check("Length зөв", items[1]["Length"] == "180000")
-check("хоосон текст → []", parse_find_items("Error\r\n") == [])
-
-# ─── fetch_stored_picture (fake камер сервер) ────────────────────────────────
-print("fetch_stored_picture:")
+FULL_JPEG = b"\xff\xd8" + b"F" * 90000 + b"\xff\xd9"
 
 
-class FakeCam(BaseHTTPRequestHandler):
+class FakeRpcCam(BaseHTTPRequestHandler):
     calls = []
 
     def log_message(self, *a):
         pass
 
-    def _send(self, body: bytes, ctype="text/plain"):
+    def _json(self, obj):
+        body = json.dumps(obj).encode()
         self.send_response(200)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _bytes(self, data, ctype="image/jpeg"):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
-        u = urlparse(self.path)
-        q = parse_qs(u.query)
-        FakeCam.calls.append((u.path, q.get("action", [""])[0]))
-        if u.path == "/cgi-bin/mediaFileFind.cgi":
-            action = q["action"][0]
-            if action == "factory.create":
-                return self._send(b"result=123456\r\n")
-            if action == "findFile":
-                # Хайлтын муж дамжсаныг шалгана
-                ok = "condition.StartTime" in u.query and q.get("condition.Types[0]") == ["jpg"]
-                return self._send(b"OK\r\n" if ok else b"Error\r\n")
-            if action == "findNextFile":
-                return self._send(FIND_TEXT.replace("\n", "\r\n").encode())
-            return self._send(b"OK\r\n")
-        if u.path == "/cgi-bin/RPC_Loadfile/mnt/appdata1/userpic/a_full.jpg":
-            return self._send(JPEG_BIG, "image/jpeg")
+        FakeRpcCam.calls.append(self.path)
+        if self.path.startswith("/RPC_Loadfile/mnt/pic/full.jpg"):
+            return self._bytes(FULL_JPEG)
         self.send_response(404)
         self.end_headers()
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length))
+        method = req.get("method")
+        FakeRpcCam.calls.append(method)
+        if self.path == "/RPC2_Login":
+            if not req["params"].get("password"):
+                return self._json({"result": False, "session": "S1",
+                                   "params": {"realm": "R", "random": "X",
+                                              "encryption": "Default"}})
+            return self._json({"result": True, "session": "S1"})
+        if method == "mediaFileFind.factory.create":
+            return self._json({"result": 777, "id": req["id"]})
+        if method == "mediaFileFind.findFile":
+            cond = req["params"]["condition"]
+            # Зөвхөн Flags:["Event"]-тэй эхний хувилбар амжилттай гэж дуурайна
+            ok = cond.get("Flags") == ["Event"] and "StartTime" in cond
+            return self._json({"result": ok, "id": req["id"]})
+        if method == "mediaFileFind.findNextFile":
+            return self._json({"result": True, "id": req["id"], "params": {
+                "found": 2,
+                "infos": [
+                    {"FilePath": "/mnt/pic/cutout.jpg", "Length": 4000, "Type": "jpg"},
+                    {"FilePath": "/mnt/pic/full.jpg", "Length": 90004, "Type": "jpg"},
+                ]}})
+        return self._json({"result": True, "id": req.get("id", 0)})
 
-srv = HTTPServer(("127.0.0.1", 0), FakeCam)
-port = srv.server_address[1]
+
+srv = HTTPServer(("127.0.0.1", 0), FakeRpcCam)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
+ip = f"127.0.0.1:{srv.server_address[1]}"
 
 data, err = asyncio.run(fetch_stored_picture(
-    f"127.0.0.1:{port}", datetime(2026, 7, 23, 14, 30), datetime(2026, 7, 23, 14, 33)))
-check("зураг татагдсан", data == JPEG_BIG)
+    ip, datetime(2026, 7, 23, 14, 30), datetime(2026, 7, 23, 14, 33)))
+check("зураг татагдсан", data == FULL_JPEG)
 check("алдаагүй", err == "")
-check("хамгийн ТОМ файлыг сонгосон", data is not None and len(data) > 5000)
-actions = [a for _, a in FakeCam.calls]
-check("close/destroy дуудагдсан", "close" in actions and "destroy" in actions)
-
-# Олдохгүй үед
-class EmptyCam(FakeCam):
-    def do_GET(self):
-        u = urlparse(self.path)
-        q = parse_qs(u.query)
-        if q.get("action") == ["factory.create"]:
-            return self._send(b"result=9\r\n")
-        if q.get("action") == ["findNextFile"]:
-            return self._send(b"found=0\r\n")
-        return self._send(b"OK\r\n")
+check("хамгийн ТОМ файл (бүтэн кадр)", data is not None and len(data) > 50000)
+check("login хийсэн", FakeRpcCam.calls.count("global.login") >= 2)
+check("close/destroy/logout дуудагдсан",
+      "mediaFileFind.close" in FakeRpcCam.calls and "global.logout" in FakeRpcCam.calls)
 
 
-srv2 = HTTPServer(("127.0.0.1", 0), EmptyCam)
+# Хоосон үед
+class EmptyRpcCam(FakeRpcCam):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length))
+        if self.path == "/RPC2_Login":
+            if not req["params"].get("password"):
+                return self._json({"result": False, "session": "S2",
+                                   "params": {"realm": "R", "random": "X"}})
+            return self._json({"result": True, "session": "S2"})
+        if req.get("method") == "mediaFileFind.factory.create":
+            return self._json({"result": 5, "id": req["id"]})
+        if req.get("method") == "mediaFileFind.findNextFile":
+            return self._json({"result": True, "id": req["id"], "params": {"found": 0, "infos": []}})
+        return self._json({"result": True, "id": req.get("id", 0)})
+
+
+srv2 = HTTPServer(("127.0.0.1", 0), EmptyRpcCam)
 threading.Thread(target=srv2.serve_forever, daemon=True).start()
 data2, err2 = asyncio.run(fetch_stored_picture(
     f"127.0.0.1:{srv2.server_address[1]}", datetime(2026, 7, 23, 14, 30), datetime(2026, 7, 23, 14, 33)))
