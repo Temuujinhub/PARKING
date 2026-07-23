@@ -222,18 +222,23 @@ async def fetch_stored_picture(ip: str, start: datetime, end: datetime) -> tuple
             if not m:
                 return None, f"factory.create: HTTP {r.status_code} {r.text[:80]}"
             token = m.group(1)
-            r = await client.get(base, params={
-                "action": "findFile", "object": token,
-                "condition.Channel": 1,
-                "condition.StartTime": start.strftime(fmt),
-                "condition.EndTime": end.strftime(fmt),
-                "condition.Types[0]": "jpg",
-            })
-            if "ok" not in r.text.lower():
-                return None, f"findFile: {r.text[:80]}"
-            r = await client.get(base, params={"action": "findNextFile",
-                                               "object": token, "count": 64})
-            items = [i for i in parse_find_items(r.text) if i.get("FilePath")]
+            items = []
+            # Firmware-ээс хамаарч суваг 1 эсвэл 0 — хоёуланг нь оролдоно
+            for channel in (1, 0):
+                r = await client.get(base, params={
+                    "action": "findFile", "object": token,
+                    "condition.Channel": channel,
+                    "condition.StartTime": start.strftime(fmt),
+                    "condition.EndTime": end.strftime(fmt),
+                    "condition.Types[0]": "jpg",
+                })
+                if "ok" not in r.text.lower():
+                    continue
+                r = await client.get(base, params={"action": "findNextFile",
+                                                   "object": token, "count": 64})
+                items = [i for i in parse_find_items(r.text) if i.get("FilePath")]
+                if items:
+                    break
             if not items:
                 return None, "энэ мужид камерт хадгалагдсан зураг олдсонгүй"
             # Хамгийн том файл = бүтэн кадр (тайрмал жижиг байдаг)
