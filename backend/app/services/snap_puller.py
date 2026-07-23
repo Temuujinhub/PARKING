@@ -34,16 +34,17 @@ _tasks: dict[str, asyncio.Task] = {}
 
 _PLATE_JSON_RE = re.compile(r'"PlateNumber"\s*:\s*"([^"]+)"')
 
-# Firmware бүр filter-ийн өөр хэлбэр хүлээдэг — амжилттай болтол дарааллаар оролдоно
-# (production дээр бүрэн хэлбэрийг 268959743 алдаагаар гологдсон тохиолдол бүртгэгдсэн)
+# Firmware бүр filter-ийн өөр хэлбэр хүлээдэг — амжилттай болтол дарааллаар оролдоно.
+# PRODUCTION ДЭЭР БАТЛАГДСАН (2026-07-23, ITC ANPR Web 5.0): Channels заавал [1]
+# (0-ээр 268959743 өгдөг) — тиймээс ялсан хувилбар эхэндээ.
 ATTACH_FILTERS = [
-    {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"],
+    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
+    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"],
      "Internal": 1, "OfflineParam": {"ClientIP": "", "ClientID": ""},
      "Support": ["Ack"], "Transfer": ["Realtime"]},
     {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
     {"Channels": [0], "Events": ["TrafficJunction"], "NeedData": True, "Flags": ["Event"]},
-    {"Channels": [0], "Events": ["All"], "NeedData": True, "Flags": ["Event"]},
-    {"Channels": [1], "Events": ["All"], "NeedData": True, "Flags": ["Event", "Manual"]},
+    {"Channels": [1], "Events": ["TrafficJunction"], "NeedData": True, "Flags": ["Event"]},
     {"Channels": [0], "Events": ["All"], "Flags": ["Event", "Manual"]},
 ]
 
