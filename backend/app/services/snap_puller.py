@@ -192,7 +192,12 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                     if attached:
                         break
                 if not attached:
-                    raise RuntimeError(f"attachFileProc бүх хувилбар гологдов: {last_err}")
+                    # Камер зургийн subscribe-ийг ганц сувагт өгдөг — өөр хэн нэгэн
+                    # (ажиллаж буй backend сервис, камерын web UI-ийн Live хуудас)
+                    # эзэлсэн үед яг ийм 268959743 алдаа өгдөг нь ажиглагдсан
+                    raise RuntimeError(
+                        f"attachFileProc гологдов (суваг эзлэгдсэн байж болзошгүй — "
+                        f"backend сервис/камерын web UI Live хуудас): {last_err}")
                 print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK)")
 
                 # Дугааргүй notification-д хамгийн сүүлийн дугаарыг оноох (event-ийн
@@ -223,6 +228,17 @@ async def _ws_session(ip: str, on_picture, test_mode: bool = False):
                               f"{json.dumps(payload, ensure_ascii=False)[:180]}")
                     if not payload or payload.get("method") != "client.notifySnapFile":
                         continue
+                    # Support:["Ack"] амласан тул файл бүрийг хүлээж авснаа мэдэгдэнэ —
+                    # эс бол камер дараагийн зургуудаа түр саатуулж болзошгүй
+                    meta = json.dumps(payload.get("params") or {}, ensure_ascii=False)
+                    pid = re.search(r'"PicID"\s*:\s*"?([\w.-]+)"?', meta)
+                    if pid:
+                        msg_id += 1
+                        pic_id = int(pid.group(1)) if pid.group(1).isdigit() else pid.group(1)
+                        await ws.send(ws_encode(sid, {"method": "snapManager.ackUpload",
+                                                      "params": {"PicID": pic_id, "ClientID": "",
+                                                                 "ClientIP": "", "result": True},
+                                                      "object": obj, "id": msg_id, "session": sid}))
                     plate = plate_from_notify(payload)
                     now = time.monotonic()
                     if plate:
@@ -364,7 +380,9 @@ if __name__ == "__main__":
         sys.exit(1)
     _ip = sys.argv[1]
     print(f"{_ip}: WS зургийн суваг руу холбогдож 120 секунд сонсоно (Ctrl+C зогсооно).")
-    print("Машин өнгөрөхөд notify мөр гарч, зураг /tmp/snaptest-д хадгалагдана.\n")
+    print("Машин өнгөрөхөд notify мөр гарч, зураг /tmp/snaptest-д хадгалагдана.")
+    print("АНХААР: камер subscribe-ийг ганц сувагт өгдөг — backend сервис ажиллаж"
+          " байвал эхлээд: sudo systemctl stop parking-backend (дараа нь start)\n")
 
     async def _test():
         import os
