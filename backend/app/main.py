@@ -92,6 +92,10 @@ async def start_vat_auto_send():
     from .services.cgi_poller import supervisor as cgi_supervisor
     asyncio.get_event_loop().create_task(cgi_supervisor())
 
+    # Event зургийн стрим — snapManager.attachFileProc (PARKING_SNAP_PULL, default true)
+    from .services.snap_puller import supervisor as snap_supervisor
+    asyncio.get_event_loop().create_task(snap_supervisor())
+
     # Гацсан session-ийн авто цэвэрлэгээ (site.auto_close_hours / default 72ц)
     from .services.auto_close import supervisor as auto_close_supervisor
     asyncio.get_event_loop().create_task(auto_close_supervisor())

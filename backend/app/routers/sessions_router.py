@@ -317,6 +317,52 @@ def get_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
     return FileResponse(path, media_type="image/jpeg")
 
 
+@router.post("/{session_id}/snapshot/{kind}/backfill")
+async def backfill_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
+                            user: User = Depends(require("cashier", "check", "history"))):
+    """Дутуу зургийг камерын санах ойгоос нөхөж татна (mediaFileFind + RPC_Loadfile).
+    Орох/гарах цагийн ±90с мужид камерт хадгалагдсан хамгийн том jpg-г авна."""
+    from ..config import settings as cfg
+    from ..services.snap_puller import fetch_stored_picture
+    from ..services.snapshot import _save
+    if kind not in ("entry", "exit"):
+        raise HTTPException(404, "kind нь entry эсвэл exit байна")
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)
+    event_time = s.entry_time if kind == "entry" else s.exit_time
+    if not event_time:
+        raise HTTPException(400, "Гарах цаг бүртгэлгүй тул гарах зураг хайх боломжгүй")
+    device_id = s.entry_device_id if kind == "entry" else s.exit_device_id
+    device = db.get(Device, device_id) if device_id else None
+    if not device or not device.ip_address:
+        # Event-ийн төхөөрөмж тодорхойгүй бол тухайн чиглэлийн камерыг хайна
+        lane = "entry" if kind == "entry" else "exit"
+        device = (db.query(Device)
+                  .filter(Device.site_id == s.site_id, Device.device_type == "camera",
+                          Device.lane_dir == lane, Device.status == "active",
+                          Device.ip_address.isnot(None), Device.ip_address != "")
+                  .first())
+    if not device or not device.ip_address:
+        raise HTTPException(400, "Энэ чиглэлийн камерын IP бүртгэлгүй байна")
+    # DB нь UTC, камер локал цагаар ажилладаг — мужийг камерын цаг руу шилжүүлнэ
+    cam_time = event_time + timedelta(hours=cfg.camera_tz_offset_hours)
+    data, err = await fetch_stored_picture(
+        device.ip_address, cam_time - timedelta(seconds=90), cam_time + timedelta(seconds=90))
+    if not data:
+        raise HTTPException(404, f"Камераас зураг олдсонгүй: {err}")
+    rel = _save(data, s.plate_number, kind)
+    if not rel:
+        raise HTTPException(500, "Зургийг хадгалж чадсангүй")
+    if kind == "exit":
+        s.exit_snapshot = rel
+    else:
+        s.entry_snapshot = rel
+    db.commit()
+    return {"ok": True, "path": rel, "size": len(data)}
+
+
 @router.get("/{session_id}")
 def get_session(session_id: str, db: Session = Depends(get_db),
                 user: User = Depends(require("history", "cashier"))):

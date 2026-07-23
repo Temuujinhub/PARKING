@@ -105,6 +105,12 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         try:
             s = db.get(ParkingSession, session_id)
             if s:
+                # snap_puller (жинхэнэ event зураг) түрүүлж бичсэн бол дарж бичихгүй —
+                # snapshot.cgi нь ердөө "одоогийн кадр" тул чанараар дутуу
+                existing = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
+                if existing:
+                    print(f"[snapshot] {plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
+                    return
                 if lane_dir == "exit":
                     s.exit_snapshot = rel
                 else:

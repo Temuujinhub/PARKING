@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     # LPR snapshot — event бүрд камераас зураг татаж хадгална (нотолгоо/маргаан шийдэхэд)
     snapshot_enabled: bool = True
     snapshot_dir: str = "/var/lib/parking/snapshots"
+    # snapManager.attachFileProc стрим — камерын ЖИНХЭНЭ event зургийг татна
+    # (snapshot.cgi "одоогийн кадр"-аас найдвартай; тэр нь fallback болж үлдэнэ)
+    snap_pull: bool = True
+    # Камерын цаг серверийн UTC-ээс хэдэн цагаар түрүүлж явдаг вэ (УБ=+8) —
+    # mediaFileFind нөхөн таталтын хайлтын мужид хэрэглэнэ
+    camera_tz_offset_hours: int = 8
 
     # Гарах хаалтны LED дэлгэц (trafficParking.setScreenDisplay) — гарах камерын
     # LED-д төлбөрийн дүн/мэндчилгээ харуулна. Template-д {amount}, {plate} орлуулна.
