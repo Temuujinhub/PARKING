@@ -328,64 +328,217 @@ async def supervisor():
         await asyncio.sleep(60)
 
 
-# ─── Нөхөн таталт: RPC2 mediaFileFind + RPC_Loadfile ─────────────────────────
+# ─── Нөхөн таталт: ОЛОН АРГААР камерын хадгалсан зургийг татах ────────────────
+#
+# Нэг арга (mediaFileFind) найдваргүй байсан тул 3 бие даасан аргыг дараалан
+# оролдоно. Эхнийх нь амжилттай болонгуут зогсоно, бүх аргын оношийг цуглуулна:
+#   1. RecordFinder(TrafficSnapEventInfo) — ANPR event-д ШУУД холбогдсон зураг
+#      (дугаарын event-ийн бичлэгээс замыг авдаг тул хамгийн зөв эх сурвалж)
+#   2. mediaFileFind — цагийн мужийн хадгалсан jpg файлуудыг жагсааж татна
+#   3. snapshot.cgi — камерын ОДООГИЙН амьд кадр (event зураг огт олдоогүйн эцсийн арга)
+#
+# Цаг/бүсийн тохиргоо буруу байх эргэлзээг даван туулахын тулд:
+#   • хайлтын цонхыг аажим өргөтгөнө (window → ×5 → ×20)
+#   • тохируулсан бүсийн зөрүү (tz_offset_hours)-г БОЛОН 0-г хоёуланг оролдож,
+#     олдсон файлуудаас target цагт хамгийн ОЙРхныг сонгоно.
 
-async def fetch_stored_picture(ip: str, start: datetime, end: datetime) -> tuple[bytes | None, str]:
-    """Камерын санах ойгоос [start, end] (КАМЕРЫН ЦАГААР) мужийн хамгийн том
-    jpg-г RPC2-оор татна. Буцаах: (зураг|None, алдааны тайлбар)."""
-    fmt = "%Y-%m-%d %H:%M:%S"
-    username = settings.camera_username
-    password = settings.camera_password
+_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _extract_paths(node) -> list[str]:
+    """Record/file info дотроос зургийн зам төстэй мөр бүрийг рекурсивээр цуглуулна.
+    Firmware бүр талбараа өөр нэрлэдэг (FilePath / ImageURL / PicPath …) тул
+    бүтцээс биш агуулгаас («/…\\.jpg») хайна."""
+    out: list[str] = []
+    if isinstance(node, str):
+        s = node.strip()
+        low = s.lower()
+        if s.startswith("/") and (".jpg" in low or ".jpeg" in low):
+            out.append(s)
+    elif isinstance(node, dict):
+        for v in node.values():
+            out.extend(_extract_paths(v))
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            out.extend(_extract_paths(v))
+    return out
+
+
+def _info_time(info: dict) -> datetime | None:
+    """Бичлэгээс цаг талбарыг олж datetime болгоно (ойрын сонголтод хэрэглэнэ)."""
+    if not isinstance(info, dict):
+        return None
+    for k in ("StartTime", "Time", "BeginTime", "CreateTime"):
+        v = info.get(k)
+        if isinstance(v, list) and v:
+            v = v[0]
+        if isinstance(v, str) and len(v) >= 19:
+            try:
+                return datetime.strptime(v[:19], _FMT)
+            except ValueError:
+                continue
+    return None
+
+
+async def _download_file(client: httpx.AsyncClient, ip: str, session_id, path: str) -> bytes | None:
+    """RPC_Loadfile-ээр нэг файлыг татна (боломжит хоёр URL хэлбэрийг оролдоно)."""
+    headers = {"Cookie": f"WebClientHttpSessionID={session_id}",
+               "x-api-session": str(session_id)}
+    for url in (f"http://{ip}/RPC_Loadfile{path}",
+                f"http://{ip}/cgi-bin/RPC_Loadfile{path}"):
+        try:
+            r = await client.get(url, headers=headers)
+        except Exception:
+            continue
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            return r.content
+    return None
+
+
+async def _pick_and_download(client: httpx.AsyncClient, ip: str, session_id,
+                             infos: list, target: datetime) -> bytes | None:
+    """Олдсон бичлэгүүдээс target цагт хамгийн ОЙРыг (цаггүй бол хамгийн ТОМыг)
+    эрэмбэлж, эхний бүтэн jpg татагдтал дараалан оролдоно."""
+    def rank(info):
+        t = _info_time(info)
+        if t is not None:
+            return (0, abs((t - target).total_seconds()))
+        return (1, -int((info or {}).get("Length") or 0))
+
+    for info in sorted(infos, key=rank):
+        for path in _extract_paths(info):
+            data = await _download_file(client, ip, session_id, path)
+            if data:
+                return data
+    return None
+
+
+async def _find_via_record(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
+                           start: datetime, end: datetime, target: datetime) -> tuple[bytes | None, str]:
+    """Арга #1 — RecordFinder(TrafficSnapEventInfo): ANPR event бичлэгээс шууд зураг."""
+    inst = await rpc._call("RecordFinder.factory.create", {"name": "TrafficSnapEventInfo"})
+    obj = inst.get("result")
+    if not obj:
+        return None, f"factory.create: {json.dumps(inst, ensure_ascii=False)[:70]}"
+    try:
+        cond = {"StartTime": start.strftime(_FMT), "EndTime": end.strftime(_FMT), "Order": "Ascent"}
+        started = await rpc._call("RecordFinder.startFind", {"condition": cond}, obj=obj)
+        if not started.get("result") and not (started.get("params") or {}).get("token"):
+            # Зарим firmware Time массив хүлээдэг
+            alt = {"Time": [start.strftime(_FMT), end.strftime(_FMT)]}
+            started = await rpc._call("RecordFinder.startFind", {"condition": alt}, obj=obj)
+        infos: list = []
+        for _ in range(4):
+            df = await rpc._call("RecordFinder.doFind", {"count": 100}, obj=obj)
+            batch = (df.get("params") or {}).get("infos") or []
+            if not batch:
+                break
+            infos.extend(batch)
+            if len(batch) < 100:
+                break
+        if not infos:
+            return None, "event бичлэг олдсонгүй"
+        data = await _pick_and_download(client, ip, rpc.session_id, infos, target)
+        return (data, "" if data else f"{len(infos)} event олдсон ч зураг татагдсангүй")
+    finally:
+        try:
+            await rpc._call("RecordFinder.stopFind", obj=obj)
+            await rpc._call("RecordFinder.destroy", obj=obj)
+        except Exception:
+            pass
+
+
+async def _find_via_media(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
+                          start: datetime, end: datetime, target: datetime) -> tuple[bytes | None, str]:
+    """Арга #2 — mediaFileFind: цагийн мужаар хадгалсан jpg файлуудыг жагсаана."""
+    inst = await rpc._call("mediaFileFind.factory.create")
+    obj = inst.get("result")
+    if not obj:
+        return None, f"factory.create: {json.dumps(inst, ensure_ascii=False)[:70]}"
+    try:
+        base_cond = {"StartTime": start.strftime(_FMT), "EndTime": end.strftime(_FMT)}
+        infos: list = []
+        # Firmware-ээс хамаарч нөхцөлийн хэлбэр ялгаатай — хувилбаруудыг дарааллаар
+        for extra in ({"Channel": 0, "Types": ["jpg"], "Flags": ["Event"]},
+                      {"Channel": 0, "Types": ["jpg"]},
+                      {"Channel": 1, "Types": ["jpg"]},
+                      {"Channel": 0}):
+            ff = await rpc._call("mediaFileFind.findFile",
+                                 {"condition": {**base_cond, **extra}}, obj=obj)
+            if not ff.get("result"):
+                continue
+            nf = await rpc._call("mediaFileFind.findNextFile", {"count": 100}, obj=obj)
+            infos = (nf.get("params") or {}).get("infos") or []
+            if infos:
+                break
+        if not infos:
+            return None, "файл олдсонгүй"
+        data = await _pick_and_download(client, ip, rpc.session_id, infos, target)
+        return (data, "" if data else f"{len(infos)} файл олдсон ч татагдсангүй")
+    finally:
+        try:
+            await rpc._call("mediaFileFind.close", obj=obj)
+            await rpc._call("mediaFileFind.destroy", obj=obj)
+        except Exception:
+            pass
+
+
+async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
+                               tz_offset_hours: int = 8,
+                               window_seconds: int = 180) -> tuple[bytes | None, str]:
+    """event-ийн зургийг камераас ОЛОН АРГААР дараалан нөхөж татна.
+
+    event_time_utc — session-ий орох/гарах цаг (DB-ийн UTC цагаар).
+    Дотроо бүсийн зөрүү + өргөтгөх цонхыг өөрөө боддог тул дуудагч талд
+    цагийн тооцоо хийх шаардлагагүй.
+
+    Буцаах: (зураг|None, тайлбар). Амжилттай бол тайлбар хоосон; үгүй бол
+    оролдсон бүх аргын товч оношийг агуулна."""
+    # Бүсийн зөрүүг БОЛОН 0-г оролдоно (камерын цаг эсвэл тохиргоо буруу байж болзошгүй)
+    offsets: list[int] = []
+    for off in (tz_offset_hours, 0):
+        if off not in offsets:
+            offsets.append(off)
+    windows = [window_seconds, window_seconds * 5, window_seconds * 20]
+    diag: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=25) as client:
-            rpc = DahuaRpc(client, ip, username, password)
+            rpc = DahuaRpc(client, ip, settings.camera_username, settings.camera_password)
             await rpc.login()
-            obj = None
             try:
-                inst = await rpc._call("mediaFileFind.factory.create")
-                obj = inst.get("result")
-                if not obj:
-                    return None, f"mediaFileFind.factory.create: {json.dumps(inst)[:100]}"
-                base_cond = {"StartTime": start.strftime(fmt), "EndTime": end.strftime(fmt)}
-                infos = []
-                # Firmware-ээс хамаарч нөхцөлийн хэлбэр ялгаатай — хувилбаруудыг дарааллаар
-                for extra in ({"Channel": 0, "Types": ["jpg"], "Flags": ["Event"]},
-                              {"Channel": 0, "Types": ["jpg"]},
-                              {"Channel": 1, "Types": ["jpg"]},
-                              {"Channel": 0}):
-                    ff = await rpc._call("mediaFileFind.findFile",
-                                         {"condition": {**base_cond, **extra}}, obj=obj)
-                    if not ff.get("result"):
-                        continue
-                    nf = await rpc._call("mediaFileFind.findNextFile", {"count": 64}, obj=obj)
-                    infos = (nf.get("params") or {}).get("infos") or []
-                    if infos:
-                        break
-                infos = [i for i in infos if i.get("FilePath")]
-                if not infos:
-                    return None, "камерт энэ мужид хадгалагдсан зураг олдсонгүй"
-                best = max(infos, key=lambda i: int(i.get("Length") or 0))
-                path = best["FilePath"]
-                headers = {"Cookie": f"WebClientHttpSessionID={rpc.session_id}",
-                           "x-api-session": str(rpc.session_id)}
-                last = ""
-                for url in (f"http://{ip}/RPC_Loadfile{path}",
-                            f"http://{ip}/cgi-bin/RPC_Loadfile{path}"):
-                    r = await client.get(url, headers=headers)
-                    if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
-                        return r.content, ""
-                    last = f"HTTP {r.status_code} ({len(r.content)}b)"
-                return None, f"RPC_Loadfile татаж чадсангүй: {last} — {path}"
+                for w in windows:
+                    for off in offsets:
+                        target = event_time_utc + timedelta(hours=off)
+                        start = target - timedelta(seconds=w)
+                        end = target + timedelta(seconds=w)
+                        for name, fn in (("record", _find_via_record),
+                                         ("media", _find_via_media)):
+                            try:
+                                data, note = await fn(rpc, client, ip, start, end, target)
+                            except Exception as e:
+                                data, note = None, f"{type(e).__name__}: {str(e)[:60]}"
+                            if data:
+                                print(f"[snap_pull] {ip}: нөхөн таталт OK — "
+                                      f"{name} (off{off:+d}/±{w}s, {len(data)}b)")
+                                return data, ""
+                            diag.append(f"{name}[off{off:+d}/±{w}s]: {note}")
             finally:
-                if obj:
-                    try:
-                        await rpc._call("mediaFileFind.close", obj=obj)
-                        await rpc._call("mediaFileFind.destroy", obj=obj)
-                    except Exception:
-                        pass
                 await rpc.logout()
     except Exception as e:
-        return None, f"{type(e).__name__}: {str(e)[:120]}"
+        diag.append(f"холболт: {type(e).__name__}: {str(e)[:80]}")
+
+    # Арга #3 — амьд кадр (хадгалсан event зураг огт олдоогүйн эцсийн арга)
+    try:
+        from .snapshot import _fetch_from_camera
+        live = await _fetch_from_camera(ip)
+        if live:
+            print(f"[snap_pull] {ip}: нөхөн таталт — амьд кадраар нөхөв ({len(live)}b)")
+            return live, ""
+        diag.append("snapshot.cgi: амьд кадр татагдсангүй")
+    except Exception as e:
+        diag.append(f"snapshot.cgi: {type(e).__name__}")
+
+    return None, " | ".join(diag[-6:]) or "камераас зураг олдсонгүй"
 
 
 # ─── Туршилтын горим: DB-гүйгээр WS сувгийг шалгах ──────────────────────────

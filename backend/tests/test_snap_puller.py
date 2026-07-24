@@ -136,7 +136,7 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 ip = f"127.0.0.1:{srv.server_address[1]}"
 
 data, err = asyncio.run(fetch_stored_picture(
-    ip, datetime(2026, 7, 23, 14, 30), datetime(2026, 7, 23, 14, 33)))
+    ip, datetime(2026, 7, 23, 14, 30), tz_offset_hours=0, window_seconds=180))
 check("зураг татагдсан", data == FULL_JPEG)
 check("алдаагүй", err == "")
 check("хамгийн ТОМ файл (бүтэн кадр)", data is not None and len(data) > 50000)
@@ -165,7 +165,8 @@ class EmptyRpcCam(FakeRpcCam):
 srv2 = HTTPServer(("127.0.0.1", 0), EmptyRpcCam)
 threading.Thread(target=srv2.serve_forever, daemon=True).start()
 data2, err2 = asyncio.run(fetch_stored_picture(
-    f"127.0.0.1:{srv2.server_address[1]}", datetime(2026, 7, 23, 14, 30), datetime(2026, 7, 23, 14, 33)))
+    f"127.0.0.1:{srv2.server_address[1]}", datetime(2026, 7, 23, 14, 30),
+    tz_offset_hours=0, window_seconds=180))
 check("хоосон үед None + тайлбар", data2 is None and "олдсонгүй" in err2)
 
 srv.shutdown(); srv2.shutdown()

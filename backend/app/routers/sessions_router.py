@@ -346,10 +346,12 @@ async def backfill_snapshot(session_id: str, kind: str, db: Session = Depends(ge
                   .first())
     if not device or not device.ip_address:
         raise HTTPException(400, "Энэ чиглэлийн камерын IP бүртгэлгүй байна")
-    # DB нь UTC, камер локал цагаар ажилладаг — мужийг камерын цаг руу шилжүүлнэ
-    cam_time = event_time + timedelta(hours=cfg.camera_tz_offset_hours)
+    # UTC event цагийг шууд дамжуулна — fetch_stored_picture өөрөө бүсийн зөрүү,
+    # хайлтын цонхыг тооцож 3 өөр аргаар (RecordFinder → mediaFileFind → амьд кадр) татна
     data, err = await fetch_stored_picture(
-        device.ip_address, cam_time - timedelta(seconds=90), cam_time + timedelta(seconds=90))
+        device.ip_address, event_time,
+        tz_offset_hours=cfg.camera_tz_offset_hours,
+        window_seconds=cfg.snapshot_search_window_seconds)
     if not data:
         raise HTTPException(404, f"Камераас зураг олдсонгүй: {err}")
     rel = _save(data, s.plate_number, kind)
