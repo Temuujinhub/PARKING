@@ -67,8 +67,9 @@ systemctl reload nginx
 
 echo "==> 7/7 Шалгах"
 sleep 3
-if curl -fsS http://localhost/api/health >/dev/null; then
-  curl -fsS http://localhost/api/health && echo
+# Backend руу ШУУД (127.0.0.1:8000) — nginx-ийн HTTP→HTTPS redirect-д баригдахгүй
+if curl -fsS http://127.0.0.1:8000/api/health >/dev/null; then
+  curl -fsS http://127.0.0.1:8000/api/health && echo
 else
   echo "    health БҮТЭЛГҮЙ — сүүлийн лог:"
   journalctl -u parking-backend -n 25 --no-pager
