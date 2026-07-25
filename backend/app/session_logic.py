@@ -24,6 +24,29 @@ def normalize_plate(plate: str) -> str:
     return (plate or "").upper().replace(" ", "").replace("-", "").strip()
 
 
+def strip_images(raw):
+    """LprEvent.raw-д хадгалахын өмнө том base64 зургийг хасна — push-аар ирсэн зураг
+    (~1MB) event бүрд DB-д хуримтлагдвал сан хэт томордог. Capture нь ТУСДАА бүрэн
+    raw-г ашигладаг тул энэ нь зөвхөн ЛОГД хадгалах хувилбар."""
+    import copy
+    if not isinstance(raw, (dict, list)):
+        return raw
+    out = copy.deepcopy(raw)
+
+    def scrub(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, str) and len(v) > 2000:
+                    node[k] = f"<{len(v)}b image stripped>"
+                else:
+                    scrub(v)
+        elif isinstance(node, list):
+            for v in node:
+                scrub(v)
+    scrub(out)
+    return out
+
+
 def is_valid_plate(plate: str) -> bool:
     return bool(PLATE_RE.match(normalize_plate(plate)))
 
@@ -224,7 +247,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         db.flush()
 
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
-                    lane_dir="entry", confidence=confidence, accepted=True, raw=raw))
+                    lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
     db.commit()
     # Зургийг ард нь татаж хадгална (хаалт нээхийг хүлээлгэхгүй)
     schedule_capture(session.id, device.ip_address, plate, "entry", raw)
@@ -272,7 +295,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     session, fuzzy = match_open_session(db, plate, site_id)
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
-                    lane_dir="exit", confidence=confidence, accepted=True, raw=raw))
+                    lane_dir="exit", confidence=confidence, accepted=True, raw=strip_images(raw)))
     if session and fuzzy:
         # Гарах камер орох дугаараас өөр уншсан (OCR зөрүү) — ойролцоо session-д
         # тохоов. Ил тод байдлын үүднээс тэмдэглэж, аудитад бичнэ.

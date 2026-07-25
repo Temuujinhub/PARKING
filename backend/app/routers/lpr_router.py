@@ -4,6 +4,8 @@
   URL: http://{server}/api/lpr/callback?device_key={device_key}
 device_key нь тухайн камерыг СИСТЕМД бүртгэсэн Device.device_key-тэй таарна.
 """
+import base64
+import json as _json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,9 +14,38 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import Device, LprEvent
-from ..session_logic import handle_entry, handle_exit, normalize_plate
+from ..session_logic import handle_entry, handle_exit, normalize_plate, strip_images
 
 router = APIRouter(prefix="/api/lpr", tags=["lpr"])
+
+
+async def _parse_push(request: Request) -> tuple[dict, bytes | None]:
+    """ITSAPI push-ийг задлана. Камер хоёр хэлбэрээр илгээж болно:
+      • JSON body (Picture.NormalPic.Content-д base64 зурагтай)
+      • multipart/form-data — текст (JSON) хэсэг + зураг binary хэсэг
+    Буцаах: (payload dict, зургийн raw bytes | None)."""
+    ctype = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        payload: dict = {}
+        image: bytes | None = None
+        for _key, val in form.multi_items():
+            if hasattr(val, "read"):  # файл хэсэг (зураг)
+                data = await val.read()
+                if isinstance(data, bytes) and data[:2] == b"\xff\xd8" and (
+                        image is None or len(data) > len(image)):
+                    image = data  # хамгийн том jpeg (бүтэн кадр)
+            elif isinstance(val, str) and not payload:
+                try:
+                    payload = _json.loads(val)
+                except Exception:
+                    payload = {"_raw_text": val[:1000]}
+        return payload, image
+    try:
+        return await request.json(), None
+    except Exception:
+        body = await request.body()
+        return {"_raw_text": body[:1000].decode("utf-8", "replace")}, None
 
 
 def _client_ip(request: Request) -> str:
@@ -63,10 +94,7 @@ def _extract_plate(event: dict) -> tuple[str, float]:
 
 @router.post("/callback")
 async def lpr_callback(request: Request, device_key: str = "", db: Session = Depends(get_db)):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "JSON body шаардлагатай")
+    payload, image = await _parse_push(request)
 
     device = None
     if device_key:
@@ -83,21 +111,34 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         raise HTTPException(404, "Камер бүртгэлгүй байна. Device.device_key тохируулна уу.")
 
     device.last_seen = datetime.utcnow()
+    events = _extract_events(payload)
+    # Multipart-аар ирсэн зургийг event бүрт base64-оор шингээнэ — snapshot.cgi татах
+    # шаардлагагүйгээр (найдвартай) яг event-ийн зураг хадгалагдана.
+    if image:
+        b64 = base64.b64encode(image).decode()
+        for ev in events:
+            if isinstance(ev, dict):
+                ev.setdefault("Picture", {}).setdefault("NormalPic", {})["Content"] = b64
+    # Оношийн лог: push бүрд юу ирснийг харуулна (зураг ирж байгаа эсэхийг батлахад)
+    _p0 = _extract_plate(events[0])[0] if events and isinstance(events[0], dict) else "?"
+    print(f"[lpr_push] {device.name} ({device.lane_dir}): plate={_p0!r} "
+          f"image={len(image) if image else 0}b events={len(events)} "
+          f"ctype={(request.headers.get('content-type') or '')[:30]}")
     results = []
-    for event in _extract_events(payload):
+    for event in events:
         raw_plate, conf = _extract_plate(event)
         plate = normalize_plate(raw_plate)
         if not plate:
             # Дугаар танигдаагүй/формат таарахгүй бол raw-ийг логд хадгална (камер тохируулахад тусална)
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number="?",
                             lane_dir=device.lane_dir, confidence=0, accepted=False,
-                            reject_reason="plate not parsed", raw=event))
+                            reject_reason="plate not parsed", raw=strip_images(event)))
             db.commit()
             continue
         if conf < settings.lpr_min_confidence:
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
                             lane_dir=device.lane_dir, confidence=conf, accepted=False,
-                            reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=event))
+                            reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=strip_images(event)))
             db.commit()
             continue
         if device.lane_dir == "exit":
