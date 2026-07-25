@@ -136,7 +136,9 @@ class Settings(BaseSettings):
     auto_close_hours: int = 12
     auto_close_create_debt: bool = True  # авто хаахад төлөгдөөгүй дүнгээр өр үүсгэх
 
-    screen_fee_text: str = "{plate} Tulbur: {amount}"  # AWAITING_PAYMENT үед
+    # 2 мөр: дугаар дээд мөрөнд, төлбөр доод мөрөнд (LED-ийн Custom-д «\n» = мөр таслал).
+    # .env-д мөр таслалыг «|» эсвэл «\n»-ээр бичиж болно (render_screen_text хөрвүүлнэ).
+    screen_fee_text: str = "{plate}\nTulbur: {amount}"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай

@@ -98,7 +98,9 @@ class DahuaRpc:
         """LED дэлгэцэнд текст харуулах — trafficParking.setScreenDisplay {Custom}.
         Камерын Web 5.0 клиентийн InoutGeneralConfig/DeviceTest хуудас яг ийм
         дуудлага хийдэг (клиент JS-ээс батлагдсан). Дэлгэц "Managed Mode
-        (Platform)" горимд байх шаардлагатай."""
+        (Platform)" горимд байх шаардлагатай.
+        «|» эсвэл «\\n» = мөр таслал (дугаар/төлбөрийг 2 мөрөнд харуулна)."""
+        text = text.replace("\\n", "\n").replace("|", "\n")
         res = await self._call("trafficParking.setScreenDisplay", {"Custom": text})
         if not res.get("result"):
             raise DahuaRpcError(f"setScreenDisplay амжилтгүй: {res}")
@@ -268,6 +270,10 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None):
 
 def render_screen_text(template: str, amount: float | int | None = None,
                        plate: str = "") -> str:
-    """Template-ийн {amount}/{plate}-ийг орлуулна. Дүн бүхэл тоогоор."""
+    """Template-ийн {amount}/{plate}-ийг орлуулна. Дүн бүхэл тоогоор.
+    Мөр таслал: .env-д «|» эсвэл literal «\\n» бичвэл LED-ийн жинхэнэ мөр таслал (\\n)
+    болгоно — дугаар/төлбөрийг 2 тусдаа мөрөнд харуулах боломжтой."""
     amt = "" if amount is None else f"{int(round(float(amount)))}"
-    return template.replace("{amount}", amt).replace("{plate}", plate or "").strip()
+    text = template.replace("{amount}", amt).replace("{plate}", plate or "")
+    text = text.replace("\\n", "\n").replace("|", "\n")  # .env мөр таслалыг хөрвүүлнэ
+    return "\n".join(line.strip() for line in text.split("\n")).strip("\n")
