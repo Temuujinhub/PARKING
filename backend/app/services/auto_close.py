@@ -7,7 +7,8 @@
 
 Хамгаалалт:
   - Сүүлийн 1 цагт event-тэй (updated_at) session-д хүрэхгүй — бодитоор идэвхтэй машин.
-  - PAID session-д хүрэхгүй (grace/зөрүүг гарах урсгал өөрөө шийднэ).
+  - PAID-ийг ч хаана (төлсөн ч гарах уншилтгүй гацсаныг цэвэрлэнэ) — гэхдээ
+    төлбөрийг deadline дээр царцаадаг тул худал өр үүсгэхгүй.
   - Босго 0 бол тухайн зогсоолд унтарсан.
   - Session бүр өөрийн try/except — нэг алдаа бусдыг зогсоохгүй.
 """
@@ -32,9 +33,12 @@ def run_once() -> int:
                 else settings.auto_close_hours
             if not hours or hours <= 0:
                 continue
+            # PAID-ийг ч хамруулна: төлсөн ч гарах камерт уншигдаагүй тул хаагдалгүй
+            # "зогсоолд байгаа"-д гацсан машинууд (close_session_forced нь PAID-ийг
+            # deadline дээр царцаадаг тул худал өр үүсгэхгүй).
             stale = (db.query(ParkingSession)
                      .filter(ParkingSession.site_id == site.id,
-                             ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"]),
+                             ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
                              ParkingSession.entry_time < now - timedelta(hours=hours),
                              ParkingSession.updated_at < recent_guard)
                      .limit(100).all())

@@ -88,6 +88,62 @@ def check_plate(plate: str, site_id: str | None = None,
     return _attach_debt(db, [_session_out(db, s, with_fee=True) for s in sessions])
 
 
+@router.get("/audit")
+def audit_sessions(site_id: str | None = None,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Зогсоолын тоог тулгах аудит: "зогсоолд байгаа" гэж тоологдож буй бүх бүртгэлийг
+    сэжигтэй шинжээр тэмдэглэж буцаана. Ингэснээр гарах камерт уншигдсан хэрнээ
+    хаагдаагүй, буруу форматтай (junk) дугаар, эсвэл удаан гацсан phantom-уудыг
+    ялган нэг товчоор цэвэрлэх боломжтой.
+
+    Тэмдэг (flags):
+      • exit_read    — орсны дараа ГАРАХ камерт уншигдсан (машин гарсан байх магадлалтай)
+      • invalid_plate — дугаар стандарт формат биш (4 орон + 3 кирилл үсэг биш)
+      • stale        — auto_close босгоос удаан зогссон
+    """
+    from ..config import settings as cfg
+    from ..session_logic import is_valid_plate
+    site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
+    q = db.query(ParkingSession).filter(
+        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+    if site_id:
+        q = q.filter(ParkingSession.site_id == site_id)
+    elif site_ids:
+        q = q.filter(ParkingSession.site_id.in_(site_ids))
+    rows = q.order_by(ParkingSession.entry_time.asc()).limit(500).all()
+    now = datetime.utcnow()
+
+    # Орсны дараа гарах камерт уншигдсан эсэх — дугаар бүрийн сүүлийн exit event
+    plates = {s.plate_number for s in rows}
+    last_exit: dict[str, datetime] = {}
+    if plates:
+        for pl, ts in (db.query(LprEvent.plate_number, func.max(LprEvent.created_at))
+                       .filter(LprEvent.plate_number.in_(plates),
+                               LprEvent.lane_dir == "exit", LprEvent.accepted.is_(True))
+                       .group_by(LprEvent.plate_number).all()):
+            last_exit[pl] = ts
+
+    out = []
+    for s in rows:
+        hours = round((now - s.entry_time).total_seconds() / 3600, 1) if s.entry_time else 0.0
+        ex = last_exit.get(s.plate_number)
+        exit_read = bool(ex and s.entry_time and ex > s.entry_time)
+        invalid = not is_valid_plate(s.plate_number)
+        stale = bool(cfg.auto_close_hours and hours >= cfg.auto_close_hours)
+        flags = ([f for f, on in (("exit_read", exit_read), ("invalid_plate", invalid),
+                                  ("stale", stale)) if on])
+        d = _session_out(db, s, with_fee=True)
+        d["audit"] = {"hours_parked": hours, "exit_read": exit_read,
+                      "exit_read_at": ex.isoformat() if ex else None,
+                      "invalid_plate": invalid, "stale": stale,
+                      "flags": flags, "suspect": bool(flags)}
+        out.append(d)
+    out = _attach_debt(db, out)
+    return {"total": len(out), "suspect": sum(1 for d in out if d["audit"]["suspect"]),
+            "rows": out}
+
+
 @router.get("/recent-exits")
 def recent_exits(site_id: str, minutes: int = 30,
                  db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
@@ -472,3 +528,43 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
         "barrier_opened": barrier_opened, "manual": True,
     })
     return _session_out(db, s)
+
+
+@router.post("/{session_id}/reopen")
+async def reopen_session(session_id: str, db: Session = Depends(get_db),
+                         user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Андуурч хассан/хаасан бүртгэлийг буцаан зогсоолд оруулна (status→OPEN).
+    Орсон цаг хэвээр тул хугацаа орсноос нь үргэлжлэн бодогдоно ("цаг явна").
+    Хассан үед үүссэн PENDING өр (нөхөн төлбөр) байвал цуцлана.
+    Төлбөр төлөгдсөн бүртгэлийг сэргээхгүй (payment алдагдахаас сэргийлж)."""
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
+    if s.status in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+        raise HTTPException(400, "Энэ бүртгэл аль хэдийн зогсоолд байна")
+    from ..session_logic import paid_total
+    if s.paid_at or paid_total(db, s) > 0:
+        raise HTTPException(400, "Төлбөр төлөгдсөн бүртгэлийг сэргээх боломжгүй")
+    # uq_active_session: ижил дугаарын өөр идэвхтэй бүртгэл байвал зөрчилдөнө
+    dup = get_open_session(db, s.plate_number, s.site_id)
+    if dup and dup.id != s.id:
+        raise HTTPException(400, f"{s.plate_number} дугаартай өөр нээлттэй бүртгэл байна")
+    s.status = "OPEN"
+    s.exit_time = None
+    s.exit_device_id = None
+    s.duration_minutes = None
+    s.total_fee = s.base_fee = s.vat_amount = None
+    s.exit_deadline = None
+    canceled = (db.query(Compensation)
+                .filter(Compensation.session_id == s.id, Compensation.status == "PENDING")
+                .update({"status": "CANCELLED"}, synchronize_session=False))
+    db.add(AuditLog(username=user.username, action="REOPEN", entity="session",
+                    entity_id=s.id, detail={"plate": s.plate_number, "canceled_debt": canceled}))
+    db.commit()
+    await manager.broadcast(s.site_id, "ENTRY_EVENT", {
+        "session_id": s.id, "plate": s.plate_number,
+        "entry_time": s.entry_time.isoformat() if s.entry_time else None,
+        "reopened": True, "by": user.username,
+    })
+    return _session_out(db, s, with_fee=True)

@@ -101,7 +101,14 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     гарах оролдлогогүй (OPEN) бол одоог хүртэлх дүнгээр (daily_cap хамгаална).
     Буцаах: үүсгэсэн өрийн дүн (0 бол өр үүсээгүй). commit хийхгүй — caller хийнэ."""
     now = datetime.utcnow()
-    at = s.exit_time if (s.status == "AWAITING_PAYMENT" and s.exit_time) else now
+    if s.status == "PAID" and s.paid_at:
+        # Төлчихсөн машин — grace дотор гарсан гэж үзэж төлбөрийг ТӨЛСӨН/deadline
+        # үедээ царцаана. Эс бол одоог хүртэлх хугацаагаар хэт нэхэж, худал өр үүснэ.
+        at = s.exit_deadline or s.paid_at
+    elif s.status == "AWAITING_PAYMENT" and s.exit_time:
+        at = s.exit_time
+    else:
+        at = now
     fee = session_fee_info(db, s, at=at)
     due = amount_due(db, s, fee)
     s.exit_time = at
