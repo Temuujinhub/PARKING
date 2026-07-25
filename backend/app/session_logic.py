@@ -194,16 +194,17 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     site_id = device.site_id
     now = datetime.utcnow()
 
-    # Давхар event хамгаалалт
-    recent = (
-        db.query(LprEvent)
-        .filter(
-            LprEvent.plate_number == plate, LprEvent.site_id == site_id,
-            LprEvent.lane_dir == "entry", LprEvent.accepted.is_(True),
+    # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Орох камер нэг
+    # машиныг хэдэн секундын зайтай 2 удаа өөр дугаараар (Х/К, О/0 г.м. андуурч)
+    # уншихад 2 тусдаа session үүсдэг байсныг (ж: 5155УХК + 5155УКК) зогсооно.
+    recent_plates = [
+        rp for (rp,) in db.query(LprEvent.plate_number).filter(
+            LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+            LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
-        ).first()
-    )
-    if recent:
+        ).all()
+    ]
+    if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
         return {"action": "dedup", "plate": plate}
 
     black = is_blacklisted(db, plate)
