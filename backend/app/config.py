@@ -153,6 +153,22 @@ class Settings(BaseSettings):
     org_info_url: str = "https://info.ebarimt.mn/rest/merchant/info"
     org_info_timeout_sec: float = 6.0
 
+    # ── Түншийн интеграцийн API (/api/v1) — wallet/апп-уудад зориулсан B2B түлхүүрүүд ──
+    # Формат: "нэр:түлхүүр,нэр2:түлхүүр2"  ж: "toki:AbC123,easywallet:XyZ789"
+    # Түлхүүр бүр X-API-Key толгойгоор ирж, нэр нь Payment.provider болно (TOKI, EASYWALLET).
+    # Шинэ wallet нэмэхэд КОД ӨӨРЧЛӨХГҮЙ — зөвхөн .env-д түлхүүр нэмнэ.
+    partner_keys: str = ""
+
+    def partner_map(self) -> dict[str, str]:
+        """{api_key: PARTNER_NAME} — partner_keys-ийг задалсан хүснэгт."""
+        out = {}
+        for pair in (self.partner_keys or "").split(","):
+            if ":" in pair:
+                name, key = pair.split(":", 1)
+                if name.strip() and key.strip():
+                    out[key.strip()] = name.strip().upper()
+        return out
+
     class Config:
         env_file = ".env"
         env_prefix = "PARKING_"

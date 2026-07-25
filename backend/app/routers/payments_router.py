@@ -9,12 +9,6 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from ..auth import enforce_site, require, require_role
-
-
-def secrets_compare(a: str, b: str) -> bool:
-    """Цагийн зөрүүнд суурилсан халдлагаас хамгаалсан харьцуулалт."""
-    return hmac.compare_digest((a or "").encode(), (b or "").encode())
-
 from ..config import settings
 from ..database import get_db
 from ..models import AuditLog, CashierShift, ParkingSession, Payment, User, VatReceipt
@@ -23,6 +17,11 @@ from ..services import ebarimt, qpay
 from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
+
+
+def secrets_compare(a: str, b: str) -> bool:
+    """Цагийн зөрүүнд суурилсан халдлагаас хамгаалсан харьцуулалт (webhook токен)."""
+    return hmac.compare_digest((a or "").encode(), (b or "").encode())
 
 
 def _invoice_no(session: ParkingSession) -> str:
@@ -318,6 +317,45 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
 
 
 # ─────────────────────────── PAX A9000 POS ───────────────────────────
+
+def _find_terminal(db: Session, terminal_id: str):
+    """POS терминалыг бүртгэлээс олно (Device: device_type=pax_terminal, device_key=terminal_id).
+    Терминал бүр аль зогсоолд харьяалагдахаа device_key-ээрээ өөрөө танина."""
+    from ..models import Device
+    if not terminal_id:
+        return None
+    return (db.query(Device)
+            .filter(Device.device_key == terminal_id,
+                    Device.device_type.in_(["pax_terminal", "pos"]),
+                    Device.status == "active").first())
+
+
+@router.get("/pos/terminal/{terminal_id}")
+def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+    """POS апп асахдаа өөрийн terminal_id-ээр дуудаж АЛЬ ЗОГСООЛД харьяалагдахаа
+    танина + тухайн зогсоолын төлбөр хүлээж буй машинуудыг авна.
+    Терминалыг Тохиргоо→Төхөөрөмжид device_type=pax_terminal, device_key=terminal_id-ээр бүртгэнэ."""
+    terminal = _find_terminal(db, terminal_id)
+    if not terminal:
+        raise HTTPException(404, "Терминал бүртгэлгүй — Тохиргоо→Төхөөрөмжид "
+                                 "pax_terminal төрлөөр device_key-тэй бүртгэнэ үү")
+    terminal.last_seen = datetime.utcnow()
+    awaiting = (db.query(ParkingSession)
+                .filter(ParkingSession.site_id == terminal.site_id,
+                        ParkingSession.status == "AWAITING_PAYMENT")
+                .order_by(ParkingSession.updated_at.desc()).limit(20).all())
+    from ..session_logic import session_fee_info as _fee
+    db.commit()
+    return {
+        "terminal_id": terminal_id, "site_id": terminal.site_id,
+        "site_code": terminal.site.site_code if terminal.site else None,
+        "site_name": terminal.site.name if terminal.site else None,
+        "awaiting": [{"session_id": s.id, "plate_number": s.plate_number,
+                      "amount_due": amount_due(db, s, _fee(db, s))} for s in awaiting],
+    }
+
+
 @router.post("/pos/confirm")
 async def pos_confirm(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
@@ -329,6 +367,12 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
+    # Терминал бүртгэлтэй бол зогсоолын харьяаллыг тулгана — А зогсоолын POS
+    # Б зогсоолын машинд төлбөр авахаас (буруу тооцоо) сэргийлнэ
+    terminal = _find_terminal(db, body.get("terminal_id", ""))
+    if terminal and terminal.site_id != session.site_id:
+        raise HTTPException(400, f"Энэ терминал «{terminal.site.name if terminal.site else '?'}» "
+                                 "зогсоолд харьяалагддаг — өөр зогсоолын машинд төлбөр авах боломжгүй")
 
     payment = _create_payment(db, session, "POS", "CARD", cashier=user)
     if abs(float(body.get("amount", 0)) - float(payment.amount)) > 1:

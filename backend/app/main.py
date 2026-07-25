@@ -21,7 +21,8 @@ if not settings.debug:
         log.warning("PARKING_ALLOW_SIMULATE=true — /api/lpr/simulate нээлттэй. Production-д унтраана уу.")
 from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
-    health_router, lpr_router, payments_router, public_router, reports_router, sessions_router,
+    health_router, integration_router, lpr_router, payments_router, public_router,
+    reports_router, sessions_router,
 )
 from .ws import manager
 
@@ -62,7 +63,7 @@ app.add_middleware(
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
-          health_router):
+          health_router, integration_router):
     app.include_router(r.router)
 
 
