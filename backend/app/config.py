@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     screen_fee_text: str = "{plate}\nTulbur: {amount}"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
+    # Орох LED — дугаар + мэндчилгээ (Managed горимд камер өөрөө харуулахгүй тул сервер илгээнэ)
+    screen_welcome_text: str = "{plate}|Tavtai morilno uu"
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай
     # (TTS хөдөлгүүр латин/кирилл текстийг зөв уншихгүй байж болзошгүй)
     screen_voice: bool = False

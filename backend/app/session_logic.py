@@ -270,6 +270,11 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         "registered": registered is not None, "blacklisted": black is not None,
         "barrier_opened": barrier_opened,
     })
+    # Орох LED дэлгэцэнд дугаар + мэндчилгээ (Managed горимд камер өөрөө харуулахгүй тул
+    # сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг хүлээлгэхгүй, ард нь.
+    if not black:
+        schedule_display(device.ip_address,
+                         render_screen_text(settings.screen_welcome_text, plate=plate))
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
@@ -281,17 +286,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     site_id = device.site_id
     now = datetime.utcnow()
 
-    # Давхар event хамгаалалт — камер нэг машиныг хэдэн секундын зайтай дахин
-    # уншихад давхар broadcast/нээх команд явуулахгүй (орох талтай ижил дүрэм)
-    recent = (
-        db.query(LprEvent)
-        .filter(
-            LprEvent.plate_number == plate, LprEvent.site_id == site_id,
-            LprEvent.lane_dir == "exit", LprEvent.accepted.is_(True),
+    # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Камер гарах дугаарыг
+    # хэдэн секундын зайтай 2 дахь удаа арай ӨӨР уншихад (жишээ 2 дахь уншилт session-
+    # тэй таарахгүй) LED-д "бүртгэлгүй" текст илгээж, төлбөрийн текстийг дардаг байсныг
+    # зогсооно (орох талтай ижил OCR-тэсвэртэй дүрэм).
+    recent_plates = [
+        rp for (rp,) in db.query(LprEvent.plate_number).filter(
+            LprEvent.site_id == site_id, LprEvent.lane_dir == "exit",
+            LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
-        ).first()
-    )
-    if recent:
+        ).all()
+    ]
+    if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
         return {"action": "dedup", "plate": plate}
 
     session, fuzzy = match_open_session(db, plate, site_id)
