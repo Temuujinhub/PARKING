@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from .billing import calculate_fee
 from .config import settings
 from .models import (
-    BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite, Payment,
-    RegisteredDriver,
+    AuditLog, BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite,
+    Payment, RegisteredDriver,
 )
 from .services.barrier import open_barrier, render_screen_text, schedule_display
 from .services.snapshot import schedule_capture
@@ -213,6 +213,39 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     ]
     if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
         return {"action": "dedup", "plate": plate}
+
+    # ЦУВРАЛ уншилт: burst цонхонд (default 6с) энэ зогсоолын орох камерт өөр event
+    # аль хэдийн ирсэн бол физикийн хувьд НЭГ машин (хаалтаар 6 секундэд 2 машин
+    # орохгүй) — огт өөр уншигдсан ч шинэ session ҮҮСГЭХГҮЙ. Шинэ уншилт зөв
+    # форматтай бол өмнөх session-ий дугаарыг сүүлийн (хамгийн ойрын, ихэвчлэн
+    # хамгийн зөв) уншилтаар засна: 1101ЭН → 1310ХЭН → 7370ХЭН гэж нийлдэг.
+    burst_prev = (db.query(LprEvent)
+                  .filter(LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+                          LprEvent.accepted.is_(True),
+                          LprEvent.created_at >= now - timedelta(seconds=settings.entry_burst_seconds))
+                  .order_by(LprEvent.created_at.desc()).first())
+    if burst_prev:
+        if is_valid_plate(plate) and not get_open_session(db, plate, site_id):
+            prev_session = get_open_session(db, burst_prev.plate_number, site_id)
+            # Зөвхөн саяхан (энэ burst-д) үүссэн session-ийг л засна
+            if prev_session and prev_session.entry_time >= now - timedelta(seconds=60):
+                old_plate = prev_session.plate_number
+                prev_session.plate_number = plate
+                db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
+                                lane_dir="entry", confidence=confidence, accepted=True,
+                                raw=strip_images(raw)))
+                db.add(AuditLog(username="system", action="PLATE_AUTOCORRECT", entity="session",
+                                entity_id=prev_session.id,
+                                detail={"old": old_plate, "new": plate,
+                                        "reason": "цуврал уншилт — сүүлийн зөв уншилтаар"}))
+                db.commit()
+                print(f"[entry] цуврал уншилт: {old_plate} → {plate} (session {prev_session.id})")
+                await manager.broadcast(site_id, "PLATE_EDITED", {
+                    "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
+                    "by": "system:autocorrect"})
+                return {"action": "plate_autocorrect", "session_id": prev_session.id,
+                        "old": old_plate, "new": plate}
+        return {"action": "burst_dedup", "plate": plate}
 
     black = is_blacklisted(db, plate)
     registered = find_registered(db, plate, site_id)
