@@ -117,6 +117,12 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
           f"image={len(image) if image else 0}b events={len(events)} "
           f"ctype={(request.headers.get('content-type') or '')[:30]} "
           f"keys={list(payload)[:8]}")
+    # Firmware яг ЯМАР бүтэцтэй илгээж байгааг харах (зураггүй, тайрсан) — парсинг
+    # тохирч байгаа эсэхийг батлах/засахад
+    try:
+        print(f"[lpr_push] RAW: {_json.dumps(strip_images(payload), ensure_ascii=False)[:600]}")
+    except Exception:
+        pass
     if not device:
         # 200 буцаая — камер дахин дахин оролдож логоо дүүргэхгүйн тулд (шалтгаан логонд бий)
         return {"ok": False, "error": "camera not registered", "ip": client_ip}
