@@ -99,12 +99,19 @@ def _ocr_canon(p: str) -> str:
 
 def plates_ocr_similar(a: str, b: str) -> bool:
     """Хоёр дугаар OCR-ийн зөрүүтэй ижил машинйх байж болох эсэх:
-    яг ижил, эсвэл ижил урттай бөгөөд НЭГ л байрлалд зөрүүтэй (substitution),
-    эсвэл андуурагддаг тэмдэгтүүдийг жигдэлмэгц ижил."""
+    - яг ижил
+    - ижил урттай бөгөөд НЭГ л байрлалд зөрүүтэй (substitution)
+    - андуурагддаг тэмдэгтүүдийг (О/0, Б/В г.м.) жигдэлмэгц ижил
+    - нэг нь нөгөөгийнхөө ТАЙРАГДСАН уншилт: камер эхний/сүүлийн цифрийг
+      алгасч уншдаг (ж: 7524УБТ → 524УБТ) — богино нь стандарт формат биш
+      бол л (жинхэнэ өөр машин байх боломжгүй) ижил гэж үзнэ."""
     if a == b:
         return True
     if len(a) != len(b):
-        return False
+        long_p, short_p = (a, b) if len(a) > len(b) else (b, a)
+        return (len(long_p) - len(short_p) <= 2 and len(short_p) >= 5
+                and not is_valid_plate(short_p)
+                and (long_p.endswith(short_p) or long_p.startswith(short_p)))
     if _ocr_canon(a) == _ocr_canon(b):
         return True
     return sum(1 for x, y in zip(a, b) if x != y) == 1

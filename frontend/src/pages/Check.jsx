@@ -2,7 +2,7 @@
 // Дугаарын эхний тэмдэгтээр live шүүнэ, төлөв/зогсоолоор шүүнэ, real-time шинэчлэгдэнэ.
 // Админ "Аудит горим"-оор сэжигтэй (гарсан ч хаагдаагүй / буруу дугаар / удсан) бүртгэлийг
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
-import { RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { useAuth } from '../auth'
@@ -78,6 +78,30 @@ export default function Check() {
       setData({ ...d, suspect: 0 })
       setSel((prev) => prev.filter((id) => d.rows.some((r) => r.id === id)))
     }).catch(() => {})
+  }
+
+  // Камер буруу уншсан дугаарыг гараар засах (ж: 1101ЭН → 7707ХЭН).
+  // Давхардал бол (жинхэнэ дугаартай нь аль хэдийн бүртгэлтэй) засахын оронд
+  // буруугий нь "өр үүсгэхгүй" чагтгүйгээр хасна — endpoint давхардлыг өөрөө хориглоно.
+  const editPlate = async (s) => {
+    const entered = window.prompt(
+      `${s.plate_number} дугаарыг засах — зөв дугаарыг оруулна уу:`, s.plate_number)
+    if (!entered || entered.trim().toUpperCase() === s.plate_number) return
+    const newPlate = entered.trim().toUpperCase()
+    try {
+      await api(`/api/sessions/${s.id}/plate`, { method: 'PUT', body: { plate_number: newPlate } })
+      toast(`${s.plate_number} → ${newPlate} болж засагдлаа`)
+      load()
+    } catch (err) {
+      if (/формат буруу/.test(err.message) &&
+          window.confirm(`${err.message}\n\nТусгай/дипломат дугаар мөн бол ЗАСАХ уу?`)) {
+        try {
+          await api(`/api/sessions/${s.id}/plate`, { method: 'PUT', body: { plate_number: newPlate, force: true } })
+          toast(`${s.plate_number} → ${newPlate} болж засагдлаа`)
+          load()
+        } catch (e2) { toast(e2.message, 'error') }
+      } else toast(err.message, 'error')
+    }
   }
 
   const doRemove = async (e) => {
@@ -203,7 +227,11 @@ export default function Check() {
             <td className="td"><Badge value={s.status} /></td>
             <td className="td"><SnapshotButton session={s} /></td>
             {isAdmin && (
-              <td className="td text-right">
+              <td className="td text-right whitespace-nowrap">
+                <button className="btn-secondary py-1 text-xs mr-1" title="Дугаар засах (камер буруу уншсан)"
+                  onClick={() => editPlate(s)}>
+                  <Pencil size={13} />
+                </button>
                 <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
                   onClick={() => setRemoving({ ids: [s.id], createComp: true, reason: '' })}>
                   <Trash2 size={13} />
