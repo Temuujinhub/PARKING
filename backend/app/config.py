@@ -104,9 +104,13 @@ class Settings(BaseSettings):
     # LPR snapshot — event бүрд камераас зураг татаж хадгална (нотолгоо/маргаан шийдэхэд)
     snapshot_enabled: bool = True
     snapshot_dir: str = "/var/lib/parking/snapshots"
-    # snapManager.attachFileProc стрим — камерын ЖИНХЭНЭ event зургийг татна
-    # (snapshot.cgi "одоогийн кадр"-аас найдвартай; тэр нь fallback болж үлдэнэ)
-    snap_pull: bool = True
+    # snapManager.attachFileProc WS стрим — ОДОО ажиллаж буй ITC firmware дээр
+    # subscribe амжилттай ч зураг ОГТ ирдэггүй нь батлагдсан (2026-07-25). Гэтэл
+    # камер бүрд RPC session + WebSocket (2 холболт) эзэлж, камерын нэгэн зэрэг
+    # холболтын хязгаарыг дүүргэн snapshot.cgi-г "Bad Request" болгодог. Тиймээс
+    # DEFAULT UNTRAASAN. Зургийг event үед snapshot.cgi-ээр барина (найдвартай).
+    # Realtime WS push дэмждэг firmware гарвал PARKING_SNAP_PULL=true болгоно.
+    snap_pull: bool = False
     # Камерын цаг серверийн UTC-ээс хэдэн цагаар түрүүлж явдаг вэ (УБ=+8) —
     # нөхөн таталтын хайлтын мужид хэрэглэнэ. Камерын цаг эргэлзээтэй байвал
     # нөхөн таталт бүсийн зөрүүг БОЛОН 0-г хоёуланг оролдоно (тохиргоо буруу байсан ч олдоно).
