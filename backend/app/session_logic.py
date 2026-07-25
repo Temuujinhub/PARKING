@@ -63,6 +63,49 @@ def get_open_session(db: Session, plate: str, site_id: str) -> ParkingSession | 
     )
 
 
+# OCR-т амархан андуурагддаг Кирилл/цифр хосууд — жигдэлмэгц ижил болгож харьцуулна
+_OCR_CANON = str.maketrans({
+    "О": "0", "O": "0", "В": "Б", "Ь": "Б", "Ё": "Е", "Э": "З",
+    "Ү": "У", "Ұ": "У", "Й": "И", "П": "Н", "Ц": "Ч", "І": "1", "l": "1",
+})
+
+
+def _ocr_canon(p: str) -> str:
+    return (p or "").translate(_OCR_CANON)
+
+
+def plates_ocr_similar(a: str, b: str) -> bool:
+    """Хоёр дугаар OCR-ийн зөрүүтэй ижил машинйх байж болох эсэх:
+    яг ижил, эсвэл ижил урттай бөгөөд НЭГ л байрлалд зөрүүтэй (substitution),
+    эсвэл андуурагддаг тэмдэгтүүдийг жигдэлмэгц ижил."""
+    if a == b:
+        return True
+    if len(a) != len(b):
+        return False
+    if _ocr_canon(a) == _ocr_canon(b):
+        return True
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSession | None, bool]:
+    """Гарах талд session хайх: эхлээд ЯГ таарах, олдохгүй бол OCR-ийн зөрүүтэй
+    (үсэг андуурч уншсан) session-ийг олно. Буцаах: (session|None, fuzzy_эсэх).
+
+    Аюулгүй байдал: OCR-ойролцоо нэр дэвшигч ЯГ НЭГ байвал л зөвшөөрнө — 2+ бол
+    сэжигтэй тул None буцааж, оператор гараар шийднэ (буруу машинд төлбөр тохохгүй)."""
+    exact = get_open_session(db, plate, site_id)
+    if exact:
+        return exact, False
+    opens = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site_id,
+                     ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+             .all())
+    close = [s for s in opens if plates_ocr_similar(plate, s.plate_number)]
+    if len(close) == 1:
+        return close[0], True
+    return None, False
+
+
 def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None) -> dict:
     site: ParkingSite = s.site
     template = site.tariff_template if site else None
@@ -227,9 +270,19 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     if recent:
         return {"action": "dedup", "plate": plate}
 
-    session = get_open_session(db, plate, site_id)
+    session, fuzzy = match_open_session(db, plate, site_id)
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="exit", confidence=confidence, accepted=True, raw=raw))
+    if session and fuzzy:
+        # Гарах камер орох дугаараас өөр уншсан (OCR зөрүү) — ойролцоо session-д
+        # тохоов. Ил тод байдлын үүднээс тэмдэглэж, аудитад бичнэ.
+        from .models import AuditLog
+        note = f"Гарах OCR зөрүү: уншсан «{plate}» → «{session.plate_number}»"
+        session.note = f"{session.note + ' | ' if session.note else ''}{note}"[:1000]
+        db.add(AuditLog(username="system", action="EXIT_OCR_MATCH", entity="session",
+                        entity_id=session.id,
+                        detail={"read_plate": plate, "matched_plate": session.plate_number}))
+        print(f"[exit] OCR зөрүү тохов: уншсан {plate} → session {session.plate_number}")
 
     # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
     from .models import Compensation

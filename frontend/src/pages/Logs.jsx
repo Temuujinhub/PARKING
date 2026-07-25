@@ -1,4 +1,4 @@
-// Лог: аудит + LPR event
+// Лог: аудит + LPR event (камерын уншилт — гарах OCR зөрүүг илрүүлэхэд)
 import { Download } from 'lucide-react'
 import { useState } from 'react'
 import { api, fmtDate } from '../api'
@@ -8,8 +8,13 @@ import { Badge, Table, useToast } from '../components/ui'
 export default function Logs() {
   const toast = useToast()
   const [tab, setTab] = useState('audit')
+  const [plate, setPlate] = useState('')
+  const [lane, setLane] = useState('')
   const { data: audit } = useFetch(tab === 'audit' ? '/api/reports/audit-logs' : null, { initial: [] })
-  const { data: lpr } = useFetch(tab === 'lpr' ? '/api/reports/lpr-events' : null, { initial: [] })
+  const lprParams = new URLSearchParams({ limit: 300 })
+  if (plate.trim()) lprParams.set('plate', plate.trim())
+  if (lane) lprParams.set('lane', lane)
+  const { data: lpr } = useFetch(tab === 'lpr' ? `/api/reports/lpr-events?${lprParams}` : null, { initial: [] })
 
   const downloadAudit = async () => {
     try {
@@ -53,18 +58,43 @@ export default function Logs() {
       )}
 
       {tab === 'lpr' && (
-        <Table headers={['Огноо', 'Дугаар', 'Чиглэл', 'Итгэлцүүр', 'Хүлээн авсан', 'Татгалзсан шалтгаан']} empty={lpr.length === 0}>
-          {lpr.map((e) => (
-            <tr key={e.id}>
-              <td className="td font-mono text-xs">{fmtDate(e.created_at)}</td>
-              <td className="td font-mono font-bold">{e.plate_number}</td>
-              <td className="td text-xs">{e.lane_dir === 'entry' ? 'Орох' : 'Гарах'}</td>
-              <td className="td font-mono">{e.confidence?.toFixed(0)}%</td>
-              <td className="td"><Badge value={e.accepted ? 'SUCCESS' : 'FAILED'} /></td>
-              <td className="td text-xs text-slate-500">{e.reject_reason || '-'}</td>
-            </tr>
-          ))}
-        </Table>
+        <>
+          <div className="card grid grid-cols-1 md:grid-cols-3 gap-3">
+            <input className="input font-mono" placeholder="Дугаараар шүүх (эхний тоо: ж 3970)…"
+              value={plate} onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              aria-label="Дугаараар шүүх" />
+            <select className="input" value={lane} onChange={(e) => setLane(e.target.value)} aria-label="Чиглэл">
+              <option value="">Орох + Гарах</option>
+              <option value="entry">Зөвхөн Орох</option>
+              <option value="exit">Зөвхөн Гарах</option>
+            </select>
+            <div className="text-xs text-slate-500 flex items-center px-1">
+              Нэг машины орох ба гарах уншилтыг харьцуулж, гарах талд «таарсангүй»
+              байвал OCR зөрүүг (үсэг андуурч уншсан) илрүүлнэ.
+            </div>
+          </div>
+          <Table headers={['Огноо', 'Дугаар', 'Чиглэл', 'Камер', 'Итгэлцүүр', 'Хүлээн авсан', 'Session', 'Шалтгаан']}
+            empty={lpr.length === 0}>
+            {lpr.map((e) => (
+              <tr key={e.id} className={e.lane_dir === 'exit' && e.matched === false ? 'bg-amber-500/10' : ''}>
+                <td className="td font-mono text-xs">{fmtDate(e.created_at)}</td>
+                <td className="td font-mono font-bold">{e.plate_number}</td>
+                <td className="td text-xs">{e.lane_dir === 'entry'
+                  ? <span className="text-cyan-400">Орох</span>
+                  : <span className="text-amber-400">Гарах</span>}</td>
+                <td className="td text-xs text-slate-400">{e.device_name || '-'}</td>
+                <td className="td font-mono">{e.confidence?.toFixed(0)}%</td>
+                <td className="td"><Badge value={e.accepted ? 'SUCCESS' : 'FAILED'} /></td>
+                <td className="td text-xs">
+                  {e.lane_dir !== 'exit' ? <span className="text-slate-600">-</span>
+                    : e.matched ? <span className="text-green-400">таарсан</span>
+                      : <span className="text-amber-400 font-semibold">таарсангүй</span>}
+                </td>
+                <td className="td text-xs text-slate-500">{e.reject_reason || '-'}</td>
+              </tr>
+            ))}
+          </Table>
+        </>
       )}
     </div>
   )

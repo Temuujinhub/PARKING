@@ -901,9 +901,36 @@ def audit_logs_excel(username: str | None = None, action: str | None = None,
 
 
 @router.get("/lpr-events")
-def lpr_events(site_id: str | None = None, limit: int = 200,
+def lpr_events(site_id: str | None = None, plate: str | None = None,
+               lane: str | None = None, limit: int = 200,
                db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
+    """Камерын уншилтын лог. plate=эхний тэмдэгтээр шүүнэ (гарах OCR зөрүүг илрүүлэхэд —
+    орох vs гарах уншилтыг харьцуулна), lane=entry|exit. Гарах уншилт бүрд тухайн
+    агшинд нээлттэй session ЯГ таарч байсан эсэхийг (matched) тэмдэглэнэ."""
+    from ..models import Device
+    from ..session_logic import normalize_plate
     q = db.query(LprEvent)
     if site_id:
         q = q.filter(LprEvent.site_id == site_id)
-    return [to_dict(e) for e in q.order_by(LprEvent.created_at.desc()).limit(min(limit, 1000)).all()]
+    if plate:
+        q = q.filter(LprEvent.plate_number.ilike(f"{normalize_plate(plate)}%"))
+    if lane in ("entry", "exit"):
+        q = q.filter(LprEvent.lane_dir == lane)
+    events = q.order_by(LprEvent.created_at.desc()).limit(min(limit, 1000)).all()
+    dev_ids = {e.device_id for e in events if e.device_id}
+    names = ({d.id: d.name for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()}
+             if dev_ids else {})
+    # Гарах уншилт нээлттэй session-тэй ЯГ таарч байсан эсэх (odoo байдлаар)
+    exit_plates = {e.plate_number for e in events if e.lane_dir == "exit"}
+    open_plates = set()
+    if exit_plates:
+        open_plates = {p for (p,) in db.query(ParkingSession.plate_number)
+                       .filter(ParkingSession.plate_number.in_(exit_plates),
+                               ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).all()}
+    out = []
+    for e in events:
+        d = to_dict(e)
+        d["device_name"] = names.get(e.device_id)
+        d["matched"] = (e.plate_number in open_plates) if e.lane_dir == "exit" else None
+        out.append(d)
+    return out
