@@ -42,6 +42,19 @@ def run_once() -> int:
                              ParkingSession.entry_time < now - timedelta(hours=hours),
                              ParkingSession.updated_at < recent_guard)
                      .limit(100).all())
+            # Дагаж гарсан (tailgating) машиныг ХУРДАН өр болгох: гарах хаалтанд
+            # уншигдсан (AWAITING_PAYMENT) ч төлөлгүй N цаг ямар ч хөдөлгөөнгүй бол
+            # явчихсан — төлбөр нь сүүлд харагдсан үед царцаж, өр бүртгэгдэнэ.
+            aw_hours = settings.auto_close_awaiting_hours
+            if aw_hours and aw_hours > 0:
+                awaiting = (db.query(ParkingSession)
+                            .filter(ParkingSession.site_id == site.id,
+                                    ParkingSession.status == "AWAITING_PAYMENT",
+                                    ParkingSession.updated_at < now - timedelta(hours=aw_hours))
+                            .limit(100).all())
+                # Хоёр query-д давхар таарсан session-ийг нэг л удаа хаана
+                seen_ids = {s.id for s in stale}
+                stale += [s for s in awaiting if s.id not in seen_ids]
             for s in stale:
                 try:
                     # Junk (буруу форматтай) дугаар нь камерын буруу уншилт — жинхэнэ

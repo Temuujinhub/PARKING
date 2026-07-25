@@ -178,8 +178,11 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         # Төлчихсөн машин — grace дотор гарсан гэж үзэж төлбөрийг ТӨЛСӨН/deadline
         # үедээ царцаана. Эс бол одоог хүртэлх хугацаагаар хэт нэхэж, худал өр үүснэ.
         at = s.exit_deadline or s.paid_at
-    elif s.status == "AWAITING_PAYMENT" and s.exit_time:
-        at = s.exit_time
+    elif s.status == "AWAITING_PAYMENT":
+        # Гарах оролдлоготой машин: exit_time (байвал), үгүй бол сүүлд гарах хаалтанд
+        # харагдсан үе (updated_at) дээр төлбөрийг царцаана — дагаж гарсан машинд
+        # алга болсноос хойшхи цагийг нэхэхгүй (шударга дүн).
+        at = s.exit_time or s.updated_at or now
     else:
         at = now
     fee = session_fee_info(db, s, at=at)
