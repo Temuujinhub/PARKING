@@ -95,6 +95,7 @@ def _extract_plate(event: dict) -> tuple[str, float]:
 @router.post("/callback")
 async def lpr_callback(request: Request, device_key: str = "", db: Session = Depends(get_db)):
     payload, image = await _parse_push(request)
+    client_ip = _client_ip(request)
 
     device = None
     if device_key:
@@ -103,15 +104,24 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
                                          Device.status != "deleted").first()
     if not device:
         # device_key байхгүй бол эх IP-ээр таних (nginx-ийн ард X-Forwarded-For)
-        client_ip = _client_ip(request)
         device = db.query(Device).filter(Device.ip_address == client_ip,
                                          Device.device_type == "camera",
                                          Device.status != "deleted").first()
+
+    events = _extract_events(payload)
+    _p0 = _extract_plate(events[0])[0] if events and isinstance(events[0], dict) else ""
+    # БҮХ ирж буй push-ийг (амжилттай/амжилтгүй) логлоно — камерын "Push Results" 0
+    # байвал энэ мөрөөс шалтгааныг (device танихгүй / зураг ирээгүй) шууд харна.
+    print(f"[lpr_push] ip={client_ip} key={device_key or '-'} "
+          f"device={device.name if device else 'ОЛДСОНГҮЙ'} plate={_p0 or '-'} "
+          f"image={len(image) if image else 0}b events={len(events)} "
+          f"ctype={(request.headers.get('content-type') or '')[:30]} "
+          f"keys={list(payload)[:8]}")
     if not device:
-        raise HTTPException(404, "Камер бүртгэлгүй байна. Device.device_key тохируулна уу.")
+        # 200 буцаая — камер дахин дахин оролдож логоо дүүргэхгүйн тулд (шалтгаан логонд бий)
+        return {"ok": False, "error": "camera not registered", "ip": client_ip}
 
     device.last_seen = datetime.utcnow()
-    events = _extract_events(payload)
     # Multipart-аар ирсэн зургийг event бүрт base64-оор шингээнэ — snapshot.cgi татах
     # шаардлагагүйгээр (найдвартай) яг event-ийн зураг хадгалагдана.
     if image:
@@ -119,11 +129,6 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         for ev in events:
             if isinstance(ev, dict):
                 ev.setdefault("Picture", {}).setdefault("NormalPic", {})["Content"] = b64
-    # Оношийн лог: push бүрд юу ирснийг харуулна (зураг ирж байгаа эсэхийг батлахад)
-    _p0 = _extract_plate(events[0])[0] if events and isinstance(events[0], dict) else "?"
-    print(f"[lpr_push] {device.name} ({device.lane_dir}): plate={_p0!r} "
-          f"image={len(image) if image else 0}b events={len(events)} "
-          f"ctype={(request.headers.get('content-type') or '')[:30]}")
     results = []
     for event in events:
         raw_plate, conf = _extract_plate(event)
