@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, ParkingSession, ParkingSite
-from ..session_logic import close_session_forced
+from ..session_logic import close_session_forced, is_valid_plate
 
 
 def run_once() -> int:
@@ -44,8 +44,10 @@ def run_once() -> int:
                      .limit(100).all())
             for s in stale:
                 try:
-                    debt = close_session_forced(db, s, "auto_close", "system",
-                                                settings.auto_close_create_debt)
+                    # Junk (буруу форматтай) дугаар нь камерын буруу уншилт — жинхэнэ
+                    # машин биш тул өр үүсгэхгүйгээр чимээгүй хаана.
+                    make_debt = settings.auto_close_create_debt and is_valid_plate(s.plate_number)
+                    debt = close_session_forced(db, s, "auto_close", "system", make_debt)
                     db.add(AuditLog(username="system", action="AUTO_CLOSE", entity="session",
                                     entity_id=s.id,
                                     detail={"plate": s.plate_number, "site": site.name,
