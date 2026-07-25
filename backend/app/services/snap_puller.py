@@ -501,7 +501,11 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
             offsets.append(off)
     windows = [window_seconds, window_seconds * 5, window_seconds * 20]
     diag: list[str] = []
-    try:
+    # RPC2 stored-find (RecordFinder/mediaFileFind) энэ firmware дээр ажилладаггүй бол
+    # (default) алгасна — дэмий RPC2 login хийж admin эрх түгжихээс сэргийлж, шууд
+    # snapshot.cgi (амьд кадр) рүү очно.
+    if settings.snapshot_stored_find:
+      try:
         async with httpx.AsyncClient(timeout=25) as client:
             rpc = DahuaRpc(client, ip, settings.camera_username, settings.camera_password)
             await rpc.login()
@@ -524,10 +528,10 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
                             diag.append(f"{name}[off{off:+d}/±{w}s]: {note}")
             finally:
                 await rpc.logout()
-    except Exception as e:
+      except Exception as e:
         diag.append(f"холболт: {type(e).__name__}: {str(e)[:80]}")
 
-    # Арга #3 — амьд кадр (хадгалсан event зураг огт олдоогүйн эцсийн арга)
+    # Амьд кадр — snapshot.cgi (энэ firmware дээр цорын ганц ажилладаг зургийн эх сурвалж)
     try:
         from .snapshot import _fetch_from_camera
         live = await _fetch_from_camera(ip)

@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     # Нөхөн таталтын анхны хайлтын хагас-цонх (секунд). Олдохгүй бол ×5, ×20 болгож
     # аажим өргөтгөнө — камерын цаг зөрсөн ч зургийг барьж авахын тулд.
     snapshot_search_window_seconds: int = 180
+    # Камерын хадгалсан зургийг RPC2 (RecordFinder/mediaFileFind)-оор татах эсэх.
+    # ODOOGIIN ITC firmware эдгээрийг ДЭМЖДЭГГҮЙ ("Bad Request") тул DEFAULT УНТРААСАН —
+    # backfill дэмий RPC2 login хийж admin эрх түгжих эрсдэл үүсгэхээс сэргийлж, шууд
+    # snapshot.cgi (амьд кадр) рүү очно. Дэмждэг firmware дээр PARKING_SNAPSHOT_STORED_FIND=true.
+    snapshot_stored_find: bool = False
 
     # Гарах хаалтны LED дэлгэц (trafficParking.setScreenDisplay) — гарах камерын
     # LED-д төлбөрийн дүн/мэндчилгээ харуулна. Template-д {amount}, {plate} орлуулна.

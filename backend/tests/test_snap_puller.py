@@ -72,6 +72,10 @@ check("Response задарна", p2["result"] == 12345 and b2 == b"")
 # ─── fetch_stored_picture (fake RPC2 камер) ─────────────────────────────────
 print("fetch_stored_picture (RPC2):")
 
+# RPC2 stored-find замыг шалгах тул идэвхжүүлнэ (production default = False)
+from app.config import settings as _settings  # noqa: E402
+_settings.snapshot_stored_find = True
+
 FULL_JPEG = b"\xff\xd8" + b"F" * 90000 + b"\xff\xd9"
 
 
