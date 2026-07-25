@@ -963,3 +963,61 @@ def lpr_events_excel(site_id: str | None = None, plate: str | None = None,
     return _xlsx("kamer_unshilt", "Камерын уншилт",
                  ["Огноо", "Чиглэл", "Дугаар", "Камер", "Итгэлцүүр %", "Хүлээн авсан", "Шалтгаан"],
                  rows, widths=[20, 8, 12, 18, 12, 14, 30])
+
+
+# Хаалт нээх командын эх сурвалжийн монгол нэр — "хэн/юугаар нээгдсэн"-ийг харуулна
+_CMD_SRC_MN = {"auto_entry": "Авто орох", "auto_exit": "Авто гарах (үнэгүй/төлсөн)",
+               "payment": "Төлбөрийн дараа", "manual": "Гараар (оператор)",
+               "whitelist": "Цагаан жагсаалт", "forced": "Албадан"}
+
+
+def _barrier_command_rows(db, site_id, plate, source, limit):
+    from ..models import BarrierCommand, Device
+    q = db.query(BarrierCommand).join(Device, BarrierCommand.device_id == Device.id)
+    if site_id:
+        q = q.filter(Device.site_id == site_id)
+    if source:
+        q = q.filter(BarrierCommand.command_source == source)
+    cmds = q.order_by(BarrierCommand.created_at.desc()).limit(min(limit, 2000)).all()
+    # Дугаарыг session-оос холбоно (аль машинд хаалт нээснийг харуулна)
+    sids = {c.session_id for c in cmds if c.session_id}
+    plates = ({s.id: s.plate_number for s in
+               db.query(ParkingSession).filter(ParkingSession.id.in_(sids)).all()}
+              if sids else {})
+    dev = {d.id: d.name for d in db.query(Device).filter(
+        Device.id.in_({c.device_id for c in cmds if c.device_id})).all()}
+    if plate:
+        pl = plate.upper()
+        cmds = [c for c in cmds if plates.get(c.session_id, "").startswith(pl)]
+    return cmds, plates, dev
+
+
+@router.get("/barrier-commands")
+def barrier_commands(site_id: str | None = None, plate: str | None = None,
+                     source: str | None = None, limit: int = 200,
+                     db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
+    """Хаалт нээх командын лог — аль машинд, ямар эх сурвалжаар (авто гарах / төлбөр /
+    гараар), амжилттай эсэхийг харуулна. Төлбөргүй машин гарсан бол ХААЛТ ХЭРХЭН
+    нээгдсэнийг эндээс шалгана (эсвэл команд огт байхгүй = tailgating)."""
+    cmds, plates, dev = _barrier_command_rows(db, site_id, plate, source, limit)
+    return [{"id": c.id, "created_at": c.created_at.isoformat() if c.created_at else None,
+             "command": c.command, "source": c.command_source,
+             "source_mn": _CMD_SRC_MN.get(c.command_source, c.command_source),
+             "status": c.status, "plate_number": plates.get(c.session_id),
+             "device_name": dev.get(c.device_id), "issued_by": c.issued_by,
+             "response_text": (c.response_text or "")[:200]} for c in cmds]
+
+
+@router.get("/barrier-commands/excel")
+def barrier_commands_excel(site_id: str | None = None, plate: str | None = None,
+                           source: str | None = None, limit: int = 5000,
+                           db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
+    cmds, plates, dev = _barrier_command_rows(db, site_id, plate, source, limit)
+    rows = [[(c.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S") if c.created_at else "",
+             plates.get(c.session_id, ""), c.command,
+             _CMD_SRC_MN.get(c.command_source, c.command_source), c.status,
+             dev.get(c.device_id, ""), c.issued_by or "", (c.response_text or "")[:120]]
+            for c in cmds]
+    return _xlsx("haalt_komand", "Хаалтны команд",
+                 ["Огноо", "Дугаар", "Команд", "Эх сурвалж", "Төлөв", "Хаалт", "Оператор", "Хариу"],
+                 rows, widths=[20, 12, 10, 22, 10, 16, 14, 30])
