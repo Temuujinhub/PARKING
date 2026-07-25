@@ -117,14 +117,16 @@ async def main(ip: str):
             except Exception as e:
                 print(f"  {cond}: АЛДАА {e}")
 
-        # 4. snapshot.cgi fallback
-        print("\n--- 4. snapshot.cgi ---")
-        try:
-            r = await c.get(f"http://{ip}/cgi-bin/snapshot.cgi")
-            ok = r.status_code == 200 and r.content[:2] == b"\xff\xd8"
-            print(f"  HTTP {r.status_code}, {len(r.content)}b, JPEG={ok}")
-        except Exception as e:
-            print(f"  АЛДАА: {e}")
+        # 4. snapshot.cgi (channel хувилбаруудтай)
+        print("\n--- 4. snapshot.cgi (channel хувилбарууд) ---")
+        for suffix in ("", "?channel=1", "?channel=0", "?channel=1&type=0"):
+            try:
+                r = await c.get(f"http://{ip}/cgi-bin/snapshot.cgi{suffix}")
+                ok = r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+                body = "" if ok else f" body={r.content[:60]!r}"
+                print(f"  snapshot.cgi{suffix or ' (default)'}: HTTP {r.status_code}, {len(r.content)}b, JPEG={ok}{body}")
+            except Exception as e:
+                print(f"  snapshot.cgi{suffix}: АЛДАА {e}")
 
     print("\n=== Дууслаа — энэ гаралтыг бүтнээр нь хуулж өгнө үү ===")
 

@@ -934,3 +934,32 @@ def lpr_events(site_id: str | None = None, plate: str | None = None,
         d["matched"] = (e.plate_number in open_plates) if e.lane_dir == "exit" else None
         out.append(d)
     return out
+
+
+@router.get("/lpr-events/excel")
+def lpr_events_excel(site_id: str | None = None, plate: str | None = None,
+                     lane: str | None = None, limit: int = 5000,
+                     db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
+    """Камерын уншилтын логыг Excel болгож татна (гарах камерын уншсан дугаарууд).
+    plate/lane шүүлт lpr-events-тэй ижил."""
+    from ..models import Device
+    from ..session_logic import normalize_plate
+    q = db.query(LprEvent)
+    if site_id:
+        q = q.filter(LprEvent.site_id == site_id)
+    if plate:
+        q = q.filter(LprEvent.plate_number.ilike(f"{normalize_plate(plate)}%"))
+    if lane in ("entry", "exit"):
+        q = q.filter(LprEvent.lane_dir == lane)
+    events = q.order_by(LprEvent.created_at.desc()).limit(min(limit, 20000)).all()
+    dev_ids = {e.device_id for e in events if e.device_id}
+    names = ({d.id: d.name for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()}
+             if dev_ids else {})
+    rows = [[(e.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S"),
+             "Орох" if e.lane_dir == "entry" else "Гарах",
+             e.plate_number, names.get(e.device_id, ""),
+             round(e.confidence or 0), "Тийм" if e.accepted else "Үгүй",
+             e.reject_reason or ""] for e in events]
+    return _xlsx("kamer_unshilt", "Камерын уншилт",
+                 ["Огноо", "Чиглэл", "Дугаар", "Камер", "Итгэлцүүр %", "Хүлээн авсан", "Шалтгаан"],
+                 rows, widths=[20, 8, 12, 18, 12, 14, 30])

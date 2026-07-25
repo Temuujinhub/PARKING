@@ -16,22 +16,24 @@ export default function Logs() {
   if (lane) lprParams.set('lane', lane)
   const { data: lpr } = useFetch(tab === 'lpr' ? `/api/reports/lpr-events?${lprParams}` : null, { initial: [] })
 
-  const downloadAudit = async () => {
+  const download = async (path, name) => {
     try {
-      const blob = await api('/api/reports/audit-logs/excel', { blob: true })
+      const blob = await api(path, { blob: true })
       const url = URL.createObjectURL(blob)
-      const a = Object.assign(document.createElement('a'), { href: url, download: 'uildliin_log.xlsx' })
+      const a = Object.assign(document.createElement('a'), { href: url, download: name })
       a.click(); URL.revokeObjectURL(url)
     } catch (e) { toast(e.message, 'error') }
   }
+  const downloadAudit = () => download('/api/reports/audit-logs/excel', 'uildliin_log.xlsx')
+  const downloadLpr = () => download(`/api/reports/lpr-events/excel?${lprParams}`, 'kamer_unshilt.xlsx')
 
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Лог</h1>
-        {tab === 'audit' && (
-          <button className="btn-primary" onClick={downloadAudit}><Download size={16} /> Excel татах</button>
-        )}
+        <button className="btn-primary" onClick={tab === 'audit' ? downloadAudit : downloadLpr}>
+          <Download size={16} /> Excel татах
+        </button>
       </div>
       <div className="flex gap-1 border-b border-surface-border/60" role="tablist">
         {[['audit', 'Үйлдлийн лог'], ['lpr', 'Камерын event лог']].map(([v, l]) => (

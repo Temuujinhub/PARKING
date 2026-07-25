@@ -51,25 +51,30 @@ async def _fetch_from_camera(ip: str) -> bytes | None:
     (ANPR боловсруулалт + encoder ачаалалтай) үед кадр рендерлэх нь удааширдаг
     тул уншилтын timeout-ыг ӨГӨӨМӨР (25с) авна — өмнө нь 6с байсан тул бүх
     оролдлого timeout болж, орох/гарах зураг огт хадгалагддаггүй байв."""
-    url = f"http://{ip}/cgi-bin/snapshot.cgi"
     auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
     # холболт хурдан, харин зураг татах уншилт удаан байж болно
     timeout = httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)
+    # Firmware/тохиргооноос хамаарч channel параметр шаардаж болзошгүй — хувилбаруудыг
+    # дараалан оролдоно (channel-гүй, channel=1, channel=0). Аль нэг нь JPEG өгвөл хангалттай.
+    urls = [f"http://{ip}/cgi-bin/snapshot.cgi",
+            f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
+            f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
     last_err = ""
     for attempt in range(1, 4):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.get(url, auth=auth)
-            if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
-                if attempt > 1:
-                    print(f"[snapshot] {ip}: snapshot.cgi OK ({len(r.content)}b, {attempt}-р оролдлого)")
-                return r.content
-            last_err = f"HTTP {r.status_code} эсвэл JPEG биш ({len(r.content)}b)"
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {str(e)[:60]}"
+        for url in urls:
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    r = await client.get(url, auth=auth)
+                if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
+                    if attempt > 1 or url != urls[0]:
+                        print(f"[snapshot] {ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
+                    return r.content
+                last_err = f"{url.split('cgi-bin/')[-1]} → HTTP {r.status_code} ({len(r.content)}b)"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {str(e)[:50]}"
         if attempt < 3:
             await asyncio.sleep(1.5)
-    print(f"[snapshot] {ip}: snapshot.cgi 3 оролдлогод татаж чадсангүй ({last_err})")
+    print(f"[snapshot] {ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
     return None
 
 
