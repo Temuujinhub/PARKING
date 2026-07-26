@@ -9,6 +9,7 @@
 """
 import io
 import logging
+import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,20 +28,31 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 log = logging.getLogger(__name__)
 
 
-def find_site(db: Session, site_code: str, active_only: bool = False) -> ParkingSite:
-    """QR-аас ирсэн зогсоолын кодоор зогсоол олно.
+def find_site(db: Session, site_ref: str, active_only: bool = False) -> ParkingSite:
+    """QR-аас ирсэн заагчаар зогсоол олно — код (SITE01) эсвэл UUID хоёуланг нь дэмжинэ.
 
-    Хэвлэгдсэн QR-ыг дахин хэвлэх боломжгүй тул код нь ТОМ/ЖИЖИГ үсэг, урд хойд
-    хоосон зайнаас үл хамааран таарна. Олдоогүй үед кодыг WARNING-аар логлоно —
-    талбайд хэвлэгдсэн QR ямар кодтой байсныг лог-оос олж бүртгэх боломжтой.
+    Талбайд хэвлэгдчихсэн QR-ыг дахин хэвлэх боломжгүй тул хайлт тэсвэртэй байх ёстой:
+      * `/pay?site=SITE01` — site_code-оор, ТОМ/ЖИЖИГ үсэг, хоосон зайг үл тооно
+      * `/checkout/<uuid>`, `/check-cost/<uuid>` — зогсоолын id-гаар (хуучин
+        хэвлэгдсэн QR-ууд ийм хэлбэртэй)
+
+    Олдоогүй үед заагчийг WARNING-аар логлоно — хэвлэгдсэн QR ямар заагчтай байсныг
+    лог-оос олж бүртгэх боломжтой.
     """
-    code = (site_code or "").strip()
-    q = db.query(ParkingSite).filter(func.upper(ParkingSite.site_code) == code.upper())
+    ref = (site_ref or "").strip()
+    q = db.query(ParkingSite)
     if active_only:
         q = q.filter(ParkingSite.is_active.is_(True))
-    site = q.first()
+
+    try:
+        # UUID хэлбэртэй бол id-гаар — буруу хэлбэртэй утгыг DB рүү явуулахгүй
+        # (UUID баганад тэнцүүлэх нь DataError өгнө)
+        site = q.filter(ParkingSite.id == str(uuid.UUID(ref))).first()
+    except ValueError:
+        site = q.filter(func.upper(ParkingSite.site_code) == ref.upper()).first()
+
     if not site:
-        log.warning("QR: бүртгэлгүй зогсоолын код уншигдлаа: %r", code)
+        log.warning("QR: бүртгэлгүй зогсоолын заагч уншигдлаа: %r", ref)
         raise HTTPException(404, "Зогсоол олдсонгүй")
     return site
 

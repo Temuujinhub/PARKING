@@ -20,6 +20,7 @@
 import argparse
 import os
 import sys
+import uuid
 
 BACKEND = "/root/PARKING/backend"
 sys.path.insert(0, BACKEND)
@@ -45,6 +46,7 @@ def show(site: ParkingSite, prefix: str = "") -> None:
     if site.address:
         print(f"{prefix}{'':12} хаяг: {site.address}")
     print(f"{prefix}{'':12} QR линк: {pay_url(site)}")
+    print(f"{prefix}{'':12} id-гаар: {settings.public_base_url}/checkout/{site.id}")
 
 
 def list_sites(db) -> int:
@@ -76,6 +78,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Зогсоол бүртгэх / засах")
     p.add_argument("--list", action="store_true", help="Бүртгэлтэй зогсоолуудыг харуулаад гарах")
     p.add_argument("--code", help="Зогсоолын код — QR доторх ?site= утга (ЯГ ижил байх ёстой)")
+    p.add_argument("--id", dest="site_id", default=None,
+                   help="Зогсоолын UUID — хэвлэгдсэн QR /checkout/<uuid> хэлбэртэй үед "
+                        "тэр UUID-г ЯГ ижлээр өгнө (зөвхөн ШИНЭ зогсоолд)")
     p.add_argument("--name", help="Зогсоолын нэр (жолоочид харагдана)")
     p.add_argument("--address", default=None, help="Хаяг / байршлын тайлбар")
     p.add_argument("--capacity", type=int, default=None, help="Багтаамж (0 = дүүргэлтгүй)")
@@ -95,15 +100,32 @@ def main() -> int:
             p.error("--code болон --name заавал (эсвэл --list ашиглана уу)")
 
         code = args.code.strip()
+        site_id = None
+        if args.site_id:
+            try:
+                site_id = str(uuid.UUID(args.site_id.strip()))
+            except ValueError:
+                print(f"АЛДАА: --id '{args.site_id}' нь зөв UUID биш.", file=sys.stderr)
+                return 1
+
         # Кодыг том/жижиг үсгээс үл хамааран хайна — давхардал үүсгэхээс сэргийлнэ
         existing = next((s for s in db.query(ParkingSite).all()
                          if s.site_code.upper() == code.upper()), None)
+        if site_id and not existing:
+            existing = db.get(ParkingSite, site_id)
 
         if existing:
             print(f"'{existing.site_code}' код аль хэдийн бүртгэлтэй — шинэчилж байна.\n")
+            if site_id and existing.id != site_id:
+                print(f"АНХААР: --id ({site_id}) нь бүртгэлтэй зогсоолын id "
+                      f"({existing.id})-ээс өөр байна. id-г ДАРААХ ЗАСВАРЛААГҮЙ — "
+                      "хэвлэгдсэн QR ажиллахгүй бол зогсоолыг устгаад шинээр "
+                      "--id-тай нь үүсгэнэ үү.", file=sys.stderr)
             site = existing
         else:
             site = ParkingSite(site_code=code, name=args.name, zone_code="A", capacity=0)
+            if site_id:
+                site.id = site_id
             db.add(site)
 
         site.name = args.name

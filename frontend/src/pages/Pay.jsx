@@ -1,8 +1,12 @@
 // Public /pay — жолоочийн QR төлбөрийн хуудас (нэвтрэлтгүй, mobile-first)
 // Урсгал: QR уншина → дугаараа оруулна (эсвэл сүүлд уншигдсанаас сонгоно) → QPay → нээгдэнэ
+//
+// Зогсоолыг 2 хэлбэрээр заана (аль аль нь дэмжигдэнэ — талбайд хоёулаа хэвлэгдсэн):
+//   /pay?site=SITE01                — зогсоолын кодоор
+//   /checkout/<uuid>, /check-cost/<uuid> — зогсоолын id-гаар
 import { ArrowLeft, Car, CheckCircle2, Clock, CreditCard, Loader2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { fmt, fmtDur } from '../api'
 import { LogoMark, LogoText } from '../components/Logo'
 
@@ -21,7 +25,9 @@ const fmtTime = (s) => new Date(s + 'Z').toLocaleString('mn-MN', { month: '2-dig
 
 export default function Pay() {
   const [params] = useSearchParams()
-  const siteCode = params.get('site') || ''
+  const { siteRef } = useParams()
+  // Замын /checkout/<uuid> эсвэл query-ийн ?site=<код> — аль нэг нь байхад ажиллана
+  const siteCode = siteRef || params.get('site') || ''
   const [site, setSite] = useState(null)
   const [recent, setRecent] = useState([])
   const [plate, setPlate] = useState('')

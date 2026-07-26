@@ -68,6 +68,19 @@ try:
     r = client.get("/api/public/site/BAIHGUI-KOD")
     check("бүртгэлгүй код → 404", r.status_code == 404)
 
+    print("UUID-аар хайх (/checkout/<uuid> хэлбэрийн хэвлэгдсэн QR):")
+    r = client.get(f"/api/public/site/{site.id}")
+    check("зогсоолын id-гаар → 200", r.status_code == 200 and r.json()["site_code"] == CODE)
+
+    r = client.get(f"/api/public/site/{str(site.id).upper()}")
+    check("id том үсгээр → 200", r.status_code == 200)
+
+    r = client.get("/api/public/site/00000000-0000-0000-0000-000000000000")
+    check("бүртгэлгүй UUID → 404 (DB алдаа биш)", r.status_code == 404)
+
+    r = client.get("/api/public/site/zzz-biш-uuid-биш-код")
+    check("UUID мэт боловч буруу утга → 404", r.status_code == 404)
+
     print("Бусад public endpoint мөн тэсвэртэй эсэх:")
     r = client.get(f"/api/public/recent-exits/{CODE.lower()}")
     check("recent-exits жижиг үсгээр → 200", r.status_code == 200)

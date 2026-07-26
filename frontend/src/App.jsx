@@ -47,6 +47,10 @@ export default function App() {
         <Routes>
           {/* Public — жолоочийн төлбөрийн хуудас */}
           <Route path="/pay" element={<Pay />} />
+          {/* Талбайд хэвлэгдчихсэн QR-ууд зогсоолын id-гаар заадаг — дахин хэвлэх
+              боломжгүй тул эдгээр замыг мөн ижил хуудсаар үйлчилнэ */}
+          <Route path="/checkout/:siteRef" element={<Pay />} />
+          <Route path="/check-cost/:siteRef" element={<Pay />} />
           <Route path="/login" element={<Login />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route index element={<Home />} />
