@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost"
 
     # QPay v2 (developer.qpay.mn)
+    # Камерын нэвтрэлт амжилтгүй (401) үед дахин холбогдох хүртэл хүлээх хугацаа.
+    # Dahua камер олон удаагийн буруу оролдлогод бүртгэлийг түгждэг тул урт байна —
+    # эс бол зөв нууц үг оруулсны дараа ч түгжээ тайлагдахгүй.
+    camera_auth_retry_sec: int = 300
+
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
     qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)
     qpay_password: str = ""    # client_secret — зөвхөн .env-д (git-д бүү бич)

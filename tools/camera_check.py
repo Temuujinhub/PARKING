@@ -4,6 +4,7 @@
 Ажиллуулах (production сервер дээр):
     sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_check.py 10.0.101.10 10.0.101.11
     sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_check.py --all
+    sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_check.py --site SPORT
 
 Шалгах дараалал (эхнийх нь унавал дараагийнх нь утгагүй):
   1. TCP 80  — сервер камер руу сүлжээгээр хүрч байна уу (route/VLAN/firewall)
@@ -40,6 +41,16 @@ def tcp_open(ip: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+def _mask(secret: str) -> str:
+    """Нууц үгийг БҮТНЭЭР нь хэвлэхгүйгээр таних тэмдэг: урт + эхний/сүүлийн үсэг.
+    Ингэснээр "юу хадгалагдсаныг" (алдаатай хуулсан, зай оруулсан г.м) шалгаж болно."""
+    if not secret:
+        return "(хоосон)"
+    if len(secret) <= 2:
+        return f"{len(secret)} тэмдэгт"
+    return f"{len(secret)} тэмдэгт: {secret[0]}{'•' * (len(secret) - 2)}{secret[-1]}"
+
+
 def _device_for(ip: str):
     """Энэ IP-тэй бүртгэлтэй төхөөрөмж (өөрийн нэвтрэлттэй бол түүгээр шалгана)."""
     try:
@@ -62,9 +73,13 @@ def check(ip: str) -> str:
     device = _device_for(ip)
     cam_user, cam_pass = camera_credentials(device)
     if device is not None and (device.username or device.password):
-        print(f"  · {device.name}-ийн ӨӨРИЙН нэвтрэлтээр шалгаж байна ({cam_user})")
+        print(f"  · {device.name} — ТӨХӨӨРӨМЖИЙН өөрийн нэвтрэлт (DB-д хадгалагдсан)")
     else:
-        print(f"  · системийн ерөнхий нэвтрэлтээр шалгаж байна ({cam_user})")
+        print("  · системийн ерөнхий нэвтрэлт (.env) — энэ төхөөрөмжид өөрийнх нь алга")
+    print(f"      нэр:      {cam_user!r}")
+    print(f"      нууц үг:  {_mask(cam_pass)}")
+    if cam_pass != cam_pass.strip():
+        print("      !! Нууц үгийн урд/хойно ЗАЙ байна — хуулахдаа орсон байж магадгүй")
     auth = httpx.DigestAuth(cam_user, cam_pass)
 
     if not tcp_open(ip, 80):
@@ -116,6 +131,13 @@ def check(ip: str) -> str:
         else:
             print(f"{BAD} RPC2 нэвтрэлт session өгсөнгүй — хаалт нээх команд ажиллахгүй")
     except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "remainLockSecond" in msg or "ТҮГЖИГДСЭН" in msg:
+            print(f"{BAD} Камер ТҮГЖИГДСЭН — олон удаа буруу нууц үг очсоны улмаас.")
+            print("      Нууц үг зөв байсан ч түгжээ тайлагдтал нэвтрэхгүй.")
+            print("      Хийх зүйл: (1) DB дэх нууц үгээ зөв болгох, (2) 5-10 минут хүлээх,")
+            print("      (3) дараа нь дахин шалгах. Буруу нууц үгээр давтвал түгжээ уртасна.")
+            return "auth"
         print(f"{BAD} RPC2 нэвтрэлт амжилтгүй ({type(e).__name__}: {e})")
         print(f"      → хаалт нээх команд ажиллахгүй. Туршсан: {bar_user}. "
               "Нууц үг болон камерын RPC2 эрхийг шалгана уу.")
@@ -140,19 +162,27 @@ def main() -> int:
         print(__doc__)
         return 1
 
-    if args[0] == "--all":
+    if args[0] in ("--all", "--site"):
         from app.database import SessionLocal
         from app.models import Device, ParkingSite
+        want = args[1].upper() if args[0] == "--site" and len(args) > 1 else None
         db = SessionLocal()
         rows = (db.query(Device).filter(Device.device_type == "camera",
                                         Device.status == "active",
                                         Device.ip_address != "").all())
         ips = []
         for d in rows:
-            s = db.get(ParkingSite, d.site_id)
-            print(f"  {(s.site_code if s else '?'):8} {d.lane_dir:6} {d.ip_address}  {d.name}")
+            st = db.get(ParkingSite, d.site_id)
+            code = st.site_code if st else "?"
+            if want and code.upper() != want:
+                continue
+            own = "өөрийн нэвтрэлттэй" if (d.username or d.password) else "ерөнхий нэвтрэлт"
+            print(f"  {code:8} {d.lane_dir:6} {d.ip_address:15} {d.name}  [{own}]")
             ips.append(d.ip_address)
         db.close()
+        if want and not ips:
+            print(f"'{want}' зогсоолд IP-тэй идэвхтэй камер алга.")
+            return 1
         if not ips:
             print("IP-тэй идэвхтэй камер бүртгэгдээгүй байна.")
             return 1

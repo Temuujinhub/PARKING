@@ -86,6 +86,16 @@ class DahuaRpc:
             "userName": self.username, "password": pwd, "clientType": "Web3.0",
             "authorityType": "Default", "passwordType": "Default"}, url="/RPC2_Login")
         if not second.get("result"):
+            # Dahua нь олон удаагийн буруу нэвтрэлтийн дараа бүртгэлийг ТҮГЖДЭГ.
+            # Түүхий JSON биш, юу болсныг ойлгомжтой хэлнэ — оператор нууц үгээ
+            # дахин дахин оролдож түгжээг уртасгахаас сэргийлнэ.
+            lock = (second.get("params") or {}).get("remainLockSecond")
+            if lock:
+                raise DahuaRpcError(
+                    f"Камер ТҮГЖИГДСЭН байна (олон удаа буруу нууц үг оруулсны улмаас). "
+                    f"Дахин оролдох хүртэл {lock} секунд үлдлээ. Нууц үгээ Тохиргоо → "
+                    f"Төхөөрөмж хэсэгт зөв болгоод, түгжээ тайлагдтал хүлээнэ үү "
+                    f"(буруу нууц үгээр дахин оролдвол түгжээ дахин уртасна).")
             raise DahuaRpcError(f"login амжилтгүй: {second}")
         self.session_id = str(second.get("session", self.session_id))
 

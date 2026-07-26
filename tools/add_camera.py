@@ -52,11 +52,32 @@ def list_devices(db) -> int:
     for d in rows:
         s = db.get(ParkingSite, d.site_id)
         by_site.setdefault(s.site_code if s else "?", []).append(d)
+    warned = False
     for code, devs in sorted(by_site.items()):
         print(f"\n{code}:")
         for d in sorted(devs, key=lambda x: (x.lane_no, x.device_type)):
+            creds = ""
+            if d.device_type == "camera":
+                creds = ("  [өөрийн нэвтрэлт]" if (d.username or d.password)
+                         else "  [ерөнхий нэвтрэлт]")
             print(f"  эгнээ {d.lane_no} · {d.lane_dir:6} · {d.device_type:8} · "
-                  f"IP {d.ip_address or '—':15} · {d.name}")
+                  f"IP {d.ip_address or '—':15} · {d.name}{creds}")
+
+        # Хаалт нь ӨӨРИЙН IP-гүй бол ижил ЭГНЭЭНИЙ камерын IP-г ашигладаг. Эгнээ
+        # зөрвөл хаалт "IP олдсонгүй" гэж уначихдаг — энэ нь нүдэнд харагдахгүй
+        # тул тусад нь анхааруулна.
+        cam_lanes = {d.lane_no for d in devs if d.device_type == "camera" and d.ip_address}
+        for d in devs:
+            if d.device_type == "barrier" and not d.ip_address and d.lane_no not in cam_lanes:
+                warned = True
+                print(f"  !! «{d.name}» (эгнээ {d.lane_no}) — энэ эгнээнд IP-тэй камер алга.")
+                print(f"     Хаалт нь ижил эгнээний камерын IP-гээр ажилладаг тул энэ "
+                      f"хаалт НЭЭГДЭХГҮЙ.")
+                print(f"     Засах: {d.lane_dir} камерын 'Эгнээ' талбарыг {d.lane_no} болгох "
+                      f"(эсвэл хаалтынхыг камерынхтай тааруулах).")
+    if warned:
+        print("\n  Журам: орох = эгнээ 1, гарах = эгнээ 2. Камер ба хаалт нь ижил "
+              "эгнээтэй байх ёстой.")
     return 0
 
 
@@ -115,11 +136,34 @@ def main() -> int:
     try:
         if args.list:
             return list_devices(db)
-        if not args.site or not (args.entry or args.exit_ip):
-            p.error("--site болон --entry/--exit заавал (эсвэл --list)")
+        if not args.site or not (args.entry or args.exit_ip
+                                 or args.username is not None or args.password is not None):
+            p.error("--site болон --entry/--exit (эсвэл --username/--password) заавал "
+                    "— бүртгэлтэйг харах бол --list")
 
         site = find_site(db, args.site)
         print(f"\nЗогсоол: {site.name} ({site.site_code})")
+
+        # IP заагаагүй, зөвхөн нэвтрэлт өгсөн бол: тухайн зогсоолын БҮХ камерт хэрэглэнэ
+        if not args.entry and not args.exit_ip:
+            cams = db.query(Device).filter(
+                Device.site_id == site.id, Device.device_type == "camera",
+                Device.status == "active").all()
+            if not cams:
+                print("  Энэ зогсоолд идэвхтэй камер алга.", file=sys.stderr)
+                return 1
+            for cam in cams:
+                if args.username is not None:
+                    cam.username = args.username.strip() or None
+                if args.password is not None:
+                    cam.password = args.password.strip() or None
+                print(f"  {cam.name} ({cam.ip_address or '—'}): нэвтрэлт шинэчлэв → "
+                      f"{cam.username or '(ерөнхий нэр)'} / "
+                      f"{'***' if cam.password else '(ерөнхий нууц үг)'}")
+            db.commit()
+            print("\nДараа нь: sudo systemctl restart parking-backend")
+            return 0
+
         if args.entry:
             upsert_camera(db, site, "entry", args.entry.strip(), args.username, args.password)
         if args.exit_ip:

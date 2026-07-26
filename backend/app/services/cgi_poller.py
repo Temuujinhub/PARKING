@@ -131,9 +131,18 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
             async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=30)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
                     if resp.status_code != 200:
-                        print(f"[cgi_poll] {ip}: HTTP {resp.status_code} "
-                              f"({'нууц үг буруу' if resp.status_code == 401 else 'алдаа'}) — 15с дараа дахин")
-                        await asyncio.sleep(15)
+                        # 401 үед ХУРДАН давтаж болохгүй: Dahua камер хэд хэдэн
+                        # буруу оролдлогын дараа бүртгэлийг ТҮГЖДЭГ. 15с тутам
+                        # давтвал зөв нууц үг оруулсны дараа ч түгжээ тайлагдахгүй
+                        # (хаалт нээх RPC2 нь "remainLockSecond" алдаа өгсөөр байна).
+                        if resp.status_code == 401:
+                            print(f"[cgi_poll] {ip}: 401 нэвтрэлт амжилтгүй — нууц үгээ "
+                                  f"шалгана уу (Тохиргоо → Төхөөрөмж). Камер түгжигдэхээс "
+                                  f"сэргийлж {settings.camera_auth_retry_sec}с хүлээнэ.")
+                            await asyncio.sleep(settings.camera_auth_retry_sec)
+                        else:
+                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — 15с дараа дахин")
+                            await asyncio.sleep(15)
                         continue
                     print(f"[cgi_poll] {ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
                     last_touch = 0.0
