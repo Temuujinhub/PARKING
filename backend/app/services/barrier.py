@@ -228,27 +228,36 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
 
 # ─── LED дэлгэц / дуут зарлал ────────────────────────────────────────────────
 
-async def display_on_screen(ip: str, text: str, voice_text: str | None = None) -> str:
+async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
+                            repeat: int | None = None) -> str:
     """Камерын LED дэлгэцэнд текст харуулна (шаардлагатай бол дуут зарлал).
+
+    Камер Vehicle Passing горимдоо манай текстийг хурдан дарж бичдэг тул текстийг
+    screen_repeat удаа (screen_repeat_interval зайтай) ДАВТАЖ илгээснээр нийт
+    ~5-6 секунд тогтвортой харагдуулна. Дуут зарлал зөвхөн эхний удаад.
     Амжилттай бол хоосон мөр, алдаатай бол алдааны тайлбар буцаана."""
     if settings.barrier_mock:
         print(f"[screen] MOCK {ip}: {text}")
         return ""
     username = settings.barrier_username or settings.camera_username
     password = settings.barrier_password or settings.camera_password
+    times = max(1, repeat if repeat is not None else settings.screen_repeat)
     try:
         async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
             rpc = DahuaRpc(client, ip, username, password)
             await rpc.login()
             try:
-                await rpc.set_screen(text)
-                if voice_text:
-                    await rpc.set_voice(voice_text)
+                for i in range(times):
+                    if i:
+                        await asyncio.sleep(settings.screen_repeat_interval)
+                    await rpc.set_screen(text)
+                    if i == 0 and voice_text:
+                        await rpc.set_voice(voice_text)
             finally:
                 await rpc.logout()
         # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
-        print(f"[screen] {ip}: OK «{text}»")
+        print(f"[screen] {ip}: OK ×{times} «{text}»")
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"

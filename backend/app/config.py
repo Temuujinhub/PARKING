@@ -155,6 +155,10 @@ class Settings(BaseSettings):
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай
     # (TTS хөдөлгүүр латин/кирилл текстийг зөв уншихгүй байж болзошгүй)
     screen_voice: bool = False
+    # LED текстийг хэдэн удаа, ямар зайтай давтаж илгээх — камер Vehicle Passing
+    # горимдоо текстийг хурдан дардаг тул давтаж илгээснээр ~5-6 секунд барина
+    screen_repeat: int = 3
+    screen_repeat_interval: float = 2.5
 
     # e-Barimt нээлттэй лавлагаа — байгууллагын регистрээр нэр шалгах
     # (зөвхөн Монголын IP-ээс хандагдана; гаднаас timeout өгвөл frontend

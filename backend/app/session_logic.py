@@ -436,13 +436,17 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         "entry_time": session.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
         "amount_due": due,
+        "has_debt": bool(debts), "debt_amount": debt_amount,
     })
-    # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй)
-    fee_text = render_screen_text(settings.screen_fee_text, amount=due, plate=plate)
+    # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй).
+    # Өртэй машинд ӨМНӨХ ӨРИЙГ НИЙЛҮҮЛЖ нэхэмжилнэ (жолооч нийт дүнгээ шууд харна).
+    fee_text = render_screen_text(settings.screen_fee_text,
+                                  amount=due + debt_amount, plate=plate)
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None)
     return {"action": "awaiting_payment", "session_id": session.id,
-            "total_fee": fee["total_fee"], "amount_due": due}
+            "total_fee": fee["total_fee"], "amount_due": due,
+            "debt_amount": debt_amount}
 
 
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
