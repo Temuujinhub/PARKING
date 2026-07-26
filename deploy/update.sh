@@ -62,6 +62,16 @@ chown -R www-data:www-data /var/www/parking
 cd ..
 
 echo "==> 6/7 Backend дахин асаах (схем автоматаар шинэчилнэ)"
+# Watchdog: минут тутам health шалгаж, гацсан/унасан бол авто restart (идемпотент)
+install -m 755 tools/watchdog.sh /usr/local/bin/parking-watchdog
+printf '* * * * * root /usr/local/bin/parking-watchdog\\n' > /etc/cron.d/parking-watchdog
+chmod 644 /etc/cron.d/parking-watchdog
+# systemd unit өөрчлөгдсөн бол шинэчилнэ (TimeoutStopSec г.м)
+if ! cmp -s deploy/parking-backend.service /etc/systemd/system/parking-backend.service; then
+  cp deploy/parking-backend.service /etc/systemd/system/parking-backend.service
+  systemctl daemon-reload
+  echo "    systemd unit шинэчлэв"
+fi
 systemctl restart parking-backend
 systemctl reload nginx
 

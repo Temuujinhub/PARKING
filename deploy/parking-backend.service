@@ -10,6 +10,7 @@ WorkingDirectory=/root/PARKING/backend
 ExecStart=/root/PARKING/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=3
+TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
