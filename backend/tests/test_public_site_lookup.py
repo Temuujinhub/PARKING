@@ -94,6 +94,25 @@ try:
     check("QR файлын нэр DB дэх ЖИНХЭНЭ кодоор өгөгдөнө",
           CODE in r.headers.get("content-disposition", ""))
 
+    print("Хэвлэгдсэн самбарын QR линк (qr_url):")
+    PRINTED = f"https://app.easy-parking.mn/checkout/{site.id}"
+    r = client.get(f"/api/public/qr/{CODE}.png")
+    default_png = r.content
+    site.qr_url = PRINTED
+    db.commit()
+
+    from app.serializers import site_pay_url
+    check("qr_url бөглөвөл pay_url нь ЯГ тэр линк болно", site_pay_url(site) == PRINTED)
+
+    r = client.get(f"/api/public/qr/{CODE}.png")
+    check("QR зураг өөрчлөгдсөн (өөр линк кодлогдсон)", r.content != default_png)
+
+    site.qr_url = None
+    db.commit()
+    r = client.get(f"/api/public/qr/{CODE}.png")
+    check("qr_url цэвэрлэвэл стандарт /pay?site= рүү буцна", r.content == default_png)
+    check("стандарт pay_url хэлбэр зөв", site_pay_url(site).endswith(f"/pay?site={CODE}"))
+
     print("Идэвхгүй зогсоол:")
     site.is_active = False
     db.commit()

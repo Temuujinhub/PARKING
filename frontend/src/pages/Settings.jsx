@@ -408,6 +408,16 @@ function Sites() {
               <input className="input" value={editing.address || ''}
                 onChange={(e) => setEditing({ ...editing, address: e.target.value })} />
             </Field>
+            <Field label="Хэвлэгдсэн самбарын QR линк">
+              <input className="input font-mono text-xs" value={editing.qr_url || ''}
+                placeholder="Хоосон бол автоматаар /pay?site=КОД"
+                onChange={(e) => setEditing({ ...editing, qr_url: e.target.value })} />
+              <div className="text-xs text-slate-400 mt-1.5">
+                Талбайд хэвлэгдчихсэн самбар өөр линктэй бол ЯГ тэр линкийг энд бичнэ —
+                систем үүсгэх QR тэр самбартай ижил болно. Самбарыг солихгүйгээр
+                үргэлжлүүлэн ашиглана.
+              </div>
+            </Field>
             <Field label="Тарифын загвар">
               <select className="input" value={editing.tariff_template_id || ''}
                 onChange={(e) => setEditing({ ...editing, tariff_template_id: e.target.value })}>

@@ -48,6 +48,9 @@ class ParkingSite(Base):
     capacity = Column(Integer, nullable=False, default=0)
     # Авто цэвэрлэгээний босго (цаг): null = глобал default (72), 0 = энэ зогсоолд унтраах
     auto_close_hours = Column(Integer, nullable=True)
+    # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
+    # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
+    qr_url = Column(Text, nullable=True)
     tariff_template_id = Column(UUID(as_uuid=False), ForeignKey("tariff_templates.id"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -313,7 +316,7 @@ class Compensation(Base):
     # QR-аар нийлүүлж төлөх: аль нэгдсэн Payment-д багтсан (finalize үед PAID болгож,
     # өр тус бүрд ТУСДАА e-Barimt үүсгэнэ). PENDING статус л эрх мэдэлтэй — холбоос
     # нь зөвхөн бүртгэл тул шинэ invoice үүсгэхэд дарж холбогдоно.
-    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     site = relationship("ParkingSite", lazy="joined")

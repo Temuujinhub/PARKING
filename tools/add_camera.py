@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Зогсоолд орох/гарах камер бүртгэх — вэб UI-гүйгээр, сервер дээр шууд.
+
+Хаалтыг ГАРААР нэмэх шаардлагагүй: камер бүртгэгдмэгц ижил эгнээнд хаалт
+(device_auto.ensure_lane_barriers) автоматаар үүснэ. Dahua ANPR кит хаалтаа
+камерынхаа релеэр удирддаг тул хаалтад тусдаа IP хэрэггүй.
+
+Ажиллуулах (production сервер дээр):
+    sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/add_camera.py \
+        --site KH --entry 10.0.101.10 --exit 10.0.101.11
+
+    # зөвхөн нэг талыг нь бүртгэх бас болно
+    sudo .../add_camera.py --site SPORT --entry 10.0.104.10
+
+    # бүртгэгдсэнийг харах
+    sudo .../add_camera.py --list
+
+Эгнээний журам (UI-ийн шидтэнтэй ижил): орох = lane 1 / entry, гарах = lane 2 / exit.
+Идемпотент — ижил зогсоол+чиглэлд дахин ажиллуулбал зөвхөн IP-г шинэчилнэ.
+"""
+import argparse
+import os
+import sys
+
+BACKEND = "/root/PARKING/backend"
+sys.path.insert(0, BACKEND)
+os.chdir(BACKEND)
+
+import secrets  # noqa: E402
+
+from app.database import SessionLocal  # noqa: E402
+from app.models import Device, ParkingSite  # noqa: E402
+from app.services.device_auto import ensure_lane_barriers, fetch_camera_model  # noqa: E402
+
+
+def find_site(db, code: str) -> ParkingSite:
+    site = next((s for s in db.query(ParkingSite).all()
+                 if s.site_code.upper() == code.strip().upper()), None)
+    if not site:
+        codes = [s.site_code for s in db.query(ParkingSite).all()]
+        print(f"АЛДАА: '{code}' кодтой зогсоол олдсонгүй. Байгаа: {codes}", file=sys.stderr)
+        sys.exit(1)
+    return site
+
+
+def list_devices(db) -> int:
+    rows = db.query(Device).filter(Device.status == "active").all()
+    if not rows:
+        print("Идэвхтэй төхөөрөмж алга.")
+        return 0
+    by_site: dict[str, list] = {}
+    for d in rows:
+        s = db.get(ParkingSite, d.site_id)
+        by_site.setdefault(s.site_code if s else "?", []).append(d)
+    for code, devs in sorted(by_site.items()):
+        print(f"\n{code}:")
+        for d in sorted(devs, key=lambda x: (x.lane_no, x.device_type)):
+            print(f"  эгнээ {d.lane_no} · {d.lane_dir:6} · {d.device_type:8} · "
+                  f"IP {d.ip_address or '—':15} · {d.name}")
+    return 0
+
+
+def upsert_camera(db, site: ParkingSite, lane_dir: str, ip: str) -> Device:
+    lane_no = 1 if lane_dir == "entry" else 2
+    name = "Орох камер" if lane_dir == "entry" else "Гарах камер"
+
+    cam = db.query(Device).filter(
+        Device.site_id == site.id, Device.device_type == "camera",
+        Device.lane_dir == lane_dir, Device.status == "active").first()
+
+    if cam:
+        print(f"  '{site.site_code}' {lane_dir}: камер бүртгэлтэй байна "
+              f"(IP {cam.ip_address or '—'}) → IP-г {ip} болгож шинэчилнэ")
+        cam.ip_address = ip
+    else:
+        cam = Device(site_id=site.id, name=name, device_type="camera", vendor="Dahua",
+                     ip_address=ip, lane_no=lane_no, lane_dir=lane_dir,
+                     auto_open=(lane_dir == "entry"), status="active",
+                     device_key=f"camera-{secrets.token_hex(8)}")
+        db.add(cam)
+        print(f"  '{site.site_code}' {lane_dir}: шинэ камер бүртгэв (IP {ip}, эгнээ {lane_no})")
+
+    model = fetch_camera_model(ip)
+    if model:
+        cam.model = model
+        print(f"      загвар камераас уншсан: {model}")
+    else:
+        print("      загвар уншигдсангүй (камер унтарсан/хүрэхгүй байж болно) — "
+              "бүртгэлд саад болохгүй")
+    return cam
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Зогсоолд камер бүртгэх")
+    p.add_argument("--list", action="store_true", help="Бүртгэлтэй төхөөрөмжүүдийг харуулах")
+    p.add_argument("--site", help="Зогсоолын код (жишээ: KH, SPORT)")
+    p.add_argument("--entry", help="Орох камерын IP")
+    p.add_argument("--exit", dest="exit_ip", help="Гарах камерын IP")
+    args = p.parse_args()
+
+    db = SessionLocal()
+    try:
+        if args.list:
+            return list_devices(db)
+        if not args.site or not (args.entry or args.exit_ip):
+            p.error("--site болон --entry/--exit заавал (эсвэл --list)")
+
+        site = find_site(db, args.site)
+        print(f"\nЗогсоол: {site.name} ({site.site_code})")
+        if args.entry:
+            upsert_camera(db, site, "entry", args.entry.strip())
+        if args.exit_ip:
+            upsert_camera(db, site, "exit", args.exit_ip.strip())
+
+        db.flush()
+        # Камер бүрд ижил эгнээний хаалт байгааг баталгаажуулна (байхгүй бол үүсгэнэ)
+        res = ensure_lane_barriers(db)
+        db.commit()
+        print(f"\nХаалт: {res.get('created', 0)} шинэ, {res.get('restored', 0)} сэргээв")
+
+        print("\nОдоогийн байдал:")
+        list_devices(db)
+        print("\nДараагийн алхам:")
+        print("  1. Холболт шалгах:")
+        print("     sudo /root/PARKING/backend/venv/bin/python "
+              "/root/PARKING/tools/camera_check.py --all")
+        print("  2. Backend дахин асаах (event poller шинэ камеруудыг барина):")
+        print("     sudo systemctl restart parking-backend")
+        print("  3. UI → Хаалтны удирдлага хэсгээс зогсоолоо сонгож 'Нээх' товчоор турших")
+        return 0
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

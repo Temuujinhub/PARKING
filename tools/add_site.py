@@ -33,8 +33,11 @@ from app.database import SessionLocal  # noqa: E402
 from app.models import ParkingSite, TariffTemplate  # noqa: E402
 
 
+from app.serializers import site_pay_url  # noqa: E402
+
+
 def pay_url(site: ParkingSite) -> str:
-    return f"{settings.public_base_url}/pay?site={site.site_code}"
+    return site_pay_url(site)
 
 
 def show(site: ParkingSite, prefix: str = "") -> None:
@@ -45,7 +48,8 @@ def show(site: ParkingSite, prefix: str = "") -> None:
     print(f"{prefix}{'':12} багтаамж: {cap} · бүс: {site.zone_code} · тариф: {tariff} · {state}")
     if site.address:
         print(f"{prefix}{'':12} хаяг: {site.address}")
-    print(f"{prefix}{'':12} QR линк: {pay_url(site)}")
+    print(f"{prefix}{'':12} QR линк: {pay_url(site)}"
+          f"{'  ← хэвлэгдсэн самбартай ижил' if site.qr_url else ''}")
     print(f"{prefix}{'':12} id-гаар: {settings.public_base_url}/checkout/{site.id}")
 
 
@@ -88,6 +92,9 @@ def main() -> int:
     p.add_argument("--tariff", default=None, help="Тарифын загварын нэр (default: эхний идэвхтэй)")
     p.add_argument("--auto-close-hours", type=int, default=None,
                    help="Гацсан машины авто хаалтын босго, цагаар (0 = унтраах)")
+    p.add_argument("--qr-url", dest="qr_url", default=None,
+                   help="Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк — систем үүсгэх QR "
+                        "яг үүнтэй ижил болно ('' өгвөл цэвэрлэнэ)")
     p.add_argument("--inactive", action="store_true", help="Идэвхгүй болгож бүртгэх")
     args = p.parse_args()
 
@@ -137,6 +144,8 @@ def main() -> int:
             site.zone_code = args.zone
         if args.auto_close_hours is not None:
             site.auto_close_hours = args.auto_close_hours
+        if args.qr_url is not None:
+            site.qr_url = args.qr_url.strip() or None
         site.is_active = not args.inactive
 
         tariff = pick_tariff(db, args.tariff)

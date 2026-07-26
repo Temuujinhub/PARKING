@@ -13,15 +13,22 @@ set -euo pipefail
 PY=/root/PARKING/backend/venv/bin/python
 ADD=/root/PARKING/tools/add_site.py
 
-add() {  # add <uuid> <код> <нэр> <хаяг>
+BASE=https://app.easy-parking.mn
+
+add() {  # add <uuid> <код> <нэр> <хаяг> <хэвлэгдсэн-QR-линк>
   echo
   echo "──────────────────────────────────────────────────────────────"
-  "$PY" "$ADD" --id "$1" --code "$2" --name "$3" --address "$4" --capacity 0
+  "$PY" "$ADD" --id "$1" --code "$2" --name "$3" --address "$4" --capacity 0 --qr-url "$5"
 }
 
-add 565a3ddb-1c01-4201-ad1c-81fc449cbdd7 SPORT  "Спортын төв ордон" "Спортын төв ордны баруун тал"
-add 7c25552b-98bd-4e9b-bc18-a3df6ba8add0 KH     "Кэй Эйч хотхон"    "Кэй Эйч хотхоны баруун тал"
-add b8773f25-2ef7-408e-9abf-cc30961c5716 MONNIS "Моннис билдинг"    "Monnis building"
+# 5 дахь аргумент = самбар дээр ХЭВЛЭГДСЭН яг тэр линк. Үүнийг өгсний ачаар
+# Тохиргоо → QR → "Хэвлэх PNG татах" нь самбартай ЯГ ИЖИЛ QR гаргана.
+add 565a3ddb-1c01-4201-ad1c-81fc449cbdd7 SPORT  "Спортын төв ордон" "Спортын төв ордны баруун тал" \
+    "$BASE/checkout/565a3ddb-1c01-4201-ad1c-81fc449cbdd7"
+add 7c25552b-98bd-4e9b-bc18-a3df6ba8add0 KH     "Кэй Эйч хотхон"    "Кэй Эйч хотхоны баруун тал" \
+    "$BASE/check-cost/7c25552b-98bd-4e9b-bc18-a3df6ba8add0"
+add b8773f25-2ef7-408e-9abf-cc30961c5716 MONNIS "Моннис билдинг"    "Monnis building" \
+    "$BASE/checkout/b8773f25-2ef7-408e-9abf-cc30961c5716"
 
 cat <<'NOTE'
 

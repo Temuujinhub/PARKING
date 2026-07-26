@@ -21,6 +21,7 @@ from ..config import settings
 from ..database import get_db
 from ..models import ParkingSession, ParkingSite
 from ..ratelimit import throttle
+from ..serializers import site_pay_url
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/public", tags=["public"])
@@ -127,7 +128,8 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
 
     # is_active шүүлтгүй — идэвхгүй зогсоолын QR-ийг ч админ урьдчилан хэвлэж болно
     site = find_site(db, site_code)
-    url = f"{settings.public_base_url}/pay?site={site.site_code}"
+    # Хэвлэгдсэн самбартай зогсоолд ЯГ тэр линкээр үүснэ (QR зураг ижил гарна)
+    url = site_pay_url(site)
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=max(4, min(40, size // 33)), border=3)
     qr.add_data(url)
     qr.make(fit=True)

@@ -14,7 +14,7 @@ from ..models import (
     RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
 )
 from ..config import settings
-from ..serializers import to_dict
+from ..serializers import site_pay_url, to_dict
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -81,8 +81,9 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
             # capacity=0 → дүүргэлтгүй (хязгааргүй) зогсоол: сул тоо тооцохгүй
             "free_spaces": max(0, s.capacity - occupied) if s.capacity else None,
             "tariff_template_name": s.tariff_template.name if s.tariff_template else None,
-            # Жолоочийн төлбөрийн линк — QR-т кодлогдсонтой ЯГ ижил (public_base_url домэйн)
-            "pay_url": f"{settings.public_base_url}/pay?site={s.site_code}",
+            # Жолоочийн төлбөрийн линк — QR-т кодлогдсонтой ЯГ ижил
+            # (хэвлэгдсэн самбартай зогсоолд тэр самбарын линк)
+            "pay_url": site_pay_url(s),
         }))
     return out
 
@@ -93,13 +94,13 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
-                           "tariff_template_id", "auto_close_hours")
+                           "tariff_template_id", "auto_close_hours", "qr_url")
                           if k in body})
     db.add(site)
     db.flush()
     _audit(db, user, "CREATE", "site", site.id, body)
     db.commit()
-    return to_dict(site, extra={"pay_url": f"{settings.public_base_url}/pay?site={site.site_code}"})
+    return to_dict(site, extra={"pay_url": site_pay_url(site)})
 
 
 @router.put("/sites/{site_id}")
@@ -109,12 +110,13 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "is_active"):
+              "auto_close_hours", "is_active", "qr_url"):
         if k in body:
-            setattr(site, k, body[k])
+            # Хоосон мөр → NULL (стандарт /pay?site= хэлбэр рүү буцна)
+            setattr(site, k, body[k].strip() or None if k == "qr_url" and body[k] else body[k])
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
-    return to_dict(site)
+    return to_dict(site, extra={"pay_url": site_pay_url(site)})
 
 
 @router.delete("/sites/{site_id}")

@@ -65,6 +65,9 @@ MIGRATIONS = [
     "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS payment_id UUID REFERENCES payments(id)",
     "CREATE INDEX IF NOT EXISTS ix_compensations_payment_id ON compensations (payment_id)",
 
+    # v2.2 — Хэвлэгдсэн самбар дээрх QR линк (систем үүсгэх QR түүнтэй таарна)
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qr_url TEXT",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 
