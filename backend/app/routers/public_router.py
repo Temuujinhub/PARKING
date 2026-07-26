@@ -8,10 +8,12 @@
   5. POST /api/payments/qpay/check/{id}       — төлөгдсөн эсэх polling
 """
 import io
+import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -21,6 +23,26 @@ from ..ratelimit import throttle
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/public", tags=["public"])
+
+log = logging.getLogger(__name__)
+
+
+def find_site(db: Session, site_code: str, active_only: bool = False) -> ParkingSite:
+    """QR-аас ирсэн зогсоолын кодоор зогсоол олно.
+
+    Хэвлэгдсэн QR-ыг дахин хэвлэх боломжгүй тул код нь ТОМ/ЖИЖИГ үсэг, урд хойд
+    хоосон зайнаас үл хамааран таарна. Олдоогүй үед кодыг WARNING-аар логлоно —
+    талбайд хэвлэгдсэн QR ямар кодтой байсныг лог-оос олж бүртгэх боломжтой.
+    """
+    code = (site_code or "").strip()
+    q = db.query(ParkingSite).filter(func.upper(ParkingSite.site_code) == code.upper())
+    if active_only:
+        q = q.filter(ParkingSite.is_active.is_(True))
+    site = q.first()
+    if not site:
+        log.warning("QR: бүртгэлгүй зогсоолын код уншигдлаа: %r", code)
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    return site
 
 
 def _throttle_public(request: Request, name: str, limit: int = 60):
@@ -92,9 +114,7 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
     from qrcode.constants import ERROR_CORRECT_H
 
     # is_active шүүлтгүй — идэвхгүй зогсоолын QR-ийг ч админ урьдчилан хэвлэж болно
-    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
-    if not site:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site = find_site(db, site_code)
     url = f"{settings.public_base_url}/pay?site={site.site_code}"
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=max(4, min(40, size // 33)), border=3)
     qr.add_data(url)
@@ -158,10 +178,7 @@ def receipt_qr(payment_id: str, db: Session = Depends(get_db)):
 
 @router.get("/site/{site_code}")
 def get_site(site_code: str, db: Session = Depends(get_db)):
-    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code,
-                                        ParkingSite.is_active.is_(True)).first()
-    if not site:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site = find_site(db, site_code, active_only=True)
     t = site.tariff_template
     return {"name": site.name, "site_code": site.site_code, "zone_code": site.zone_code,
             "free_minutes": t.free_minutes if t else 0,
@@ -172,9 +189,7 @@ def get_site(site_code: str, db: Session = Depends(get_db)):
 def recent_exits(site_code: str, request: Request, db: Session = Depends(get_db)):
     """Гарах камерт сүүлийн 15 минутад уншигдсан, төлбөр хүлээж буй дугаарууд (масктай)."""
     _throttle_public(request, "recent", limit=120)
-    site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
-    if not site:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site = find_site(db, site_code)
     since = datetime.utcnow() - timedelta(minutes=15)
     sessions = (
         db.query(ParkingSession)
@@ -195,9 +210,7 @@ def search_plates(site: str, q: str, request: Request, db: Session = Depends(get
     q = normalize_plate(q)
     if len(q) < 2:
         return []
-    site_obj = db.query(ParkingSite).filter(ParkingSite.site_code == site).first()
-    if not site_obj:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site_obj = find_site(db, site)
     sessions = (
         db.query(ParkingSession)
         .filter(ParkingSession.site_id == site_obj.id,
@@ -225,9 +238,7 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
     plate = normalize_plate(plate)
     if not plate:
         raise HTTPException(400, "Дугаараа оруулна уу")
-    site_obj = db.query(ParkingSite).filter(ParkingSite.site_code == site).first()
-    if not site_obj:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site_obj = find_site(db, site)
     s = (
         db.query(ParkingSession)
         .filter(ParkingSession.plate_number == plate,
