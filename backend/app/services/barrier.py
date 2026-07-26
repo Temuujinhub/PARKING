@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import BarrierCommand, Device
+from .device_auth import barrier_credentials
 
 RPC_METHODS = {
     "open": "trafficSnap.openStrobe",
@@ -126,15 +127,18 @@ class DahuaRpc:
         return res
 
 
-def _resolve_ip(db: Session, device: Device) -> str | None:
+def _resolve_device(db: Session, device: Device) -> tuple[str | None, Device | None]:
     """Команд илгээх IP. Бүх-нэг-дор ITC камер хаалтаа өөрийн реле (NO1/NO2)-ээр
     нээдэг тул хаалт төхөөрөмжид IP байхгүй бол тухайн эгнээний камерын IP-г ашиглана.
 
     ЧУХАЛ: ижил эгнээний камер олдоогүй үед БУСАД эгнээний камер руу шилжихийг
     хориглоно (өмнө нь тэгдэг байсан) — эс бол орох хаалтын команд гарах камер руу
-    очиж БУРУУ хаалт нээнэ. Олон камертай зогсоолд ижил эгнээнийх заавал байх ёстой."""
+    очиж БУРУУ хаалт нээнэ. Олон камертай зогсоолд ижил эгнээнийх заавал байх ёстой.
+
+    Буцаах: (ip, тэр IP-тэй төхөөрөмж) — нэвтрэх нэр/нууц үгийг ЯГ ТЭР төхөөрөмжөөс
+    авахын тулд (камер бүр өөр нууц үгтэй байж болно)."""
     if device.ip_address:
-        return device.ip_address
+        return device.ip_address, device
     cams = db.query(Device).filter(
         Device.site_id == device.site_id, Device.device_type == "camera",
         Device.ip_address.isnot(None), Device.ip_address != "",
@@ -142,12 +146,17 @@ def _resolve_ip(db: Session, device: Device) -> str | None:
     # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв
     same_lane = [c for c in cams if c.lane_no == device.lane_no]
     if same_lane:
-        return same_lane[0].ip_address
+        return same_lane[0].ip_address, same_lane[0]
     # 2) Зогсоолд ЯГ НЭГ камертай (нэг all-in-one төхөөрөмж орох/гарах хоёуланд) бол түүнийг
     if len(cams) == 1:
-        return cams[0].ip_address
+        return cams[0].ip_address, cams[0]
     # 3) Олон камертай ч энэ эгнээнийх алга — буруу хаалт нээхээс сэргийлж унана
-    return None
+    return None, None
+
+
+def _resolve_ip(db: Session, device: Device) -> str | None:
+    """Зөвхөн IP хэрэгтэй дуудагчдад — буцаах утга нь өмнөх хэвээр."""
+    return _resolve_device(db, device)[0]
 
 
 async def _execute(db: Session, device: Device, command: str, session_id: str | None,
@@ -159,7 +168,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     db.add(cmd)
     db.flush()
 
-    ip = _resolve_ip(db, device)
+    ip, target = _resolve_device(db, device)
 
     if settings.barrier_mock:
         cmd.status = "SUCCESS"
@@ -182,8 +191,8 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
         db.commit()
         return cmd
 
-    username = settings.barrier_username or settings.camera_username
-    password = settings.barrier_password or settings.camera_password
+    # Нэвтрэлт нь командыг ХҮЛЭЭН АВАХ төхөөрөмжийнх (хаалт камерын IP зээлсэн бол камерынх)
+    username, password = barrier_credentials(target)
     cmd.status = "FAILED"
     try:
         async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
@@ -229,7 +238,8 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
 # ─── LED дэлгэц / дуут зарлал ────────────────────────────────────────────────
 
 async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
-                            repeat: int | None = None) -> str:
+                            repeat: int | None = None,
+                            creds: tuple[str, str] | None = None) -> str:
     """Камерын LED дэлгэцэнд текст харуулна (шаардлагатай бол дуут зарлал).
 
     Камер Vehicle Passing горимдоо манай текстийг хурдан дарж бичдэг тул текстийг
@@ -239,8 +249,7 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
     if settings.barrier_mock:
         print(f"[screen] MOCK {ip}: {text}")
         return ""
-    username = settings.barrier_username or settings.camera_username
-    password = settings.barrier_password or settings.camera_password
+    username, password = creds or barrier_credentials(None)
     times = max(1, repeat if repeat is not None else settings.screen_repeat)
     try:
         async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
@@ -265,7 +274,8 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         return err
 
 
-def schedule_display(ip: str | None, text: str, voice_text: str | None = None):
+def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
+                     creds: tuple[str, str] | None = None):
     """Event боловсруулалтын дараа дуудна — дэлгэцний командыг АРД НЬ явуулна
     (хаалт нээх/WS broadcast-ыг хэзээ ч хүлээлгэхгүй, snapshot-той ижил хэв маяг)."""
     if not settings.screen_enabled or not ip or not text:
@@ -274,7 +284,7 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None):
         asyncio.get_running_loop()
     except RuntimeError:
         return  # event loop-гүй орчин (тест г.м) — алгасна
-    asyncio.create_task(display_on_screen(ip, text, voice_text))
+    asyncio.create_task(display_on_screen(ip, text, voice_text, creds=creds))
 
 
 def render_screen_text(template: str, amount: float | int | None = None,

@@ -68,6 +68,17 @@ MIGRATIONS = [
     # v2.2 — Хэвлэгдсэн самбар дээрх QR линк (систем үүсгэх QR түүнтэй таарна)
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qr_url TEXT",
 
+    # v2.3 — Зогсоол бүрийн өөрийн QPay мерчант данс (түрээслэгч тус бүрд)
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qpay_username VARCHAR(80)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qpay_password VARCHAR(160)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qpay_invoice_code VARCHAR(80)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qpay_branch_code VARCHAR(40)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS qpay_district_code VARCHAR(10)",
+
+    # v2.4 — Төхөөрөмж бүрийн өөрийн нэвтрэх мэдээлэл (камер бүр өөр нууц үгтэй байж болно)
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS username VARCHAR(60)",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS password VARCHAR(160)",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

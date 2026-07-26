@@ -17,6 +17,7 @@ from datetime import datetime
 import httpx
 
 from ..config import settings
+from .device_auth import camera_credentials
 from ..database import SessionLocal
 
 _SAFE = re.compile(r"[^0-9A-ZА-ЯЁӨҮ]")
@@ -43,7 +44,7 @@ def _payload_picture(raw: dict) -> bytes | None:
     return None
 
 
-async def _fetch_from_camera(ip: str) -> bytes | None:
+async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> bytes | None:
     """Камерын snapshot.cgi-ээс одоогийн кадрыг татна (digest auth).
 
     Энэ firmware дээр snapshot.cgi найдвартай ажилладаг нь production дээр
@@ -51,7 +52,7 @@ async def _fetch_from_camera(ip: str) -> bytes | None:
     (ANPR боловсруулалт + encoder ачаалалтай) үед кадр рендерлэх нь удааширдаг
     тул уншилтын timeout-ыг ӨГӨӨМӨР (25с) авна — өмнө нь 6с байсан тул бүх
     оролдлого timeout болж, орох/гарах зураг огт хадгалагддаггүй байв."""
-    auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
+    auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     # холболт хурдан, харин зураг татах уншилт удаан байж болно
     timeout = httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)
     # Firmware/тохиргооноос хамаарч channel параметр шаардаж болзошгүй — хувилбаруудыг
@@ -96,11 +97,12 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
 
 
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
-                             lane_dir: str, raw: dict):
+                             lane_dir: str, raw: dict,
+                             creds: tuple[str, str] | None = None):
     data = _payload_picture(raw)
     source = "payload"
     if data is None and camera_ip:
-        data = await _fetch_from_camera(camera_ip)
+        data = await _fetch_from_camera(camera_ip, creds)
         source = "snapshot.cgi"
     if data is None:
         print(f"[snapshot] {plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
@@ -136,7 +138,7 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
 
 
 def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,
-                     lane_dir: str, raw: dict):
+                     lane_dir: str, raw: dict, creds: tuple[str, str] | None = None):
     """Event боловсруулалтын дараа дуудна — зургийг ард нь татаж хадгална.
     Хаалт нээх/WS broadcast-ыг хэзээ ч хүлээлгэхгүй."""
     if not settings.snapshot_enabled or not session_id:
@@ -145,4 +147,4 @@ def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,
         asyncio.get_running_loop()
     except RuntimeError:
         return  # event loop-гүй орчин (тест г.м) — алгасна
-    asyncio.create_task(_capture_and_store(session_id, camera_ip or "", plate, lane_dir, raw))
+    asyncio.create_task(_capture_and_store(session_id, camera_ip or "", plate, lane_dir, raw, creds))

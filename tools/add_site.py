@@ -51,6 +51,15 @@ def show(site: ParkingSite, prefix: str = "") -> None:
     print(f"{prefix}{'':12} QR линк: {pay_url(site)}"
           f"{'  ← хэвлэгдсэн самбартай ижил' if site.qr_url else ''}")
     print(f"{prefix}{'':12} id-гаар: {settings.public_base_url}/checkout/{site.id}")
+    if site.qpay_username and site.qpay_password:
+        print(f"{prefix}{'':12} QPay данс: {site.qpay_username} "
+              f"(нэхэмжлэх: {site.qpay_invoice_code or '—'}, "
+              f"дүүрэг: {site.qpay_district_code or '—'}) — БОДИТ горим")
+    elif site.qpay_username:
+        print(f"{prefix}{'':12} QPay данс: {site.qpay_username} — НУУЦ ҮГ ДУТУУ, "
+              "ерөнхий данс үйлчилнэ!")
+    else:
+        print(f"{prefix}{'':12} QPay данс: системийн ерөнхий")
 
 
 def list_sites(db) -> int:
@@ -95,6 +104,16 @@ def main() -> int:
     p.add_argument("--qr-url", dest="qr_url", default=None,
                    help="Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк — систем үүсгэх QR "
                         "яг үүнтэй ижил болно ('' өгвөл цэвэрлэнэ)")
+    p.add_argument("--qpay-username", dest="qpay_username", default=None,
+                   help="Зогсоолын ӨӨРИЙН QPay нэвтрэх нэр (ж: MONNIS_PROPERTIES)")
+    p.add_argument("--qpay-password", dest="qpay_password", default=None,
+                   help="Зогсоолын ӨӨРИЙН QPay нууц үг ('' өгвөл цэвэрлэнэ)")
+    p.add_argument("--qpay-invoice-code", dest="qpay_invoice_code", default=None,
+                   help="Нэхэмжлэхийн код (ж: MONNIS_PROPERTIES_INVOICE)")
+    p.add_argument("--qpay-district-code", dest="qpay_district_code", default=None,
+                   help="НӨАТ-ын дүүрэг+хороо, 4 орон (ж: 2318)")
+    p.add_argument("--qpay-branch-code", dest="qpay_branch_code", default=None,
+                   help="Мерчантын салбарын код")
     p.add_argument("--inactive", action="store_true", help="Идэвхгүй болгож бүртгэх")
     args = p.parse_args()
 
@@ -146,6 +165,11 @@ def main() -> int:
             site.auto_close_hours = args.auto_close_hours
         if args.qr_url is not None:
             site.qr_url = args.qr_url.strip() or None
+        for f in ("qpay_username", "qpay_password", "qpay_invoice_code",
+                  "qpay_district_code", "qpay_branch_code"):
+            val = getattr(args, f)
+            if val is not None:
+                setattr(site, f, val.strip() or None)
         site.is_active = not args.inactive
 
         tariff = pick_tariff(db, args.tariff)

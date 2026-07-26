@@ -14,14 +14,22 @@ from ..models import (
     RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
 )
 from ..config import settings
-from ..serializers import site_pay_url, to_dict
+from ..serializers import SECRET_COLUMNS, site_pay_url, to_dict
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def _scrub(detail: dict | None) -> dict:
+    """Аудитын бичлэгт нууц үг ХАДГАЛАХГҮЙ — зөвхөн өөрчилсөн эсэхийг тэмдэглэнэ."""
+    if not detail:
+        return {}
+    return {k: ("(өөрчлөв)" if v else "(цэвэрлэв)") if k in SECRET_COLUMNS else v
+            for k, v in detail.items()}
+
+
 def _audit(db: Session, user: User, action: str, entity: str, entity_id: str, detail: dict | None = None):
     db.add(AuditLog(username=user.username, action=action, entity=entity,
-                    entity_id=str(entity_id), detail=detail or {}))
+                    entity_id=str(entity_id), detail=_scrub(detail)))
 
 
 # API/UI-аас үүсгэж болох дүрүүд (SUPER_ADMIN зөвхөн DB-ээр)
@@ -94,7 +102,9 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
-                           "tariff_template_id", "auto_close_hours", "qr_url")
+                           "tariff_template_id", "auto_close_hours", "qr_url",
+                           "qpay_username", "qpay_password", "qpay_invoice_code",
+                           "qpay_branch_code", "qpay_district_code")
                           if k in body})
     db.add(site)
     db.flush()
@@ -110,10 +120,15 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "is_active", "qr_url"):
+              "auto_close_hours", "is_active", "qr_url",
+              "qpay_username", "qpay_password", "qpay_invoice_code",
+              "qpay_branch_code", "qpay_district_code"):
         if k in body:
-            # Хоосон мөр → NULL (стандарт /pay?site= хэлбэр рүү буцна)
-            setattr(site, k, body[k].strip() or None if k == "qr_url" and body[k] else body[k])
+            val = body[k]
+            # Мөр талбарууд: хоосон → NULL (глобал .env тохиргоо руу уналт хийнэ)
+            if isinstance(val, str) and k != "name":
+                val = val.strip() or None
+            setattr(site, k, val)
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
     return to_dict(site, extra={"pay_url": site_pay_url(site)})
@@ -206,12 +221,13 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
 def create_device(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
-                        "lane_no", "lane_dir", "auto_open") if k in body})
+                        "lane_no", "lane_dir", "auto_open", "username", "password")
+                       if k in body})
     device.device_key = f"{body.get('device_type','dev')}-{secrets.token_hex(8)}"
     if device.device_type == "camera" and device.ip_address and not device.model:
         # Загварыг камераас нь автоматаар татна (magicBox CGI, 4с timeout)
         from ..services.device_auto import fetch_camera_model
-        device.model = fetch_camera_model(device.ip_address) or ""
+        device.model = fetch_camera_model(device.ip_address, device) or ""
     db.add(device)
     db.flush()
     _audit(db, user, "CREATE", "device", device.id, body)
@@ -230,9 +246,13 @@ def update_device(device_id: str, body: dict, db: Session = Depends(get_db),
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
     for k in ("name", "device_type", "vendor", "model", "ip_address", "lane_no",
-              "lane_dir", "auto_open", "status", "site_id"):
+              "lane_dir", "auto_open", "status", "site_id", "username", "password"):
         if k in body:
-            setattr(device, k, body[k])
+            val = body[k]
+            # Нэвтрэх мэдээллийг хоосноор илгээвэл цэвэрлэнэ (глобал .env руу уналт)
+            if k in ("username", "password") and isinstance(val, str):
+                val = val.strip() or None
+            setattr(device, k, val)
     _audit(db, user, "UPDATE", "device", device_id, body)
     db.commit()
     return to_dict(device)

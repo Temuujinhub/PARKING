@@ -15,6 +15,7 @@ from datetime import datetime
 import httpx
 
 from ..config import settings
+from .device_auth import camera_credentials
 from ..database import SessionLocal
 from ..models import Device, LprEvent
 from ..session_logic import handle_entry, handle_exit, normalize_plate
@@ -115,11 +116,11 @@ async def _process_event(device_id: str, data: dict):
         db.close()
 
 
-async def _poll_one(device_id: str, ip: str):
+async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = None):
     """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй).
     codes=[All] — камерын бүх event-ийг авч, дугаартайг нь л боловсруулна (дибагт хялбар)."""
     url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]&heartbeat=5"
-    auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
+    auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     while True:
         buffer = ""
         try:
@@ -170,7 +171,9 @@ async def supervisor():
             for c in cams:
                 active.add(c.id)
                 if c.id not in _tasks or _tasks[c.id].done():
-                    _tasks[c.id] = asyncio.create_task(_poll_one(c.id, c.ip_address))
+                    # creds-ийг session амьд байхад мөр болгож шийднэ
+                    _tasks[c.id] = asyncio.create_task(
+                        _poll_one(c.id, c.ip_address, camera_credentials(c)))
                     print(f"[cgi_poll] {c.name} ({c.ip_address}) сонсож эхэллээ")
             for did in list(_tasks):
                 if did not in active:

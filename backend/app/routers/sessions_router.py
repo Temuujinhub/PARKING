@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..auth import (enforce_site, get_current_user, operator_site, operator_sites,
                     require, require_role, scoped_site)
 from ..database import get_db
+from ..services.device_auth import camera_credentials
 from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
 from ..serializers import to_dict
 from ..session_logic import (close_session_forced, get_open_session, normalize_plate,
@@ -102,7 +103,7 @@ def audit_sessions(site_id: str | None = None,
       • invalid_plate — дугаар стандарт формат биш (4 орон + 3 кирилл үсэг биш)
       • stale        — auto_close босгоос удаан зогссон
     """
-    from ..config import settings as cfg
+    from ..config import settings
     from ..session_logic import is_valid_plate
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession).filter(
@@ -406,6 +407,7 @@ async def backfill_snapshot(session_id: str, kind: str, db: Session = Depends(ge
     # хайлтын цонхыг тооцож 3 өөр аргаар (RecordFinder → mediaFileFind → амьд кадр) татна
     data, err = await fetch_stored_picture(
         device.ip_address, event_time,
+        creds=camera_credentials(device),
         tz_offset_hours=cfg.camera_tz_offset_hours,
         window_seconds=cfg.snapshot_search_window_seconds)
     if not data:

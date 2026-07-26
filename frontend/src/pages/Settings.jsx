@@ -434,6 +434,47 @@ function Sites() {
                 дүнгээр өр үүсгэнэ. Хоосон = 72ц, 0 = унтраах.
               </div>
             </Field>
+
+            <details className="rounded-lg border border-slate-700 px-3 py-2"
+              open={!!(editing.qpay_username || editing.qpay_password_set)}>
+              <summary className="cursor-pointer text-sm font-medium py-1">
+                Төлбөрийн данс (QPay) — энэ зогсоолынх
+                <span className="ml-2 text-xs text-slate-400">
+                  {editing.qpay_username || editing.qpay_password_set
+                    ? '· өөрийн данстай' : '· системийн ерөнхий данс'}
+                </span>
+              </summary>
+              <div className="text-xs text-slate-400 my-2">
+                Түрээслэгч байгууллага өөрийн QPay гэрээтэй бол энд бичнэ — төлбөр нь
+                ТЭДНИЙ данс руу орж, e-Barimt нь ТЭДНИЙ ТТД-ээр үүснэ. Хоосон
+                үлдээвэл системийн ерөнхий данс үйлчилнэ. Нэвтрэх нэр БОЛОН нууц
+                үг хоёулаа бөглөгдсөн үед л өөрийн данс идэвхжинэ.
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Нэвтрэх нэр (username)">
+                  <input className="input font-mono text-xs" autoComplete="off"
+                    value={editing.qpay_username || ''} placeholder="MONNIS_PROPERTIES"
+                    onChange={(e) => setEditing({ ...editing, qpay_username: e.target.value })} />
+                </Field>
+                <Field label="Нууц үг (password)">
+                  <input className="input font-mono text-xs" type="password" autoComplete="new-password"
+                    value={editing.qpay_password ?? ''}
+                    placeholder={editing.qpay_password_set ? '•••••• (хадгалагдсан)' : 'Ерөнхий данс'}
+                    onChange={(e) => setEditing({ ...editing, qpay_password: e.target.value })} />
+                </Field>
+                <Field label="Нэхэмжлэхийн код (invoice_code)">
+                  <input className="input font-mono text-xs" value={editing.qpay_invoice_code || ''}
+                    placeholder="MONNIS_PROPERTIES_INVOICE"
+                    onChange={(e) => setEditing({ ...editing, qpay_invoice_code: e.target.value })} />
+                </Field>
+                <Field label="НӨАТ-ын дүүрэг+хороо (4 орон)">
+                  <input className="input font-mono text-xs" value={editing.qpay_district_code || ''}
+                    placeholder="2318 = Хан-Уул 18-р хороо"
+                    onChange={(e) => setEditing({ ...editing, qpay_district_code: e.target.value })} />
+                </Field>
+              </div>
+            </details>
+
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>
         )}
@@ -733,6 +774,24 @@ function Devices() {
                   <option value="both">Хоёулаа</option>
                 </select>
               </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Нэвтрэх нэр">
+                <input className="input font-mono" value={editing.username || ''} placeholder="admin"
+                  autoComplete="off"
+                  onChange={(e) => setEditing({ ...editing, username: e.target.value })} />
+              </Field>
+              <Field label="Нууц үг">
+                <input className="input font-mono" type="password" autoComplete="new-password"
+                  value={editing.password ?? ''}
+                  placeholder={editing.password_set ? '•••••• (хадгалагдсан)' : 'Ерөнхий тохиргоог ашиглана'}
+                  onChange={(e) => setEditing({ ...editing, password: e.target.value })} />
+              </Field>
+            </div>
+            <div className="text-xs text-slate-400 -mt-1">
+              Энэ төхөөрөмжийн ӨӨРИЙН нэвтрэлт. Хоосон үлдээвэл системийн ерөнхий
+              тохиргоо (.env) үйлчилнэ. Зогсоол бүрийн камер өөр нууц үгтэй бол энд бичнэ.
+              {editing.password_set && ' Нууц үгийг хоосон болгож хадгалвал устана.'}
             </div>
             {editing.device_type === 'camera' && editing.lane_dir === 'entry' && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">

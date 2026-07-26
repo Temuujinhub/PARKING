@@ -27,48 +27,124 @@ import base64
 import math
 import random
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
 
 from ..config import settings
 
-# Токены cache (access + refresh)
-_token = {"access": None, "refresh": None, "access_exp": datetime.min}
+
+@dataclass(frozen=True)
+class QpayAccount:
+    """Нэг QPay мерчант данс. Зогсоол бүр өөрийн гэрээтэй байж болно — төлбөр нь
+    тухайн түрээслэгчийн данс руу орж, e-Barimt нь тэдний ТТД-ээр үүснэ."""
+    username: str
+    password: str
+    invoice_code: str
+    branch_code: str
+    district_code: str
+    tax_type: str
+    classification_code: str
+    base_url: str
+    mock: bool
+
+    @property
+    def cache_key(self) -> tuple[str, str]:
+        return (self.base_url, self.username)
 
 
-async def _auth_basic() -> dict:
+def global_account() -> QpayAccount:
+    """.env-ийн глобал QPay данс (өөрийн данс тохируулаагүй зогсоолуудад)."""
+    return QpayAccount(
+        username=settings.qpay_username,
+        password=settings.qpay_password,
+        invoice_code=settings.qpay_invoice_code,
+        branch_code=settings.qpay_branch_code,
+        district_code=settings.qpay_district_code,
+        tax_type=settings.qpay_tax_type,
+        classification_code=settings.qpay_classification_code,
+        base_url=settings.qpay_base_url,
+        mock=settings.qpay_mock,
+    )
+
+
+def account_for(site) -> QpayAccount:
+    """Зогсоолын QPay данс. Зогсоолд өөрийн username/password тохируулсан бол
+    ТҮҮГЭЭР, эс бол глобал .env-ийн данснаас. Талбар тус бүр тусад нь уналт
+    хийдэг тул зөвхөн дүүргийн кодоо өөрчлөх гэх мэт хэсэгчилсэн тохиргоо бас болно.
+
+    ЧУХАЛ: өөрийн данстай зогсоолд mock=False — глобал mock=true байсан ч
+    бодит гэрээтэй түрээслэгчийн төлбөрийг хуурамчаар боловсруулахгүй."""
+    g = global_account()
+    if site is None:
+        return g
+    user = (getattr(site, "qpay_username", None) or "").strip()
+    pwd = (getattr(site, "qpay_password", None) or "").strip()
+    if not (user and pwd):
+        # Хэсэгчилсэн тохиргоо (зөвхөн дүүрэг/салбар) — данс нь глобал хэвээр
+        return QpayAccount(
+            username=g.username, password=g.password,
+            invoice_code=(getattr(site, "qpay_invoice_code", None) or g.invoice_code),
+            branch_code=(getattr(site, "qpay_branch_code", None) or g.branch_code),
+            district_code=(getattr(site, "qpay_district_code", None) or g.district_code),
+            tax_type=g.tax_type, classification_code=g.classification_code,
+            base_url=g.base_url, mock=g.mock,
+        )
+    return QpayAccount(
+        username=user, password=pwd,
+        invoice_code=(getattr(site, "qpay_invoice_code", None) or g.invoice_code),
+        branch_code=(getattr(site, "qpay_branch_code", None) or g.branch_code),
+        district_code=(getattr(site, "qpay_district_code", None) or g.district_code),
+        tax_type=g.tax_type, classification_code=g.classification_code,
+        base_url=g.base_url, mock=False,
+    )
+
+
+# Токены cache — мерчант данс бүрд ТУСДАА (нэг процесст олон гэрээ зэрэг ажиллана).
+# QPay-ийн заавар: токеныг хугацаанд нь нэг л удаа авч, дуусах хүртэл дахин ашиглана.
+_tokens: dict[tuple[str, str], dict] = {}
+
+
+def _cache(acc: QpayAccount) -> dict:
+    return _tokens.setdefault(acc.cache_key,
+                              {"access": None, "refresh": None, "access_exp": datetime.min})
+
+
+async def _auth_basic(acc: QpayAccount) -> dict:
     """POST /v2/auth/token — client_id:client_secret Basic auth."""
-    basic = base64.b64encode(f"{settings.qpay_username}:{settings.qpay_password}".encode()).decode()
+    basic = base64.b64encode(f"{acc.username}:{acc.password}".encode()).decode()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(f"{settings.qpay_base_url}/auth/token",
+        resp = await client.post(f"{acc.base_url}/auth/token",
                                  headers={"Authorization": f"Basic {basic}"})
         resp.raise_for_status()
         return resp.json()
 
 
-async def _auth_refresh() -> dict:
+async def _auth_refresh(acc: QpayAccount) -> dict:
     """POST /v2/auth/refresh — Bearer refresh_token."""
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(f"{settings.qpay_base_url}/auth/refresh",
-                                 headers={"Authorization": f"Bearer {_token['refresh']}"})
+        resp = await client.post(f"{acc.base_url}/auth/refresh",
+                                 headers={"Authorization": f"Bearer {_cache(acc)['refresh']}"})
         resp.raise_for_status()
         return resp.json()
 
 
-async def _get_token() -> str:
+async def _get_token(acc: QpayAccount | None = None) -> str:
     """Хүчинтэй access_token буцаана. Дуусах дөхсөн бол refresh, боломжгүй бол дахин auth."""
+    acc = acc or global_account()
+    tok = _cache(acc)
     now = datetime.utcnow()
-    if _token["access"] and _token["access_exp"] > now:
-        return _token["access"]
+    if tok["access"] and tok["access_exp"] > now:
+        return tok["access"]
     try:
-        data = await _auth_refresh() if _token["refresh"] else await _auth_basic()
+        data = await _auth_refresh(acc) if tok["refresh"] else await _auth_basic(acc)
     except Exception:
-        data = await _auth_basic()  # refresh амжилтгүй бол шинээр
-    _token["access"] = data["access_token"]
-    _token["refresh"] = data.get("refresh_token", _token["refresh"])
-    _token["access_exp"] = now + timedelta(seconds=int(data.get("expires_in", 3600)) - 60)
-    return _token["access"]
+        data = await _auth_basic(acc)  # refresh амжилтгүй бол шинээр
+    tok["access"] = data["access_token"]
+    tok["refresh"] = data.get("refresh_token", tok["refresh"])
+    tok["access_exp"] = now + timedelta(seconds=int(data.get("expires_in", 3600)) - 60)
+    return tok["access"]
 
 
 def _vat_of(price: float) -> float:
@@ -78,15 +154,16 @@ def _vat_of(price: float) -> float:
     return math.floor(price * r / (1 + r) * 10000) / 10000
 
 
-def build_lines(items: list[dict]) -> list[dict]:
+def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]:
     """e-Barimt нэхэмжлэхийн lines-ийг бүтээгдэхүүн бүрээр байгуулна.
 
     items: [{"description", "unit_price", "quantity"(=1), "classification_code"(optional),
              "barcode"(optional), "note"(optional)}]
     tax_type=1 (НӨАТ тооцогдох) үед мөр бүрт VAT taxes нэмнэ. 2/3 үед VAT тооцохгүй.
     """
+    acc = acc or global_account()
     lines = []
-    vat_able = settings.qpay_tax_type == "1"
+    vat_able = acc.tax_type == "1"
     for it in items:
         price = round(float(it["unit_price"]), 2)
         qty = float(it.get("quantity", 1) or 1)
@@ -96,7 +173,7 @@ def build_lines(items: list[dict]) -> list[dict]:
             "line_quantity": f"{qty:.2f}",
             "line_unit_price": f"{price:.2f}",
             "note": it.get("note", ""),
-            "classification_code": it.get("classification_code") or settings.qpay_classification_code,
+            "classification_code": it.get("classification_code") or acc.classification_code,
         }
         if it.get("barcode"):
             line["barcode"] = str(it["barcode"])
@@ -128,31 +205,33 @@ def pick_qpay_deeplink(urls: list[dict]) -> str:
 
 async def create_invoice(sender_invoice_no: str, description: str, receiver_code: str,
                          callback_url: str, lines: list[dict],
-                         receiver_data: dict | None = None) -> dict:
+                         receiver_data: dict | None = None,
+                         acc: QpayAccount | None = None) -> dict:
     """POST /v2/invoice — e-Barimt-тэй нэхэмжлэл үүсгэнэ (lines бүтээгдэхүүн бүрээр задлагдсан).
 
     Буцаах: invoice_id, qr_text, qr_image (base64 PNG), deep_link, urls (банкны жагсаалт)."""
-    if settings.qpay_mock:
+    acc = acc or global_account()
+    if acc.mock:
         mock_id = f"MOCK-INV-{uuid.uuid4().hex[:10].upper()}"
         return {"invoice_id": mock_id, "qr_text": f"https://qpay.mn/q/MOCK/{mock_id}",
                 "qr_image": "", "deep_link": f"qpay://q?invoice={mock_id}", "urls": [], "mock": True}
 
-    token = await _get_token()
+    token = await _get_token(acc)
     payload = {
-        "invoice_code": settings.qpay_invoice_code,
+        "invoice_code": acc.invoice_code,
         "sender_invoice_no": sender_invoice_no,
         "invoice_receiver_code": receiver_code or "terminal",
-        "sender_branch_code": settings.qpay_branch_code,
+        "sender_branch_code": acc.branch_code,
         "invoice_description": description,
-        "tax_type": settings.qpay_tax_type,
-        "district_code": settings.qpay_district_code,
+        "tax_type": acc.tax_type,
+        "district_code": acc.district_code,
         "callback_url": callback_url,
         "lines": lines,
     }
     if receiver_data:
         payload["invoice_receiver_data"] = receiver_data
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(f"{settings.qpay_base_url}/invoice",
+        resp = await client.post(f"{acc.base_url}/invoice",
                                  json=payload, headers={"Authorization": f"Bearer {token}"})
         resp.raise_for_status()
         data = resp.json()
@@ -169,15 +248,16 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
     }
 
 
-async def check_payment(invoice_id: str) -> dict:
+async def check_payment(invoice_id: str, acc: QpayAccount | None = None) -> dict:
     """POST /v2/payment/check — invoice-ийн төлбөр төлөгдсөн эсэх (webhook ирээгүй үед polling).
     Хариу: paid, paid_amount, count, rows, payment_id (эхний төлбөрийн g_payment_id — ebarimt-д)."""
-    if settings.qpay_mock:
+    acc = acc or global_account()
+    if acc.mock:
         return {"paid": False, "mock": True}
-    token = await _get_token()
+    token = await _get_token(acc)
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            f"{settings.qpay_base_url}/payment/check",
+            f"{acc.base_url}/payment/check",
             json={"object_type": "INVOICE", "object_id": invoice_id,
                   "offset": {"page_number": 1, "page_limit": 100}},
             headers={"Authorization": f"Bearer {token}"},
@@ -202,7 +282,8 @@ async def check_payment(invoice_id: str) -> dict:
 
 async def create_ebarimt(payment_id: str, receiver_type: str = "CITIZEN",
                          receiver: str | None = None,
-                         district_code: str | None = None) -> dict:
+                         district_code: str | None = None,
+                         acc: QpayAccount | None = None) -> dict:
     """POST /v2/ebarimt_v3/create — төлөгдсөн төлбөр дээр e-Barimt баримт үүсгэнэ.
 
     payment_id: QPay-ийн g_payment_id (payment/check-ээс ирсэн).
@@ -210,40 +291,43 @@ async def create_ebarimt(payment_id: str, receiver_type: str = "CITIZEN",
     receiver: CITIZEN үед ebarimt апп-д бүртгэлтэй утас (сонголт); COMPANY үед ААН регистр.
 
     Буцаах (стандартчилсан): {status, billId(=ebarimt_receipt_id), id, lottery, qrData, date, raw}."""
-    if settings.qpay_mock:
+    acc = acc or global_account()
+    if acc.mock:
         return _mock_ebarimt()
 
-    token = await _get_token()
+    token = await _get_token(acc)
     payload = {"payment_id": payment_id, "ebarimt_receiver_type": receiver_type}
     if receiver:
         payload["ebarimt_receiver"] = receiver
-    payload["district_code"] = district_code or settings.qpay_district_code
+    payload["district_code"] = district_code or acc.district_code
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(f"{settings.qpay_base_url}/ebarimt_v3/create",
+        resp = await client.post(f"{acc.base_url}/ebarimt_v3/create",
                                  json=payload, headers={"Authorization": f"Bearer {token}"})
         resp.raise_for_status()
         data = resp.json()
     return _normalize_ebarimt(data)
 
 
-async def cancel_ebarimt(ebarimt_id: str) -> bool:
+async def cancel_ebarimt(ebarimt_id: str, acc: QpayAccount | None = None) -> bool:
     """DELETE /v2/ebarimt_v3/{id} — e-Barimt цуцлах."""
-    if settings.qpay_mock:
+    acc = acc or global_account()
+    if acc.mock:
         return True
-    token = await _get_token()
+    token = await _get_token(acc)
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.delete(f"{settings.qpay_base_url}/ebarimt_v3/{ebarimt_id}",
+        resp = await client.delete(f"{acc.base_url}/ebarimt_v3/{ebarimt_id}",
                                    headers={"Authorization": f"Bearer {token}"})
     return resp.status_code in (200, 204)
 
 
-async def cancel_payment(payment_id: str) -> bool:
+async def cancel_payment(payment_id: str, acc: QpayAccount | None = None) -> bool:
     """DELETE /v2/payment/cancel/{id} — картын гүйлгээ цуцлах."""
-    if settings.qpay_mock:
+    acc = acc or global_account()
+    if acc.mock:
         return True
-    token = await _get_token()
+    token = await _get_token(acc)
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.delete(f"{settings.qpay_base_url}/payment/cancel/{payment_id}",
+        resp = await client.delete(f"{acc.base_url}/payment/cancel/{payment_id}",
                                    headers={"Authorization": f"Bearer {token}"})
     return resp.status_code in (200, 204)
 

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from ..config import settings
+from .device_auth import camera_credentials
 from ..database import SessionLocal
 from ..models import Device, ParkingSession
 from .barrier import DahuaRpc
@@ -132,13 +133,13 @@ class AttachRejected(RuntimeError):
     холболт дээр туршина (нэг холболтод эхний алдааны дараа камер дүлийрдэг)."""
 
 
-async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False):
+async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
+                      creds: tuple[str, str] | None = None):
     """Нэг WS холболтын амьдрал: login → detach(хуучин) → attach → notification.
     on_picture(plate, jpeg_bytes) — plate-тай бүрэн jpeg бүрд дуудагдана."""
     import websockets
 
-    username = settings.camera_username
-    password = settings.camera_password
+    username, password = creds or camera_credentials(None)
     async with httpx.AsyncClient(timeout=15) as hc:
         rpc = DahuaRpc(hc, ip, username, password)
         await rpc.login()
@@ -261,7 +262,8 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False):
             await rpc.logout()
 
 
-async def _pull_one(device_id: str, ip: str, lane_dir: str):
+async def _pull_one(device_id: str, ip: str, lane_dir: str,
+                    creds: tuple[str, str] | None = None):
     """Нэг камерын зургийн WS сувгийг тасралтгүй барина (reconnect-тэй).
     Event бүрд хэд хэдэн зураг (бүтэн кадр + тайрмал) ирдэг — 2.5с цонхонд
     дугаар тус бүрийн ХАМГИЙН ТОМЫГ нь session-д холбоно."""
@@ -284,7 +286,7 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str):
     while True:
         flt = ATTACH_FILTERS[vi % len(ATTACH_FILTERS)]
         try:
-            await _ws_session(ip, on_picture, flt)
+            await _ws_session(ip, on_picture, flt, creds=creds)
         except AttachRejected as e:
             print(f"[snap_pull] {ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
                   f"дараагийн хувилбар 10с дараа")
@@ -315,7 +317,8 @@ async def supervisor():
                 active.add(c.id)
                 if c.id not in _tasks or _tasks[c.id].done():
                     _tasks[c.id] = asyncio.create_task(
-                        _pull_one(c.id, c.ip_address, c.lane_dir or "entry"))
+                        _pull_one(c.id, c.ip_address, c.lane_dir or "entry",
+                                  camera_credentials(c)))
                     print(f"[snap_pull] {c.name} ({c.ip_address}) зургийн стрим эхэллээ")
             for did in list(_tasks):
                 if did not in active:
@@ -484,6 +487,7 @@ async def _find_via_media(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
 
 
 async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
+                               creds: tuple[str, str] | None = None,
                                tz_offset_hours: int = 8,
                                window_seconds: int = 180) -> tuple[bytes | None, str]:
     """event-ийн зургийг камераас ОЛОН АРГААР дараалан нөхөж татна.
@@ -507,7 +511,7 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
     if settings.snapshot_stored_find:
       try:
         async with httpx.AsyncClient(timeout=25) as client:
-            rpc = DahuaRpc(client, ip, settings.camera_username, settings.camera_password)
+            rpc = DahuaRpc(client, ip, *(creds or camera_credentials(None)))
             await rpc.login()
             try:
                 for w in windows:
@@ -534,7 +538,7 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
     # Амьд кадр — snapshot.cgi (энэ firmware дээр цорын ганц ажилладаг зургийн эх сурвалж)
     try:
         from .snapshot import _fetch_from_camera
-        live = await _fetch_from_camera(ip)
+        live = await _fetch_from_camera(ip, creds)
         if live:
             print(f"[snap_pull] {ip}: нөхөн таталт — амьд кадраар нөхөв ({len(live)}b)")
             return live, ""

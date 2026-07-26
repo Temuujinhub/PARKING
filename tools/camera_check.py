@@ -40,16 +40,39 @@ def tcp_open(ip: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-def check(ip: str) -> bool:
+def _device_for(ip: str):
+    """Энэ IP-тэй бүртгэлтэй төхөөрөмж (өөрийн нэвтрэлттэй бол түүгээр шалгана)."""
+    try:
+        from app.database import SessionLocal
+        from app.models import Device
+        db = SessionLocal()
+        try:
+            return db.query(Device).filter(Device.ip_address == ip,
+                                           Device.status == "active").first()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — DB байхгүй ч IP-гээр шалгах боломжтой хэвээр
+        return None
+
+
+def check(ip: str) -> str:
+    """Буцаах: 'ok' | 'auth' (сүлжээгээр хүрч байгаа ч нэвтрэлт буруу) | 'net'"""
     print(f"\n═══ {ip} ═══")
-    auth = httpx.DigestAuth(settings.camera_username, settings.camera_password)
+    from app.services.device_auth import barrier_credentials, camera_credentials
+    device = _device_for(ip)
+    cam_user, cam_pass = camera_credentials(device)
+    if device is not None and (device.username or device.password):
+        print(f"  · {device.name}-ийн ӨӨРИЙН нэвтрэлтээр шалгаж байна ({cam_user})")
+    else:
+        print(f"  · системийн ерөнхий нэвтрэлтээр шалгаж байна ({cam_user})")
+    auth = httpx.DigestAuth(cam_user, cam_pass)
 
     if not tcp_open(ip, 80):
         print(f"{BAD} TCP 80 хаалттай — сервер энэ IP руу хүрэхгүй байна.")
         print("      Шалгах: камер тэжээлтэй/сүлжээнд холбогдсон эсэх;")
         print(f"      серверээс маршрут байгаа эсэх (ip route get {ip});")
         print("      завсрын firewall/VLAN энэ дэд сүлжээг нэвтрүүлж байгаа эсэх.")
-        return False
+        return "net"
     print(f"{OK} TCP 80 нээлттэй")
 
     try:
@@ -57,15 +80,18 @@ def check(ip: str) -> bool:
                       auth=auth, timeout=6)
     except Exception as e:  # noqa: BLE001
         print(f"{BAD} HTTP хүсэлт амжилтгүй: {e}")
-        return False
+        return "net"
 
     if r.status_code == 401:
         print(f"{BAD} Нэвтрэлт амжилтгүй (401) — хэрэглэгч/нууц үг буруу.")
-        print(f"      Одоо ашиглаж буй: {settings.camera_username} / "
-              f"{'(хоосон)' if not settings.camera_password else '***'}")
-        print("      Засах: /root/PARKING/backend/.env → PARKING_CAMERA_USERNAME / "
-              "PARKING_CAMERA_PASSWORD, дараа нь backend restart.")
-        return False
+        print(f"      Туршсан: {cam_user} / {'(хоосон)' if not cam_pass else '***'}")
+        print("      Сүлжээ ХЭВИЙН — зөвхөн нэвтрэлт таарахгүй байна. Засах 2 арга:")
+        print("      1) Энэ камер өөр нууц үгтэй бол: UI → Тохиргоо → Төхөөрөмж →")
+        print("         тухайн камерыг засаад 'Нэвтрэх нэр/Нууц үг' талбарт бичнэ")
+        print("         (зогсоол бүр өөр нууц үгтэй байж болно).")
+        print("      2) Бүх камер ижил шинэ нууц үгтэй бол: backend/.env →")
+        print("         PARKING_CAMERA_USERNAME / PARKING_CAMERA_PASSWORD + restart.")
+        return "auth"
     if r.status_code != 200:
         print(f"{WARN} magicBox.cgi HTTP {r.status_code} — Dahua биш эсвэл өөр firmware байж болно")
     else:
@@ -73,11 +99,12 @@ def check(ip: str) -> bool:
         print(f"{OK} Нэвтрэлт зөв · загвар: {model}")
 
     # RPC2 — хаалт удирдах гол суваг (barrier.py-тай ЯГ ижил нэвтрэлт/нууц үг)
+    bar_user, bar_pass = barrier_credentials(device)
+
     async def _rpc_login():
         from app.services.barrier import DahuaRpc
-        password = settings.barrier_password or settings.camera_password
         async with httpx.AsyncClient(timeout=8) as client:
-            rpc = DahuaRpc(client, ip, settings.camera_username, password)
+            rpc = DahuaRpc(client, ip, bar_user, bar_pass)
             await rpc.login()
             return rpc.session_id
 
@@ -90,8 +117,8 @@ def check(ip: str) -> bool:
             print(f"{BAD} RPC2 нэвтрэлт session өгсөнгүй — хаалт нээх команд ажиллахгүй")
     except Exception as e:  # noqa: BLE001
         print(f"{BAD} RPC2 нэвтрэлт амжилтгүй ({type(e).__name__}: {e})")
-        print("      → хаалт нээх команд ажиллахгүй. Нууц үг (.env PARKING_BARRIER_PASSWORD "
-              "эсвэл PARKING_CAMERA_PASSWORD) болон камерын RPC2 эрхийг шалгана уу.")
+        print(f"      → хаалт нээх команд ажиллахгүй. Туршсан: {bar_user}. "
+              "Нууц үг болон камерын RPC2 эрхийг шалгана уу.")
 
     # Snapshot — session-ий зураг
     try:
@@ -104,7 +131,7 @@ def check(ip: str) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"{WARN} snapshot.cgi: {e}")
 
-    return True
+    return "ok"
 
 
 def main() -> int:
@@ -134,10 +161,21 @@ def main() -> int:
 
     results = {ip: check(ip) for ip in ips}
 
+    LABEL = {
+        "ok": "БҮРЭН БЭЛЭН",
+        "auth": "сүлжээ хэвийн · НЭВТРЭЛТ БУРУУ",
+        "net": "СҮЛЖЭЭГЭЭР ХҮРЭХГҮЙ",
+    }
     print("\n═══ ДҮГНЭЛТ ═══")
-    for ip, ok in results.items():
-        print(f"  {ip:16} {'ХҮРЧ БАЙНА' if ok else 'ХҮРЭХГҮЙ'}")
-    return 0 if all(results.values()) else 1
+    for ip, r in results.items():
+        print(f"  {ip:16} {LABEL[r]}")
+    if any(r == "auth" for r in results.values()):
+        print("\n  → Нэвтрэлт буруу камеруудад нууц үгийг нь UI-аас (Тохиргоо →")
+        print("    Төхөөрөмж) камер тус бүрд оруулна уу.")
+    if any(r == "net" for r in results.values()):
+        print("\n  → Хүрэхгүй байгаа IP-ууд нь сүлжээний асуудал (маршрут/VLAN/")
+        print("    firewall эсвэл камер асаагүй). Нууц үгтэй хамаагүй.")
+    return 0 if all(r == "ok" for r in results.values()) else 1
 
 
 if __name__ == "__main__":

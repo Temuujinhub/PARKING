@@ -51,6 +51,17 @@ class ParkingSite(Base):
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
     # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
     qr_url = Column(Text, nullable=True)
+
+    # ─── Зогсоолын ӨӨРИЙН QPay мерчант данс (заавал биш) ───
+    # Түрээслэгч байгууллага бүр өөрийн QPay гэрээтэй байж болно: төлбөр нь
+    # тэдний данс руу орж, e-Barimt нь тэдний ТТД-ээр үүснэ. Хоосон талбарууд
+    # нь .env-ийн глобал тохиргоо руу уналт хийнэ (config.qpay_*).
+    qpay_username = Column(String(80), nullable=True)      # client_id
+    qpay_password = Column(String(160), nullable=True)     # client_secret — API-аар БУЦААХГҮЙ
+    qpay_invoice_code = Column(String(80), nullable=True)
+    qpay_branch_code = Column(String(40), nullable=True)
+    # НӨАТ-ын дүүрэг+хороо (4 орон, ж: 2318 = Хан-Уул 18-р хороо)
+    qpay_district_code = Column(String(10), nullable=True)
     tariff_template_id = Column(UUID(as_uuid=False), ForeignKey("tariff_templates.id"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -71,6 +82,11 @@ class Device(Base):
     lane_dir = Column(String(10), default="entry")  # entry, exit, both
     auto_open = Column(Boolean, nullable=False, default=True)  # entry lane: дугаар уншмагц автоматаар нээх
     status = Column(String(30), nullable=False, default="active")
+    # Төхөөрөмжийн ӨӨРИЙН нэвтрэх мэдээлэл (заавал биш). Хоосон бол .env-ийн
+    # глобал camera_username/password руу уналт хийнэ — зогсоол бүр өөр нууц
+    # үгтэй камертай байж болох тул. password нь API-аар БУЦААГДАХГҮЙ.
+    username = Column(String(60), nullable=True)
+    password = Column(String(160), nullable=True)
     device_key = Column(String(80), unique=True, nullable=True)  # LPR callback-д төхөөрөмж таних түлхүүр
     extra = Column(JSON, nullable=False, default=dict)
     last_seen = Column(DateTime, nullable=True)

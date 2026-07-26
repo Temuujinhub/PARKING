@@ -60,7 +60,8 @@ def list_devices(db) -> int:
     return 0
 
 
-def upsert_camera(db, site: ParkingSite, lane_dir: str, ip: str) -> Device:
+def upsert_camera(db, site: ParkingSite, lane_dir: str, ip: str,
+                  username: str | None = None, password: str | None = None) -> Device:
     lane_no = 1 if lane_dir == "entry" else 2
     name = "Орох камер" if lane_dir == "entry" else "Гарах камер"
 
@@ -80,7 +81,15 @@ def upsert_camera(db, site: ParkingSite, lane_dir: str, ip: str) -> Device:
         db.add(cam)
         print(f"  '{site.site_code}' {lane_dir}: шинэ камер бүртгэв (IP {ip}, эгнээ {lane_no})")
 
-    model = fetch_camera_model(ip)
+    if username is not None:
+        cam.username = username.strip() or None
+    if password is not None:
+        cam.password = password.strip() or None
+    if cam.username or cam.password:
+        print(f"      нэвтрэлт: {cam.username or '(ерөнхий нэр)'} / "
+              f"{'***' if cam.password else '(ерөнхий нууц үг)'}")
+
+    model = fetch_camera_model(ip, cam)
     if model:
         cam.model = model
         print(f"      загвар камераас уншсан: {model}")
@@ -96,6 +105,10 @@ def main() -> int:
     p.add_argument("--site", help="Зогсоолын код (жишээ: KH, SPORT)")
     p.add_argument("--entry", help="Орох камерын IP")
     p.add_argument("--exit", dest="exit_ip", help="Гарах камерын IP")
+    p.add_argument("--username", default=None,
+                   help="Энэ зогсоолын камеруудын нэвтрэх нэр (хоосон = ерөнхий тохиргоо)")
+    p.add_argument("--password", default=None,
+                   help="Энэ зогсоолын камеруудын нууц үг (хоосон = ерөнхий тохиргоо)")
     args = p.parse_args()
 
     db = SessionLocal()
@@ -108,9 +121,9 @@ def main() -> int:
         site = find_site(db, args.site)
         print(f"\nЗогсоол: {site.name} ({site.site_code})")
         if args.entry:
-            upsert_camera(db, site, "entry", args.entry.strip())
+            upsert_camera(db, site, "entry", args.entry.strip(), args.username, args.password)
         if args.exit_ip:
-            upsert_camera(db, site, "exit", args.exit_ip.strip())
+            upsert_camera(db, site, "exit", args.exit_ip.strip(), args.username, args.password)
 
         db.flush()
         # Камер бүрд ижил эгнээний хаалт байгааг баталгаажуулна (байхгүй бол үүсгэнэ)

@@ -15,12 +15,21 @@ def site_pay_url(site) -> str:
     return getattr(site, "qr_url", None) or f"{settings.public_base_url}/pay?site={site.site_code}"
 
 
+# API-аар ХЭЗЭЭ Ч буцаахгүй багана (нууц үг/түлхүүр). Оронд нь <нэр>_set: bool өгнө.
+SECRET_COLUMNS = frozenset({"password_hash", "password", "qpay_password"})
+
+
 def to_dict(obj, *, exclude: set[str] = frozenset(), extra: dict | None = None) -> dict:
     if obj is None:
         return None
     out = {}
     for col in obj.__table__.columns:
-        if col.name in exclude or col.name == "password_hash":
+        if col.name in SECRET_COLUMNS:
+            # Тохируулсан эсэхийг л мэдэгдэнэ — утгыг нь биш
+            if col.name != "password_hash":
+                out[f"{col.name}_set"] = bool(getattr(obj, col.name))
+            continue
+        if col.name in exclude:
             continue
         val = getattr(obj, col.name)
         if isinstance(val, datetime):

@@ -61,7 +61,8 @@ async def screen_display(device_id: str, body: dict, db: Session = Depends(get_d
     """LED дэлгэц тест — камерын дэлгэцэнд текст харуулна.
     body: {text, voice?} — voice=true үед дуут зарлал давхар явуулна.
     Камер эсвэл хаалт төхөөрөмжийн аль алиныг зааж болно (IP-г ижил дүрмээр олно)."""
-    from ..services.barrier import _resolve_ip, display_on_screen
+    from ..services.barrier import _resolve_device, display_on_screen
+    from ..services.device_auth import barrier_credentials
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
@@ -69,10 +70,11 @@ async def screen_display(device_id: str, body: dict, db: Session = Depends(get_d
     text = str(body.get("text") or "").strip()
     if not text or len(text) > 64:
         raise HTTPException(400, "text талбар шаардлагатай (1-64 тэмдэгт)")
-    ip = _resolve_ip(db, device)
+    ip, target = _resolve_device(db, device)
     if not ip:
         raise HTTPException(400, "Төхөөрөмжид IP бүртгэлгүй байна")
-    err = await display_on_screen(ip, text, text if body.get("voice") else None)
+    err = await display_on_screen(ip, text, text if body.get("voice") else None,
+                            creds=barrier_credentials(target))
     db.add(AuditLog(username=user.username, action="SCREEN_DISPLAY", entity="device",
                     entity_id=device_id, detail={"text": text, "error": err or None}))
     db.commit()

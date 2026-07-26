@@ -103,7 +103,7 @@ async def run():
     settings.qpay_password = "test-secret"  # MockTransport тул жинхэнэ нууц үг шаардлагагүй
     settings.qpay_invoice_code = "EB_EASY_2PARKING_INVOICE"
     qpay.httpx.AsyncClient = _MockClient
-    qpay._token.update({"access": None, "refresh": None})
+    qpay._tokens.clear()
 
     inv = await qpay.create_invoice(
         "SITE01-20260709-ABCD1234", "Зогсоолын төлбөр — 1234УБА", "terminal_SITE01",

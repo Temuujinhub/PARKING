@@ -25,6 +25,13 @@ def secrets_compare(a: str, b: str) -> bool:
     return hmac.compare_digest((a or "").encode(), (b or "").encode())
 
 
+def _site_of(payment: Payment):
+    """Төлбөрийн зогсоол — QPay данс/e-Barimt-ыг тухайн түрээслэгчээр сонгоход.
+    Session-гүй төлбөр практикт үүсдэггүй; тэр тохиолдолд глобал данс үйлчилнэ."""
+    sess = getattr(payment, "session", None)
+    return getattr(sess, "site", None) if sess is not None else None
+
+
 def _invoice_no(session: ParkingSession) -> str:
     """QPay/санхүүд харагдах гүйлгээний дугаар — машины дугаарыг шингээнэ
     (банкны хуулга, QPay порталтай тулгахад дугаараар олоход амар)."""
@@ -70,6 +77,8 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
                 payment.provider_payment_id, receiver_type,
                 # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
                 receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+                # Зогсоолын өөрийн QPay данс — баримт нь тухайн түрээслэгчийн ТТД-ээр үүснэ
+                acc=qpay.account_for(_site_of(payment)),
             )
         else:
             receipt_raw = await ebarimt.create_receipt(
@@ -143,7 +152,8 @@ async def _confirm_qpay(db: Session, payment: Payment) -> bool:
             payment.provider_payment_id = f"MOCK-PAY-{uuid.uuid4().hex[:12]}"
         await _finalize_paid(db, payment)
         return True
-    res = await qpay.check_payment(payment.provider_invoice_id)
+    res = await qpay.check_payment(payment.provider_invoice_id,
+                                   acc=qpay.account_for(_site_of(payment)))
     if not res.get("paid"):
         return False
     if abs(float(res.get("paid_amount") or 0) - float(payment.amount)) > 1:
@@ -293,12 +303,13 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
             "description": f"Өмнөх өр ({comp.created_at:%Y-%m-%d}) — {comp.plate_number}",
             "unit_price": float(comp.amount), "quantity": 1,
         })
-    lines = qpay.build_lines(line_items)
+    acc = qpay.account_for(session.site)
+    lines = qpay.build_lines(line_items, acc)
     inv = await qpay.create_invoice(
         payment.sender_invoice_no,
         f"Зогсоолын төлбөр — {session.plate_number}",
         f"terminal_{session.site.site_code if session.site else 'X'}", callback,
-        lines, receiver_data=receiver_data,
+        lines, receiver_data=receiver_data, acc=acc,
     )
     payment.provider_invoice_id = inv["invoice_id"]
     payment.qr_text = inv["qr_text"]

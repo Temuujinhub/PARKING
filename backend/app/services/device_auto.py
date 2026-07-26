@@ -15,16 +15,17 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Device
+from .device_auth import camera_credentials
 
 
-def fetch_camera_model(ip: str) -> str | None:
+def fetch_camera_model(ip: str, device=None) -> str | None:
     """Dahua камерын загварыг өөрөөс нь асууна: /cgi-bin/magicBox.cgi?action=getDeviceType
     → "type=IPMECS-2234-IZ". Хүрэхгүй/өөр брэнд бол None (алдаа шидэхгүй)."""
     if not ip:
         return None
     try:
         r = httpx.get(f"http://{ip}/cgi-bin/magicBox.cgi?action=getDeviceType",
-                      auth=httpx.DigestAuth(settings.camera_username, settings.camera_password),
+                      auth=httpx.DigestAuth(*camera_credentials(device)),
                       timeout=4)
         if r.status_code == 200 and "type=" in r.text:
             return r.text.split("type=", 1)[1].strip().splitlines()[0][:80] or None

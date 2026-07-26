@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from .billing import calculate_fee
 from .config import settings
+from .services.device_auth import barrier_credentials, camera_credentials
 from .models import (
     AuditLog, BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite,
     Payment, RegisteredDriver,
@@ -294,7 +295,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                     lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
     db.commit()
     # Зургийг ард нь татаж хадгална (хаалт нээхийг хүлээлгэхгүй)
-    schedule_capture(session.id, device.ip_address, plate, "entry", raw)
+    schedule_capture(session.id, device.ip_address, plate, "entry", raw,
+                             camera_credentials(device))
 
     barrier_opened = False
     if black:
@@ -317,7 +319,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг хүлээлгэхгүй, ард нь.
     if not black:
         schedule_display(device.ip_address,
-                         render_screen_text(settings.screen_welcome_text, plate=plate))
+                         render_screen_text(settings.screen_welcome_text, plate=plate),
+                         barrier_credentials(device))
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
@@ -372,13 +375,15 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         await manager.broadcast(site_id, "EXIT_NO_SESSION",
                                 {"plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount})
         schedule_display(device.ip_address,
-                         render_screen_text(settings.screen_nosession_text, plate=plate))
+                         render_screen_text(settings.screen_nosession_text, plate=plate),
+                         barrier_credentials(device))
         return {"action": "no_session", "plate": plate}
 
     session.exit_device_id = device.id
     session.confidence_exit = confidence
     # Гарах зургийг ард нь татаж хадгална (маргаан/нотолгоонд — ялангуяа төлбөргүй гарсан үед)
-    schedule_capture(session.id, device.ip_address, plate, "exit", raw)
+    schedule_capture(session.id, device.ip_address, plate, "exit", raw,
+                             camera_credentials(device))
 
     fee = session_fee_info(db, session, at=now)
 
@@ -402,7 +407,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                             amount=due_now + debt_amount, plate=plate),
                          render_screen_text(settings.screen_fee_text,
                                             amount=due_now + debt_amount, plate=plate)
-                         if settings.screen_voice else None)
+                         if settings.screen_voice else None,
+                         barrier_credentials(device))
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
 
     # Төлчихсөн — grace хугацаа дотор гарч байна
@@ -443,7 +449,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     fee_text = render_screen_text(settings.screen_fee_text,
                                   amount=due + debt_amount, plate=plate)
     schedule_display(device.ip_address, fee_text,
-                     fee_text if settings.screen_voice else None)
+                     fee_text if settings.screen_voice else None,
+                         barrier_credentials(device))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
             "debt_amount": debt_amount}
@@ -474,7 +481,8 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
     # Дэлгэцэнд мэндчилгээ (төлбөр төлөгдсөн/үнэгүй — хаалт нээгдэж байна)
     schedule_display(exit_device.ip_address,
                      render_screen_text(settings.screen_bye_text,
-                                        plate=session.plate_number))
+                                        plate=session.plate_number),
+                         barrier_credentials(exit_device))
     return {"action": "exit_completed", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
