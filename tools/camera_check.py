@@ -107,6 +107,14 @@ def check(ip: str) -> str:
         print("      2) Бүх камер ижил шинэ нууц үгтэй бол: backend/.env →")
         print("         PARKING_CAMERA_USERNAME / PARKING_CAMERA_PASSWORD + restart.")
         return "auth"
+    if r.status_code == 403:
+        # Энэ firmware түгжигдсэн үед 401 биш 403 өгдөг нь батлагдсан (production).
+        print(f"{BAD} HTTP 403 — камер энэ IP-гээс ирэх хандалтыг ТҮР ХААСАН байна.")
+        print("      Dahua нь буруу нэвтрэлтийн дараа ЭХ ҮҮСВЭРИЙН IP-гээр түгждэг:")
+        print("      таны хөтчөөр (өөр IP) нэвтэрч байхад серверийнх хаалттай байж болно.")
+        print("      5-10 минут хүлээгээд дахин шалгана уу; нууц үг буруу хэвээр бол")
+        print("      түгжээ дахин сунгагдана.")
+        return "auth"
     if r.status_code != 200:
         print(f"{WARN} magicBox.cgi HTTP {r.status_code} — Dahua биш эсвэл өөр firmware байж болно")
     else:

@@ -94,6 +94,10 @@ def upsert_camera(db, site: ParkingSite, lane_dir: str, ip: str,
         print(f"  '{site.site_code}' {lane_dir}: камер бүртгэлтэй байна "
               f"(IP {cam.ip_address or '—'}) → IP-г {ip} болгож шинэчилнэ")
         cam.ip_address = ip
+        if cam.lane_no != lane_no:
+            print(f"      эгнээг {cam.lane_no} → {lane_no} болгож зассан "
+                  f"(хаалт нь ижил эгнээний камерын IP-гээр ажилладаг)")
+            cam.lane_no = lane_no
     else:
         cam = Device(site_id=site.id, name=name, device_type="camera", vendor="Dahua",
                      ip_address=ip, lane_no=lane_no, lane_dir=lane_dir,
@@ -130,12 +134,35 @@ def main() -> int:
                    help="Энэ зогсоолын камеруудын нэвтрэх нэр (хоосон = ерөнхий тохиргоо)")
     p.add_argument("--password", default=None,
                    help="Энэ зогсоолын камеруудын нууц үг (хоосон = ерөнхий тохиргоо)")
+    p.add_argument("--fix-lanes", action="store_true", dest="fix_lanes",
+                   help="Эгнээг журамд оруулна (орох=1, гарах=2) — IP/нууц үг хөндөхгүй")
     args = p.parse_args()
 
     db = SessionLocal()
     try:
         if args.list:
             return list_devices(db)
+        if args.fix_lanes:
+            if not args.site:
+                p.error("--fix-lanes-д --site заавал")
+            site = find_site(db, args.site)
+            print(f"\nЗогсоол: {site.name} ({site.site_code})")
+            devs = db.query(Device).filter(Device.site_id == site.id,
+                                           Device.status == "active").all()
+            changed = 0
+            for d in devs:
+                want = 1 if d.lane_dir == "entry" else 2 if d.lane_dir == "exit" else None
+                if want and d.lane_no != want:
+                    print(f"  {d.name} ({d.device_type}): эгнээ {d.lane_no} → {want}")
+                    d.lane_no = want
+                    changed += 1
+            db.commit()
+            print(f"\n{changed} төхөөрөмжийн эгнээ зассан." if changed
+                  else "\nБүх эгнээ аль хэдийн журмын дагуу байна.")
+            print("\nОдоогийн байдал:")
+            list_devices(db)
+            return 0
+
         if not args.site or not (args.entry or args.exit_ip
                                  or args.username is not None or args.password is not None):
             p.error("--site болон --entry/--exit (эсвэл --username/--password) заавал "
