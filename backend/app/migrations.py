@@ -61,6 +61,10 @@ MIGRATIONS = [
     # v2.0 — Гацсан session-ийн авто цэвэрлэгээ (зогсоол бүрийн босго)
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS auto_close_hours INTEGER",
 
+    # v2.1 — QR-аар өрийг нийлүүлж төлөх: нэгдсэн Payment-ийн холбоос
+    "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS payment_id UUID REFERENCES payments(id)",
+    "CREATE INDEX IF NOT EXISTS ix_compensations_payment_id ON compensations (payment_id)",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

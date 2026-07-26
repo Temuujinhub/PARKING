@@ -277,8 +277,12 @@ export default function Pay() {
             </>)}
             <span className="text-slate-400">НӨАТ (10%)</span>
             <span className="font-mono text-right">{fmt(session.vat_amount)}₮</span>
+            {session.debt_amount > 0 && (<>
+              <span className="text-red-400">Өмнөх өр</span>
+              <span className="font-mono text-right text-red-400 font-semibold">+{fmt(session.debt_amount)}₮</span>
+            </>)}
             <span className="font-semibold text-base pt-1 border-t border-surface-border/50">Нийт дүн</span>
-            <span className="font-mono text-right text-2xl font-bold text-accent pt-1 border-t border-surface-border/50">{fmt(session.total_fee)}₮</span>
+            <span className="font-mono text-right text-2xl font-bold text-accent pt-1 border-t border-surface-border/50">{fmt(session.amount_total ?? session.total_fee)}₮</span>
           </div>
           {session.is_free ? (
             <div className="text-center bg-accent/10 text-accent rounded-xl p-4">

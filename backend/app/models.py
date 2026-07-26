@@ -310,6 +310,10 @@ class Compensation(Base):
     created_by = Column(String(60), default="system")
     paid_at = Column(DateTime, nullable=True)
     paid_by = Column(String(60), nullable=True)
+    # QR-аар нийлүүлж төлөх: аль нэгдсэн Payment-д багтсан (finalize үед PAID болгож,
+    # өр тус бүрд ТУСДАА e-Barimt үүсгэнэ). PENDING статус л эрх мэдэлтэй — холбоос
+    # нь зөвхөн бүртгэл тул шинэ invoice үүсгэхэд дарж холбогдоно.
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     site = relationship("ParkingSite", lazy="joined")

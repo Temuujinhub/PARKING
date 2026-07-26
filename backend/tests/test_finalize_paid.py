@@ -54,6 +54,7 @@ class FakeQuery:
     def __init__(self, store): self.store = store
     def filter(self, *a, **k): return self
     def first(self): return self.store.get("receipt")
+    def all(self): return []  # холбогдсон өр (Compensation) байхгүй гэж үзнэ
 
 
 class FakeDB:

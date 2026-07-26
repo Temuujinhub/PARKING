@@ -239,6 +239,13 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
         raise HTTPException(404, "Энэ дугаартай нээлттэй бүртгэл олдсонгүй. Дугаараа шалгана уу.")
     fee = session_fee_info(db, s)
     due = amount_due(db, s, fee)
+    # Өмнөх өр (нөхөн төлбөр) — QR-ийн нэхэмжлэхэд нийлүүлж төлүүлдэг тул задаргааг харуулна
+    from sqlalchemy import func as _f
+
+    from ..models import Compensation
+    debt = float(db.query(_f.coalesce(_f.sum(Compensation.amount), 0))
+                 .filter(Compensation.plate_number == plate,
+                         Compensation.status == "PENDING").scalar() or 0)
     return {
         "session_id": s.id, "plate_number": s.plate_number,
         "entry_time": s.entry_time.isoformat(),
@@ -247,6 +254,9 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
         "discount_amount": fee["discount_amount"], "total_fee": fee["total_fee"],
         # Төлөх ёстой үлдэгдэл — grace хэтэрсэн (өмнө нь төлсөн) үед зөвхөн зөрүү
         "amount_due": due,
+        # Өмнөх өр + QR-аар төлөгдөх нийт дүн
+        "debt_amount": debt,
+        "amount_total": due + debt,
         "is_free": fee["is_free"], "free_reason": fee["reason"],
         "status": s.status,
         "paid": s.status == "PAID" and due <= 0,

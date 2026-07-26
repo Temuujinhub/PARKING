@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from ..auth import enforce_site, require, require_role
 from ..config import settings
 from ..database import get_db
-from ..models import AuditLog, CashierShift, ParkingSession, Payment, User, VatReceipt
+from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Payment,
+                      User, VatReceipt)
 from ..serializers import to_dict
 from ..services import ebarimt, qpay
 from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
@@ -33,7 +34,10 @@ def _invoice_no(session: ParkingSession) -> str:
 
 
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None):
-    """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt."""
+    """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
+
+    Нэгдсэн (өр багтсан) төлбөрт: session-ий хэсэгт нэг баримт, холбогдсон ӨР ТУС
+    БҮРД ТУСДАА баримт үүсгэж, нөхөн төлбөрүүдийг PAID болгоно."""
     if payment.status == "PAID":
         return  # idempotent — давхар webhook хамгаалалт
     payment.status = "PAID"
@@ -41,10 +45,22 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     if raw:
         payment.raw_payload = raw
 
+    # Энэ төлбөрт багтсан (QR-аар нийлүүлж төлсөн) өрүүд — тус бүрийн НӨАТ,
+    # session-ий хэсгийн дүнг ялгаж тооцно
+    comps = (db.query(Compensation)
+             .filter(Compensation.payment_id == payment.id,
+                     Compensation.status == "PENDING").all())
+    vat_r = settings.vat_rate
+    comp_vats = {c.id: round(float(c.amount) * vat_r / (1 + vat_r)) for c in comps}
+    sess_amount = float(payment.amount) - sum(float(c.amount) for c in comps)
+    sess_vat = float(payment.vat_amount) - sum(comp_vats.values())
+
     receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
-    # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар
+    # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар.
+    # QPay-ийн нэгдсэн баримт задаргаа дэмжихгүй тул ӨР БАГТСАН үед локал PosAPI-аар
+    # хэсэг тус бүрд тусдаа баримт үүсгэнэ.
     use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
-                   and bool(payment.provider_payment_id))
+                   and bool(payment.provider_payment_id) and not comps)
     # ВАЖНО: e-Barimt амжилтгүй болсон ч төлбөрийг PAID болгож ХААЛТЫГ НЭЭНЭ —
     # жолооч төлсөн атлаа гацахгүй. Баримтыг FAILED болгож дараа дахин үүсгэж болно.
     receipt_raw, ebarimt_error = {}, None
@@ -57,7 +73,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
             )
         else:
             receipt_raw = await ebarimt.create_receipt(
-                float(payment.amount), float(payment.vat_amount),
+                sess_amount, sess_vat,
                 "CASH" if payment.payment_method == "CASH" else "CARD",
                 customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
             )
@@ -79,12 +95,39 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         ebarimt_id=receipt_raw.get("billId"),
         # ААН-ны баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
         lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
-        amount=payment.amount, vat_amount=payment.vat_amount,
+        amount=sess_amount, vat_amount=sess_vat,
         customer_tin=payment.customer_tin,
         # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа
         status="SENT" if receipt_raw.get("billId") else "FAILED",
         receipt_url=ebarimt_error,
     ))
+
+    # Өр тус бүр: ТУСДАА e-Barimt + PAID (баримт нь өрийн анхны session-д холбогдоно)
+    for comp in comps:
+        comp_amount, comp_vat = float(comp.amount), comp_vats[comp.id]
+        comp_receipt, comp_error = {}, None
+        try:
+            comp_receipt = await ebarimt.create_receipt(
+                comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
+        except Exception as e:  # noqa: BLE001
+            comp_error = str(e)[:200]
+            print(f"[ebarimt FAILED] compensation={comp.id}: {comp_error}")
+        ebarimt.cache_qr(comp.id, comp_receipt.get("qrData"))
+        db.add(VatReceipt(
+            # Өрийн анхны session (байхгүй бол одоо төлж буй session-д) холбоно
+            payment_id=payment.id, session_id=comp.session_id or payment.session_id,
+            ebarimt_id=comp_receipt.get("billId"),
+            lottery_code=None if receiver_type == "COMPANY" else comp_receipt.get("lottery"),
+            amount=comp_amount, vat_amount=comp_vat, customer_tin=payment.customer_tin,
+            status="SENT" if comp_receipt.get("billId") else "FAILED",
+            receipt_url=comp_error,
+        ))
+        comp.status = "PAID"
+        comp.paid_at = datetime.utcnow()
+        comp.paid_by = f"{payment.provider}:QR"
+        print(f"[payment] өр төлөгдөв: {comp.plate_number} {comp_amount:.0f}₮ "
+              f"(comp {comp.id}, payment {payment.id})")
+
     session = db.get(ParkingSession, payment.session_id)
     await mark_paid_and_open(db, session)
 
@@ -140,8 +183,15 @@ def _print_payload(db: Session, payment: Payment) -> dict:
     }
 
 
+def _pending_debts(db: Session, plate: str) -> list[Compensation]:
+    """Дугаарын төлөгдөөгүй нөхөн төлбөрүүд (бүх зогсоолын — өр дугаарыг дагадаг)."""
+    return (db.query(Compensation)
+            .filter(Compensation.plate_number == plate,
+                    Compensation.status == "PENDING").all())
+
+
 def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
-                    cashier: User | None = None) -> Payment:
+                    cashier: User | None = None, include_debts: bool = False) -> Payment:
     fee = session_fee_info(db, session)
     if fee["total_fee"] <= 0:
         raise HTTPException(400, "Төлбөр шаардлагагүй (үнэгүй) session байна")
@@ -159,6 +209,12 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
         fee["base_fee"], fee["vat_amount"], fee["total_fee"])
     session.duration_minutes = fee["duration_minutes"]
 
+    # Өмнөх өрийг нийлүүлж нэхэмжлэх: дүн + өр тус бүрийн НӨАТ (үнэд багтсан)
+    comps: list[Compensation] = _pending_debts(db, session.plate_number) if include_debts else []
+    debt_total = sum(float(c.amount) for c in comps)
+    debt_vat = sum(round(float(c.amount) * settings.vat_rate / (1 + settings.vat_rate))
+                   for c in comps)
+
     shift = None
     if cashier:
         shift = db.query(CashierShift).filter(CashierShift.user_id == cashier.id,
@@ -166,12 +222,18 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
     payment = Payment(
         session_id=session.id, provider=provider, payment_method=method,
         sender_invoice_no=_invoice_no(session),
-        amount=due, vat_amount=vat_due,
+        amount=due + debt_total, vat_amount=vat_due + debt_vat,
         cashier_id=cashier.id if cashier else None,
         shift_id=shift.id if shift else None,
     )
     db.add(payment)
     db.flush()
+    # Өрүүдийг энэ төлбөрт холбоно (PENDING статус л эрх мэдэлтэй — өмнөх орхигдсон
+    # invoice-ийн холбоосыг дарж бичихэд аюулгүй)
+    for comp in comps:
+        comp.payment_id = payment.id
+    # Дуудагч талд шууд хэрэглэх (autoflush=False тул дахин query найдваргүй)
+    payment._debt_comps = comps  # type: ignore[attr-defined]
     return payment
 
 
@@ -185,7 +247,11 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
 
-    # Өмнө үүсгэсэн PENDING invoice байвал дүн нь одоогийн үлдэгдэлтэй таарч
+    # Өмнөх өрийг QR-д нийлүүлж нэхэмжилнэ (body-д include_debts=false өгвөл зөвхөн
+    # одоогийн төлбөр — кассын тусгай хэрэглээнд)
+    include_debts = bool(body.get("include_debts", True))
+
+    # Өмнө үүсгэсэн PENDING invoice байвал дүн нь одоогийн үлдэгдэл (+өр)-тэй таарч
     # байгаа тохиолдолд л дахин ашиглана (хугацаа өнгөрч тариф өссөн эсвэл
     # grace хэтэрч зөрүү нэхэж буй үед хуучин QR буруу дүнтэй болно)
     existing = db.query(Payment).filter(Payment.session_id == session.id,
@@ -193,6 +259,8 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
                                         Payment.status == "PENDING").first()
     if existing and existing.provider_invoice_id:
         current_due = amount_due(db, session, session_fee_info(db, session))
+        if include_debts:
+            current_due += sum(float(c.amount) for c in _pending_debts(db, session.plate_number))
         if abs(float(existing.amount) - current_due) <= 1:
             return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
                     "qr_text": existing.qr_text, "deep_link": existing.deep_link, "urls": [],
@@ -200,7 +268,7 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
         existing.status = "CANCELLED"  # дүн зөрсөн — шинэ invoice үүсгэнэ
         db.flush()
 
-    payment = _create_payment(db, session, "QPAY", "QR")
+    payment = _create_payment(db, session, "QPAY", "QR", include_debts=include_debts)
     payment.source = "POS" if body.get("source") == "POS" else "QR"  # кассын пос эсвэл утас
     # НӨАТ-ийн баримтын хүлээн авагчийн төрөл: ТТД өгвөл ААН (COMPANY), үгүй бол иргэн (CITIZEN)
     receiver_data = None
@@ -213,11 +281,19 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
     if settings.qpay_webhook_secret:
         callback += f"&token={settings.qpay_webhook_secret}"
-    # e-Barimt нэхэмжлэхийн мөрүүд — бүтээгдэхүүн бүрээр (зогсоолын үйлчилгээ = нэг мөр)
-    lines = qpay.build_lines([{
+    # e-Barimt нэхэмжлэхийн мөрүүд — session-ий төлбөр нэг мөр, өр тус бүр тусдаа мөр
+    linked_comps = getattr(payment, "_debt_comps", [])
+    debt_total = sum(float(c.amount) for c in linked_comps)
+    line_items = [{
         "description": f"Зогсоолын үйлчилгээ — {session.plate_number}",
-        "unit_price": float(payment.amount), "quantity": 1,
-    }])
+        "unit_price": float(payment.amount) - debt_total, "quantity": 1,
+    }]
+    for comp in linked_comps:
+        line_items.append({
+            "description": f"Өмнөх өр ({comp.created_at:%Y-%m-%d}) — {comp.plate_number}",
+            "unit_price": float(comp.amount), "quantity": 1,
+        })
+    lines = qpay.build_lines(line_items)
     inv = await qpay.create_invoice(
         payment.sender_invoice_no,
         f"Зогсоолын төлбөр — {session.plate_number}",
@@ -231,7 +307,8 @@ async def qpay_invoice(body: dict, db: Session = Depends(get_db)):
     return {"payment_id": payment.id, "invoice_id": inv["invoice_id"],
             "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
             "deep_link": inv["deep_link"], "urls": inv.get("urls", []),
-            "amount": float(payment.amount), "mock": inv.get("mock", False)}
+            "amount": float(payment.amount), "debt_amount": debt_total,
+            "mock": inv.get("mock", False)}
 
 
 async def _webhook_handler(payment_id: str, token: str, qpay_payment_id: str,
