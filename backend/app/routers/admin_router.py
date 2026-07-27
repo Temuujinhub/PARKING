@@ -31,6 +31,14 @@ def _qpay_err(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"[:300]
 
 
+def _check_district(code):
+    """QPay-ийн district_code = дүүрэг(2 орон)+хороо(2 орон). Буруу бол нэхэмжлэл
+    үүсэхгүй тул хадгалахын өмнө шалгана."""
+    if code and not (str(code).isdigit() and len(str(code)) == 4):
+        raise HTTPException(400, "НӨАТ-ын дүүрэг+хорооны код 4 оронтой тоо байх ёстой "
+                                 "(жишээ: 2318 = Хан-Уул 18-р хороо)")
+
+
 def _scrub(detail: dict | None) -> dict:
     """Аудитын бичлэгт нууц үг ХАДГАЛАХГҮЙ — зөвхөн өөрчилсөн эсэхийг тэмдэглэнэ."""
     if not detail:
@@ -118,6 +126,7 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code")
                           if k in body})
+    _check_district(site.qpay_district_code)
     db.add(site)
     db.flush()
     _audit(db, user, "CREATE", "site", site.id, body)
@@ -141,6 +150,7 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
             if isinstance(val, str) and k != "name":
                 val = val.strip() or None
             setattr(site, k, val)
+    _check_district(site.qpay_district_code)
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
     return to_dict(site, extra={"pay_url": site_pay_url(site)})

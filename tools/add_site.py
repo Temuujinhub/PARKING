@@ -168,8 +168,18 @@ def main() -> int:
         for f in ("qpay_username", "qpay_password", "qpay_invoice_code",
                   "qpay_district_code", "qpay_branch_code"):
             val = getattr(args, f)
-            if val is not None:
-                setattr(site, f, val.strip() or None)
+            if val is None:
+                continue
+            val = val.strip() or None
+            # Дүүргийн код = дүүрэг(2) + хороо(2). Буруу утга хадгалагдвал QPay
+            # нэхэмжлэл үүсгэхээс татгалзана — жишээ текст ("XXXX") ороход
+            # чимээгүй хадгалагдаж байсныг блоклоно.
+            if f == "qpay_district_code" and val and not (val.isdigit() and len(val) == 4):
+                print(f"АЛДАА: дүүргийн код 4 оронтой ТОО байх ёстой (жишээ 2318), "
+                      f"'{val}' биш.\n       Цэвэрлэх бол: --qpay-district-code ''",
+                      file=sys.stderr)
+                return 1
+            setattr(site, f, val)
         site.is_active = not args.inactive
 
         tariff = pick_tariff(db, args.tariff)
