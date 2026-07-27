@@ -156,11 +156,24 @@ async def _confirm_qpay(db: Session, payment: Payment) -> bool:
                                    acc=qpay.account_for(_site_of(payment)))
     if not res.get("paid"):
         return False
-    if abs(float(res.get("paid_amount") or 0) - float(payment.amount)) > 1:
+    paid_amount = float(res.get("paid_amount") or 0)
+    expected = float(payment.amount)
+    # ДУТУУ төлсөн бол л REVIEW — жолоочийг гаргахгүй, оператор шалгана.
+    # ИЛҮҮ төлсөн тохиолдолд машиныг зогсоолд ХОРИХ нь буруу: мөнгө нь бүрэн
+    # ирсэн байтал хаалт нээгдэхгүй үлддэг байв (мерчантын НӨАТ-ын тохиргооноос
+    # болж QPay нэхэмжлэлийн дүн дээр татвар нэмж тооцох тохиолдол бий).
+    if paid_amount < expected - 1:
         payment.status = "REVIEW"
         payment.raw_payload = res.get("raw") or {}
         db.commit()
+        print(f"[payment] ДУТУУ төлөгдсөн: {payment.id} нэхэмжлэл={expected:.2f} "
+              f"төлсөн={paid_amount:.2f} → REVIEW")
         return False
+    if paid_amount > expected + 1:
+        # Илүү төлсөнийг бүртгэлд үлдээнэ (санхүү тулгахад хэрэгтэй) ч гаргана
+        print(f"[payment] ИЛҮҮ төлөгдсөн: {payment.id} нэхэмжлэл={expected:.2f} "
+              f"төлсөн={paid_amount:.2f} зөрүү={paid_amount - expected:.2f} "
+              f"— хаалтыг нээж байна. QPay мерчантын НӨАТ тохиргоог шалгана уу.")
     if res.get("payment_id"):
         payment.provider_payment_id = res["payment_id"]
     await _finalize_paid(db, payment, raw=res.get("raw"))

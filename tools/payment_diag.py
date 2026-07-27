@@ -79,7 +79,7 @@ def show_payment(db, p: Payment, full: bool = False):
         print(f"    raw: {str(p.raw_payload)[:400]}")
 
 
-async def ask_qpay(db, p: Payment, finalize: bool) -> int:
+async def ask_qpay(db, p: Payment, finalize: bool, accept_less: bool = False) -> int:
     """QPay-ээс төлбөрийг шалгаад, шаардвал дуусгана."""
     s = db.get(ParkingSession, p.session_id) if p.session_id else None
     site = s.site if s else None
@@ -105,6 +105,21 @@ async def ask_qpay(db, p: Payment, finalize: bool) -> int:
         print("    → QPay дээр ГҮЙЛГЭЭ БҮРТГЭГДЭЭГҮЙ байна. Мөнгө яг энэ QR-аар")
         print("      төлөгдсөн эсэхийг банкны баримтаас шалгана уу (өөр QR байж болзошгүй).")
 
+    paid_amount = float(res.get("paid_amount") or 0)
+    expected = float(p.amount)
+    diff = paid_amount - expected
+    if abs(diff) > 1:
+        print(f"    !! ДҮН ЗӨРЖ БАЙНА: нэхэмжлэл {expected:,.2f}₮ · "
+              f"төлсөн {paid_amount:,.2f}₮ · зөрүү {diff:+,.2f}₮")
+        if diff > 1:
+            # Ихэвчлэн QPay мерчантын НӨАТ тохиргоо: нэхэмжлэлийн дүн дээр
+            # татварыг НЭМЖ тооцсоноос үүсдэг (2000 → 2181.82 = 2000 + 2000/11)
+            ratio = paid_amount / expected if expected else 0
+            hint = " (≈ НӨАТ 10% дээр нь нэмэгдсэн)" if 1.08 < ratio < 1.10 else ""
+            print(f"       Илүү төлөгдсөн{hint}. Жолоочийг гаргах нь зөв.")
+        else:
+            print("       ДУТУУ төлөгдсөн — гаргахын өмнө шалгана уу.")
+
     if not res.get("paid"):
         print("    → Төлбөр QPay дээр ороогүй тул дуусгах боломжгүй.")
         return 1
@@ -115,6 +130,10 @@ async def ask_qpay(db, p: Payment, finalize: bool) -> int:
     if not finalize:
         print("    → QPay ТӨЛӨГДСӨН гэж байна. Дуусгаж хаалт нээх бол --finalize нэмнэ.")
         return 0
+    if diff < -1 and not accept_less:
+        print("    → ДУТУУ төлөгдсөн тул автоматаар дуусгахгүй. Санаатай гаргах бол")
+        print("      --accept-less нэмнэ (зөрүүг өр болгож бүртгэхгүй, шууд гаргана).")
+        return 1
 
     from app.routers.payments_router import _finalize_paid
     if res.get("payment_id"):
@@ -136,6 +155,8 @@ def main() -> int:
     ap.add_argument("--pending", action="store_true", help="Зөвхөн дуусаагүй төлбөрүүд")
     ap.add_argument("--finalize", action="store_true",
                     help="QPay төлөгдсөн гэвэл дуусгаж ХААЛТЫГ НЭЭНЭ (--id-тай хамт)")
+    ap.add_argument("--accept-less", action="store_true", dest="accept_less",
+                    help="ДУТУУ төлсөн байсан ч дуусгах (санаатай шийдвэр)")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -146,7 +167,7 @@ def main() -> int:
                 print(f"АЛДАА: '{args.id}' төлбөр олдсонгүй", file=sys.stderr)
                 return 1
             show_payment(db, p, full=True)
-            return asyncio.run(ask_qpay(db, p, args.finalize))
+            return asyncio.run(ask_qpay(db, p, args.finalize, args.accept_less))
 
         q = db.query(Payment).filter(
             Payment.created_at >= datetime.utcnow() - timedelta(hours=args.hours))
