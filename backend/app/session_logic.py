@@ -147,9 +147,23 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
             at = datetime.utcnow()
         else:
             at = s.exit_time or datetime.utcnow()
+    # Гэрээт эсэхийг ОРОХ үед л тогтоож session дээр хөлдөөдөг байсан тул, машин
+    # орсны ДАРАА жагсаалтад нэмэгдвэл (ж: Excel импорт, гараар бүртгэх) төлбөртэй
+    # хэвээр үлдэж, оператор гараар чөлөөлөх шаардлагатай болдог байв. Зогсоолд
+    # байгаа машины төлбөрийг тооцох бүрд ДАХИН шалгаснаар шинээр бүртгэсэн машин
+    # ямар ч гар ажиллагаагүйгээр шууд гарна (fee.is_free → хаалт авто нээгдэнэ).
+    registered = s.is_registered
+    if not registered and db is not None and s.status in ("OPEN", "AWAITING_PAYMENT"):
+        registered = find_registered(db, s.plate_number, s.site_id) is not None
+        if registered:
+            # Session дээр нь тэмдэглэнэ — жагсаалтад "Гэрээт" гэж зөв харагдана
+            # (дараагийн commit-той хамт хадгалагдана; read-only хүсэлтэд хадгалагдахгүй
+            # ч тооцоолол зөв хэвээр).
+            s.is_registered = True
+
     return calculate_fee(
         template, s.entry_time, at,
-        discount=s.discount, is_registered=s.is_registered,
+        discount=s.discount, is_registered=registered,
     )
 
 
