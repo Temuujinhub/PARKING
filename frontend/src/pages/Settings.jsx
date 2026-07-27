@@ -75,12 +75,129 @@ function genDevices(entryLanes, exitLanes) {
   return list
 }
 
+// QPay дансны туршилт — машин орох шаардлагагүйгээр түрээслэгчийн данс/e-Barimt-ыг шалгана.
+// Урсгал: жижиг дүнгээр БОДИТ нэхэмжлэл → QR → төлнө → check → e-Barimt-ын ДДТД/ТТД харуулна.
+function QpayTestModal({ state, onClose }) {
+  const toast = useToast()
+  const [amount, setAmount] = useState(10)
+  const [inv, setInv] = useState(null)
+  const [result, setResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const site = state?.site
+
+  useEffect(() => { setInv(null); setResult(null); setAmount(10) }, [state])
+
+  const start = async () => {
+    setBusy(true)
+    try {
+      const r = await api(`/api/admin/sites/${site.id}/qpay-test`, {
+        method: 'POST', body: { amount: +amount },
+      })
+      setInv(r); setResult(null)
+      if (!r.using_own_account) {
+        toast('Анхаар: энэ зогсоол өөрийн данстай биш — системийн ерөнхий данс руу төлөгдөнө', 'error')
+      }
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  const check = async () => {
+    setBusy(true)
+    try {
+      const r = await api(`/api/admin/sites/${site.id}/qpay-test/check`, {
+        method: 'POST', body: { invoice_id: inv.invoice_id },
+      })
+      setResult(r)
+      if (!r.paid) toast('Төлбөр хараахан ороогүй байна — төлөөд дахин шалгана уу')
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal open={!!state} onClose={onClose} title={`${site?.name || ''} — QPay дансны туршилт`}>
+      <div className="space-y-3 text-sm">
+        {!inv && (
+          <>
+            <div className="text-slate-400">
+              Энэ зогсоолын QPay дансаар <b className="text-slate-200">бодит</b> туршилтын
+              нэхэмжлэл үүсгэнэ. Машин орох шаардлагагүй. Төлсөн дүн тухайн дансанд
+              бодитоор орно — жижиг дүн ашиглана уу.
+            </div>
+            <Field label="Дүн (₮)">
+              <input className="input" type="number" min="1" max="10000" value={amount}
+                onChange={(e) => setAmount(e.target.value)} />
+            </Field>
+            <button className="btn-primary w-full justify-center" disabled={busy} onClick={start}>
+              {busy ? 'Үүсгэж байна…' : 'Нэхэмжлэл үүсгэх'}
+            </button>
+          </>
+        )}
+
+        {inv && (
+          <>
+            <div className="rounded-lg bg-surface-muted/50 p-3 space-y-1 text-xs">
+              <div>Мерчант: <b className="font-mono text-slate-200">{inv.merchant}</b>
+                {inv.using_own_account
+                  ? <span className="text-accent ml-2">· энэ зогсоолын өөрийн данс</span>
+                  : <span className="text-amber-400 ml-2">· системийн ерөнхий данс!</span>}
+              </div>
+              <div>Нэхэмжлэхийн код: <span className="font-mono">{inv.invoice_code}</span></div>
+              <div>Дүүрэг: <span className="font-mono">{inv.district_code || '—'}</span></div>
+              <div>Дүн: <b>{fmt(inv.amount)}₮</b></div>
+            </div>
+
+            {inv.qr_image
+              ? <img className="mx-auto rounded-xl bg-white p-3 w-56 h-56"
+                  src={`data:image/png;base64,${inv.qr_image}`} alt="QPay QR" />
+              : <div className="text-xs break-all font-mono bg-surface-muted/50 p-2 rounded">{inv.qr_text}</div>}
+
+            {inv.deep_link && (
+              <a className="btn-secondary w-full justify-center" href={inv.deep_link}>
+                Банкны апп-аар нээх
+              </a>
+            )}
+
+            <button className="btn-primary w-full justify-center" disabled={busy} onClick={check}>
+              {busy ? 'Шалгаж байна…' : 'Төлөгдсөн эсэхийг шалгах'}
+            </button>
+
+            {result && result.paid && (
+              <div className="rounded-lg border border-accent/40 bg-accent/5 p-3 space-y-1 text-xs">
+                <div className="text-accent font-medium">Төлбөр амжилттай — {fmt(result.paid_amount)}₮</div>
+                {result.ebarimt_ok ? (
+                  <>
+                    <div>ДДТД: <span className="font-mono break-all">{result.ebarimt_id}</span></div>
+                    <div>Сугалаа: <span className="font-mono">{result.lottery || '—'}</span></div>
+                    <div>Баримт олгосон ТТД: <b className="font-mono text-slate-200">
+                      {result.merchant_register || '—'}</b></div>
+                    <div className="text-slate-400 pt-1">
+                      Энэ ТТД нь түрээслэгчийнх байвал данс зөв холбогдсон.
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-amber-400">
+                    Төлбөр орсон ч e-Barimt үүсээгүй: {result.ebarimt_error || '—'}
+                  </div>
+                )}
+              </div>
+            )}
+            {result && !result.paid && (
+              <div className="text-xs text-slate-400">
+                Хараахан төлөгдөөгүй. QR-аа уншуулж төлөөд дахин шалгана уу.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
 function Sites() {
   const toast = useToast()
   const [rows, setRows] = useState([])
   const [templates, setTemplates] = useState([])
   const [editing, setEditing] = useState(null)
   const [qrSite, setQrSite] = useState(null)
+  const [qpayTest, setQpayTest] = useState(null)
   const [wizard, setWizard] = useState(null)
   const load = () => api('/api/admin/sites').then(setRows)
   useEffect(() => { load(); api('/api/admin/tariff-templates').then(setTemplates) }, [])
@@ -473,12 +590,24 @@ function Sites() {
                     onChange={(e) => setEditing({ ...editing, qpay_district_code: e.target.value })} />
                 </Field>
               </div>
+              {editing.id && (
+                <button type="button" className="btn-secondary w-full justify-center mt-3"
+                  onClick={() => setQpayTest({ site: editing, amount: 10 })}>
+                  Дансыг турших (жижиг дүнгээр бодит төлбөр)
+                </button>
+              )}
+              <div className="text-[11px] text-slate-500 mt-1.5">
+                Эхлээд Хадгалах дараад турших. Туршилт нь машин орох шаардлагагүй —
+                QR гарч ирэх ба төлсний дараа e-Barimt хэний ТТД-ээр үүссэнийг харуулна.
+              </div>
             </details>
 
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>
         )}
       </Modal>
+
+      <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
 
       <Modal open={!!qrSite} onClose={() => setQrSite(null)} title={`${qrSite?.name} — Төлбөрийн QR`}>
         {qrSite && (

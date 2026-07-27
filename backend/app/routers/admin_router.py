@@ -19,6 +19,18 @@ from ..serializers import SECRET_COLUMNS, site_pay_url, to_dict
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def _qpay_err(e: Exception) -> str:
+    """QPay-ийн HTTP алдааг админд ойлгомжтой мөр болгоно (message талбарыг гаргана)."""
+    import httpx
+    if isinstance(e, httpx.HTTPStatusError):
+        try:
+            data = e.response.json()
+            return str(data.get("message") or data.get("error") or data)[:300]
+        except Exception:  # noqa: BLE001
+            return e.response.text[:300]
+    return f"{type(e).__name__}: {e}"[:300]
+
+
 def _scrub(detail: dict | None) -> dict:
     """Аудитын бичлэгт нууц үг ХАДГАЛАХГҮЙ — зөвхөн өөрчилсөн эсэхийг тэмдэглэнэ."""
     if not detail:
@@ -175,6 +187,114 @@ def delete_site(site_id: str, force: bool = False, db: Session = Depends(get_db)
            {"name": site.name, "site_code": site.site_code, "force": force, "sessions": sess_count})
     db.commit()
     return {"ok": True, "deleted_sessions": sess_count}
+
+
+# ─────────────── QPay дансны туршилт (машингүйгээр) ───────────────
+@router.post("/sites/{site_id}/qpay-test")
+async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_db),
+                            user: User = Depends(require("settings"))):
+    """Тухайн зогсоолын QPay дансаар БОДИТ туршилтын нэхэмжлэл үүсгэнэ.
+
+    Машин орох/гарах шаардлагагүйгээр түрээслэгчийн данс зөв ажиллаж байгааг
+    шалгана: токен авах → нэхэмжлэл → QR. Дараа нь /qpay-test/check-ээр
+    төлөгдсөнийг шалгаж e-Barimt үүсгэнэ (баримт нь тухайн дансны ТТД-ээр гарна).
+
+    ЭНЭ НЬ ЖИНХЭНЭ МӨНГӨ — багахан дүн (default 10₮) ашиглана.
+    Зогсоолын бүртгэл (session/payment) үүсгэхгүй тул тайланг бохирдуулахгүй."""
+    from ..services import qpay as qpay_svc
+
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+
+    # Зөвхөн ОГТ өгөөгүй үед default — явуулсан 0-ийг чимээгүй 10 болгож нуухгүй
+    raw_amount = body.get("amount")
+    try:
+        amount = float(10 if raw_amount in (None, "") else raw_amount)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Дүн тоо байх ёстой") from None
+    if not (1 <= amount <= 10000):
+        raise HTTPException(400, "Туршилтын дүн 1–10000₮ хооронд байна")
+
+    acc = qpay_svc.account_for(site)
+    own = bool((site.qpay_username or "").strip() and (site.qpay_password or "").strip())
+    if acc.mock:
+        raise HTTPException(400, "QPay туршилтын (mock) горимд байна — бодит данс "
+                                 "тохируулаагүй тул шалгах боломжгүй.")
+
+    invoice_no = f"TEST-{site.site_code}-{datetime.utcnow():%Y%m%d%H%M%S}"
+    callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={invoice_no}"
+    lines = qpay_svc.build_lines([{
+        "description": f"Дансны туршилт — {site.name}",
+        "unit_price": amount, "quantity": 1,
+    }], acc)
+    try:
+        inv = await qpay_svc.create_invoice(
+            invoice_no, f"Дансны туршилт — {site.name}",
+            f"test_{site.site_code}", callback, lines, acc=acc)
+    except Exception as e:  # noqa: BLE001 — алдааг админд ойлгомжтой буцаана
+        raise HTTPException(400, f"QPay нэхэмжлэл үүсгэж чадсангүй: {_qpay_err(e)}") from e
+
+    _audit(db, user, "QPAY_TEST", "site", site_id,
+           {"amount": amount, "invoice_no": invoice_no, "merchant": acc.username})
+    db.commit()
+    return {
+        "invoice_id": inv["invoice_id"], "invoice_no": invoice_no, "amount": amount,
+        "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
+        "deep_link": inv.get("deep_link", ""), "urls": inv.get("urls", []),
+        # Аль данс ашиглагдаж байгааг харуулна — буруу данс руу төлөхөөс сэргийлнэ
+        "merchant": acc.username, "invoice_code": acc.invoice_code,
+        "district_code": acc.district_code,
+        "using_own_account": own,
+    }
+
+
+@router.post("/sites/{site_id}/qpay-test/check")
+async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db),
+                          user: User = Depends(require("settings"))):
+    """Туршилтын нэхэмжлэл төлөгдсөн эсэхийг шалгаад, төлөгдсөн бол тухайн
+    зогсоолын дансаар e-Barimt үүсгэнэ. Буцаах ДДТД/сугалаа нь баримт ЯМАР
+    байгууллагын нэрээр үүссэнийг батална."""
+    from ..services import qpay as qpay_svc
+
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    invoice_id = (body.get("invoice_id") or "").strip()
+    if not invoice_id:
+        raise HTTPException(400, "invoice_id заавал")
+
+    acc = qpay_svc.account_for(site)
+    try:
+        res = await qpay_svc.check_payment(invoice_id, acc=acc)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Төлбөр шалгаж чадсангүй: {_qpay_err(e)}") from e
+
+    if not res.get("paid"):
+        return {"paid": False, "merchant": acc.username}
+
+    out = {"paid": True, "paid_amount": res.get("paid_amount"),
+           "g_payment_id": res.get("payment_id"), "merchant": acc.username}
+
+    receiver_type = (body.get("receiver_type") or "CITIZEN").upper()
+    try:
+        eb = await qpay_svc.create_ebarimt(
+            res["payment_id"], receiver_type,
+            receiver=body.get("receiver") or None, acc=acc)
+        raw = eb.get("raw") or {}
+        out.update({
+            "ebarimt_ok": bool(eb.get("billId")),
+            "ebarimt_id": eb.get("billId"),          # ДДТД
+            "lottery": eb.get("lottery"),
+            "qr_data": eb.get("qrData"),
+            # Баримт ХЭНИЙ нэрээр үүссэн — дансны зөв эсэхийн эцсийн баталгаа
+            "merchant_register": raw.get("merchant_register"),
+            "merchant_branch_code": raw.get("merchant_branch_code"),
+            "ebarimt_status": raw.get("ebarimt_status"),
+        })
+    except Exception as e:  # noqa: BLE001 — төлбөр амжилттай ч баримт унаж болно
+        out.update({"ebarimt_ok": False, "ebarimt_error": _qpay_err(e)})
+    return out
 
 
 @router.put("/sites/{site_id}/tariff")
