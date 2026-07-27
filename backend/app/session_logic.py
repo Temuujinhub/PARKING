@@ -7,8 +7,8 @@ from .billing import calculate_fee
 from .config import settings
 from .services.device_auth import barrier_credentials, camera_credentials
 from .models import (
-    AuditLog, BlacklistEntry, Device, LprEvent, ParkingSession, ParkingSite,
-    Payment, RegisteredDriver,
+    AuditLog, BarrierCommand, BlacklistEntry, Device, LprEvent, ParkingSession,
+    ParkingSite, Payment, RegisteredDriver,
 )
 from .services.barrier import open_barrier, render_screen_text, schedule_display
 from .services.snapshot import schedule_capture
@@ -214,6 +214,39 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     return 0.0
 
 
+async def ensure_entry_barrier(db: Session, device: Device, plate: str,
+                               session_id: str | None = None,
+                               registered=None) -> bool:
+    """Орох хаалтыг нээх — ХАРИН саяхан нээсэн бол давтахгүй.
+
+    Яагаад хэрэгтэй вэ: давхар уншилтын (dedup/burst) шүүлтүүрүүд нь ДАВХАР
+    SESSION үүсэхээс сэргийлэх зорилготой боловч, өмнө нь хаалт нээх кодыг ч
+    алгасаад буцдаг байв. Үр дүнд нь машин хаалганы өмнө зогсоод, жолооч
+    дугаараа дахин уншуулах бүрд «дахин уншсан» гэж тооцогдож хаалт хэзээ ч
+    нээгддэггүй байсан (lpr_dedup_seconds=20с тул 20 секундын турш гацна).
+
+    Session үүсгэх эсэх нь тусдаа шийдэл — энэ функц ЗӨВХӨН хаалтыг хариуцна.
+    """
+    if not device.auto_open:
+        return False
+    barrier = _find_barrier(db, device.site_id, device)
+    if not barrier:
+        return False
+    # Саяхан амжилттай нээсэн бол дахин команд илгээхгүй (командын үер үүсгэхгүй)
+    cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    recent = (db.query(BarrierCommand)
+              .filter(BarrierCommand.device_id == barrier.id,
+                      BarrierCommand.command == "open",
+                      BarrierCommand.status == "SUCCESS",
+                      BarrierCommand.created_at >= cooldown)
+              .first())
+    if recent:
+        return True   # хаалт нээлттэй байгаа — дахин нээх шаардлагагүй
+    source = "whitelist" if registered else "auto_entry"
+    cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
+    return cmd.status == "SUCCESS"
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол)."""
     site_id = device.site_id
@@ -230,7 +263,11 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         ).all()
     ]
     if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
-        return {"action": "dedup", "plate": plate}
+        # Давхар уншилт — шинэ session үүсгэхгүй, ГЭХДЭЭ хаалтыг заавал нээнэ:
+        # машин хаалганы өмнө зогсож байгаа тул уншилт давтагдсан байж болно.
+        opened = await ensure_entry_barrier(db, device, plate)
+        db.commit()
+        return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     # ЦУВРАЛ уншилт: burst цонхонд (default 6с) энэ зогсоолын орох камерт өөр event
     # аль хэдийн ирсэн бол физикийн хувьд НЭГ машин (хаалтаар 6 секундэд 2 машин
@@ -261,9 +298,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                 await manager.broadcast(site_id, "PLATE_EDITED", {
                     "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
                     "by": "system:autocorrect"})
+                opened = await ensure_entry_barrier(db, device, plate, prev_session.id,
+                                                    find_registered(db, plate, site_id))
+                db.commit()
                 return {"action": "plate_autocorrect", "session_id": prev_session.id,
-                        "old": old_plate, "new": plate}
-        return {"action": "burst_dedup", "plate": plate}
+                        "old": old_plate, "new": plate, "barrier_opened": opened}
+        opened = await ensure_entry_barrier(db, device, plate,
+                                            registered=find_registered(db, plate, site_id))
+        db.commit()
+        return {"action": "burst_dedup", "plate": plate, "barrier_opened": opened}
 
     black = is_blacklisted(db, plate)
     registered = find_registered(db, plate, site_id)
@@ -318,11 +361,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             "plate": plate, "reason": black.reason, "lane": "entry",
         })
     elif device.auto_open:
-        barrier = _find_barrier(db, site_id, device)
-        if barrier:
-            source = "whitelist" if registered else "auto_entry"
-            cmd = await open_barrier(db, barrier, session.id, source, plate=plate)
-            barrier_opened = cmd.status == "SUCCESS"
+        barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered)
 
     await manager.broadcast(site_id, "ENTRY_EVENT", {
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
