@@ -133,6 +133,15 @@ function QpayTestModal({ state, onClose }) {
 
         {inv && (
           <>
+            {!inv.using_own_account && (
+              <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-300">
+                <b>Анхаар: энэ зогсоол өөрийн QPay дансгүй байна.</b> Төлбөр системийн
+                ерөнхий данс ({inv.merchant}) руу орж, e-Barimt мөн түүний ТТД-ээр үүснэ.
+                Түрээслэгчийн данс руу орох ёстой бол цонхыг хааж, «Төлбөрийн данс (QPay)»
+                хэсгээс «Энэ зогсоолын өөрийн данс»-ыг сонгож нэр/нууц үгийг бөглөөд
+                ЗААВАЛ «Хадгалах» дараад дахин туршина уу.
+              </div>
+            )}
             <div className="rounded-lg bg-surface-muted/50 p-3 space-y-1 text-xs">
               <div>Мерчант: <b className="font-mono text-slate-200">{inv.merchant}</b>
                 {inv.using_own_account
@@ -205,8 +214,23 @@ function Sites() {
   const save = async (e) => {
     e.preventDefault()
     try {
+      // QPay: "ерөнхий данс" сонгосон бол талбаруудыг цэвэрлэж илгээнэ,
+      // "өөрийн данс" сонгосон бол нэр+нууц үг хоёулаа байх ёстой
+      if (editing.qpay_mode === 'own') {
+        if (!editing.qpay_username?.trim()) {
+          toast('QPay нэвтрэх нэрээ бичнэ үү (эсвэл "Системийн ерөнхий данс"-ыг сонгоно уу)', 'error'); return
+        }
+        if (!editing.qpay_password?.trim() && !editing.qpay_password_set) {
+          toast('QPay нууц үгээ бичнэ үү — нэр ганцаараа хангалтгүй', 'error'); return
+        }
+      }
+      const qpayClear = editing.qpay_mode === 'global'
+        ? { qpay_username: '', qpay_password: '', qpay_invoice_code: '',
+            qpay_district_code: '', qpay_branch_code: '' }
+        : {}
       const body = {
         ...editing,
+        ...qpayClear,
         capacity: editing.unlimited ? 0 : +editing.capacity,
         tariff_template_id: editing.tariff_template_id || null,
         // '' = глобал default (72ц), 0 = унтраах, N = тухайн зогсоолын босго
@@ -322,7 +346,8 @@ function Sites() {
             </td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs mr-1"
-                onClick={() => setEditing({ ...s, unlimited: !s.capacity })}>Засах</button>
+                onClick={() => setEditing({ ...s, unlimited: !s.capacity,
+                  qpay_mode: (s.qpay_username || s.qpay_password_set) ? 'own' : 'global' })}>Засах</button>
               <button className="btn-secondary py-1 text-xs text-red-400 hover:text-red-300"
                 onClick={() => removeSite(s)} aria-label={`${s.name} зогсоолыг устгах`}>
                 <Trash2 size={14} />
@@ -552,41 +577,54 @@ function Sites() {
               </div>
             </Field>
 
-            <details className="rounded-lg border border-slate-700 px-3 py-2"
-              open={!!(editing.qpay_username || editing.qpay_password_set)}>
+            <details className="rounded-lg border border-slate-700 px-3 py-2" open>
               <summary className="cursor-pointer text-sm font-medium py-1">
-                Төлбөрийн данс (QPay) — энэ зогсоолынх
-                <span className="ml-2 text-xs text-slate-400">
-                  {editing.qpay_username || editing.qpay_password_set
-                    ? '· өөрийн данстай' : '· системийн ерөнхий данс'}
-                </span>
+                Төлбөрийн данс (QPay)
+                {editing.qpay_mode === 'own'
+                  ? <span className="ml-2 text-xs text-accent">· энэ зогсоолын өөрийн данс</span>
+                  : <span className="ml-2 text-xs text-amber-400">· системийн ерөнхий данс</span>}
               </summary>
-              <div className="text-xs text-slate-400 my-2">
-                Түрээслэгч байгууллага өөрийн QPay гэрээтэй бол энд бичнэ — төлбөр нь
-                ТЭДНИЙ данс руу орж, e-Barimt нь ТЭДНИЙ ТТД-ээр үүснэ. Хоосон
-                үлдээвэл системийн ерөнхий данс үйлчилнэ. Нэвтрэх нэр БОЛОН нууц
-                үг хоёулаа бөглөгдсөн үед л өөрийн данс идэвхжинэ.
+
+              {/* Аль данс руу төлөгдөхийг ИЛТ сонгуулна — талбар хоосон байхад
+                  жишээ текст (placeholder) бөглөсөн мэт харагдаж, ерөнхий данс
+                  руу төлөгдөж байгааг анзаараагүй тохиолдол гарсан. */}
+              <div className="my-2 space-y-1.5">
+                {[['global', 'Системийн ерөнхий данс', 'Бүх зогсоолын нийтлэг QPay гэрээ'],
+                  ['own', 'Энэ зогсоолын өөрийн данс', 'Түрээслэгчийн QPay гэрээ — төлбөр ТЭДЭНД, e-Barimt ТЭДНИЙ ТТД-ээр']]
+                  .map(([v, label, hint]) => (
+                  <label key={v} className={`flex items-start gap-2.5 px-3 py-2 rounded-lg border cursor-pointer transition-colors
+                    ${editing.qpay_mode === v ? 'border-accent/50 bg-accent/5' : 'border-surface-border hover:border-slate-600'}`}>
+                    <input type="radio" name="qpay_mode" className="mt-0.5 cursor-pointer"
+                      checked={editing.qpay_mode === v}
+                      onChange={() => setEditing({ ...editing, qpay_mode: v })} />
+                    <span>
+                      <span className="text-sm">{label}</span>
+                      <span className="block text-[11px] text-slate-400">{hint}</span>
+                    </span>
+                  </label>
+                ))}
               </div>
-              <div className="grid grid-cols-2 gap-3">
+
+              <div className={`grid grid-cols-2 gap-3 ${editing.qpay_mode === 'own' ? '' : 'hidden'}`}>
                 <Field label="Нэвтрэх нэр (username)">
                   <input className="input font-mono text-xs" autoComplete="off"
-                    value={editing.qpay_username || ''} placeholder="MONNIS_PROPERTIES"
+                    value={editing.qpay_username || ''} placeholder="жишээ: MONNIS_PROPERTIES"
                     onChange={(e) => setEditing({ ...editing, qpay_username: e.target.value })} />
                 </Field>
                 <Field label="Нууц үг (password)">
                   <input className="input font-mono text-xs" type="password" autoComplete="new-password"
                     value={editing.qpay_password ?? ''}
-                    placeholder={editing.qpay_password_set ? '•••••• (хадгалагдсан)' : 'Ерөнхий данс'}
+                    placeholder={editing.qpay_password_set ? '•••••• (хадгалагдсан)' : 'заавал бөглөнө'}
                     onChange={(e) => setEditing({ ...editing, qpay_password: e.target.value })} />
                 </Field>
                 <Field label="Нэхэмжлэхийн код (invoice_code)">
                   <input className="input font-mono text-xs" value={editing.qpay_invoice_code || ''}
-                    placeholder="MONNIS_PROPERTIES_INVOICE"
+                    placeholder="жишээ: MONNIS_PROPERTIES_INVOICE"
                     onChange={(e) => setEditing({ ...editing, qpay_invoice_code: e.target.value })} />
                 </Field>
                 <Field label="НӨАТ-ын дүүрэг+хороо (4 орон)">
                   <input className="input font-mono text-xs" value={editing.qpay_district_code || ''}
-                    placeholder="2318 = Хан-Уул 18-р хороо"
+                    placeholder="жишээ: 2318 (Хан-Уул 18-р хороо)"
                     onChange={(e) => setEditing({ ...editing, qpay_district_code: e.target.value })} />
                 </Field>
               </div>
@@ -597,8 +635,10 @@ function Sites() {
                 </button>
               )}
               <div className="text-[11px] text-slate-500 mt-1.5">
-                Эхлээд Хадгалах дараад турших. Туршилт нь машин орох шаардлагагүй —
-                QR гарч ирэх ба төлсний дараа e-Barimt хэний ТТД-ээр үүссэнийг харуулна.
+                <b className="text-amber-400">Эхлээд «Хадгалах» дарна</b>, дараа нь турших.
+                Хадгалахгүйгээр туршвал хуучин (ерөнхий) данс гарч ирнэ. Туршилт нь машин
+                орох шаардлагагүй — QR гарч ирэх ба төлсний дараа e-Barimt хэний ТТД-ээр
+                үүссэнийг харуулна.
               </div>
             </details>
 
