@@ -34,10 +34,22 @@ if [ -n "$BUNDLE" ]; then
   echo "    bundle-аас шинэчлэв: $BUNDLE"
 else
   # ── GitHub горим (default) ──────────────────────────────────────────────
-  if ! git fetch --quiet origin main; then
-    echo "    АЛДАА: GitHub-аас татаж чадсангүй (сүлжээ/443 хаалттай байж болзошгүй)."
-    echo "    Bundle-аар шинэчлэхийг оролдоно уу:"
-    echo "      sudo bash deploy/update.sh /зам/upd.bundle"
+  # ЧУХАЛ: timeout-гүй бол байгууллагын firewall GitHub-ыг чимээгүй унтраахад
+  # git МӨНХӨД гацдаг (Ctrl+C дарах хүртэл). Хугацаа тавьж, ойлгомжтой унана.
+  export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20
+  export GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes"
+  if ! timeout "${FETCH_TIMEOUT:-90}" git fetch --quiet origin main; then
+    rc=$?
+    [ "$rc" = 124 ] && echo "    АЛДАА: GitHub-аас татах хугацаа хэтэрлээ (${FETCH_TIMEOUT:-90}с)." \
+                    || echo "    АЛДАА: GitHub-аас татаж чадсангүй (exit $rc)."
+    echo
+    echo "    Шалтгааныг олох:"
+    echo "      git -C $APP_DIR remote -v                                  # ямар хаяг руу очиж байна"
+    echo "      timeout 15 curl -sS -o /dev/null -w '%{http_code}\\n' https://github.com"
+    echo "      timeout 20 git -C $APP_DIR ls-remote origin HEAD           # 20с дотор хариу ирэх ёстой"
+    echo
+    echo "    GitHub хаалттай бол bundle-аар шинэчилнэ:"
+    echo "      sudo bash $APP_DIR/deploy/update.sh /зам/upd.bundle"
     exit 1
   fi
   git reset --hard origin/main   # локал өөрчлөлт байвал дарж бичнэ (production дээр гараар засдаггүй)
