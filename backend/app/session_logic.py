@@ -423,6 +423,25 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "plate": plate, "debt_count": len(debts), "debt_amount": debt_amount})
 
     if not session:
+        # ГЭРЭЭТ машин: session олдоогүй ч (орох уншилт алдагдсан, жагсаалтад
+        # дараа нэмэгдсэн г.м.) төлөх зүйлгүй тул ХОРИХ ёсгүй — шууд гаргана.
+        # Өмнө нь «Бүртгэл олдсонгүй» гэж LED-д гаргаад хаалт нээгддэггүй байв.
+        reg = find_registered(db, plate, site_id)
+        if reg and not debts:
+            db.commit()
+            barrier = _find_barrier(db, site_id, device)
+            opened = False
+            if barrier:
+                cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate)
+                opened = cmd.status == "SUCCESS"
+            await manager.broadcast(site_id, "EXIT_NO_SESSION", {
+                "plate": plate, "has_debt": False, "debt_amount": 0,
+                "registered": True, "barrier_opened": opened})
+            schedule_display(device.ip_address,
+                             render_screen_text(settings.screen_bye_text, plate=plate),
+                             barrier_credentials(device))
+            return {"action": "registered_exit", "plate": plate, "barrier_opened": opened}
+
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
         db.commit()
         await manager.broadcast(site_id, "EXIT_NO_SESSION",

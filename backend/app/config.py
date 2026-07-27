@@ -89,7 +89,13 @@ class Settings(BaseSettings):
 
     # Barrier — Dahua ITC камерын RPC2 (trafficSnap.openStrobe/closeStrobe)
     barrier_mock: bool = True  # Бодит төхөөрөмжгүй үед mock
-    barrier_timeout_sec: float = 5.0
+    # Хаалтны RPC2 timeout. 5с богино байсан тул ачаалалтай үед ConnectTimeout/
+    # ReadTimeout болж хаалт нээгддэггүй байв (камер ANPR боловсруулалтад завгүй).
+    barrier_timeout_sec: float = 12.0
+    # Сүлжээний түр саатлын улмаас команд унасан бол хэдэн удаа дахин оролдох.
+    # Машин хаалганы өмнө зогсож байгаа тул нэг оролдлого хангалтгүй.
+    barrier_retries: int = 2
+    barrier_retry_delay_sec: float = 0.8
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)
@@ -173,8 +179,11 @@ class Settings(BaseSettings):
     screen_voice: bool = False
     # LED текстийг хэдэн удаа, ямар зайтай давтаж илгээх — камер Vehicle Passing
     # горимдоо текстийг хурдан дардаг тул давтаж илгээснээр ~5-6 секунд барина
-    screen_repeat: int = 3
-    screen_repeat_interval: float = 2.5
+    screen_repeat: int = 6
+    screen_repeat_interval: float = 3.0
+    # LED дэлгэцийн мөр таслалын тэмдэг. Зарим firmware «\n»-ийг ойлгодоггүй тул
+    # «\r\n» эсвэл хоосон зайгаар туршиж болно (камер солихгүйгээр .env-ээс).
+    screen_line_break: str = "\n"
 
     # e-Barimt нээлттэй лавлагаа — байгууллагын регистрээр нэр шалгах
     # (зөвхөн Монголын IP-ээс хандагдана; гаднаас timeout өгвөл frontend

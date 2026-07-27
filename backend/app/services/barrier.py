@@ -111,7 +111,8 @@ class DahuaRpc:
         дуудлага хийдэг (клиент JS-ээс батлагдсан). Дэлгэц "Managed Mode
         (Platform)" горимд байх шаардлагатай.
         «|» эсвэл «\\n» = мөр таслал (дугаар/төлбөрийг 2 мөрөнд харуулна)."""
-        text = text.replace("\\n", "\n").replace("|", "\n")
+        br = settings.screen_line_break.replace("\\n", "\n").replace("\\r", "\r")
+        text = text.replace("\\n", "\n").replace("|", "\n").replace("\n", br)
         res = await self._call("trafficParking.setScreenDisplay", {"Custom": text})
         if not res.get("result"):
             raise DahuaRpcError(f"setScreenDisplay амжилтгүй: {res}")
@@ -204,27 +205,41 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     # Нэвтрэлт нь командыг ХҮЛЭЭН АВАХ төхөөрөмжийнх (хаалт камерын IP зээлсэн бол камерынх)
     username, password = barrier_credentials(target)
     cmd.status = "FAILED"
-    try:
-        async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
-            if command == "open" and settings.barrier_open_path:
-                # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
-                auth = httpx.DigestAuth(username, password)
-                resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
-                body = (resp.text or "").strip()
-                if resp.status_code == 200 and "error" not in body.lower():
-                    cmd.status = "SUCCESS"
-                cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
-            else:
-                rpc = DahuaRpc(client, ip, username, password)
-                await rpc.login()
-                try:
-                    res = await rpc.strobe(RPC_METHODS[command], settings.barrier_channel, plate)
-                    cmd.status = "SUCCESS"
-                    cmd.response_text = f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
-                finally:
-                    await rpc.logout()
-    except Exception as e:
-        cmd.response_text = f"{type(e).__name__}: {str(e)[:400]}"
+    # Машин хаалганы өмнө зогсож байгаа тул нэг удаагийн сүлжээний саатлаар
+    # бууж өгөхгүй — timeout/холболтын алдаанд хэд дахин оролдоно.
+    attempts = max(1, settings.barrier_retries + 1)
+    last_err = ""
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(settings.barrier_retry_delay_sec)
+        try:
+            async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
+                if command == "open" and settings.barrier_open_path:
+                    # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
+                    auth = httpx.DigestAuth(username, password)
+                    resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
+                    body = (resp.text or "").strip()
+                    if resp.status_code == 200 and "error" not in body.lower():
+                        cmd.status = "SUCCESS"
+                    cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
+                else:
+                    rpc = DahuaRpc(client, ip, username, password)
+                    await rpc.login()
+                    try:
+                        res = await rpc.strobe(RPC_METHODS[command],
+                                               settings.barrier_channel, plate)
+                        cmd.status = "SUCCESS"
+                        cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
+                                             + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
+                    finally:
+                        await rpc.logout()
+            if cmd.status == "SUCCESS":
+                break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:300]}"
+            cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
+                                 if attempt + 1 < attempts
+                                 else f"{last_err} ({attempts} удаа оролдсон)")
     cmd.executed_at = datetime.utcnow()
     db.commit()
     return cmd
