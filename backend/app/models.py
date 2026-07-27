@@ -140,6 +140,9 @@ class RegisteredDriver(Base):
     phone = Column(String(20), default="")
     contract_type = Column(String(20), nullable=False, default="MONTHLY")  # MONTHLY, CONTRACT, VIP, STAFF
     site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # null = бүх зогсоол
+    # Аль байгууллагын машин (Excel импортод хуудас/компани тус бүрээр бүлэглэнэ)
+    company = Column(String(160), default="", index=True)
+    note = Column(Text, default="")          # албан тушаал г.м. нэмэлт тэмдэглэл
     monthly_fee = Column(Numeric(12, 2), nullable=False, default=0)
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow)
     valid_to = Column(DateTime, nullable=False)

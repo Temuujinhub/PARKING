@@ -79,6 +79,11 @@ MIGRATIONS = [
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS username VARCHAR(60)",
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS password VARCHAR(160)",
 
+    # v2.5 — Гэрээт жолоочийн байгууллага + тэмдэглэл (Excel импорт)
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS company VARCHAR(160)",
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS note TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_registered_drivers_company ON registered_drivers (company)",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

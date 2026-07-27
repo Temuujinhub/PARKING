@@ -5,13 +5,16 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (t) => localStorage.setItem(TOKEN_KEY, t)
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 
-export async function api(path, { method = 'GET', body, form, blob } = {}) {
+export async function api(path, { method = 'GET', body, form, formData, blob } = {}) {
   const headers = {}
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
 
   let payload
-  if (form) {
+  if (formData) {
+    // Файл хуулах (multipart) — Content-Type-ыг браузер өөрөө boundary-тай тавина
+    payload = formData
+  } else if (form) {
     payload = new URLSearchParams(form)
     headers['Content-Type'] = 'application/x-www-form-urlencoded'
   } else if (body !== undefined) {

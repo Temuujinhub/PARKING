@@ -1,7 +1,7 @@
 // Бүртгэлтэй жолооч — гэрээт/сарын эрхтэй машинууд
-import { Plus, Search } from 'lucide-react'
+import { Plus, Search, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, fmt, fmtDate } from '../api'
+import { api, fmtDate } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 const CONTRACT_TYPES = {
@@ -9,19 +9,123 @@ const CONTRACT_TYPES = {
   SPECIAL: 'Тусгай хэрэгцээт (түргэн, онцгой байдал г.м)',
 }
 
+// Excel импортын цонх — эхлээд УРЬДЧИЛАН ХАРНА (dry-run), дараа нь баталгаажуулж оруулна.
+// Ингэснээр буруу файл шууд DB рүү орохгүй.
+function ImportModal({ open, onClose, sites, onDone }) {
+  const toast = useToast()
+  const [file, setFile] = useState(null)
+  const [siteId, setSiteId] = useState('')
+  const [replace, setReplace] = useState(false)
+  const [preview, setPreview] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => { setFile(null); setPreview(null); setReplace(false) }, [open])
+
+  const send = async (dryRun) => {
+    if (!file) { toast('Excel файлаа сонгоно уу', 'error'); return }
+    setBusy(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('site_id', siteId)
+      fd.append('replace', replace ? 'true' : 'false')
+      fd.append('dry_run', dryRun ? 'true' : 'false')
+      const data = await api('/api/admin/drivers/import', { method: 'POST', formData: fd })
+      if (dryRun) setPreview(data)
+      else {
+        toast(`${data.created} шинэ, ${data.updated} шинэчлэв`)
+        onDone(); onClose()
+      }
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Гэрээт машины жагсаалт — Excel импорт">
+      <div className="space-y-3 text-sm">
+        <div className="text-xs text-slate-400">
+          Excel-ийн <b className="text-slate-200">бүх хуудсыг</b> уншина — хуудас бүрийг
+          нэг байгууллага гэж үзнэ. Хуудсанд «Улсын дугаар» гэсэн гарчигтай багана
+          байх шаардлагатай. Ижил дугаар давхардвал шинэчилнэ (давхар бүртгэл үүсэхгүй).
+        </div>
+        <Field label="Excel файл (.xlsx)" required>
+          <input type="file" accept=".xlsx,.xlsm" className="input"
+            onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null) }} />
+        </Field>
+        <Field label="Аль зогсоолд хүчинтэй вэ">
+          <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            <option value="">Бүх зогсоол</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <label className="flex items-start gap-2 text-xs cursor-pointer">
+          <input type="checkbox" className="mt-0.5 cursor-pointer" checked={replace}
+            onChange={(e) => setReplace(e.target.checked)} />
+          <span>
+            Жагсаалтыг бүрэн солих — файлд БАЙХГҮЙ хуучин бүртгэлийг идэвхгүй болгоно
+            <span className="block text-slate-500">Устгахгүй, зөвхөн идэвхгүй болгоно.</span>
+          </span>
+        </label>
+
+        {preview && (
+          <div className="rounded-lg border border-accent/40 bg-accent/5 p-3 space-y-2 text-xs">
+            <div className="text-accent font-medium">
+              Уншсан: {preview.total} машин · {Object.keys(preview.companies).length} байгууллага
+            </div>
+            <div className="max-h-40 overflow-y-auto space-y-0.5">
+              {Object.entries(preview.companies).map(([c, n]) => (
+                <div key={c} className="flex justify-between gap-3">
+                  <span className="truncate">{c}</span><span className="font-mono">{n}</span>
+                </div>
+              ))}
+            </div>
+            {preview.warnings?.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-amber-400">
+                  Анхааруулга ({preview.warnings.length})
+                </summary>
+                <div className="max-h-32 overflow-y-auto mt-1 space-y-0.5 text-amber-300/80">
+                  {preview.warnings.map((w, i) => <div key={i}>{w}</div>)}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+
+        {!preview
+          ? <button className="btn-secondary w-full justify-center" disabled={busy} onClick={() => send(true)}>
+              {busy ? 'Уншиж байна…' : 'Файлыг унших (урьдчилан харах)'}
+            </button>
+          : <button className="btn-primary w-full justify-center" disabled={busy} onClick={() => send(false)}>
+              {busy ? 'Оруулж байна…' : `${preview.total} машиныг бүртгэх`}
+            </button>}
+      </div>
+    </Modal>
+  )
+}
+
 export default function Drivers() {
   const toast = useToast()
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [q, setQ] = useState('')
+  const [company, setCompany] = useState('')
+  const [companies, setCompanies] = useState([])
   const [editing, setEditing] = useState(null)
+  const [importing, setImporting] = useState(false)
 
-  const load = () => api(`/api/admin/drivers${q ? `?q=${encodeURIComponent(q)}` : ''}`).then(setRows)
+  const load = () => {
+    const p = new URLSearchParams()
+    if (q) p.set('q', q)
+    if (company) p.set('company', company)
+    api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
+    api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
+  }
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => { load() }, [company])
 
   const blank = {
     plate_number: '', full_name: '', phone: '', contract_type: 'MONTHLY',
-    site_id: '', monthly_fee: 0,
+    site_id: '', monthly_fee: 0, company: '', note: '',
     valid_from: new Date().toISOString().slice(0, 10),
     valid_to: new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10),
   }
@@ -40,23 +144,35 @@ export default function Drivers() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Бүртгэлтэй жолооч</h1>
-        <button className="btn-primary" onClick={() => setEditing(blank)}><Plus size={16} /> Бүртгэх</button>
+        <div className="flex gap-2">
+          <button className="btn-secondary" onClick={() => setImporting(true)}>
+            <Upload size={16} /> Excel-ээс импортлох
+          </button>
+          <button className="btn-primary" onClick={() => setEditing(blank)}><Plus size={16} /> Бүртгэх</button>
+        </div>
       </div>
-      <div className="card flex gap-2 py-3">
-        <input className="input font-mono" placeholder="Дугаараар хайх…" value={q}
-          onChange={(e) => setQ(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === 'Enter' && load()} />
+      <div className="card flex flex-wrap gap-2 py-3 items-center">
+        <input className="input font-mono flex-1 min-w-48" placeholder="Дугаар, нэр, байгууллагаар хайх…"
+          value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
         <button className="btn-secondary" onClick={load}><Search size={15} /></button>
+        <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>
+          <option value="">Бүх байгууллага ({companies.reduce((a, c) => a + c.count, 0)})</option>
+          {companies.map((c) => (
+            <option key={c.company} value={c.company}>{c.company} ({c.count})</option>
+          ))}
+        </select>
+        <span className="text-xs text-slate-400">{rows.length} машин</span>
       </div>
-      <Table headers={['Дугаар', 'Нэр', 'Утас', 'Төрөл', 'Зогсоол', 'Сарын төлбөр', 'Хүчинтэй хугацаа', 'Төлөв', '']}
+      <Table headers={['Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Төлөв', '']}
         empty={rows.length === 0}>
         {rows.map((d) => (
           <tr key={d.id}>
             <td className="td font-mono font-bold">{d.plate_number}</td>
             <td className="td">{d.full_name}</td>
-            <td className="td font-mono">{d.phone}</td>
+            <td className="td text-xs">{d.company}</td>
+            <td className="td text-xs text-slate-400">{d.note}</td>
             <td className="td">{CONTRACT_TYPES[d.contract_type] || d.contract_type}</td>
             <td className="td">{d.site_name}</td>
-            <td className="td font-mono">{fmt(d.monthly_fee)}₮</td>
             <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
             <td className="td"><Badge value={d.is_active ? 'active' : 'FAILED'} /></td>
             <td className="td text-right">
@@ -68,6 +184,8 @@ export default function Drivers() {
           </tr>
         ))}
       </Table>
+
+      <ImportModal open={importing} onClose={() => setImporting(false)} sites={sites} onDone={load} />
 
       <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Жолооч засах' : 'Жолооч бүртгэх'}>
         {editing && (

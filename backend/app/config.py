@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # эс бол зөв нууц үг оруулсны дараа ч түгжээ тайлагдахгүй.
     camera_auth_retry_sec: int = 300
 
+    # Камерын event stream (eventManager.cgi attach) тохиргоо.
+    # Камер нэгэн зэрэг ӨӨР систем рүү (тухайн байгууллагын хуучин платформ г.м)
+    # мөн дата илгээж байвал heartbeat саатаж, богино read timeout нь холболтыг
+    # дэмий тасалж reconnect-ийн давталт үүсгэдэг. Уртасгавал зэрэгцэн ажиллана.
+    camera_event_heartbeat_sec: int = 10   # камерын heartbeat давтамж (CGI параметр)
+    camera_event_read_timeout_sec: int = 120  # энэ хугацаанд юу ч ирэхгүй бол дахин холбоно
+    camera_event_reconnect_sec: int = 15   # тасарсны дараа дахин холбогдох хүлээлт
+
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
     qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)
     qpay_password: str = ""    # client_secret — зөвхөн .env-д (git-д бүү бич)

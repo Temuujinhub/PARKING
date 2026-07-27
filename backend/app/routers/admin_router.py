@@ -2,7 +2,7 @@
 import secrets
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from ..auth import (ALL_MODULES, get_current_user, hash_password, operator_sites,
@@ -495,13 +495,36 @@ def update_discount(discount_id: str, body: dict, db: Session = Depends(get_db),
 
 # ─────────────────────────── Бүртгэлтэй жолооч ───────────────────────────
 @router.get("/drivers")
-def list_drivers(q: str | None = None, db: Session = Depends(get_db),
+def list_drivers(q: str | None = None, company: str | None = None,
+                 site_id: str | None = None, db: Session = Depends(get_db),
                  user: User = Depends(require("drivers"))):
-    query = db.query(RegisteredDriver).order_by(RegisteredDriver.created_at.desc())
+    query = db.query(RegisteredDriver).order_by(RegisteredDriver.company,
+                                                RegisteredDriver.plate_number)
     if q:
-        query = query.filter(RegisteredDriver.plate_number.ilike(f"%{q.upper()}%"))
+        # Дугаар, эзэмшигч, байгууллагын аль нэгээр нь хайна (олон зуун мөртэй
+        # жагсаалтад зөвхөн дугаараар хайх нь хангалтгүй)
+        like = f"%{q.strip()}%"
+        query = query.filter(
+            RegisteredDriver.plate_number.ilike(f"%{q.strip().upper()}%")
+            | RegisteredDriver.full_name.ilike(like)
+            | RegisteredDriver.company.ilike(like))
+    if company:
+        query = query.filter(RegisteredDriver.company == company)
+    if site_id:
+        query = query.filter(RegisteredDriver.site_id == site_id)
     return [to_dict(d, extra={"site_name": d.site.name if d.site else "Бүх зогсоол"})
-            for d in query.limit(500).all()]
+            for d in query.limit(2000).all()]
+
+
+@router.get("/drivers/companies")
+def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
+    """Байгууллагын жагсаалт + машины тоо — шүүлтүүрт."""
+    from sqlalchemy import func as _f
+    rows = (db.query(RegisteredDriver.company, _f.count(RegisteredDriver.id))
+            .filter(RegisteredDriver.company.isnot(None), RegisteredDriver.company != "")
+            .group_by(RegisteredDriver.company)
+            .order_by(RegisteredDriver.company).all())
+    return [{"company": c, "count": n} for c, n in rows]
 
 
 @router.post("/drivers")
@@ -509,6 +532,7 @@ def create_driver(body: dict, db: Session = Depends(get_db), user: User = Depend
     d = RegisteredDriver(
         plate_number=body["plate_number"].upper().replace(" ", ""),
         full_name=body.get("full_name", ""), phone=body.get("phone", ""),
+        company=body.get("company", ""), note=body.get("note", ""),
         contract_type=body.get("contract_type", "MONTHLY"),
         site_id=body.get("site_id"), monthly_fee=body.get("monthly_fee", 0),
         valid_from=datetime.fromisoformat(body["valid_from"]) if body.get("valid_from") else datetime.utcnow(),
@@ -527,7 +551,8 @@ def update_driver(driver_id: str, body: dict, db: Session = Depends(get_db),
     d = db.get(RegisteredDriver, driver_id)
     if not d:
         raise HTTPException(404, "Жолооч олдсонгүй")
-    for k in ("full_name", "phone", "contract_type", "site_id", "monthly_fee", "is_active"):
+    for k in ("full_name", "phone", "contract_type", "site_id", "monthly_fee",
+              "is_active", "company", "note"):
         if k in body:
             setattr(d, k, body[k])
     if body.get("plate_number"):
@@ -538,6 +563,52 @@ def update_driver(driver_id: str, body: dict, db: Session = Depends(get_db),
     _audit(db, user, "UPDATE", "driver", driver_id, body)
     db.commit()
     return to_dict(d)
+
+
+@router.post("/drivers/import")
+async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
+                         contract_type: str = Form("CONTRACT"),
+                         valid_days: int = Form(365),
+                         replace: bool = Form(False),
+                         dry_run: bool = Form(False),
+                         db: Session = Depends(get_db),
+                         user: User = Depends(require("drivers"))):
+    """Гэрээт машины жагсаалтыг Excel-ээс импортлох (олон хуудас = олон байгууллага).
+
+    dry_run=true үед DB хөндөхгүй, зөвхөн юу орохыг буцаана — админ урьдчилан
+    хараад баталгаажуулна. replace=true бол файлд байхгүй хуучин бүртгэлийг
+    ИДЭВХГҮЙ болгоно (устгахгүй — буруу импортоос сэргээх боломж үлдэнэ)."""
+    from ..services.driver_import import import_rows, parse_workbook
+
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "Зөвхөн .xlsx файл дэмжинэ")
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Файл хэт том (10MB дээш)")
+
+    try:
+        rows, warnings = parse_workbook(data)
+    except Exception as e:  # noqa: BLE001 — эвдэрсэн файлд ойлгомжтой хариу
+        raise HTTPException(400, f"Excel уншиж чадсангүй: {type(e).__name__}: {e}") from e
+    if not rows:
+        raise HTTPException(400, "Нэг ч улсын дугаар олдсонгүй. Хуудсанд «Улсын дугаар» "
+                                 "гэсэн гарчигтай багана байх шаардлагатай.")
+
+    by_company: dict[str, int] = {}
+    for r in rows:
+        by_company[r["company"]] = by_company.get(r["company"], 0) + 1
+    preview = {"total": len(rows), "companies": by_company, "warnings": warnings[:50],
+               "sample": rows[:10]}
+
+    if dry_run:
+        return {"dry_run": True, **preview}
+
+    res = import_rows(db, rows, site_id or None, contract_type=contract_type,
+                      valid_days=valid_days, deactivate_missing=replace)
+    _audit(db, user, "IMPORT", "driver", site_id or "-",
+           {"file": file.filename, **{k: v for k, v in res.items()}})
+    db.commit()
+    return {"dry_run": False, **preview, **res}
 
 
 # ─────────────────────────── Хар жагсаалт ───────────────────────────

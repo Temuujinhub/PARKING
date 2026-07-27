@@ -119,16 +119,20 @@ async def _process_event(device_id: str, data: dict):
 async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = None):
     """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй).
     codes=[All] — камерын бүх event-ийг авч, дугаартайг нь л боловсруулна (дибагт хялбар)."""
-    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]&heartbeat=5"
+    hb = settings.camera_event_heartbeat_sec
+    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]&heartbeat={hb}"
     auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     while True:
         buffer = ""
         try:
-            # read=30: стрим heartbeat=5с тутам ирдэг тул 30с юу ч ирэхгүй бол холболт
-            # үхсэн гэж үзэж ReadTimeout шиднэ → reconnect. read=None үед TCP чимээгүй
-            # тасрахад (сүлжээний блип, NAT reset) aiter_text мөнхөд хүлээж, камер
-            # "Офлайн" болоод хэзээ ч сэргэдэггүй байсан.
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=30)) as client:
+            # read timeout: энэ хугацаанд юу ч ирэхгүй бол холболт үхсэн гэж үзэж
+            # ReadTimeout шиднэ → reconnect. read=None үед TCP чимээгүй тасрахад
+            # (сүлжээний блип, NAT reset) aiter_text мөнхөд хүлээж, камер "Офлайн"
+            # болоод хэзээ ч сэргэдэггүй байв.
+            # ЧУХАЛ: камер нэгэн зэрэг өөр систем рүү дата илгээж байвал heartbeat
+            # саатдаг тул энэ утга ӨГӨӨМӨР байх ёстой (.env-ээс тохируулна).
+            async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(10, read=settings.camera_event_read_timeout_sec)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
                     if resp.status_code != 200:
                         # 401 үед ХУРДАН давтаж болохгүй: Dahua камер хэд хэдэн
@@ -141,8 +145,9 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                                   f"сэргийлж {settings.camera_auth_retry_sec}с хүлээнэ.")
                             await asyncio.sleep(settings.camera_auth_retry_sec)
                         else:
-                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — 15с дараа дахин")
-                            await asyncio.sleep(15)
+                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — "
+                                  f"{settings.camera_event_reconnect_sec}с дараа дахин")
+                            await asyncio.sleep(settings.camera_event_reconnect_sec)
                         continue
                     print(f"[cgi_poll] {ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
                     last_touch = 0.0
@@ -160,8 +165,9 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                         for data in blocks:
                             await _process_event(device_id, data)
         except Exception as e:
-            print(f"[cgi_poll] {ip}: холболт тасарлаа ({e}) — 15с дараа дахин")
-            await asyncio.sleep(15)
+            print(f"[cgi_poll] {ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
+                  f"{settings.camera_event_reconnect_sec}с дараа дахин")
+            await asyncio.sleep(settings.camera_event_reconnect_sec)
 
 
 async def supervisor():
