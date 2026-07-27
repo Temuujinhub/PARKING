@@ -109,6 +109,7 @@ export default function Drivers() {
   const [sites, setSites] = useState([])
   const [q, setQ] = useState('')
   const [company, setCompany] = useState('')
+  const [siteFilter, setSiteFilter] = useState('')
   const [companies, setCompanies] = useState([])
   const [editing, setEditing] = useState(null)
   const [importing, setImporting] = useState(false)
@@ -117,11 +118,12 @@ export default function Drivers() {
     const p = new URLSearchParams()
     if (q) p.set('q', q)
     if (company) p.set('company', company)
+    if (siteFilter) p.set('site_id', siteFilter)
     api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
-  useEffect(() => { load() }, [company])
+  useEffect(() => { load() }, [company, siteFilter])
 
   const blank = {
     plate_number: '', full_name: '', phone: '', contract_type: 'MONTHLY',
@@ -155,6 +157,11 @@ export default function Drivers() {
         <input className="input font-mono flex-1 min-w-48" placeholder="Дугаар, нэр, байгууллагаар хайх…"
           value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
         <button className="btn-secondary" onClick={load}><Search size={15} /></button>
+        <select className="input w-auto min-w-44" value={siteFilter}
+          onChange={(e) => setSiteFilter(e.target.value)}>
+          <option value="">Бүх зогсоол</option>
+          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
         <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>
           <option value="">Бүх байгууллага ({companies.reduce((a, c) => a + c.count, 0)})</option>
           {companies.map((c) => (

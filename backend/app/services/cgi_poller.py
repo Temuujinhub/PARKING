@@ -139,10 +139,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                         # буруу оролдлогын дараа бүртгэлийг ТҮГЖДЭГ. 15с тутам
                         # давтвал зөв нууц үг оруулсны дараа ч түгжээ тайлагдахгүй
                         # (хаалт нээх RPC2 нь "remainLockSecond" алдаа өгсөөр байна).
-                        if resp.status_code == 401:
-                            print(f"[cgi_poll] {ip}: 401 нэвтрэлт амжилтгүй — нууц үгээ "
-                                  f"шалгана уу (Тохиргоо → Төхөөрөмж). Камер түгжигдэхээс "
-                                  f"сэргийлж {settings.camera_auth_retry_sec}с хүлээнэ.")
+                        if resp.status_code in (401, 403):
+                            # ЧУХАЛ: энэ Dahua firmware түгжигдсэн/хориглосон үед 401
+                            # БИШ 403 буцаадаг. Зөвхөн 401-ийг шалгаж байсан тул
+                            # 15с тутам дайрсаар түгжээг тасралтгүй сунгадаг байв.
+                            why = ("нууц үг буруу" if resp.status_code == 401 else
+                                   "камер энэ IP-г ТҮР ХОРИГЛОСОН (олон удаа буруу "
+                                   "нэвтрэлт эсвэл холболтын хязгаар дүүрсэн)")
+                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — {why}. "
+                                  f"Түгжээг уртасгахгүйн тулд "
+                                  f"{settings.camera_auth_retry_sec}с хүлээнэ.")
                             await asyncio.sleep(settings.camera_auth_retry_sec)
                         else:
                             print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — "
