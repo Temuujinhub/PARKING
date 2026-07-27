@@ -11,11 +11,24 @@ export default function Vat() {
   const [from, setFrom] = useState(monthAgo)
   const [to, setTo] = useState(today)
   const [qrReceipt, setQrReceipt] = useState(null)
+  const [retrying, setRetrying] = useState(null)
+
   const [sending, setSending] = useState(false)
   const toast = useToast()
 
-  const { data: rows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
+  const { data: rows, reload: reloadRows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
+
+  // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
+  // QPay талд «И баримт» тохиргоо идэвхжсэний дараа хуучин баримтуудыг нөхөхөд.
+  const retry = async (r) => {
+    setRetrying(r.id)
+    try {
+      const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`, { method: 'POST' })
+      toast(`Баримт үүслээ — ДДТД ${res.ebarimt_id}`)
+      reloadRows()
+    } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
+  }
 
   const sendData = async () => {
     setSending(true)
@@ -61,7 +74,7 @@ export default function Vat() {
           {info.mock && <span className="text-amber-400 text-xs">MOCK горим</span>}
         </div>
       )}
-      <Table headers={['ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'QR']} empty={rows.length === 0}>
+      <Table headers={['ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'QR']} empty={rows.length === 0}>
         {rows.map((r) => (
           <tr key={r.id}>
             <td className="td font-mono text-[10px] max-w-[16rem] break-all">{r.ebarimt_id || '-'}</td>
@@ -70,11 +83,21 @@ export default function Vat() {
             <td className="td font-mono">{fmt(r.vat_amount)}₮</td>
             <td className="td font-mono text-xs">{fmtDate(r.created_at)}</td>
             <td className="td"><Badge value={r.status} /></td>
-            <td className="td">
+            <td className="td text-[11px] text-amber-400 max-w-[14rem] break-words">
+              {r.status === 'FAILED' ? (r.receipt_url || '—') : ''}
+            </td>
+            <td className="td whitespace-nowrap">
               {r.status === 'SENT' && (
                 <button className="btn-secondary py-1 px-2" onClick={() => setQrReceipt(r)}
                   aria-label="Баримтын QR харах" title="QR аюулгүй байдлын үүднээс 1 цаг л хадгалагдана">
                   <QrCode size={14} />
+                </button>
+              )}
+              {!r.ebarimt_id && (
+                <button className="btn-secondary py-1 px-2 text-xs" disabled={retrying === r.id}
+                  onClick={() => retry(r)}
+                  title="Мөнгө дахин авахгүй — зөвхөн НӨАТ баримтыг дахин үүсгэнэ">
+                  {retrying === r.id ? '…' : 'Дахин үүсгэх'}
                 </button>
               )}
             </td>

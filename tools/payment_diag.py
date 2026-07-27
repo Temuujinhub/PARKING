@@ -146,6 +146,26 @@ async def ask_qpay(db, p: Payment, finalize: bool, accept_less: bool = False) ->
     return 0
 
 
+async def do_retry(db, payments) -> int:
+    """Бүтэлгүйтсэн баримтуудыг дахин үүсгэнэ (мөнгө дахин авахгүй)."""
+    from app.routers.payments_router import retry_ebarimt
+    ok = failed = 0
+    for p in payments:
+        res = await retry_ebarimt(db, p)
+        if res.get("ok"):
+            ok += 1
+            print(f"  ✓ {p.id[:8]}  ДДТД: {res.get('ebarimt_id')}  "
+                  f"сугалаа: {res.get('lottery') or '—'}")
+        else:
+            failed += 1
+            print(f"  ✗ {p.id[:8]}  {res.get('error')}")
+    print(f"\n{ok} амжилттай, {failed} амжилтгүй")
+    if failed and ok == 0:
+        print("\n  EBARIMT_NOT_ENABLED гэж гарвал QPay талд «И баримт» тохиргоо")
+        print("  идэвхжээгүй байна — QPay-тэй холбогдож асаалгасны дараа дахин ажиллуулна.")
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Төлбөрийн оношилгоо")
     ap.add_argument("--id", help="Тодорхой төлбөрийн id — QPay-ээс шалгана")
@@ -157,6 +177,9 @@ def main() -> int:
                     help="QPay төлөгдсөн гэвэл дуусгаж ХААЛТЫГ НЭЭНЭ (--id-тай хамт)")
     ap.add_argument("--accept-less", action="store_true", dest="accept_less",
                     help="ДУТУУ төлсөн байсан ч дуусгах (санаатай шийдвэр)")
+    ap.add_argument("--retry-ebarimt", action="store_true", dest="retry_ebarimt",
+                    help="Бүтэлгүйтсэн НӨАТ баримтыг ДАХИН үүсгэх (мөнгө дахин авахгүй). "
+                         "--id-гүй бол сүүлийн үеийн бүх бүтэлгүйтсэнийг оролдоно")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -167,7 +190,26 @@ def main() -> int:
                 print(f"АЛДАА: '{args.id}' төлбөр олдсонгүй", file=sys.stderr)
                 return 1
             show_payment(db, p, full=True)
+            if args.retry_ebarimt:
+                return asyncio.run(do_retry(db, [p]))
             return asyncio.run(ask_qpay(db, p, args.finalize, args.accept_less))
+
+        if args.retry_ebarimt:
+            # Баримт нь бүтэлгүйтсэн (ДДТД-гүй) төлөгдсөн төлбөрүүд
+            since = datetime.utcnow() - timedelta(hours=args.hours)
+            paid = (db.query(Payment).filter(Payment.status == "PAID",
+                                             Payment.created_at >= since)
+                    .order_by(Payment.created_at.desc()).limit(200).all())
+            todo = []
+            for p in paid:
+                rec = db.query(VatReceipt).filter(VatReceipt.payment_id == p.id).first()
+                if not rec or not rec.ebarimt_id:
+                    todo.append(p)
+            if not todo:
+                print(f"Сүүлийн {args.hours} цагт баримтгүй үлдсэн төлбөр алга.")
+                return 0
+            print(f"{len(todo)} төлбөрийн баримтыг дахин үүсгэж байна…")
+            return asyncio.run(do_retry(db, todo))
 
         q = db.query(Payment).filter(
             Payment.created_at >= datetime.utcnow() - timedelta(hours=args.hours))

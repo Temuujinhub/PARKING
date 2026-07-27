@@ -518,3 +518,84 @@ def list_payments(
         to_dict(p, extra={"plate_number": p.session.plate_number if p.session else None,
                           "site_name": p.session.site.name if p.session and p.session.site else None})
         for p in rows]}
+
+
+async def retry_ebarimt(db: Session, payment: Payment) -> dict:
+    """Бүтэлгүйтсэн e-Barimt баримтыг ДАХИН үүсгэнэ (төлбөрийг дахин авахгүй).
+
+    Хэрэглээ: QPay талд «И баримт» тохиргоо идэвхжээгүй байх үед баримт
+    EBARIMT_NOT_ENABLED алдаатай унадаг. Тохиргоо асаагдмагц энэ функцээр
+    хуучин төлбөрүүдийн баримтыг нөхөж үүсгэнэ — жолоочоос дахин мөнгө авахгүй.
+
+    Буцаах: {ok, ebarimt_id, lottery, error}
+    """
+    if payment.status != "PAID":
+        return {"ok": False, "error": "Төлбөр PAID биш — эхлээд төлбөрөө баталгаажуулна уу"}
+
+    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id)
+           .order_by(VatReceipt.created_at).first())
+    if rec and rec.ebarimt_id:
+        return {"ok": True, "ebarimt_id": rec.ebarimt_id, "lottery": rec.lottery_code,
+                "error": "Баримт аль хэдийн үүссэн байна"}
+
+    receiver_type = payment.ebarimt_receiver_type or (
+        "COMPANY" if payment.customer_tin else "CITIZEN")
+    try:
+        if payment.provider == "QPAY" and payment.provider_payment_id:
+            raw = await qpay.create_ebarimt(
+                payment.provider_payment_id, receiver_type,
+                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+                acc=qpay.account_for(_site_of(payment)))
+        else:
+            raw = await ebarimt.create_receipt(
+                float(payment.amount), float(payment.vat_amount),
+                "CASH" if payment.payment_method == "CASH" else "CARD",
+                customer_tin=payment.customer_tin)
+    except Exception as e:  # noqa: BLE001
+        import httpx as _httpx
+        if isinstance(e, _httpx.HTTPStatusError):
+            try:
+                err = e.response.json().get("message") or e.response.text[:200]
+            except Exception:  # noqa: BLE001
+                err = e.response.text[:200]
+        else:
+            err = str(e)[:200]
+        if rec:
+            rec.receipt_url = err
+            db.commit()
+        return {"ok": False, "error": err}
+
+    if not raw.get("billId"):
+        return {"ok": False, "error": "QPay баримтын дугаар буцаасангүй"}
+
+    ebarimt.cache_qr(payment.id, raw.get("qrData"))
+    if rec:
+        rec.ebarimt_id = raw.get("billId")
+        rec.lottery_code = None if receiver_type == "COMPANY" else raw.get("lottery")
+        rec.status = "SENT"
+        rec.receipt_url = None
+    else:
+        db.add(VatReceipt(
+            payment_id=payment.id, session_id=payment.session_id,
+            ebarimt_id=raw.get("billId"),
+            lottery_code=None if receiver_type == "COMPANY" else raw.get("lottery"),
+            amount=payment.amount, vat_amount=payment.vat_amount,
+            customer_tin=payment.customer_tin, status="SENT"))
+    db.commit()
+    return {"ok": True, "ebarimt_id": raw.get("billId"), "lottery": raw.get("lottery")}
+
+
+@router.post("/{payment_id}/retry-ebarimt")
+async def retry_ebarimt_endpoint(payment_id: str, db: Session = Depends(get_db),
+                                 user: User = Depends(require("vat", "reports"))):
+    """Бүтэлгүйтсэн НӨАТ баримтыг дахин үүсгэх (UI-ийн «Баримт дахин үүсгэх» товч)."""
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(404, "Төлбөр олдсонгүй")
+    res = await retry_ebarimt(db, payment)
+    db.add(AuditLog(username=user.username, action="EBARIMT_RETRY", entity="payment",
+                    entity_id=payment_id, detail=res))
+    db.commit()
+    if not res.get("ok"):
+        raise HTTPException(400, f"Баримт үүсгэж чадсангүй: {res.get('error')}")
+    return res
