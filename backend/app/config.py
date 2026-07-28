@@ -128,6 +128,8 @@ class Settings(BaseSettings):
     barrier_total_budget_sec: float = 15.0
     # LPR event ирснээс хаалт нээх/шийдвэр гарах хүртэлх нийт хугацааны WARNING босго (мс)
     lpr_slow_warn_ms: int = 2000
+    # Төлбөр баталгаажуулснаас хаалт нээх хүртэлх хугацааны WARNING босго (мс)
+    payment_slow_warn_ms: int = 3000
     # Event loop хэдэн мс царцвал WARNING логлох вэ (синхрон DB дуудлага бүх
     # системийг зэрэг зогсоодог — үүнийг тоогоор илрүүлнэ)
     loop_lag_warn_ms: int = 500

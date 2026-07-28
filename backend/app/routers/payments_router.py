@@ -69,7 +69,19 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
 
     Нэгдсэн (өр багтсан) төлбөрт: session-ий хэсэгт нэг баримт, холбогдсон ӨР ТУС
-    БҮРД ТУСДАА баримт үүсгэж, нөхөн төлбөрүүдийг PAID болгоно."""
+    БҮРД ТУСДАА баримт үүсгэж, нөхөн төлбөрүүдийг PAID болгоно.
+
+    ХУГАЦААНЫ ХЭМЖИЛТ: «төлбөр төлсний дараа хаалт удаан нээгдэж байна» гомдлыг
+    үе шат тус бүрээр нь ялгаж хэмжинэ (e-Barimt vs хаалт vs DB) — эс бол аль нь
+    удааширч байгааг таамаглах болно."""
+    import time as _t
+    _p0 = _t.monotonic()
+    _marks: list[str] = []
+
+    def _mark(label: str, since: float) -> float:
+        _marks.append(f"{label}={int((_t.monotonic() - since) * 1000)}мс")
+        return _t.monotonic()
+
     if payment.status == "PAID":
         return  # idempotent — давхар webhook хамгаалалт
     payment.status = "PAID"
@@ -162,8 +174,13 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         log.info(f"өр төлөгдөв: {comp.plate_number} {comp_amount:.0f}₮ "
               f"(comp {comp.id}, payment {payment.id})")
 
+    _t1 = _mark("ebarimt", _p0)
     session = db.get(ParkingSession, payment.session_id)
     await mark_paid_and_open(db, session)
+    _mark("хаалт+session", _t1)
+    total = int((_t.monotonic() - _p0) * 1000)
+    (log.warning if total >= settings.payment_slow_warn_ms else log.info)(
+        "төлбөр finalize: %dмс (%s) provider=%s", total, " ".join(_marks), payment.provider)
 
 
 async def _confirm_qpay(db: Session, payment: Payment) -> bool:
@@ -556,10 +573,16 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
         payment.ebarimt_receiver_type = "COMPANY"
     else:
         payment.ebarimt_receiver_type = "CITIZEN"
+    import time as _t
+    _c0 = _t.monotonic()
     await _finalize_paid(db, payment, raw=body)
     db.commit()
-    return {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
-            **_print_payload(db, payment)}
+    out = {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
+           **_print_payload(db, payment)}
+    _ms = int((_t.monotonic() - _c0) * 1000)
+    (log.warning if _ms >= settings.payment_slow_warn_ms else log.info)(
+        "POS confirm: %dмс (session=%s)", _ms, session.plate_number)
+    return out
 
 
 # ─────────────────────────── Жагсаалт ───────────────────────────
