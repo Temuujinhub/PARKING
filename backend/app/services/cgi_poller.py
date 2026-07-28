@@ -306,10 +306,15 @@ async def supervisor():
         ensure_workers()   # унасан worker байвал сэргээнэ
         db = SessionLocal()
         try:
-            cams = db.query(Device).filter(
-                Device.device_type == "camera", Device.status == "active",
-                Device.ip_address.isnot(None), Device.ip_address != "",
-            ).all()
+            # ИДЭВХГҮЙ болгосон зогсоолын камерыг сонсохгүй — тухайн талбай өөр
+            # системд шилжсэн/засвартай үед манай систем түүнд огт хүрэхгүй байх
+            # ёстой (эс бол хоёр систем нэг камерыг зэрэг ашиглана).
+            from ..models import ParkingSite
+            cams = (db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id)
+                    .filter(Device.device_type == "camera", Device.status == "active",
+                            ParkingSite.is_active.is_(True),
+                            Device.ip_address.isnot(None), Device.ip_address != "")
+                    .all())
             active = set()
             for c in cams:
                 active.add(c.id)

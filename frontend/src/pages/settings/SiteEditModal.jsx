@@ -21,6 +21,19 @@ export default function SiteEditModal({ editing, setEditing, templates, onSubmit
                 {['A', 'B', 'C'].map((z) => <option key={z}>{z}</option>)}
               </select>
             </Field>
+            {/* Зогсоолыг ТҮР идэвхгүй болгох — тухайн талбай өөр системд шилжсэн,
+                эсвэл засвартай үед. Идэвхгүй үед камерын event сонсохоо болино,
+                хаалт автоматаар нээгдэхгүй. Өгөгдөл, түүх ХЭВЭЭР үлдэнэ. */}
+            <Field label="Төлөв">
+              <label className="flex items-center gap-2 cursor-pointer select-none py-2">
+                <input type="checkbox" className="w-4 h-4 accent-accent"
+                  checked={editing.is_active !== false}
+                  onChange={(e) => setEditing({ ...editing, is_active: e.target.checked })} />
+                <span className="text-sm">
+                  {editing.is_active !== false ? 'Идэвхтэй' : 'ИДЭВХГҮЙ — камер сонсохгүй, хаалт авто нээгдэхгүй'}
+                </span>
+              </label>
+            </Field>
             <Field label="Багтаамж">
               <input className="input" type="number" min="1" value={editing.unlimited ? '' : editing.capacity}
                 disabled={editing.unlimited} placeholder={editing.unlimited ? 'Хязгааргүй' : ''}
