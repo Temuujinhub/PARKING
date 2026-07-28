@@ -74,6 +74,21 @@ async def close_camera_clients():
         _http_clients.pop(ip, None)
 
 
+async def reset_camera_client(ip: str):
+    """Нэг камерын холболтын санг шинэчилнэ (хаагаад дараагийн хүсэлтэд шинээр
+    нээнэ). Хаалтны команд БҮХ оролдлогодоо timeout болсны дараа дуудна: хуучирсан
+    keep-alive холболт камер талдаа үхсэн байх нь ийм timeout-ын түгээмэл шалтгаан
+    бөгөөд шинэ TCP холболтоор дараагийн команд сэргэдэг. Камерыг reboot хийхээс
+    хамаагүй аюулгүй — камерын ажиллагаа, бусад системд огт нөлөөгүй."""
+    c = _http_clients.pop(ip, None)
+    if c is not None:
+        try:
+            await c.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("%s: холболтын санг шинэчлэв (дараагийн команд шинэ TCP-ээр)", ip)
+
+
 class DahuaRpcError(RuntimeError):
     pass
 
@@ -393,6 +408,10 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                         (cmd.response_text or "")[:120])
         else:
             log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
+        if cmd.status != "SUCCESS" and "хугацаа хэтэрлээ" in (cmd.response_text or ""):
+            # Бүх оролдлого timeout — холболтын сан хуучирсан байж болзошгүй тул
+            # шинэчилнэ; дараагийн команд (давхар уншилтын retry) шинэ TCP-ээр явна
+            await reset_camera_client(ip)
         if cmd.status != "SUCCESS":
             # Хуучин easy-park агентын телеметртэй автоматаар холбоно: манай команд
             # унах мөчид хуучин систем мөн алдаа/төлөв мэдээлж байсан бол хоёр систем
