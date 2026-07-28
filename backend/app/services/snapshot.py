@@ -67,8 +67,11 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
     for attempt in range(1, 4):
         for url in urls:
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    r = await client.get(url, auth=auth)
+                # Хуваалцсан клиент — машин бүрд шинэ TCP холболт нээвэл камерын
+                # холболтын сан дүүрч хаалтны команд ч хариу авахаа болино
+                from .barrier import camera_client
+                client = camera_client(ip)
+                r = await client.get(url, auth=auth, timeout=timeout)
                 if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
                     if attempt > 1 or url != urls[0]:
                         log.info(f"{ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")

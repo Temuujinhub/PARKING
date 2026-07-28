@@ -38,6 +38,42 @@ RPC_METHODS = {
 }
 
 
+# ─── Камер тус бүрийн ХУВААЛЦСАН HTTP холболт ────────────────────────────────
+# Dahua ITC камерын веб сервер нэгэн зэрэг ЦӨӨН холболт л зөвшөөрдөг. Манай систем
+# урьд нь үйлдэл бүрд (хаалт нээх, дэлгэц бичих, зураг татах) ШИНЭ AsyncClient
+# үүсгэдэг байсан тул шинэ TCP холболт нээгдэж, камерын сан дүүрч ХАРИУ ӨГӨХӨӨ
+# БОЛИДОГ байв. Production дээр curl-ээр яг энэ хэв маяг бүртгэгдсэн (2026-07-28,
+# MONNIS): эхний 4-9 хүсэлт timeout, дараа нь бүгд 11 МИЛЛИСЕКУНД. Ping 0%
+# алдагдалтай байсан тул сүлжээ биш — холболтын сангийн асуудал.
+#
+# Шийдэл: камерын IP тус бүрд НЭГ клиент, keep-alive-аар холболтоо дахин ашиглана.
+_http_clients: dict[str, httpx.AsyncClient] = {}
+
+
+def camera_client(ip: str) -> httpx.AsyncClient:
+    """Тухайн камерын хуваалцсан HTTP клиент (холболт дахин ашиглана)."""
+    c = _http_clients.get(ip)
+    if c is None or c.is_closed:
+        c = _http_clients[ip] = httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.barrier_attempt_timeout_sec),
+            limits=httpx.Limits(
+                max_connections=settings.camera_max_connections,
+                max_keepalive_connections=settings.camera_max_connections,
+                keepalive_expiry=60.0),
+        )
+    return c
+
+
+async def close_camera_clients():
+    """Зогсох үед бүх холболтыг цэвэр хаана (камерт орхигдсон сокет үлдээхгүй)."""
+    for ip, c in list(_http_clients.items()):
+        try:
+            await c.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        _http_clients.pop(ip, None)
+
+
 class DahuaRpcError(RuntimeError):
     pass
 
@@ -255,8 +291,12 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
           # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
           _timeout = min(_remaining, settings.barrier_attempt_timeout_sec)
           async def _one_attempt():
-              """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой."""
-              async with httpx.AsyncClient(timeout=_timeout) as client:
+              """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой.
+
+              Хуваалцсан клиент: шинэ TCP холболт нээхгүй, камерын холболтын
+              санг шавхахгүй (дээрх camera_client-ийн тайлбарыг үзнэ үү)."""
+              if True:
+                  client = camera_client(ip)
                   if command == "open" and settings.barrier_open_path:
                       # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
                       auth = httpx.DigestAuth(username, password)
@@ -492,7 +532,8 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         # Нэг камерт нэг RPC — хаалтны командтай мөргөлдвөл камер «нууц үг буруу»
         # гэж ХУДАЛ татгалздаг. Дэлгэц бол заавал биш тул хаалт ирвэл бууж өгнө.
         async with _rpc_lock(ip):
-            async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
+            if True:
+                client = camera_client(ip)   # хуваалцсан холболт
                 rpc = DahuaRpc(client, ip, username, password)
                 await rpc.login()
                 try:

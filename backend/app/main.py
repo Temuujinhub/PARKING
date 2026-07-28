@@ -236,6 +236,12 @@ async def stop_background_tasks():
     except (asyncio.TimeoutError, TimeoutError):
         log.warning("зарим task 5с дотор зогсоогүй — албадан хаалаа")
     _bg_tasks.clear()
+    # Камер руу нээсэн keep-alive холболтуудыг ч цэвэр хаана
+    try:
+        from .services.barrier import close_camera_clients
+        await close_camera_clients()
+    except Exception as e:  # noqa: BLE001
+        log.warning("камерын холболт хаахад алдаа: %r", e)
 
 
 @app.websocket("/ws/sites/{site_id}")
