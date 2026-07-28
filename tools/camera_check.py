@@ -6,6 +6,9 @@
     sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_check.py --all
     sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_check.py --site SPORT
 
+Шинэ бүртгэл турших (тохиргоо ӨӨРЧЛӨХГҮЙ — эхлээд үүгээр батална):
+    ... camera_check.py 10.0.104.10 10.0.104.11 --user parking --pass 'P@99w0rd'
+
 Шалгах дараалал (эхнийх нь унавал дараагийнх нь утгагүй):
   1. TCP 80  — сервер камер руу сүлжээгээр хүрч байна уу (route/VLAN/firewall)
   2. HTTP    — вэб сервер хариулж байна уу
@@ -66,15 +69,22 @@ def _device_for(ip: str):
         return None
 
 
-def check(ip: str) -> str:
-    """Буцаах: 'ok' | 'auth' (сүлжээгээр хүрч байгаа ч нэвтрэлт буруу) | 'net'"""
+def check(ip: str, override: tuple[str, str] | None = None) -> str:
+    """Буцаах: 'ok' | 'auth' (сүлжээгээр хүрч байгаа ч нэвтрэлт буруу) | 'net'
+
+    override: (нэр, нууц үг) өгвөл тохиргоог ХӨНДӨХГҮЙГЭЭР тэр нэвтрэлтийг турших
+    (шинэ бүртгэл үүсгэсний дараа .env/DB-г өөрчлөхийн ӨМНӨ батлахад)."""
     print(f"\n═══ {ip} ═══")
     from app.services.device_auth import barrier_credentials, camera_credentials
     device = _device_for(ip)
-    cam_user, cam_pass = camera_credentials(device)
-    if device is not None and (device.username or device.password):
+    if override:
+        cam_user, cam_pass = override
+        print(f"  · ТУРШИЛТЫН нэвтрэлт (тушаалын мөрөөс — тохиргоо өөрчлөгдөөгүй)")
+    elif device is not None and (device.username or device.password):
+        cam_user, cam_pass = camera_credentials(device)
         print(f"  · {device.name} — ТӨХӨӨРӨМЖИЙН өөрийн нэвтрэлт (DB-д хадгалагдсан)")
     else:
+        cam_user, cam_pass = camera_credentials(device)
         print("  · системийн ерөнхий нэвтрэлт (.env) — энэ төхөөрөмжид өөрийнх нь алга")
     print(f"      нэр:      {cam_user!r}")
     print(f"      нууц үг:  {_mask(cam_pass)}")
@@ -170,6 +180,25 @@ def main() -> int:
         print(__doc__)
         return 1
 
+    # --user/--pass — тохиргоог ХӨНДӨХГҮЙГЭЭР шинэ бүртгэлийг турших
+    override = None
+    if "--user" in args:
+        i = args.index("--user")
+        u = args[i + 1] if len(args) > i + 1 else ""
+        args = args[:i] + args[i + 2:]
+        pw = ""
+        if "--pass" in args:
+            j = args.index("--pass")
+            pw = args[j + 1] if len(args) > j + 1 else ""
+            args = args[:j] + args[j + 2:]
+        else:
+            import getpass
+            pw = getpass.getpass("нууц үг: ")
+        override = (u, pw)
+        print(f"ТУРШИЛТ: «{u}» бүртгэлээр шалгана (тохиргоо өөрчлөгдөхгүй).")
+        print("АНХААР: буруу нууц үг оруулбал камерын оролдлогын тоо буурна — "
+              "нэг л удаа зөв оруулахыг хичээнэ үү.\n")
+
     if args[0] in ("--all", "--site"):
         from app.database import SessionLocal
         from app.models import Device, ParkingSite
@@ -197,7 +226,7 @@ def main() -> int:
     else:
         ips = args
 
-    results = {ip: check(ip) for ip in ips}
+    results = {ip: check(ip, override) for ip in ips}
 
     LABEL = {
         "ok": "БҮРЭН БЭЛЭН",
