@@ -16,22 +16,16 @@ const EVENT_LABELS = {
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [events, setEvents] = useState([])
-  const [healthAlerts, setHealthAlerts] = useState([])
   const load = () => api('/api/reports/dashboard').then(setStats).catch(() => {})
-  // Камерын эрүүл мэндийн анхааруулга (амжилт <90%, LED <50%, стрим тасарсан)
-  const loadAlerts = () => api('/api/health/cameras')
-    .then((r) => setHealthAlerts(r.alerts || [])).catch(() => {})
 
   useEffect(() => {
     load()
-    loadAlerts()
-    const ta = setInterval(loadAlerts, 60000)
     const t = setInterval(load, 30000)
     const close = wsConnect('all', (ev) => {
       setEvents((prev) => [ev, ...prev].slice(0, 30))
       load()
     })
-    return () => { clearInterval(t); clearInterval(ta); close() }
+    return () => { clearInterval(t); close() }
   }, [])
 
   if (!stats) return <div className="text-slate-500">Ачаалж байна…</div>
@@ -57,15 +51,8 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Хяналтын самбар</h1>
-
-      {/* Камерын эрүүл мэндийн анхааруулга — улаан нь яаралтай (хаалт/LED/стрим) */}
-      {healthAlerts.map((a, i) => (
-        <div key={i} className={`card flex items-center gap-2 py-3 text-sm ${a.level === 'red'
-          ? 'bg-red-500/10 border border-red-500/30 text-red-300'
-          : 'bg-amber-500/10 border border-amber-500/30 text-amber-300'}`}>
-          <Wifi size={16} /> {a.text}
-        </div>
-      ))}
+      {/* Техникийн анхааруулгууд ЭНД ГАРАХГҮЙ — энэ хуудас албан газрын хананд
+          томоор гардаг бизнесийн самбар. Алдаа/гүйцэтгэл: Системийн эрүүл мэнд. */}
 
       {/* Үндсэн үзүүлэлт — нэг эгнээ: 4 KPI + систем/төхөөрөмжийн нэгтгэсэн карт */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">

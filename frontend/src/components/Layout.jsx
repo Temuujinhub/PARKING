@@ -1,14 +1,14 @@
 import {
   Activity, Banknote, Car, ChevronDown, ClipboardList, DoorOpen, FileText, History, KeyRound,
-  LayoutDashboard, LogOut, Moon, Percent, ReceiptText, ScrollText, Settings, ShieldAlert,
-  Sun, Tag, Users, Wallet,
+  LayoutDashboard, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Percent, ReceiptText,
+  ScrollText, Settings, ShieldAlert, Sun, Tag, Users, Wallet,
 } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { api, setToken } from '../api'
 import { useAuth } from '../auth'
 import { isDark, toggleTheme } from '../theme'
-import Logo from './Logo'
+import Logo, { LogoMark } from './Logo'
 import { Field, Modal, PasswordInput, useToast } from './ui'
 
 // Бүлэглэсэн цэс: standalone item эсвэл {group, children[]}. module = эрхийн түлхүүр.
@@ -55,6 +55,9 @@ export default function Layout() {
   const [dark, setDark] = useState(isDark())
   const [pwModal, setPwModal] = useState(null) // {old_password, new_password, confirm}
   const [collapsed, setCollapsed] = useState({}) // {groupName: true} — хумигдсан бүлэг
+  // Нарийн (зөвхөн дүрс) горим — хананд томоор гаргах самбарт цэс бага зай эзэлнэ
+  const [mini, setMini] = useState(() => localStorage.getItem('sidebar-mini') === '1')
+  const toggleMini = () => setMini((m) => { localStorage.setItem('sidebar-mini', m ? '0' : '1'); return !m })
 
   // Хүртээмжтэй child-тай бүлгүүд + standalone item-ууд
   const nav = NAV.map((n) => n.group
@@ -83,56 +86,92 @@ export default function Layout() {
 
   return (
     <div className="flex min-h-dvh">
-      <aside className="w-60 shrink-0 bg-surface-card border-r border-surface-border/60 flex flex-col h-dvh sticky top-0">
-        <div className="px-5 py-5 border-b border-surface-border/60">
-          <Logo size={30} textClass="text-base" />
-          <div className="text-xs text-slate-500 mt-1.5">Зогсоолын удирдлага</div>
+      <aside className={`${mini ? 'w-14' : 'w-60'} shrink-0 bg-surface-card border-r border-surface-border/60 flex flex-col h-dvh sticky top-0 transition-all`}>
+        <div className={`${mini ? 'px-0 py-3 flex justify-center' : 'px-5 py-5'} border-b border-surface-border/60`}>
+          {mini ? <LogoMark size={26} /> : (
+            <>
+              <Logo size={30} textClass="text-base" />
+              <div className="text-xs text-slate-500 mt-1.5">Зогсоолын удирдлага</div>
+            </>
+          )}
         </div>
-        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5" aria-label="Үндсэн цэс">
-          {nav.map((n) => n.group ? (
-            <div key={n.group} className="pt-1.5">
-              <button onClick={() => setCollapsed((c) => ({ ...c, [n.group]: !c[n.group] }))}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 cursor-pointer">
-                <n.icon size={13} aria-hidden />
-                <span className="flex-1 text-left">{n.group}</span>
-                <ChevronDown size={13} className={`transition-transform ${collapsed[n.group] ? '-rotate-90' : ''}`} />
+        {/* Цэс хумих/дэлгэх — хананд томоор гаргах самбарт нарийн горим ашиглана */}
+        <button onClick={toggleMini} title={mini ? 'Цэс дэлгэх' : 'Цэс хумих (зөвхөн дүрс)'}
+          className={`${mini ? 'mx-auto' : 'ml-auto mr-2'} mt-1.5 p-1.5 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-500 hover:text-slate-300`}>
+          {mini ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+        </button>
+        {mini ? (
+          <nav className="flex-1 overflow-y-auto py-2 px-1.5 space-y-1" aria-label="Үндсэн цэс">
+            {nav.flatMap((n) => (n.group ? n.children : [n])).map(({ to, label, icon: Icon }) => (
+              <NavLink key={to} to={to} end={to === '/'} title={label}
+                className={({ isActive }) => `flex justify-center p-2 rounded-lg transition-colors ${isActive
+                  ? 'bg-accent/15 text-accent' : 'text-slate-400 hover:bg-surface-muted hover:text-slate-200'}`}>
+                <Icon size={18} aria-hidden />
+              </NavLink>
+            ))}
+          </nav>
+        ) : (
+          <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5" aria-label="Үндсэн цэс">
+            {nav.map((n) => n.group ? (
+              <div key={n.group} className="pt-1.5">
+                <button onClick={() => setCollapsed((c) => ({ ...c, [n.group]: !c[n.group] }))}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 cursor-pointer">
+                  <n.icon size={13} aria-hidden />
+                  <span className="flex-1 text-left">{n.group}</span>
+                  <ChevronDown size={13} className={`transition-transform ${collapsed[n.group] ? '-rotate-90' : ''}`} />
+                </button>
+                {!collapsed[n.group] && (
+                  <div className="space-y-0.5 mt-0.5">
+                    {n.children.map(({ to, label, icon: Icon }) => (
+                      <NavLink key={to} to={to} className={linkClass}>
+                        <Icon size={17} aria-hidden /><span>{label}</span>
+                      </NavLink>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <NavLink key={n.to} to={n.to} end={n.to === '/'} className={linkClass}>
+                <n.icon size={17} aria-hidden /><span>{n.label}</span>
+              </NavLink>
+            ))}
+          </nav>
+        )}
+        <div className={`border-t border-surface-border/60 ${mini ? 'p-2 flex flex-col items-center gap-1' : 'p-4'}`}>
+          {mini ? (
+            <>
+              <button onClick={() => setDark(toggleTheme())} aria-label="Өдөр/шөнийн горим солих"
+                className="p-2 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-400 hover:text-accent transition-colors">
+                {dark ? <Sun size={16} /> : <Moon size={16} />}
               </button>
-              {!collapsed[n.group] && (
-                <div className="space-y-0.5 mt-0.5">
-                  {n.children.map(({ to, label, icon: Icon }) => (
-                    <NavLink key={to} to={to} className={linkClass}>
-                      <Icon size={17} aria-hidden /><span>{label}</span>
-                    </NavLink>
-                  ))}
-                </div>
-              )}
-            </div>
+              <button onClick={() => { logout(); navigate('/login') }} title="Гарах"
+                className="p-2 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-400 hover:text-red-400 transition-colors">
+                <LogOut size={16} />
+              </button>
+            </>
           ) : (
-            <NavLink key={n.to} to={n.to} end={n.to === '/'} className={linkClass}>
-              <n.icon size={17} aria-hidden /><span>{n.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-        <div className="p-4 border-t border-surface-border/60">
-          <div className="flex items-center justify-between mb-2">
-            <div className="min-w-0">
-              <div className="text-sm font-medium truncate">{user?.full_name || user?.username}</div>
-              <div className="text-xs text-slate-500">{ROLE_LABELS[user?.role] || user?.role}</div>
-            </div>
-            <button onClick={() => setDark(toggleTheme())} aria-label="Өдөр/шөнийн горим солих"
-              className="p-2 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-400 hover:text-accent transition-colors">
-              {dark ? <Sun size={17} /> : <Moon size={17} />}
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            <button onClick={() => setPwModal({ old_password: '', new_password: '', confirm: '' })}
-              className="btn-secondary justify-center text-xs py-1.5" title="Нууц үг солих">
-              <KeyRound size={13} /> Нууц үг
-            </button>
-            <button onClick={() => { logout(); navigate('/login') }} className="btn-secondary justify-center text-xs py-1.5">
-              <LogOut size={13} /> Гарах
-            </button>
-          </div>
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{user?.full_name || user?.username}</div>
+                  <div className="text-xs text-slate-500">{ROLE_LABELS[user?.role] || user?.role}</div>
+                </div>
+                <button onClick={() => setDark(toggleTheme())} aria-label="Өдөр/шөнийн горим солих"
+                  className="p-2 rounded-lg hover:bg-surface-muted cursor-pointer text-slate-400 hover:text-accent transition-colors">
+                  {dark ? <Sun size={17} /> : <Moon size={17} />}
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button onClick={() => setPwModal({ old_password: '', new_password: '', confirm: '' })}
+                  className="btn-secondary justify-center text-xs py-1.5" title="Нууц үг солих">
+                  <KeyRound size={13} /> Нууц үг
+                </button>
+                <button onClick={() => { logout(); navigate('/login') }} className="btn-secondary justify-center text-xs py-1.5">
+                  <LogOut size={13} /> Гарах
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         <Modal open={!!pwModal} onClose={() => setPwModal(null)} title="Нууц үг солих">
