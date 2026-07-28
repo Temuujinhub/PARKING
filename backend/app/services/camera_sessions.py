@@ -22,7 +22,8 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import Device, ParkingSite
 from .barrier import (DahuaRpc, _auth_failed, _auth_ok, _is_auth_error, _rpc_lock,
-                      auth_block_remaining, barrier_is_waiting, camera_client)
+                      auth_block_remaining, barrier_is_waiting, camera_client,
+                      camera_sick_remaining)
 from .device_auth import camera_credentials
 
 log = logging.getLogger("parking.camera_who")
@@ -95,7 +96,9 @@ async def _fetch_log_entries(rpc: DahuaRpc) -> tuple[bool, dict]:
 
 
 async def _check_one(device_id: str, ip: str, creds: tuple[str, str]) -> None:
-    if auth_block_remaining(ip) or barrier_is_waiting(ip):
+    # Таслуур идэвхтэй / хаалт хүлээж буй / камер саяхан timeout-оор унасан үед
+    # энэ (заавал биш) шалгалт камерын нөөцийг булаахгүй — алгасна.
+    if auth_block_remaining(ip) or barrier_is_waiting(ip) or camera_sick_remaining(ip):
         return
     async with _rpc_lock(ip):
         rpc = DahuaRpc(camera_client(ip), ip, *creds)

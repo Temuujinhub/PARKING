@@ -74,6 +74,23 @@ async def close_camera_clients():
         _http_clients.pop(ip, None)
 
 
+# Камер «өвчтэй» цонх: хаалтны команд бүх оролдлогодоо timeout болбол камер
+# RPC-д хариу өгөхгүй байна гэсэн үг. Энэ үед ЗААВАЛ БИШ RPC-үүд (LED дэлгэц,
+# сессийн хяналт) түр зогсох ёстой — эс бол тэд хаалтны дараагийн оролдлоготой
+# өрсөлдөж камерын ховор нөөцийг улам шавхна (Monnis 2026-07-28: LED 0/59
+# амжилттай байх зуур хаалт 38 удаа timeout).
+_cam_sick_until: dict[str, float] = {}
+
+
+def camera_sick_remaining(ip: str) -> float:
+    """Камер саяхан timeout-оор унасан бол үлдсэн «амрах» секунд, эс бол 0."""
+    return max(0.0, _cam_sick_until.get(ip, 0.0) - time.monotonic())
+
+
+def _mark_camera_sick(ip: str, sec: float = 60.0):
+    _cam_sick_until[ip] = time.monotonic() + sec
+
+
 async def reset_camera_client(ip: str):
     """Нэг камерын холболтын санг шинэчилнэ (хаагаад дараагийн хүсэлтэд шинээр
     нээнэ). Хаалтны команд БҮХ оролдлогодоо timeout болсны дараа дуудна: хуучирсан
@@ -410,8 +427,11 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
             log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
         if cmd.status != "SUCCESS" and "хугацаа хэтэрлээ" in (cmd.response_text or ""):
             # Бүх оролдлого timeout — холболтын сан хуучирсан байж болзошгүй тул
-            # шинэчилнэ; дараагийн команд (давхар уншилтын retry) шинэ TCP-ээр явна
+            # шинэчилнэ; дараагийн команд (давхар уншилтын retry) шинэ TCP-ээр явна.
+            # Мөн заавал биш RPC-үүдийг (LED г.м.) 60с амраана — хаалтны дараагийн
+            # оролдлогод камерын бүх нөөцийг үлдээнэ.
             await reset_camera_client(ip)
+            _mark_camera_sick(ip)
         if cmd.status != "SUCCESS":
             # Хуучин easy-park агентын телеметртэй автоматаар холбоно: манай команд
             # унах мөчид хуучин систем мөн алдаа/төлөв мэдээлж байсан бол хоёр систем
@@ -605,6 +625,12 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
     if settings.barrier_mock:
         log.info(f"[screen] MOCK {ip}: {text}")
         return ""
+    sick = camera_sick_remaining(ip)
+    if sick:
+        # Камер саяхан хаалтны командад ч хариу өгөөгүй — дэлгэцийн (заавал биш)
+        # оролдлого зөвхөн нөөц шавхана. Түр алгасаж хаалтанд зам тавьж өгнө.
+        log.info("[screen] %s: камер сэргэж амжаагүй (%.0fс үлдлээ) — алгасав", ip, sick)
+        return "камер сэргэж амжаагүй"
     blocked = auth_block_remaining(ip)
     if blocked:
         # Нууц үг буруу байхад машин бүрд дахин оролдвол камер ТҮГЖИГДЭЖ,
