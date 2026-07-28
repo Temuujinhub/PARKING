@@ -26,6 +26,10 @@ class User(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     username = Column(String(60), unique=True, nullable=False, index=True)
     password_hash = Column(String(200), nullable=False)
+    # Нууц үг сүүлд солигдсон хугацаа. Үүнээс ӨМНӨ олгогдсон токеныг хүчингүй
+    # болгоно — эс бол нууц үгээ сольсон ч хулгайлагдсан токен 12 цаг ажилласаар
+    # байна (2026-07-28: seed.py-ийн нууц үг нээлттэй repo-д задарсан тохиолдол).
+    password_changed_at = Column(DateTime, nullable=True)
     full_name = Column(String(120), nullable=False, default="")
     phone = Column(String(20), default="")
     role = Column(String(20), nullable=False, default="OPERATOR")

@@ -91,6 +91,9 @@ MIGRATIONS = [
     # v2.6 — Хаалтны командын гүйцэтгэлийн хугацаа (мс) — удаашралыг хэмжих
     "ALTER TABLE barrier_commands ADD COLUMN IF NOT EXISTS duration_ms INTEGER",
 
+    # v2.7 — Нууц үг солигдсон хугацаа (өмнөх токенуудыг хүчингүй болгоход)
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 

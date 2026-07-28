@@ -46,12 +46,16 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_access_token(user: User) -> str:
+    now = datetime.utcnow()
     payload = {
         "sub": user.id,
         "username": user.username,
         "role": user.role,
         "site_id": user.site_id,
-        "exp": datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes),
+        # iat — токен хэзээ олгогдсон. Нууц үг солигдсоны ДАРАА олгогдсон эсэхийг
+        # шалгаж хуучин (хулгайлагдсан байж болзошгүй) токеныг хүчингүй болгоно.
+        "iat": now,
+        "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 
@@ -70,6 +74,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.get(User, payload["sub"])
     if not user or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Хэрэглэгч идэвхгүй байна.")
+    # Нууц үг солигдсоны дараа ХУУЧИН токеныг хүчингүй болгоно. Ингэснээр
+    # задарсан нууц үгээр нэвтэрсэн хэн нэгэн нууц үг солигдсоны дараа ч
+    # 12 цаг хандсаар байх боломжгүй болно.
+    if user.password_changed_at:
+        iat = payload.get("iat")
+        if iat is None or datetime.utcfromtimestamp(int(iat)) < user.password_changed_at:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                                "Нууц үг солигдсон тул дахин нэвтэрнэ үү.")
     return user
 
 

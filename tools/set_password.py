@@ -74,10 +74,15 @@ def main() -> int:
         if pw1 != getpass.getpass("Дахин оруулна уу: "):
             print("Таарахгүй байна.", file=sys.stderr)
             return 1
+        from datetime import datetime
         user.password_hash = hash_password(pw1)
+        # Энэ хугацаанаас ӨМНӨ олгогдсон бүх токен ШУУД хүчингүй болно —
+        # задарсан нууц үгээр нэвтэрсэн хэн нэгэн байсан ч тэр даруй тасарна.
+        user.password_changed_at = datetime.utcnow()
         db.commit()
-        print(f"«{user.username}»-ийн нууц үг солигдлоо. Идэвхтэй токенууд 12 цагийн "
-              f"дотор хугацаа нь дуусна.")
+        print(f"«{user.username}»-ийн нууц үг солигдлоо.")
+        print("Энэ хэрэглэгчийн БҮХ идэвхтэй токен ШУУД хүчингүй боллоо "
+              "(нэвтэрсэн байсан хэн ч тасарна).")
         return 0
     finally:
         db.close()

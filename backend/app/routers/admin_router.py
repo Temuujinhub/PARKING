@@ -736,6 +736,8 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
     if body.get("password"):
         _check_password(body["password"])
         u.password_hash = hash_password(body["password"])
+        # Хуучин токенуудыг хүчингүй болгоно (хулгайлагдсан байж болзошгүй)
+        u.password_changed_at = datetime.utcnow()
     _audit(db, user, "UPDATE", "user", user_id, {k: v for k, v in body.items() if k != "password"})
     db.commit()
     return to_dict(u)
