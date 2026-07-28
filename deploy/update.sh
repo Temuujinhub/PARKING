@@ -42,13 +42,33 @@ else
   # git МӨНХӨД гацдаг (Ctrl+C дарах хүртэл). Хугацаа тавьж, ойлгомжтой унана.
   export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20
   export GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes"
-  if ! timeout "${FETCH_TIMEOUT:-90}" git fetch --quiet origin main; then
-    rc=$?
+  # ЧУХАЛ: `if ! cmd; then rc=$?` гэж бичвэл rc нь ҮРГЭЛЖ 0 болдог (`!`-ийн
+  # үр дүнг уншина) — жинхэнэ шалтгаан («exit 0») далдардаг байв. Тиймээс
+  # статусыг тусад нь барина. Мөн git-ийн алдааг ХАРУУЛНА (өмнө --quiet-д дардаг байв).
+  FETCH_LOG="$(mktemp)"
+  rc=0
+  timeout "${FETCH_TIMEOUT:-90}" git fetch origin main 2>"$FETCH_LOG" || rc=$?
+  if [ "$rc" != 0 ]; then
     [ "$rc" = 124 ] && echo "    АЛДАА: GitHub-аас татах хугацаа хэтэрлээ (${FETCH_TIMEOUT:-90}с)." \
                     || echo "    АЛДАА: GitHub-аас татаж чадсангүй (exit $rc)."
+    if [ -s "$FETCH_LOG" ]; then
+      echo
+      echo "    git юу гэж хэлж байна:"
+      sed 's/^/      /' "$FETCH_LOG"
+    fi
+    rm -f "$FETCH_LOG"
     echo
-    echo "    Шалтгааныг олох:"
-    echo "      git -C $APP_DIR remote -v                                  # ямар хаяг руу очиж байна"
+    echo "    Одоогийн remote: $(git remote get-url origin 2>/dev/null || echo '(тодорхойгүй)')"
+    case "$(git remote get-url origin 2>/dev/null)" in
+      git@*|ssh://*)
+        echo "    ↑ SSH хаяг байна. Энэ сервер дээр GitHub-ийн deploy key байхгүй бол"
+        echo "      татахгүй. Шалгах:  ssh -T git@github.com"
+        echo "      HTTPS руу шилжүүлэх (нээлттэй repo эсвэл токентой):"
+        echo "        sudo git -C $APP_DIR remote set-url origin https://github.com/Temuujinhub/PARKING.git"
+        ;;
+    esac
+    echo
+    echo "    Бусад шалгалт:"
     echo "      timeout 15 curl -sS -o /dev/null -w '%{http_code}\\n' https://github.com"
     echo "      timeout 20 git -C $APP_DIR ls-remote origin HEAD           # 20с дотор хариу ирэх ёстой"
     echo
@@ -56,6 +76,7 @@ else
     echo "      sudo bash $APP_DIR/deploy/update.sh /зам/upd.bundle"
     exit 1
   fi
+  rm -f "$FETCH_LOG"
   git reset --hard origin/main   # локал өөрчлөлт байвал дарж бичнэ (production дээр гараар засдаггүй)
 fi
 echo "    HEAD: $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s | cut -c1-60)"
