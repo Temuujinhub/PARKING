@@ -95,6 +95,9 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP",
 
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
+
+    # v1.x — зөвхөн орох камерт уншигдсан session-ийг үнэгүйгээр авто хаах босго
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS entry_only_free_hours INTEGER",
 ]
 
 

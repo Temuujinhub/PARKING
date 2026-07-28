@@ -20,7 +20,14 @@ export default function Compensations() {
   const [shift, setShift] = useState(null)   // одоогийн ээлж
   const [parked, setParked] = useState([])   // зогсоолд байгаа (хаагдах) машинууд
   const [busy, setBusy] = useState(false)
+  const [sites, setSites] = useState([])     // зогсоол тус бүрээр ялгаж үйлдэл хийхэд
+  const [siteId, setSiteId] = useState('')   // '' = бүх зогсоол
   const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
+
+  // Сонгосон зогсоолоор шүүсэн жагсаалтууд
+  const parkedShown = siteId ? parked.filter((s) => s.site_id === siteId) : parked
+  const siteName = sites.find((s) => s.id === siteId)?.name
+  const debtsShown = siteName ? data.rows.filter((c) => c.site_name === siteName) : data.rows
 
   const load = () => {
     const params = new URLSearchParams()
@@ -32,7 +39,22 @@ export default function Compensations() {
   const loadParked = () => api('/api/sessions?status=OPEN,AWAITING_PAYMENT&with_fee=true&limit=200')
     .then((d) => setParked(d.rows || [])).catch(() => {})
   useEffect(load, [status])
-  useEffect(() => { loadShift(); loadParked() }, [])
+  useEffect(() => {
+    loadShift(); loadParked()
+    api('/api/admin/sites').then(setSites).catch(() => {})
+  }, [])
+
+  // Зөвхөн СОНГОСОН зогсоолын машиныг гаргаж өр үүсгэнэ (ээлж хаахгүй)
+  const nightCloseSite = async () => {
+    if (!siteId) return
+    if (!confirm(`${siteName}: зогсоолд үлдсэн ${parkedShown.length} машиныг гаргаж, төлбөртэйд нь өр үүсгэнэ.\n(Таны ээлж ХААГДАХГҮЙ.)\n\nҮргэлжлүүлэх үү?`)) return
+    setBusy(true)
+    try {
+      const r = await api('/api/compensations/night-close', { method: 'POST', body: { site_id: siteId } })
+      toast(`${siteName}: ${r.closed_sessions} машин гаргаж, ${r.compensations_created} өр үүслээ`)
+      loadParked(); load()
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
 
   const doPay = async () => {
     try {
@@ -103,12 +125,19 @@ export default function Compensations() {
 
       {/* 2. Хаагдах машинууд — шөнийн хаалтаар өр болох */}
       <div className="card">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h2 className="font-semibold">Зогсоолд үлдсэн машин (шөнийн хаалтаар өр болно)</h2>
-          <span className="text-sm text-slate-400">{parked.length} машин</span>
+          <div className="flex items-center gap-2">
+            <select className="input w-auto py-1.5 text-sm" value={siteId}
+              onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол сонгох">
+              <option value="">Бүх зогсоол</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <span className="text-sm text-slate-400">{parkedShown.length} машин</span>
+          </div>
         </div>
-        <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Төлбөр', 'Төрөл', 'Төлөв']} empty={parked.length === 0}>
-          {parked.map((s) => (
+        <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Төлбөр', 'Төрөл', 'Төлөв']} empty={parkedShown.length === 0}>
+          {parkedShown.map((s) => (
             <tr key={s.id}>
               <td className="td font-mono font-bold">{s.plate_number}</td>
               <td className="td text-xs">{s.site_name || <span className="text-slate-600">—</span>}</td>
@@ -120,7 +149,12 @@ export default function Compensations() {
             </tr>
           ))}
         </Table>
-        {canAct && shift?.open && (
+        {canAct && siteId && (
+          <button className="btn-danger w-full justify-center mt-3 py-3" onClick={nightCloseSite} disabled={busy || parkedShown.length === 0}>
+            <MoonStar size={16} /> {busy ? 'Хааж байна…' : `${siteName} — ${parkedShown.length} машин гаргаж өр үүсгэх (ээлж хаахгүй)`}
+          </button>
+        )}
+        {canAct && !siteId && shift?.open && (
           <button className="btn-danger w-full justify-center mt-3 py-3" onClick={nightCloseShift} disabled={busy}>
             <MoonStar size={16} /> {busy ? 'Хааж байна…' : `Шөнийн хаалт — ${parked.length} машин гаргаж, ЭЭЛЖ ХААХ`}
           </button>
@@ -172,8 +206,8 @@ export default function Compensations() {
       )}
 
       <Table headers={['Дугаар', 'Зогсоол', 'Дүн', 'Шалтгаан', 'Нас', 'Огноо', 'Төлөв', '']}
-        empty={data.rows.length === 0}>
-        {data.rows.map((c) => (
+        empty={debtsShown.length === 0}>
+        {debtsShown.map((c) => (
           <tr key={c.id} className={c.status === 'PENDING' ? 'bg-red-500/5' : ''}>
             <td className="td font-mono font-bold text-red-400">
               {c.plate_number}{c.pending_count >= 3 && <span className="ml-1 text-[10px] bg-red-500/20 text-red-400 px-1 rounded">хориг</span>}

@@ -67,12 +67,21 @@ export default function SiteEditModal({ editing, setEditing, templates, onSubmit
             </select>
           </Field>
           <Field label="Гацсан машины авто хаалт (цаг)">
-            <input className="input" type="number" min="0" placeholder="72 (default)"
+            <input className="input" type="number" min="0" placeholder="12 (default)"
               value={editing.auto_close_hours ?? ''}
               onChange={(e) => setEditing({ ...editing, auto_close_hours: e.target.value })} />
             <div className="text-[11px] text-slate-500 mt-1">
               Энэ цагаас дээш идэвхтэй үлдсэн машиныг систем автоматаар хасаж, төлөгдөөгүй
-              дүнгээр өр үүсгэнэ. Хоосон = 72ц, 0 = унтраах.
+              дүнгээр өр үүсгэнэ. Хоосон = default, 0 = унтраах.
+            </div>
+          </Field>
+          <Field label="Зөвхөн орох уншилттай машиныг үнэгүй хаах (цаг)">
+            <input className="input" type="number" min="0" placeholder="72 (default)"
+              value={editing.entry_only_free_hours ?? ''}
+              onChange={(e) => setEditing({ ...editing, entry_only_free_hours: e.target.value })} />
+            <div className="text-[11px] text-slate-500 mt-1">
+              Гарах камерт огт уншигдаагүй (ихэвчлэн гарах уншилт алдагдсан) машиныг
+              энэ цагийн дараа ӨР ҮҮСГЭЛГҮЙ үнэгүй хасна. Хоосон = 72ц, 0 = унтраах.
             </div>
           </Field>
 

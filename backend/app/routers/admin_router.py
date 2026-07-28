@@ -128,7 +128,7 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
-                           "tariff_template_id", "auto_close_hours", "qr_url",
+                           "tariff_template_id", "auto_close_hours", "entry_only_free_hours", "qr_url",
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code")
                           if k in body})
@@ -149,7 +149,7 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "is_active", "qr_url",
+              "auto_close_hours", "entry_only_free_hours", "is_active", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
               "qpay_branch_code", "qpay_district_code"):
         if k in body:

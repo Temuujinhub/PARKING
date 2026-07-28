@@ -27,6 +27,7 @@ class SiteCreate(_In):
     capacity: int | None = None
     tariff_template_id: str | None = None
     auto_close_hours: int | None = None
+    entry_only_free_hours: int | None = None
     qr_url: str | None = None
     qpay_username: str | None = None
     qpay_password: str | None = None

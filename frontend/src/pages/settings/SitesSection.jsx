@@ -45,6 +45,8 @@ export default function SitesSection() {
         // '' = глобал default (72ц), 0 = унтраах, N = тухайн зогсоолын босго
         auto_close_hours: editing.auto_close_hours === '' || editing.auto_close_hours == null
           ? null : +editing.auto_close_hours,
+        entry_only_free_hours: editing.entry_only_free_hours === '' || editing.entry_only_free_hours == null
+          ? null : +editing.entry_only_free_hours,
       }
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()

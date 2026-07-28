@@ -52,6 +52,9 @@ class ParkingSite(Base):
     capacity = Column(Integer, nullable=False, default=0)
     # Авто цэвэрлэгээний босго (цаг): null = глобал default (72), 0 = энэ зогсоолд унтраах
     auto_close_hours = Column(Integer, nullable=True)
+    # Зөвхөн ОРОХ камерт уншигдсан (гарах уншилтгүй) OPEN session-ийг энэ цагийн
+    # дараа ӨРГҮЙГЭЭР үнэгүй хаах босго. NULL → глобал default (72ц), 0 = унтраах.
+    entry_only_free_hours = Column(Integer, nullable=True)
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
     # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
     qr_url = Column(Text, nullable=True)
