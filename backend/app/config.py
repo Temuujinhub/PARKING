@@ -160,6 +160,13 @@ class Settings(BaseSettings):
     camera_sessions_check_sec: int = 300
     # Нэвтрэлтийн логоос хэдэн минутын мужийг харах вэ (сүүлийн үеийн хандалт л сонирхолтой)
     camera_sessions_window_min: int = 60
+    # Deadman авто-reboot: камерын last_seen (стримийн heartbeat) энэ минутаас
+    # хуучирвал камер БҮРЭН гацсан гэж үзэж magicBox.reboot илгээнэ. Богино
+    # (1-3 мин) өөрөө сэргэдэг тасалдалд reboot ХОРТОЙ тул default УНТРААЛТТАЙ —
+    # асаах бол PARKING_CAMERA_AUTO_REBOOT=true (дэлгэрэнгүй: camera_recovery.py).
+    camera_auto_reboot: bool = False
+    camera_reboot_after_min: int = 15
+    camera_reboot_cooldown_min: int = 60
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)

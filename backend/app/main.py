@@ -212,6 +212,10 @@ async def start_vat_auto_send():
     from .services.camera_sessions import supervisor as camera_who_supervisor
     _bg_task(camera_who_supervisor(), "camera-who")
 
+    # Камер БҮРЭН гацвал (heartbeat 15+ мин алга) авто-reboot — default унтраалттай
+    from .services.camera_recovery import supervisor as camera_recovery_supervisor
+    _bg_task(camera_recovery_supervisor(), "camera-recovery")
+
 
 @app.on_event("shutdown")
 async def stop_background_tasks():
