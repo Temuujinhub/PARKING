@@ -54,5 +54,45 @@ try:
 except Exception:
     check("loop-гүй орчинд exception шидэхгүй", False)
 
+
+
+
+# ─── Дэлгэцийн «нэг команд» горим (2026-07-28) ────────────────────────────────
+# Камер «хэдэн секунд харуулах» талбар дэмждэг бол давталт хэрэггүй — RPC сесс
+# богиносч хаалтны командтай мөргөлдөхгүй. Талбарын нэрийг screen_probe.py-ээр
+# бодит камераас тогтоож .env-д бичнэ.
+def _probe_screen_params(field: str, sec: int) -> dict:
+    """set_screen ямар params илгээхийг (сүлжээгүйгээр) шалгана."""
+    import asyncio as _a
+    from app.config import settings as _s
+    from app.services.barrier import DahuaRpc
+
+    old = (_s.screen_hold_field, _s.screen_hold_sec)
+    _s.screen_hold_field, _s.screen_hold_sec = field, sec
+
+    class _C:
+        def __init__(self): self.last = None
+        async def post(self, url, json=None, headers=None):
+            self.last = json
+            class R:
+                @staticmethod
+                def json(): return {"result": True}
+            return R()
+
+    c = _C()
+    _a.run(DahuaRpc(c, "1.2.3.4", "u", "p").set_screen("ТЕСТ"))
+    _s.screen_hold_field, _s.screen_hold_sec = old
+    return c.last.get("params", {})
+
+
+print("\nДэлгэцийн «нэг команд» горим:")
+_p = _probe_screen_params("", 0)
+check("hold унтраалттай үед зөвхөн Custom", set(_p) == {"Custom"})
+_p = _probe_screen_params("Time", 30)
+check("hold идэвхтэй үед хугацааны талбар нэмэгдэнэ", _p.get("Time") == 30)
+check("текст хэвээр дамжина", _p.get("Custom") == "ТЕСТ")
+_p = _probe_screen_params("HoldTime", 45)
+check("талбарын нэр тохируулж болно", _p.get("HoldTime") == 45 and "Time" not in _p)
+
 print(f"\n{PASS} PASS, {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)

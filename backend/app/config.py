@@ -215,6 +215,14 @@ class Settings(BaseSettings):
     # (Хаалт ирвэл давталт дунд нь ТАСАРЧ сесс шууд чөлөөлөгдөнө.)
     screen_repeat: int = 4
     screen_repeat_interval: float = 1.5
+    # Камер «хэдэн секунд харуулах» талбар дэмждэг бол НЭГ команд хангалттай —
+    # давталт унтарч RPC сесс маш богино болно. Ямар талбар нэртэй болохыг
+    # tools/screen_probe.py-ээр бодит камераас тогтоогоод энд бичнэ. Жишээ:
+    #   PARKING_SCREEN_HOLD_FIELD=Time
+    #   PARKING_SCREEN_HOLD_SEC=30
+    # HOLD_SEC > 0 болмогц давталт автоматаар 1 болно.
+    screen_hold_field: str = ""
+    screen_hold_sec: int = 0
     # LED дэлгэцийн мөр таслалын тэмдэг. Зарим firmware «\n»-ийг ойлгодоггүй тул
     # «\r\n» эсвэл хоосон зайгаар туршиж болно (камер солихгүйгээр .env-ээс).
     screen_line_break: str = "\n"

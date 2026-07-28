@@ -117,7 +117,14 @@ class DahuaRpc:
         «|» эсвэл «\\n» = мөр таслал (дугаар/төлбөрийг 2 мөрөнд харуулна)."""
         br = settings.screen_line_break.replace("\\n", "\n").replace("\\r", "\r")
         text = text.replace("\\n", "\n").replace("|", "\n").replace("\n", br)
-        res = await self._call("trafficParking.setScreenDisplay", {"Custom": text})
+        params = {"Custom": text}
+        # Камер «хэдэн секунд харуулах» талбар дэмждэг бол НЭГ команд хангалттай —
+        # давталт хэрэггүй болж RPC сесс богиносно (хаалттай мөргөлдөх нь буурна).
+        # Ямар талбар дэмжигдэхийг tools/screen_probe.py-ээр камераас нь асууж
+        # тогтооно; олдвол .env-д PARKING_SCREEN_HOLD_FIELD/SEC-ээр асаана.
+        if settings.screen_hold_sec > 0 and settings.screen_hold_field:
+            params[settings.screen_hold_field] = settings.screen_hold_sec
+        res = await self._call("trafficParking.setScreenDisplay", params)
         if not res.get("result"):
             raise DahuaRpcError(f"setScreenDisplay амжилтгүй: {res}")
         return res
@@ -402,7 +409,12 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                   ip, blocked)
         return "нэвтрэлтийн таслуур идэвхтэй"
     username, password = creds or barrier_credentials(None)
-    times = max(1, repeat if repeat is not None else settings.screen_repeat)
+    # Хугацааны талбар идэвхтэй бол камер өөрөө текстээ барих тул ДАВТАХГҮЙ —
+    # нэг команд = хамгийн богино RPC сесс = хаалттай мөргөлдөхгүй
+    if settings.screen_hold_sec > 0 and settings.screen_hold_field:
+        times = 1
+    else:
+        times = max(1, repeat if repeat is not None else settings.screen_repeat)
     shown = 0
     try:
         # Нэг камерт нэг RPC — хаалтны командтай мөргөлдвөл камер «нууц үг буруу»
