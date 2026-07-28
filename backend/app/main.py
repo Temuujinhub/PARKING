@@ -10,6 +10,9 @@ from .database import Base, engine
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("parking")
+# httpx хүсэлт бүрээ INFO-оор логлодог нь журналын дийлэнх эзлэхуурыг иддэг байв
+# (RPC бүрд 3-5 мөр × өдөрт олон мянган RPC) — зөвхөн алдааг нь үлдээнэ.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ── Production аюулгүй байдлын шалгуур (debug=False үед) ──
 # Кодын default secret-ээр токен гарын үсэг зурахаас сэргийлж startup-д зогсооно.

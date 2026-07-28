@@ -243,6 +243,14 @@ class Settings(BaseSettings):
     # (тохируулаагүй сервер дээр /api/dr/upload огт ажиллахгүй). Production-ы
     # backup_ship.sh мөн энэ токеноор шифрлэж илгээнэ (/root/.parking-dr-token).
     dr_upload_token: str = ""
+
+    # ─── Хуучин датаны цэвэрлэгээ (retention) — өдөрт нэг удаа, 0 = унтраах ───
+    # Санхүүгийн датад (session/payment/vat/compensation) ХЭЗЭЭ Ч хүрэхгүй,
+    # зөвхөн техникийн лог: танилтын түүхий event, хаалтны команд, аудит, зураг.
+    retention_lpr_days: int = 90
+    retention_cmd_days: int = 180
+    retention_audit_days: int = 365
+    retention_snapshot_days: int = 120
     # Гарах хаалтанд уншигдсан ч төлөлгүй алга болсон (дагаж гарсан) машиныг хурдан
     # өр болгох босго: AWAITING_PAYMENT төлөвт энэ цагаас удаан ямар ч хөдөлгөөнгүй
     # бол явчихсан гэж үзэж өртэй хаана. 0 = унтраах (ердийн 12ц-аар хаагдана).

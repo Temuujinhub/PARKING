@@ -121,14 +121,76 @@ def run_once() -> int:
     return closed
 
 
+def retention_once() -> dict:
+    """Хуучирсан техникийн датаг устгана (санхүүгийн дата — session/payment/
+    vat_receipt/compensation-д ХҮРЭХГҮЙ). Юуг хэдэн хоног хадгалахыг .env-ээс:
+      lpr_events        → retention_lpr_days      (танилтын түүхий лог)
+      barrier_commands  → retention_cmd_days      (хаалтны командын лог)
+      audit_logs        → retention_audit_days    (үйлдлийн лог)
+      snapshot зургууд  → retention_snapshot_days (диск дүүрэхээс сэргийлнэ)
+    0 = тухайн төрлийг устгахгүй. Бүгд «өдөрт нэг удаа» supervisor-оос дуудагдана."""
+    import os
+    import time as _t
+
+    from sqlalchemy import text
+
+    from ..models import AuditLog as _A, BarrierCommand as _B, LprEvent as _E
+    now = datetime.utcnow()
+    out = {}
+    db = SessionLocal()
+    try:
+        for label, model, days in (("lpr_events", _E, settings.retention_lpr_days),
+                                   ("barrier_commands", _B, settings.retention_cmd_days),
+                                   ("audit_logs", _A, settings.retention_audit_days)):
+            if days and days > 0:
+                n = (db.query(model)
+                     .filter(model.created_at < now - timedelta(days=days))
+                     .delete(synchronize_session=False))
+                db.commit()
+                if n:
+                    out[label] = n
+        # VACUUM биш — энгийн delete хангалттай (autovacuum цэвэрлэнэ)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log.error("retention DB алдаа: %r", e)
+    finally:
+        db.close()
+    # Snapshot зургууд — хамгийн их диск иддэг төрөл
+    days = settings.retention_snapshot_days
+    snap_dir = settings.snapshot_dir
+    if days and days > 0 and snap_dir and os.path.isdir(snap_dir):
+        cutoff = _t.time() - days * 86400
+        removed = 0
+        for root_, _dirs, files in os.walk(snap_dir):
+            for fn in files:
+                p = os.path.join(root_, fn)
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                        removed += 1
+                except OSError:
+                    pass
+        if removed:
+            out["snapshots"] = removed
+    if out:
+        log.info("retention: устгав %s", out)
+    return out
+
+
 async def supervisor():
-    """Startup-аас create_task-аар ажиллана: эхний удаа 5 минутын дараа, дараа нь 30 мин тутам."""
+    """Startup-аас create_task-аар ажиллана: эхний удаа 5 минутын дараа, дараа нь 30 мин тутам.
+    Хуучин датаны цэвэрлэгээ (retention) өдөрт нэг л удаа хийгдэнэ."""
     await asyncio.sleep(300)
+    last_retention = 0.0
+    import time as _t
     while True:
         try:
             n = run_once()
             if n:
                 log.info(f"нийт {n} гацсан session хаагдлаа")
+            if _t.monotonic() - last_retention > 24 * 3600:
+                last_retention = _t.monotonic()
+                retention_once()
         except Exception as e:  # noqa: BLE001
             log.error(f"давталтын алдаа: {e}")
         await asyncio.sleep(1800)
