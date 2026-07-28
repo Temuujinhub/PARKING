@@ -83,6 +83,55 @@ def _extract_json_blocks(buffer: str):
         buffer = buffer[end:]
 
 
+# ─── Producer-Consumer дараалал ──────────────────────────────────────────────
+# Стрим уншигч (producer) event-ийг дараалалд шидэж ШУУД цааш уншина; боловсруулалт
+# (consumer) нь ард нь явна. Ингэснээр DB-ийн саатал камерын стримийг гацаахгүй.
+_queue: asyncio.Queue | None = None
+_workers: list = []
+
+
+def _enqueue(device_id: str, data: dict):
+    """Дараалал дүүрсэн ч стримийг гацаахгүй — хамгийн хуучныг хаяна
+    (шинэ event нь хуучнаас чухал: машин хаалганы өмнө байна)."""
+    global _queue
+    if _queue is None:
+        _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
+    try:
+        _queue.put_nowait((device_id, data))
+    except asyncio.QueueFull:
+        try:
+            _queue.get_nowait()
+            _queue.task_done()
+            _queue.put_nowait((device_id, data))
+            log.warning("event дараалал дүүрлээ — хамгийн хуучин event хаягдав")
+        except Exception:  # noqa: BLE001
+            log.error("event дараалалд нэмж чадсангүй — event АЛДАГДЛАА")
+
+
+async def _event_worker(idx: int):
+    """Дараалалаас авч боловсруулна. Алдаа гарсан ч worker ҮХЭХГҮЙ."""
+    global _queue
+    if _queue is None:
+        _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
+    log.info("event worker #%d эхэллээ", idx)
+    while True:
+        device_id, data = await _queue.get()
+        try:
+            await _process_event(device_id, data)
+        except Exception as e:  # noqa: BLE001 — нэг event-ийн алдаа бусдыг зогсоохгүй
+            log.error("event боловсруулахад алдаа: %r", e)
+        finally:
+            _queue.task_done()
+
+
+def ensure_workers():
+    """Worker-уудыг нэг л удаа асаана (supervisor-оос дуудна)."""
+    global _workers
+    _workers = [w for w in _workers if not w.done()]
+    while len(_workers) < settings.camera_event_workers:
+        _workers.append(asyncio.create_task(_event_worker(len(_workers) + 1)))
+
+
 async def _process_event(device_id: str, data: dict):
     """Нэг ANPR event-ийг боловсруулж session үүсгэнэ."""
     db = SessionLocal()
@@ -123,7 +172,12 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
     """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй).
     codes=[All] — камерын бүх event-ийг авч, дугаартайг нь л боловсруулна (дибагт хялбар)."""
     hb = settings.camera_event_heartbeat_sec
-    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]&heartbeat={hb}"
+    # codes-ыг .env-ээс тохируулна. Default [All] — firmware бүр өөр код
+    # ашигладаг тул юу ч алдахгүй (дибагт ч хялбар). Ачаалал ихтэй эсвэл
+    # камерыг ӨӨР СИСТЕМТЭЙ хуваалцаж байгаа үед зөвхөн ANPR-ийг сонсоно:
+    #   PARKING_CAMERA_EVENT_CODES=[TrafficJunction,TrafficSnapPicture]
+    codes = settings.camera_event_codes
+    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes={codes}&heartbeat={hb}"
     auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     while True:
         buffer = ""
@@ -172,7 +226,11 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                                 log.info(f"{ip} event: {line[:90]}")
                         blocks, buffer = _extract_json_blocks(buffer)
                         for data in blocks:
-                            await _process_event(device_id, data)
+                            # Producer: event-ийг ДАРААЛАЛД шидээд шууд дараагийн
+                            # chunk-аа уншина. Өмнө нь энд `await _process_event(...)`
+                            # байсан тул DB бичих хугацаанд стрим зогсож, камерын
+                            # буферт event хуримтлагдаж саатал үүсгэдэг байв.
+                            _enqueue(device_id, data)
         except Exception as e:
             log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
                         f"{settings.camera_event_reconnect_sec}с дараа дахин")
@@ -184,7 +242,9 @@ async def supervisor():
     if not settings.cgi_poll:
         return
     log.info("идэвхжлээ — камеруудаас ANPR татаж эхэлж байна")
+    ensure_workers()   # боловсруулах worker-ууд (стримээс тусдаа)
     while True:
+        ensure_workers()   # унасан worker байвал сэргээнэ
         db = SessionLocal()
         try:
             cams = db.query(Device).filter(

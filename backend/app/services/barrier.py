@@ -277,6 +277,52 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
     return await _execute(db, device, "close", session_id, source, issued_by)
 
 
+# ─── Нэвтрэлтийн таслуур (circuit breaker) ───────────────────────────────────
+# Яагаад: Dahua төхөөрөмж дараалсан буруу нэвтрэлтийн дараа бүртгэлийг ТҮГЖДЭГ
+# (remainLoginTimes → 0). Дэлгэцэнд бичих оролдлого машин бүрд давтагддаг тул
+# нууц үг буруу үед хэдхэн машины дараа камер түгжигдэж, ТЭР ҮЕД ХААЛТНЫ команд
+# ч уначихдаг байв (2026-07-28-нд production дээр 23-30 секундын саатал болж
+# бүртгэгдсэн). Мөн нэг камерыг ХОЁР систем зэрэг ашиглаж байвал нэг нь нөгөөгийн
+# бүртгэлийг түгжих эрсдэлтэй.
+#
+# Шийдэл: нэвтрэлт нь ЭРХИЙН алдаагаар унавал тухайн IP-г түр хугацаанд
+# «блоклож» дахин оролдохоо болино. Хаалт (аюулгүй байдлын шаардлагатай) энэ
+# таслуурт ОРОХГҮЙ — зөвхөн дэлгэц (гоо сайхны) хязгаарлагдана.
+_auth_fail: dict[str, tuple[int, float]] = {}   # ip -> (дараалсан алдаа, хүртэл_блок)
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """Алдаа нь нууц үг/түгжээний алдаа мөн үү (сүлжээний түр саатал биш)."""
+    msg = str(exc)
+    return any(k in msg for k in ("User or password not valid", "login амжилтгүй",
+                                  "ТҮГЖИГДСЭН", "remainLoginTimes"))
+
+
+def auth_block_remaining(ip: str) -> float:
+    """Блоклогдсон бол үлдсэн секунд, эс бол 0."""
+    item = _auth_fail.get(ip)
+    if not item:
+        return 0.0
+    return max(0.0, item[1] - time.monotonic())
+
+
+def _auth_failed(ip: str):
+    fails = _auth_fail.get(ip, (0, 0.0))[0] + 1
+    until = (time.monotonic() + settings.camera_auth_retry_sec
+             if fails >= settings.camera_auth_fail_limit else 0.0)
+    _auth_fail[ip] = (fails, until)
+    if until:
+        log.error("%s: нэвтрэлт %d удаа дараалан уналаа — %d секунд ЗОГСООВ "
+                  "(камерын бүртгэл түгжигдэхээс сэргийлж). Нууц үгийг Тохиргоо → "
+                  "Төхөөрөмж дээр зөв болгоно уу.", ip, fails, settings.camera_auth_retry_sec)
+
+
+def _auth_ok(ip: str):
+    if ip in _auth_fail:
+        log.info("%s: нэвтрэлт сэргэлээ — таслуур цэвэрлэв", ip)
+        _auth_fail.pop(ip, None)
+
+
 # ─── LED дэлгэц / дуут зарлал ────────────────────────────────────────────────
 
 async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
@@ -291,6 +337,13 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
     if settings.barrier_mock:
         log.info(f"[screen] MOCK {ip}: {text}")
         return ""
+    blocked = auth_block_remaining(ip)
+    if blocked:
+        # Нууц үг буруу байхад машин бүрд дахин оролдвол камер ТҮГЖИГДЭЖ,
+        # хаалт ч нээгдэхгүй болно. Дэлгэц бол заавал биш тул алгасна.
+        log.debug("[screen] %s: нэвтрэлтийн таслуур идэвхтэй (%.0fс үлдлээ) — алгасав",
+                  ip, blocked)
+        return "нэвтрэлтийн таслуур идэвхтэй"
     username, password = creds or barrier_credentials(None)
     times = max(1, repeat if repeat is not None else settings.screen_repeat)
     try:
@@ -309,9 +362,12 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
         log.info(f"[screen] {ip}: OK ×{times} «{text}»")
+        _auth_ok(ip)
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
+        if _is_auth_error(e):
+            _auth_failed(ip)   # дараалсан эрхийн алдаа → түр зогсооно
         log.warning(f"[screen] {ip}: бичиж чадсангүй ({err})")
         return err
 

@@ -30,12 +30,24 @@ class Settings(BaseSettings):
     # Dahua камер олон удаагийн буруу оролдлогод бүртгэлийг түгждэг тул урт байна —
     # эс бол зөв нууц үг оруулсны дараа ч түгжээ тайлагдахгүй.
     camera_auth_retry_sec: int = 300
+    # Хэдэн дараалсан ЭРХИЙН алдааны дараа тухайн камерт хандахаа түр зогсоох.
+    # Dahua нь ихэвчлэн 5 буруу оролдлогын дараа бүртгэлийг түгжинэ — 2 дээр
+    # зогсооход түгжигдэх завсар үлдэнэ (нэг камерыг хоёр систем ашиглаж
+    # байвал нөгөө системийн нэвтрэлт хохирохгүй).
+    camera_auth_fail_limit: int = 2
 
     # Камерын event stream (eventManager.cgi attach) тохиргоо.
     # Камер нэгэн зэрэг ӨӨР систем рүү (тухайн байгууллагын хуучин платформ г.м)
     # мөн дата илгээж байвал heartbeat саатаж, богино read timeout нь холболтыг
     # дэмий тасалж reconnect-ийн давталт үүсгэдэг. Уртасгавал зэрэгцэн ажиллана.
     camera_event_heartbeat_sec: int = 10   # камерын heartbeat давтамж (CGI параметр)
+    # eventManager.cgi-д асуух event-ийн төрөл. [All] нь firmware бүрд ажилладаг тул
+    # default. Камерыг ӨӨР СИСТЕМТЭЙ хуваалцаж байгаа/ачаалал ихтэй үед зөвхөн ANPR:
+    #   PARKING_CAMERA_EVENT_CODES=[TrafficJunction,TrafficSnapPicture]
+    camera_event_codes: str = "[All]"
+    # Стримээс салгасан боловсруулах worker-ийн тоо ба дарааллын багтаамж
+    camera_event_workers: int = 2
+    camera_event_queue_size: int = 500
     camera_event_read_timeout_sec: int = 120  # энэ хугацаанд юу ч ирэхгүй бол дахин холбоно
     camera_event_reconnect_sec: int = 15   # тасарсны дараа дахин холбогдох хүлээлт
 
