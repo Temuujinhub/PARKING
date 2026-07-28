@@ -1,6 +1,6 @@
 // Системийн эрүүл мэнд — сервер metrics, сервисүүд, DB, харилцан холболт (5 сек auto-refresh)
 import {
-  Activity, AlertTriangle, Camera, Cpu, Database, DoorClosed, HardDrive,
+  Activity, AlertTriangle, Camera, Cpu, Database, HardDrive,
   MemoryStick, Network, PieChart, RefreshCw, Server, ShieldCheck, Thermometer, Wifi,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -141,78 +141,6 @@ export default function Health() {
         </div>
       )}
 
-      {/* Камерын гүйцэтгэлийн анхааруулгууд (амжилт <90%, LED <50%, стрим тасарсан, 30+ мин уншилтгүй) */}
-      {camPerf?.alerts?.map((a, i) => (
-        <div key={i} className={`card flex items-center gap-2 py-3 ${a.level === 'red'
-          ? 'bg-red-500/10 border border-red-500/30 text-red-300'
-          : 'bg-amber-500/10 border border-amber-500/30 text-amber-300'}`}>
-          <AlertTriangle size={18} /> {a.text}
-        </div>
-      ))}
-
-      {/* Камерын гүйцэтгэл — бүгд DB/санах ойгоос, камерт нэмэлт ачаалалгүй */}
-      {camPerf?.rows?.length > 0 && (
-        <div className="card">
-          <div className="flex items-center gap-2 mb-3 text-slate-300 font-semibold">
-            <Camera size={16} /> Камерын гүйцэтгэл (сүүлийн 1ц / 6ц)
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs whitespace-nowrap">
-              <thead>
-                <tr className="text-left text-slate-500">
-                  <th className="py-1 pr-3">Камер</th>
-                  <th className="py-1 pr-3">Хаалт 1ц</th>
-                  <th className="py-1 pr-3">Хаалт 6ц</th>
-                  <th className="py-1 pr-3">RPC p95</th>
-                  <th className="py-1 pr-3">LED 1ц</th>
-                  <th className="py-1 pr-3">LED 6ц</th>
-                  <th className="py-1 pr-3">Уншилт 1ц/6ц</th>
-                  <th className="py-1 pr-3">Сүүлийн уншилтаас</th>
-                  <th className="py-1 pr-3">Сүүлийн бүтэлгүйтэл</th>
-                  <th className="py-1">Гадны хандалт</th>
-                </tr>
-              </thead>
-              <tbody>
-                {camPerf.rows.map((r) => {
-                  const pct = (c) => (c.total ? `${c.ok}/${c.total} (${c.success_pct}%)` : '—')
-                  const pctCls = (c) => (c.total >= 5 && c.success_pct < 90 ? 'text-red-400 font-semibold' : '')
-                  const led = (l) => ((l.ok + l.fail) ? `${l.ok}/${l.ok + l.fail}` : '—')
-                  const ledCls = (l) => ((l.ok + l.fail) >= 5 && l.ok * 2 < l.ok + l.fail ? 'text-red-400 font-semibold' : '')
-                  return (
-                    <tr key={r.ip + r.camera} className="border-t border-surface-muted">
-                      <td className="py-1.5 pr-3">
-                        {r.site_code} · {r.camera}{' '}
-                        <span className="font-mono text-slate-500">{r.ip}</span>
-                      </td>
-                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_1h)}`}>{pct(r.cmd_1h)}</td>
-                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_6h)}`}>{pct(r.cmd_6h)}</td>
-                      <td className="py-1.5 pr-3 font-mono">
-                        {r.cmd_6h.p95_ms != null
-                          ? (r.cmd_6h.p95_ms >= 1000 ? `${(r.cmd_6h.p95_ms / 1000).toFixed(1)}с` : `${r.cmd_6h.p95_ms}мс`)
-                          : '—'}
-                      </td>
-                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_1h)}`}>{led(r.led_1h)}</td>
-                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_6h)}`}>{led(r.led_6h)}</td>
-                      <td className="py-1.5 pr-3 font-mono">{r.events_1h}/{r.events_6h}</td>
-                      <td className="py-1.5 pr-3">{r.gap_now_min != null ? `${r.gap_now_min} мин` : '—'}</td>
-                      <td className="py-1.5 pr-3 font-mono">
-                        {r.cmd_6h.last_fail_at ? new Date(r.cmd_6h.last_fail_at + 'Z').toLocaleTimeString() : '—'}
-                      </td>
-                      <td className="py-1.5 text-red-400">
-                        {(r.foreign_sessions || []).map((s) => `${s.user}@${s.ip}`).join(', ') || '—'}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-2">
-            Бүх үзүүлэлт серверийн өгөгдлөөс тооцогдоно — камерт нэмэлт ачаалал өгөхгүй.
-            LED тоолуур backend restart-аас хойш цуглардаг.
-          </p>
-        </div>
-      )}
 
       {/* Сервер metrics */}
       {sys.available === false ? (
@@ -425,14 +353,79 @@ export default function Health() {
         </div>
       )}
 
-      {/* Камер + Хаалт харилцан холболт (хаалт тусад нь бүртгэлтэй үед л харагдана —
-          зарим зогсоолд хаалт нь камертайгаа хамт удирддаг тул тусдаа төхөөрөмж байхгүй) */}
-      <div className={`grid grid-cols-1 gap-5 ${d.integrations?.barriers?.length ? 'lg:grid-cols-2' : ''}`}>
-        <DeviceTable title="Камерууд (хаалт удирдлагатай)" icon={Camera} rows={d.integrations?.cameras} />
-        {d.integrations?.barriers?.length > 0 && (
-          <DeviceTable title="Хаалтууд" icon={DoorClosed} rows={d.integrations?.barriers} />
-        )}
-      </div>
+      {/* Камерын гүйцэтгэл (хуучин Камерууд/Хаалтууд картуудыг орлосон) —
+          бүгд DB/санах ойгоос тооцогдоно, камерт нэмэлт ачаалалгүй */}
+      {camPerf?.rows?.length > 0 && (
+        <div className="card">
+          <div className="flex items-center gap-2 mb-2 text-slate-300 font-semibold">
+            <Camera size={16} /> Камерын гүйцэтгэл (сүүлийн 1ц / 6ц)
+          </div>
+          {camPerf.alerts?.length > 0 && (
+            <div className="mb-3 space-y-0.5">
+              {camPerf.alerts.map((a, i) => (
+                <div key={i} className={`text-xs flex items-center gap-1.5 ${a.level === 'red' ? 'text-red-400' : 'text-amber-400'}`}>
+                  <AlertTriangle size={12} /> {a.text}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs whitespace-nowrap">
+              <thead>
+                <tr className="text-left text-slate-500">
+                  <th className="py-1 pr-3">Камер</th>
+                  <th className="py-1 pr-3">Хаалт 1ц</th>
+                  <th className="py-1 pr-3">Хаалт 6ц</th>
+                  <th className="py-1 pr-3">RPC p95</th>
+                  <th className="py-1 pr-3">LED 1ц</th>
+                  <th className="py-1 pr-3">LED 6ц</th>
+                  <th className="py-1 pr-3">Уншилт 1ц/6ц</th>
+                  <th className="py-1 pr-3">Сүүлийн уншилтаас</th>
+                  <th className="py-1 pr-3">Сүүлийн бүтэлгүйтэл</th>
+                  <th className="py-1">Гадны хандалт</th>
+                </tr>
+              </thead>
+              <tbody>
+                {camPerf.rows.map((r) => {
+                  const pct = (c) => (c.total ? `${c.ok}/${c.total} (${c.success_pct}%)` : '—')
+                  const pctCls = (c) => (c.total >= 5 && c.success_pct < 90 ? 'text-red-400 font-semibold' : '')
+                  const led = (l) => ((l.ok + l.fail) ? `${l.ok}/${l.ok + l.fail}` : '—')
+                  const ledCls = (l) => ((l.ok + l.fail) >= 5 && l.ok * 2 < l.ok + l.fail ? 'text-red-400 font-semibold' : '')
+                  return (
+                    <tr key={r.ip + r.camera} className="border-t border-surface-muted">
+                      <td className="py-1.5 pr-3">
+                        {r.site_code} · {r.camera}{' '}
+                        <span className="font-mono text-slate-500">{r.ip}</span>
+                      </td>
+                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_1h)}`}>{pct(r.cmd_1h)}</td>
+                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_6h)}`}>{pct(r.cmd_6h)}</td>
+                      <td className="py-1.5 pr-3 font-mono">
+                        {r.cmd_6h.p95_ms != null
+                          ? (r.cmd_6h.p95_ms >= 1000 ? `${(r.cmd_6h.p95_ms / 1000).toFixed(1)}с` : `${r.cmd_6h.p95_ms}мс`)
+                          : '—'}
+                      </td>
+                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_1h)}`}>{led(r.led_1h)}</td>
+                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_6h)}`}>{led(r.led_6h)}</td>
+                      <td className="py-1.5 pr-3 font-mono">{r.events_1h}/{r.events_6h}</td>
+                      <td className="py-1.5 pr-3">{r.gap_now_min != null ? `${r.gap_now_min} мин` : '—'}</td>
+                      <td className="py-1.5 pr-3 font-mono">
+                        {r.cmd_6h.last_fail_at ? new Date(r.cmd_6h.last_fail_at + 'Z').toLocaleTimeString() : '—'}
+                      </td>
+                      <td className="py-1.5 text-red-400">
+                        {(r.foreign_sessions || []).map((s) => `${s.user}@${s.ip}`).join(', ') || '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-2">
+            Бүх үзүүлэлт серверийн өгөгдлөөс тооцогдоно — камерт нэмэлт ачаалал өгөхгүй.
+            LED тоолуур backend restart-аас хойш цуглардаг.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -446,25 +439,3 @@ function Stat({ label, value }) {
   )
 }
 
-function DeviceTable({ title, icon: Icon, rows }) {
-  return (
-    <div className="card">
-      <div className="flex items-center gap-2 text-slate-400 text-sm mb-3"><Icon size={16} /> {title}</div>
-      <Table headers={['', 'Нэр', 'IP', 'Сүүлд', 'Төлөв']} empty={!rows?.length}>
-        {rows?.map((r) => (
-          <tr key={r.id}>
-            <td className="td w-6"><Dot ok={r.reachable} /></td>
-            <td className="td text-sm">{r.name}</td>
-            <td className="td font-mono text-xs text-slate-400">{r.ip || '—'}</td>
-            <td className="td font-mono text-xs text-slate-400">{ageLabel(r.last_seen_age_sec)}</td>
-            <td className="td text-xs">
-              {r.reachable === true ? <span className="text-accent">Онлайн</span>
-                : r.reachable === false ? <span className="text-red-400">Холбогдохгүй</span>
-                  : <span className="text-slate-500">IP-гүй</span>}
-            </td>
-          </tr>
-        ))}
-      </Table>
-    </div>
-  )
-}
