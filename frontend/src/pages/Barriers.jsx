@@ -145,8 +145,8 @@ export default function Barriers() {
         <div className="text-xs text-slate-500 mb-2">
           Гарах хаалтны LED дэлгэцэнд текст илгээж шалгана. Кирилл текст гаргаж чадвал
           .env-ийн PARKING_SCREEN_FEE_TEXT-ийг кирилл болгож болно.
-          <br /><b>2 мөр:</b> «<b>|</b>» тэмдгээр тусгаарлана — ж: <span className="font-mono">6425УБД|Tulbur: 25000</span>
-          (дугаар дээд мөрөнд, төлбөр доод мөрөнд).
+          <br /><b>4 хүртэлх мөр:</b> «<b>|</b>» тэмдгээр тусгаарлана — мөр бүр LED-ийн
+          тусдаа мөрөнд гарна. Ж: <span className="font-mono">6425УБД|2ts 05min|5000T|Tavtai morilno uu</span>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
           <select className="input w-auto" value={screenDev} onChange={(e) => setScreenDev(e.target.value)}
@@ -156,7 +156,7 @@ export default function Barriers() {
               <option key={c.id} value={c.id}>{c.name} ({c.lane_dir === 'entry' ? 'орох' : 'гарах'})</option>
             ))}
           </select>
-          <input className="input flex-1 min-w-48" maxLength={64} placeholder="Ж: 6425УБД|Tulbur: 25000"
+          <input className="input flex-1 min-w-48" maxLength={128} placeholder="Ж: 6425УБД|2ts 05min|5000T|Tavtai morilno uu"
             value={screenText} onChange={(e) => setScreenText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendScreen()} aria-label="Дэлгэцний текст" />
           <button className="btn-primary py-2" onClick={sendScreen} disabled={!screenText.trim() || cameras.length === 0}>

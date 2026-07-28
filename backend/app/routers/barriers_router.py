@@ -68,8 +68,9 @@ async def screen_display(device_id: str, body: dict, db: Session = Depends(get_d
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
     enforce_site(user, device.site_id)
     text = str(body.get("text") or "").strip()
-    if not text or len(text) > 64:
-        raise HTTPException(400, "text талбар шаардлагатай (1-64 тэмдэгт)")
+    # 4 мөр (|-ээр тусгаарласан) + кирилл багтахаар 128 хүртэл
+    if not text or len(text) > 128:
+        raise HTTPException(400, "text талбар шаардлагатай (1-128 тэмдэгт)")
     ip, target = _resolve_device(db, device)
     if not ip:
         raise HTTPException(400, "Төхөөрөмжид IP бүртгэлгүй байна")

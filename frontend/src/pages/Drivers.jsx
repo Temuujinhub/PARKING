@@ -1,4 +1,4 @@
-// Бүртгэлтэй жолооч — гэрээт/сарын эрхтэй машинууд
+// Бүртгэлтэй машин — гэрээт/сарын эрхтэй машинууд
 import { Plus, Search, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
@@ -145,7 +145,7 @@ export default function Drivers() {
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Бүртгэлтэй жолооч</h1>
+        <h1 className="text-2xl font-bold">Бүртгэлтэй машин</h1>
         <div className="flex gap-2">
           <button className="btn-secondary" onClick={() => setImporting(true)}>
             <Upload size={16} /> Excel-ээс импортлох
