@@ -119,6 +119,73 @@ async def probe(ip: str) -> None:
                 await asyncio.sleep(6.0)
             print("    → 3 мөр гаргасан хувилбараа .env-д бичнэ:")
             print("      PARKING_SCREEN_LINE_BREAK='\\r\\n'   # (жишээ: 2-р хувилбар ажилласан бол)")
+
+            # ── 2.6 МӨР ТУС БҮРИЙН API хайх ──
+            # 2026-07-28 Monnis туршилт: дээрх БҮХ мөр таслал нэг мөрөнд урссан —
+            # энэ firmware Custom-ыг дан урсдаг мөр гэж үздэг нь батлагдсан.
+            # Тиймээс мөр тус бүрд тусдаа талбар/команд байгаа эсэхийг хайна.
+            print("\n  Дэлгэцийн тохиргооны бүтцийг камераас асууж байна (зөвхөн унших):")
+            for cfg in ("VSPDisplayScreen", "DisplayScreen", "TrafficScreen",
+                        "ScreenDisplay", "LedScreen", "TrafficParkingScreen",
+                        "InoutGeneralConfig", "VSPGeneral"):
+                try:
+                    res = await rpc._call("configManager.getConfig", {"name": cfg})
+                    if res.get("result"):
+                        print(f"    ✓ getConfig {cfg} → {str(res.get('params'))[:400]}")
+                        ok.append(f"getConfig:{cfg}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"    · {cfg}: {type(e).__name__}")
+                await asyncio.sleep(0.8)
+            # Бүтэн конфигоос дэлгэцтэй холбоотой түлхүүрүүдийг шүүж харуулна —
+            # per-line бүтэц ЯГ ямар нэртэйг эндээс олно (таамаглахгүй)
+            try:
+                res = await rpc._call("configManager.getConfig", {"name": "All"})
+                def _paths(node, prefix=""):
+                    if isinstance(node, dict):
+                        for k, v in node.items():
+                            p = f"{prefix}.{k}" if prefix else str(k)
+                            if any(s in str(k).lower() for s in ("screen", "led", "display")):
+                                yield p, v
+                            yield from _paths(v, p)
+                    elif isinstance(node, list):
+                        for i, v in enumerate(node):
+                            yield from _paths(v, f"{prefix}[{i}]")
+                found = list(_paths(res.get("params") or {}))
+                if found:
+                    print(f"\n  getConfig All дотор дэлгэцтэй холбоотой {len(found)} түлхүүр:")
+                    for p, v in found[:25]:
+                        print(f"    {p} = {str(v)[:200]}")
+                    if len(found) > 25:
+                        print(f"    ... (нийт {len(found)}, эхний 25-ыг харуулав)")
+                else:
+                    print("\n  getConfig All: дэлгэцтэй холбоотой түлхүүр олдсонгүй")
+            except Exception as e:  # noqa: BLE001
+                print(f"\n  getConfig All: {type(e).__name__}: {str(e)[:100]}")
+
+            print("\n  МӨР ТУС БҮРИЙН хувилбарууд — LED-ийг ажиглаж, аль үсэгтэй нь")
+            print("  ХЭДДҮГЭЭР мөрөнд гарсныг тэмдэглэнэ үү (6с зайтай):")
+            line_variants = [
+                ("A: Custom=жагсаалт", "trafficParking.setScreenDisplay",
+                 {"Custom": ["MUR-A1", "MUR-A2", "MUR-A3"]}),
+                ("B: Custom1/2/3", "trafficParking.setScreenDisplay",
+                 {"Custom1": "MUR-B1", "Custom2": "MUR-B2", "Custom3": "MUR-B3"}),
+                ("C: LineNo=2", "trafficParking.setScreenDisplay",
+                 {"Custom": "MUR-C2", "LineNo": 2}),
+                ("D: Line=2", "trafficParking.setScreenDisplay",
+                 {"Custom": "MUR-D2", "Line": 2}),
+                ("E: DisplayInfo", "trafficParking.setScreenDisplayInfo",
+                 {"DisplayInfo": [{"LineNo": 1, "Content": "MUR-E1"},
+                                  {"LineNo": 2, "Content": "MUR-E2"},
+                                  {"LineNo": 3, "Content": "MUR-E3"}]}),
+            ]
+            for name, method, params in line_variants:
+                try:
+                    res = await rpc._call(method, params)
+                    print(f"    {name}: {'OK' if res.get('result') else 'татгалзав'}"
+                          f" — LED дээр юу гарав?")
+                except Exception as e:  # noqa: BLE001
+                    print(f"    {name}: {type(e).__name__}")
+                await asyncio.sleep(6.0)
         finally:
             await rpc.logout()
 
