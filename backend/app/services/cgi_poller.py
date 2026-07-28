@@ -86,6 +86,8 @@ def _extract_json_blocks(buffer: str):
 # ─── Producer-Consumer дараалал ──────────────────────────────────────────────
 # Стрим уншигч (producer) event-ийг дараалалд шидэж ШУУД цааш уншина; боловсруулалт
 # (consumer) нь ард нь явна. Ингэснээр DB-ийн саатал камерын стримийг гацаахгүй.
+# Камер бүрд аль codes хувилбар ажилласныг санана (дахин холбогдоход шууд түүгээр)
+_codes_ok: dict[str, int] = {}
 _queue: asyncio.Queue | None = None
 _workers: list = []
 
@@ -176,10 +178,20 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
     # ашигладаг тул юу ч алдахгүй (дибагт ч хялбар). Ачаалал ихтэй эсвэл
     # камерыг ӨӨР СИСТЕМТЭЙ хуваалцаж байгаа үед зөвхөн ANPR-ийг сонсоно:
     #   PARKING_CAMERA_EVENT_CODES=[TrafficJunction,TrafficSnapPicture]
-    codes = settings.camera_event_codes
-    url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes={codes}&heartbeat={hb}"
+    # Firmware бүр өөр codes хүлээж авдаг. Шинэ firmware (2025+) нь [All]-ыг
+    # ТАТГАЛЗАЖ HTTP 400 буцаадаг нь production дээр илэрсэн (2026-07-28, MONNIS
+    # гарах камер: 400 Bad Request → стрим огт холбогдоогүй → 9 цаг машин
+    # танихгүй). Тиймээс 400 ирвэл дараагийн хувилбар руу ӨӨРӨӨ шилжинэ.
+    # Ажилласан хувилбарыг санаж дараа нь шууд түүгээр холбогдоно.
+    variants = [settings.camera_event_codes] + [
+        v for v in ("[TrafficJunction,TrafficSnapPicture,TrafficControl]",
+                    "[TrafficJunction]", "[TrafficSnapPicture]", "[All]")
+        if v != settings.camera_event_codes]
+    vi = _codes_ok.get(device_id, 0)
     auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     while True:
+        codes = variants[vi % len(variants)]
+        url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes={codes}&heartbeat={hb}"
         buffer = ""
         try:
             # read timeout: энэ хугацаанд юу ч ирэхгүй бол холболт үхсэн гэж үзэж
@@ -191,6 +203,15 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
             async with httpx.AsyncClient(
                     timeout=httpx.Timeout(10, read=settings.camera_event_read_timeout_sec)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
+                    if resp.status_code == 400:
+                        # Энэ firmware тухайн codes-ыг ойлгохгүй — дараагийнхыг оролдоно
+                        vi += 1
+                        nxt = variants[vi % len(variants)]
+                        log.warning("%s: codes=%s-ыг татгалзлаа (HTTP 400) — %s-аар "
+                                    "оролдоно", ip, codes, nxt)
+                        _codes_ok[device_id] = vi
+                        await asyncio.sleep(2)
+                        continue
                     if resp.status_code != 200:
                         # 401 үед ХУРДАН давтаж болохгүй: Dahua камер хэд хэдэн
                         # буруу оролдлогын дараа бүртгэлийг ТҮГЖДЭГ. 15с тутам
@@ -212,7 +233,8 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                                         f"{settings.camera_event_reconnect_sec}с дараа дахин")
                             await asyncio.sleep(settings.camera_event_reconnect_sec)
                         continue
-                    log.info(f"{ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
+                    _codes_ok[device_id] = vi   # энэ хувилбар ажиллалаа — санана
+                    log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}), event хүлээж байна")
                     last_touch = 0.0
                     async for chunk in resp.aiter_text():
                         buffer += chunk
