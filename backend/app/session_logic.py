@@ -444,11 +444,14 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         "registered": registered is not None, "blacklisted": black is not None,
         "barrier_opened": barrier_opened,
     })
-    # Орох LED дэлгэцэнд дугаар + мэндчилгээ (Managed горимд камер өөрөө харуулахгүй тул
-    # сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг хүлээлгэхгүй, ард нь.
+    # Орох LED дэлгэцэнд орсон цаг + дугаар + мэндчилгээ (Managed горимд камер өөрөө
+    # харуулахгүй тул сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг
+    # хүлээлгэхгүй, ард нь. {time} = УБ-ын локал цаг (DB нь UTC хадгалдаг).
     if not black:
+        local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
         schedule_display(device.ip_address,
-                         render_screen_text(settings.screen_welcome_text, plate=plate),
+                         render_screen_text(settings.screen_welcome_text, plate=plate,
+                                            time_str=local_hm),
                          camera_credentials(device))
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 

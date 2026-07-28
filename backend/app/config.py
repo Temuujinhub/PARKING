@@ -222,11 +222,14 @@ class Settings(BaseSettings):
     # НЭГ мөрөнд урсгаж байвал мөр таслалын тэмдэг нь тухайн firmware-д таарахгүй
     # байна гэсэн үг — tools/screen_probe.py-ээр туршиж PARKING_SCREEN_LINE_BREAK-ийг
     # тохируулна («\r\n» г.м).
-    screen_fee_text: str = "{plate}\n{duration}\nTulbur: {amount}"  # AWAITING_PAYMENT үед
+    # Мөр бүр БОГИНО байх ёстой: 64px өргөн lattice дэлгэцэд урт мөр урсаж эхэлдэг
+    # тул жолооч дүнгээ харах гэж хүлээнэ. Тиймээс 3-р мөр нь «Tulbur: 5000» биш
+    # зөвхөн «5000T» (₮ тэмдгийг LED фонт дэмжихгүй бол T болгож .env-ээс солино).
+    screen_fee_text: str = "{plate}\n{duration}\n{amount}T"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
-    # Орох LED — дугаар + мэндчилгээ (Managed горимд камер өөрөө харуулахгүй тул сервер илгээнэ)
-    screen_welcome_text: str = "{plate}|Tavtai morilno uu"
+    # Орох LED — 3 мөр: орсон цаг / дугаар / мэндчилгээ ({time} = локал HH:MM)
+    screen_welcome_text: str = "{time}\n{plate}\nTavtai moril"
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай
     # (TTS хөдөлгүүр латин/кирилл текстийг зөв уншихгүй байж болзошгүй)
     screen_voice: bool = False

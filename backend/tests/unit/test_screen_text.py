@@ -12,10 +12,17 @@ def test_format_duration():
 
 
 def test_fee_text_three_lines():
+    # 3-р мөр зөвхөн дүн — «Tulbur:» гэх мэт урт үг мөрийг урсгаж жолоочийн цаг алддаг
     text = render_screen_text(settings.screen_fee_text, amount=3500,
                               plate="1234УБА", duration_minutes=125)
     lines = text.split("\n")
-    assert lines == ["1234УБА", "2ts 05min", "Tulbur: 3500"]
+    assert lines == ["1234УБА", "2ts 05min", "3500T"]
+
+
+def test_welcome_text_three_lines():
+    text = render_screen_text(settings.screen_welcome_text, plate="1234УБА",
+                              time_str="14:05")
+    assert text.split("\n") == ["14:05", "1234УБА", "Tavtai moril"]
 
 
 def test_duration_missing_drops_empty_line():
