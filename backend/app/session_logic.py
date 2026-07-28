@@ -608,12 +608,19 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         session.total_fee = fee["total_fee"]
     session.status = "FREE" if (fee["is_free"] and not session.paid_at) else "CLOSED"
 
+    # ЧУХАЛ: session-ий өөрчлөлтийг хаалт нээхийн ӨМНӨ commit хийнэ.
+    # Өмнө нь хаалтны RPC (15с хүртэл) хугацаанд транзакц нээлттэй байж
+    # parking_sessions мөрийг ТҮГЖДЭГ байв — тэр үед зургийн background task-ийн
+    # UPDATE lock_timeout(10с)-д унаж, зургийн зам бичигдэхгүй үлддэг байлаа.
+    # Зан төлөв өөрчлөгдөхгүй: session нь хаалт амжилттай эсэхээс үл хамааран
+    # хаагддаг байсан (доорх barrier_opened зөвхөн мэдэгдэлд ашиглагдана).
+    db.commit()
+
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
     if barrier:
         cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number)
         barrier_opened = cmd.status == "SUCCESS"
-    db.commit()
 
     notify(session.site_id, "EXIT_COMPLETED", {
         "session_id": session.id, "plate": session.plate_number,

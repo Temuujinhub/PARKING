@@ -119,7 +119,14 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
     # Session мөр commit хийгдэж амжаагүй байж болзошгүй (payload зурагтай үед
     # capture агшин зуур дуусдаг) — олдохгүй бол багахан хүлээгээд дахин оролдоно.
     from ..models import ParkingSession
-    for attempt in range(3):
+    # Мөрийн ТҮГЖЭЭ: hand_exit/pos_confirm нь session мөрийг өөрчлөөд хаалт нээх/
+    # e-Barimt үүсгэх хугацаанд транзакцаа нээлттэй барьдаг. Тэр үед энэ UPDATE
+    # lock_timeout (10с)-д унадаг байв — зураг хадгалагдсан ч замыг нь бичиж
+    # чадахгүй, task чимээгүй уначихдаг. Одоо түгжээний алдааг тусад нь барьж
+    # хүлээгээд дахин оролдоно (оролдлого бүрд хүлээх хугацаа уртсана).
+    from sqlalchemy.exc import OperationalError
+    attempts = 5
+    for attempt in range(attempts):
         db = SessionLocal()
         try:
             s = db.get(ParkingSession, session_id)
@@ -137,9 +144,18 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                 db.commit()
                 log.info(f"{plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
                 return
+        except OperationalError as e:
+            # Түгжээ чөлөөлөгдөхийг хүлээнэ (хаалт нээх/e-Barimt дуустал)
+            db.rollback()
+            if attempt + 1 >= attempts:
+                log.warning("%s %s: session мөр %d удаа түгжээтэй байлаа — зам бичигдээгүй "
+                            "(зураг диск дээр хадгалагдсан: %s)", plate, lane_dir, attempts, rel)
+                return
+            log.info("%s %s: session мөр түгжээтэй — %dс хүлээгээд дахин оролдоно (%d/%d)",
+                     plate, lane_dir, attempt + 2, attempt + 1, attempts)
         finally:
             db.close()
-        await asyncio.sleep(1)
+        await asyncio.sleep(attempt + 1)   # 1, 2, 3, 4с — түгжээ ихэвчлэн 15с дотор тайлагдана
     log.warning(f"{plate} {lane_dir}: session {session_id} DB-д олдсонгүй — зам бичигдээгүй")
 
 
