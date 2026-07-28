@@ -283,21 +283,26 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     if recent_ok:
         return True
 
+    # ГЭРЭЭТ машин ЯМАГТ гарна — төлбөр авдаггүй тул өр (ихэвчлэн орох уншилт
+    # алдагдсанаас үүссэн хуучин артефакт) хаах шалтгаан болохгүй (2026-07-28
+    # Monnis: өглөө гараар оруулсан гэрээт машин гарахдаа гацсан).
+    registered = find_registered(db, plate, device.site_id)
     from .models import Compensation
-    if db.query(Compensation).filter(Compensation.plate_number == plate,
-                                     Compensation.status == "PENDING").count():
-        return False  # өртэй - оператор шийднэ
+    if not registered and db.query(Compensation).filter(
+            Compensation.plate_number == plate,
+            Compensation.status == "PENDING").count():
+        return False  # өртэй (гэрээт биш) - оператор шийднэ
 
     session, _fuzzy = match_open_session(db, plate, device.site_id)
     entitled = False
-    if session:
+    if registered:
+        entitled = True
+    elif session:
         if session.status == "PAID" and (not session.exit_deadline or now <= session.exit_deadline):
             entitled = True
         else:
             fee = session_fee_info(db, session, at=now)
             entitled = fee["is_free"] or amount_due(db, session, fee) <= 0
-    elif find_registered(db, plate, device.site_id):
-        entitled = True
     else:
         # Саяхан гарахаар хаагдсан (хаалт нь амжилтгүй байж болзошгүй) машин
         entitled = bool(
@@ -513,8 +518,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # ГЭРЭЭТ машин: session олдоогүй ч (орох уншилт алдагдсан, жагсаалтад
         # дараа нэмэгдсэн г.м.) төлөх зүйлгүй тул ХОРИХ ёсгүй — шууд гаргана.
         # Өмнө нь «Бүртгэл олдсонгүй» гэж LED-д гаргаад хаалт нээгддэггүй байв.
+        # ӨРТЭЙ байсан ч гаргана (2026-07-28 Monnis): гэрээт машинаас төлбөр
+        # авдаггүй тул өр нь ихэвчлэн орох/гарах уншилт алдагдсанаас үүссэн
+        # артефакт — DEBT_ALERT дээр аль хэдийн мэдэгдсэн, оператор хянана.
         reg = find_registered(db, plate, site_id)
-        if reg and not debts:
+        if reg:
             db.commit()
             barrier = _find_barrier(db, site_id, device)
             opened = False
@@ -522,7 +530,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate)
                 opened = cmd.status == "SUCCESS"
             notify(site_id, "EXIT_NO_SESSION", {
-                "plate": plate, "has_debt": False, "debt_amount": 0,
+                "plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount,
                 "registered": True, "barrier_opened": opened})
             schedule_display(device.ip_address,
                              render_screen_text(settings.screen_bye_text, plate=plate),
@@ -546,8 +554,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     fee = session_fee_info(db, session, at=now)
 
-    # #7 3+ төлөгдөөгүй өртэй машин — автоматаар хаалт нээхгүй, оператор өрийг цуглуулна
-    if len(debts) >= 3:
+    # #7 3+ төлөгдөөгүй өртэй машин — автоматаар хаалт нээхгүй, оператор өрийг цуглуулна.
+    # ГЭРЭЭТ машинд үйлчлэхгүй (төлбөр авдаггүй тул ямагт гарна; session_fee_info
+    # дээр is_registered шинэчлэгдсэн байгаа).
+    if len(debts) >= 3 and not session.is_registered:
         session.status = "AWAITING_PAYMENT"
         session.duration_minutes = fee["duration_minutes"]
         session.base_fee, session.vat_amount, session.total_fee = (
