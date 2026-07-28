@@ -20,7 +20,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from sqlalchemy.orm import Session
@@ -393,6 +393,23 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                         (cmd.response_text or "")[:120])
         else:
             log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
+        if cmd.status != "SUCCESS":
+            # Хуучин easy-park агентын телеметртэй автоматаар холбоно: манай команд
+            # унах мөчид хуучин систем мөн алдаа/төлөв мэдээлж байсан бол хоёр систем
+            # нэг камерын нөөц булаацалдсаны баримт шууд лог дээр бүрддэг
+            # (дэлгэрэнгүй: аудит LEGACY_GATE_STATUS).
+            try:
+                from ..models import AuditLog
+                _legacy = (db.query(AuditLog)
+                           .filter(AuditLog.username == "legacy-agent",
+                                   AuditLog.created_at >= datetime.utcnow() - timedelta(minutes=3))
+                           .count())
+                if _legacy:
+                    log.warning("хаалт FAILED [%s] мөчид хуучин систем сүүлийн 3 минутад "
+                                "%d алдаа/төлөв мэдээлжээ — камерын нөөц булаацалдааны шинж",
+                                _where, _legacy)
+            except Exception:  # noqa: BLE001 — холбоо тогтоох нь заавал биш
+                pass
         db.commit()
         return cmd
     finally:
