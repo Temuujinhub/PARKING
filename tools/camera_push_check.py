@@ -84,14 +84,35 @@ async def probe(db, ip: str, reboot: bool = False) -> None:
     else:
         print("  ! энэ IP-гээр төхөөрөмж бүртгэгдээгүй")
 
+    # ── Сүлжээний давхарга: ping ажиллаж байхад TCP:80 хаалттай байж БОЛНО
+    # (firewall/NAT нь ICMP-г нэвтрүүлээд HTTP-г хаадаг, эсвэл камерын веб
+    # сервис гацсан). Тиймээс порт болон RPC-г ТУСДАА хэлнэ.
+    import socket
+    tcp_ok = False
+    try:
+        with socket.create_connection((ip, 80), timeout=4):
+            tcp_ok = True
+        print("  ✓ TCP 80 нээлттэй (сервер→камер зам нээлттэй)")
+    except Exception as e:  # noqa: BLE001
+        print(f"  ✗ TCP 80 ХААЛТТАЙ/TIMEOUT ({type(e).__name__}) — сервер→камер зам БАЙХГҮЙ")
+        print("      ping ажиллаж байсан ч энэ нь ICMP л гэсэн үг. Шалгах:")
+        print("      • камерын веб сервис гацсан (тэжээлээр дахин асаах)")
+        print("      • завсрын firewall/NAT TCP:80-ыг хаасан")
+        print(f"      • гараар: curl -m 5 -I http://{ip}/  (сервер дээрээс)")
+
     creds = camera_credentials(dev)
+    if not tcp_ok:
+        return
     async with httpx.AsyncClient(timeout=10.0) as client:
         rpc = DahuaRpc(client, ip, *creds)
         try:
             await rpc.login()
         except Exception as e:  # noqa: BLE001
-            print(f"  ✗ RPC2 нэвтэрч чадсангүй: {str(e)[:120]}")
-            print("      → Камер унтарсан/сүлжээнээс салсан байж магадгүй.")
+            # str(e) нь ConnectTimeout зэрэгт ХООСОН байдаг — төрлийг нь заавал хэлнэ
+            msg = str(e).strip() or "(мессежгүй)"
+            print(f"  ✗ RPC2 нэвтэрч чадсангүй: {type(e).__name__}: {msg[:120]}")
+            print("      → Порт нээлттэй атлаа RPC хариулахгүй: камерын програм хангамж")
+            print("        гацсан эсвэл нэвтрэх мэдээлэл буруу байж магадгүй.")
             return
         print("  ✓ камер амьд (RPC2 нэвтрэлт OK)")
 
@@ -131,7 +152,7 @@ async def probe(db, ip: str, reboot: bool = False) -> None:
                 res = await rpc._call("magicBox.reboot")
                 print(f"    reboot → {res.get('result')}  (камер 40-60 секундэд сэргэнэ)")
             except Exception as e:  # noqa: BLE001
-                print(f"    ✗ reboot амжилтгүй: {str(e)[:120]}")
+                print(f"    ✗ reboot амжилтгүй: {type(e).__name__}: {str(e)[:120]}")
             finally:
                 try:
                     await rpc.logout()
