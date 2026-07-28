@@ -613,6 +613,29 @@ def _auth_ok(ip: str):
 
 # ─── LED дэлгэц / дуут зарлал ────────────────────────────────────────────────
 
+# LED-ийн амжилт/алдааны түүх (эрүүл мэндийн хуудсанд) — камерт хандахгүйгээр
+# «дэлгэц ажиллаж байна уу»-г тоогоор харуулна. Restart-аас хойшхи санах ой.
+from collections import deque as _deque  # noqa: E402
+
+_screen_stats: dict[str, "_deque"] = {}
+
+
+def _screen_record(ip: str, ok: bool):
+    dq = _screen_stats.get(ip)
+    if dq is None:
+        dq = _screen_stats[ip] = _deque(maxlen=500)
+    dq.append((datetime.utcnow(), ok))
+
+
+def screen_stats(ip: str, since: datetime) -> tuple[int, int]:
+    """(амжилттай, алдаатай) — since-ээс хойшхи бодит оролдлогууд (алгассан тооцохгүй)."""
+    ok = fail = 0
+    for ts, s in _screen_stats.get(ip) or ():
+        if ts >= since:
+            ok, fail = ok + (1 if s else 0), fail + (0 if s else 1)
+    return ok, fail
+
+
 async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                             repeat: int | None = None,
                             creds: tuple[str, str] | None = None) -> str:
@@ -674,12 +697,14 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
         log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
         _auth_ok(ip)
+        _screen_record(ip, True)
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
         if _is_auth_error(e):
             _auth_failed(ip)   # дараалсан эрхийн алдаа → түр зогсооно
         log.warning(f"[screen] {ip}: бичиж чадсангүй ({err})")
+        _screen_record(ip, False)
         return err
 
 

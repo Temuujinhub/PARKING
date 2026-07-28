@@ -72,8 +72,10 @@ export default function Health() {
   const [ivl, setIvl] = useState(30000) // шинэчлэх давтамж (мс), 0 = гараар
   const netRef = useRef(null) // сүлжээний хурд тооцох өмнөх дээж
   const [netRate, setNetRate] = useState(null)
+  const [camPerf, setCamPerf] = useState(null) // камерын гүйцэтгэл (1ц/6ц)
 
-  const load = () => api('/api/health/system').then((r) => {
+  const loadCamPerf = () => api('/api/health/cameras').then(setCamPerf).catch(() => {})
+  const load = () => (loadCamPerf(), api('/api/health/system').then((r) => {
     setErr(null)
     // Сүлжээний хурд = өмнөх дээжтэй зөрүү / хугацаа
     const net = r.system?.network
@@ -86,7 +88,7 @@ export default function Health() {
     }
     if (net) netRef.current = { rx: net.bytes_recv, tx: net.bytes_sent, t: r.generated_at }
     setD(r)
-  }).catch((e) => setErr(e.message))
+  }).catch((e) => setErr(e.message)))
 
   useEffect(() => { load() }, [])
   useEffect(() => {
@@ -136,6 +138,79 @@ export default function Health() {
       {mock.simulate && (
         <div className="card bg-amber-500/10 border border-amber-500/30 text-amber-300 flex items-center gap-2 py-3">
           <AlertTriangle size={18} /> Тест горим (simulate) идэвхтэй — production-д унтраана уу.
+        </div>
+      )}
+
+      {/* Камерын гүйцэтгэлийн анхааруулгууд (амжилт <90%, LED <50%, стрим тасарсан, 30+ мин уншилтгүй) */}
+      {camPerf?.alerts?.map((a, i) => (
+        <div key={i} className={`card flex items-center gap-2 py-3 ${a.level === 'red'
+          ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+          : 'bg-amber-500/10 border border-amber-500/30 text-amber-300'}`}>
+          <AlertTriangle size={18} /> {a.text}
+        </div>
+      ))}
+
+      {/* Камерын гүйцэтгэл — бүгд DB/санах ойгоос, камерт нэмэлт ачаалалгүй */}
+      {camPerf?.rows?.length > 0 && (
+        <div className="card">
+          <div className="flex items-center gap-2 mb-3 text-slate-300 font-semibold">
+            <Camera size={16} /> Камерын гүйцэтгэл (сүүлийн 1ц / 6ц)
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs whitespace-nowrap">
+              <thead>
+                <tr className="text-left text-slate-500">
+                  <th className="py-1 pr-3">Камер</th>
+                  <th className="py-1 pr-3">Хаалт 1ц</th>
+                  <th className="py-1 pr-3">Хаалт 6ц</th>
+                  <th className="py-1 pr-3">RPC p95</th>
+                  <th className="py-1 pr-3">LED 1ц</th>
+                  <th className="py-1 pr-3">LED 6ц</th>
+                  <th className="py-1 pr-3">Уншилт 1ц/6ц</th>
+                  <th className="py-1 pr-3">Сүүлийн уншилтаас</th>
+                  <th className="py-1 pr-3">Сүүлийн бүтэлгүйтэл</th>
+                  <th className="py-1">Гадны хандалт</th>
+                </tr>
+              </thead>
+              <tbody>
+                {camPerf.rows.map((r) => {
+                  const pct = (c) => (c.total ? `${c.ok}/${c.total} (${c.success_pct}%)` : '—')
+                  const pctCls = (c) => (c.total >= 5 && c.success_pct < 90 ? 'text-red-400 font-semibold' : '')
+                  const led = (l) => ((l.ok + l.fail) ? `${l.ok}/${l.ok + l.fail}` : '—')
+                  const ledCls = (l) => ((l.ok + l.fail) >= 5 && l.ok * 2 < l.ok + l.fail ? 'text-red-400 font-semibold' : '')
+                  return (
+                    <tr key={r.ip + r.camera} className="border-t border-surface-muted">
+                      <td className="py-1.5 pr-3">
+                        {r.site_code} · {r.camera}{' '}
+                        <span className="font-mono text-slate-500">{r.ip}</span>
+                      </td>
+                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_1h)}`}>{pct(r.cmd_1h)}</td>
+                      <td className={`py-1.5 pr-3 font-mono ${pctCls(r.cmd_6h)}`}>{pct(r.cmd_6h)}</td>
+                      <td className="py-1.5 pr-3 font-mono">
+                        {r.cmd_6h.p95_ms != null
+                          ? (r.cmd_6h.p95_ms >= 1000 ? `${(r.cmd_6h.p95_ms / 1000).toFixed(1)}с` : `${r.cmd_6h.p95_ms}мс`)
+                          : '—'}
+                      </td>
+                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_1h)}`}>{led(r.led_1h)}</td>
+                      <td className={`py-1.5 pr-3 font-mono ${ledCls(r.led_6h)}`}>{led(r.led_6h)}</td>
+                      <td className="py-1.5 pr-3 font-mono">{r.events_1h}/{r.events_6h}</td>
+                      <td className="py-1.5 pr-3">{r.gap_now_min != null ? `${r.gap_now_min} мин` : '—'}</td>
+                      <td className="py-1.5 pr-3 font-mono">
+                        {r.cmd_6h.last_fail_at ? new Date(r.cmd_6h.last_fail_at + 'Z').toLocaleTimeString() : '—'}
+                      </td>
+                      <td className="py-1.5 text-red-400">
+                        {(r.foreign_sessions || []).map((s) => `${s.user}@${s.ip}`).join(', ') || '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-2">
+            Бүх үзүүлэлт серверийн өгөгдлөөс тооцогдоно — камерт нэмэлт ачаалал өгөхгүй.
+            LED тоолуур backend restart-аас хойш цуглардаг.
+          </p>
         </div>
       )}
 

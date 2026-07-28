@@ -14,7 +14,7 @@ import time
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
-from ..auth import require_role
+from ..auth import get_current_user, require_role
 from ..config import settings
 from ..database import get_db
 from ..models import Device, User
@@ -376,3 +376,116 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         },
         "generated_at": int(now),
     }
+
+
+# ─── Камерын гүйцэтгэл (1ц/6ц) — бүгд DB + санах ойгоос, камерт хандахгүй ─────
+# Дүн шинжилгээ 2026-07-28: асуудлыг илрүүлэхэд амжилтын %, RPC p95, LED %,
+# чимээгүй завсар хамгийн их хэрэгтэй байсан. Энэ endpoint тэдгээрийг зогсоол/
+# камер бүрээр тооцож, босго давсныг alerts болгож буцаана (Dashboard-д банер).
+
+@router.get("/cameras")
+def camera_performance(db=Depends(get_db), user: User = Depends(get_current_user)):
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+
+    from ..models import BarrierCommand, LprEvent, ParkingSite
+    from ..services.barrier import screen_stats
+    from ..services.camera_sessions import foreign_info
+
+    now = datetime.utcnow()
+    h1, h6 = now - timedelta(hours=1), now - timedelta(hours=6)
+
+    sites = {s.id: s for s in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all()}
+    devs = db.query(Device).filter(Device.status == "active").all()
+    cams = [d for d in devs if d.device_type == "camera" and d.site_id in sites]
+    bars = [d for d in devs if d.device_type == "barrier" and d.site_id in sites]
+
+    ev_rows = (db.query(LprEvent.device_id, LprEvent.created_at)
+               .filter(LprEvent.created_at >= h6)
+               .order_by(LprEvent.created_at).all())
+    ev_by_dev = defaultdict(list)
+    for did, ts in ev_rows:
+        ev_by_dev[did].append(ts)
+    cmd_rows = (db.query(BarrierCommand)
+                .filter(BarrierCommand.created_at >= h6,
+                        BarrierCommand.command.in_(["open", "force_open"])).all())
+    cmd_by_dev = defaultdict(list)
+    for c in cmd_rows:
+        cmd_by_dev[c.device_id].append(c)
+
+    def _p95(vals):
+        if not vals:
+            return None
+        vals = sorted(vals)
+        return vals[max(0, min(len(vals) - 1, int(round(0.95 * (len(vals) - 1)))))]
+
+    def _cmd_stats(cl):
+        tot = len(cl)
+        ok = sum(1 for c in cl if c.status == "SUCCESS")
+        durs = [c.duration_ms for c in cl if c.status == "SUCCESS" and c.duration_ms]
+        fails = [c for c in cl if c.status == "FAILED"]
+        last_fail = max((c.created_at for c in fails), default=None)
+        return {"total": tot, "ok": ok,
+                "success_pct": round(ok * 100 / tot) if tot else None,
+                "p95_ms": _p95(durs),
+                "last_fail_at": last_fail.isoformat() if last_fail else None}
+
+    def _barrier_for(cam):
+        same = [b for b in bars if b.site_id == cam.site_id
+                and b.lane_no == cam.lane_no and b.lane_dir == cam.lane_dir]
+        if same:
+            return same[0]
+        site_bars = [b for b in bars if b.site_id == cam.site_id]
+        return site_bars[0] if site_bars else None
+
+    rows, alerts = [], []
+    for cam in cams:
+        site = sites[cam.site_id]
+        evs = ev_by_dev.get(cam.id, [])
+        gaps = [(b - a).total_seconds() for a, b in zip(evs, evs[1:])]
+        gap_max = max(gaps) if gaps else None
+        gap_now = (now - evs[-1]).total_seconds() if evs else None
+        last_seen_age = (now - cam.last_seen).total_seconds() if cam.last_seen else None
+
+        b = _barrier_for(cam)
+        bc = cmd_by_dev.get(b.id, []) if b else []
+        cmd1 = _cmd_stats([c for c in bc if c.created_at >= h1])
+        cmd6 = _cmd_stats(bc)
+        led1_ok, led1_fail = screen_stats(cam.ip_address, h1)
+        led6_ok, led6_fail = screen_stats(cam.ip_address, h6)
+        who = foreign_info(cam.id) or {}
+
+        row = {
+            "site_code": site.site_code, "site_name": site.name,
+            "camera": cam.name, "ip": cam.ip_address, "lane_dir": cam.lane_dir,
+            "barrier": b.name if b else None,
+            "events_1h": sum(1 for t in evs if t >= h1), "events_6h": len(evs),
+            "gap_max_min": round(gap_max / 60) if gap_max else None,
+            "gap_now_min": round(gap_now / 60) if gap_now else None,
+            "last_seen_age_sec": int(last_seen_age) if last_seen_age is not None else None,
+            "cmd_1h": cmd1, "cmd_6h": cmd6,
+            "led_1h": {"ok": led1_ok, "fail": led1_fail},
+            "led_6h": {"ok": led6_ok, "fail": led6_fail},
+            "foreign_sessions": who.get("sessions") or [],
+        }
+        rows.append(row)
+
+        label = f"{site.site_code} {cam.name}"
+        # Стрим (heartbeat) 5+ мин алга = камер жинхэнээсээ хариугүй — улаан
+        if last_seen_age is not None and last_seen_age > 300:
+            alerts.append({"level": "red", "site_code": site.site_code,
+                           "text": f"{label}: камер {int(last_seen_age / 60)} мин хариугүй (стрим тасарсан)"})
+        # Хаалтны амжилт <90% (сүүлийн 1ц, 5+ команд)
+        if cmd1["total"] >= 5 and cmd1["success_pct"] is not None and cmd1["success_pct"] < 90:
+            alerts.append({"level": "red", "site_code": site.site_code,
+                           "text": f"{label}: хаалтны амжилт {cmd1['success_pct']}% (сүүлийн 1ц, {cmd1['total']} команд)"})
+        # LED <50% (сүүлийн 1ц, 5+ оролдлого)
+        if (led1_ok + led1_fail) >= 5 and led1_ok * 2 < (led1_ok + led1_fail):
+            alerts.append({"level": "red", "site_code": site.site_code,
+                           "text": f"{label}: LED дэлгэц {led1_ok}/{led1_ok + led1_fail} амжилттай (сүүлийн 1ц)"})
+        # 30+ мин уншилтгүй — шар (шөнө машингүй үед хэвийн байж болно)
+        if gap_now is not None and gap_now > 1800 and (last_seen_age or 0) <= 300:
+            alerts.append({"level": "yellow", "site_code": site.site_code,
+                           "text": f"{label}: {int(gap_now / 60)} мин дугаар уншаагүй (камер онлайн — машингүй байж болно)"})
+
+    return {"rows": rows, "alerts": alerts, "generated_at": now.isoformat()}
