@@ -45,3 +45,43 @@
 - `sudo bash /root/PARKING/tools/restore_backup.sh` — жинхэнэ сэргээлт хийж
   тайлан нээгдэж буйг нүдээр батлах (test дата parking_old-д хадгалагдана).
 - Production дээр: `journalctl -t parking-backup -n 5` — илгээлтийн лог.
+
+## PITR — цэг хүртэл сэргээх (2026-07-29 нэмэгдсэн)
+
+pg_dump нь өдөрт 2 удаа тул хамгийн муу тохиолдолд 12 цагийн дата алдагдана.
+WAL архивлалт үүнийг ЯМАР Ч АГШИН хүртэл сэргээх боломжтой болгоно (жишээ:
+«буруу устгал хийхээс 1 минутын өмнө»).
+
+Тохируулах (production дээр нэг удаа; postgres ~3 секунд restart хийнэ):
+```
+sudo bash /root/PARKING/deploy/setup_pitr.sh
+sudo bash /root/PARKING/deploy/setup_pitr.sh --status   # хэдийд ч байдлыг харах
+```
+Юу болох вэ: WAL → `/var/lib/parking/wal-archive`, 7 хоног тутам basebackup →
+`/var/lib/parking/basebackup/<огноо>`, 14 хоногоос хуучныг cron цэвэрлэнэ.
+Диск: энэ ачаалалд 14 хоногт ~1-2GB.
+
+**Сэргээх (тодорхой агшин хүртэл):**
+```
+sudo systemctl stop parking-backend postgresql
+sudo mv /var/lib/postgresql/16/main /var/lib/postgresql/16/main.old
+sudo -u postgres mkdir -p /var/lib/postgresql/16/main
+# Сүүлийн basebackup-ыг задлана
+sudo -u postgres tar -xzf /var/lib/parking/basebackup/<огноо>/base.tar.gz -C /var/lib/postgresql/16/main
+sudo -u postgres tee /var/lib/postgresql/16/main/postgresql.auto.conf >/dev/null <<CONF
+restore_command = 'cp /var/lib/parking/wal-archive/%f %p'
+recovery_target_time = '2026-07-29 14:32:00'   # ← хүссэн агшин (серверийн цагаар)
+recovery_target_action = 'promote'
+CONF
+sudo -u postgres touch /var/lib/postgresql/16/main/recovery.signal
+sudo systemctl start postgresql && sudo systemctl start parking-backend
+```
+Буцаах бол `main.old`-ыг эргүүлж нэрлэнэ. **Заавал урьдчилж туршина** — жинхэнэ
+осол болоход анх удаагаа хийх нь эрсдэлтэй (test сервер дээр туршилт хийсэн).
+
+## Хуучин датаны цэвэрлэгээ (retention)
+
+Backend өдөрт нэг удаа автоматаар: lpr_events 90ө, barrier_commands 180ө,
+audit_logs 365ө, snapshot зураг 120ө-оос хуучныг устгана (.env: PARKING_RETENTION_*,
+0 = унтраах). **Санхүүгийн датад (session/payment/vat_receipt/compensation)
+ХЭЗЭЭ Ч хүрэхгүй** — хуулийн шаардлагаар мөнхөд хадгална.

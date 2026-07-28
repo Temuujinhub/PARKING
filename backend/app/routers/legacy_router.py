@@ -51,10 +51,12 @@ async def set_gate_status(request: Request, db: Session = Depends(get_db)):
     message = q.get("errorMessage") or ""
     host = request.headers.get("host", "")
     ip = _client_ip(request)
-    log.info("legacy gate: id=%s status=%s host=%s ip=%s msg=%s",
-             gate_id, status, host, ip, message[:200])
     state = (status, message)
     if _last_state.get(gate_id) != state:
+        # Зөвхөн ТӨЛӨВ ӨӨРЧЛӨГДӨХӨД логлоно — агент секундэд хэдэн удаа цохидог
+        # тул бүгдийг логловол журнал дүүрч жинхэнэ алдаа нуугддаг байв (2026-07-29).
+        log.info("legacy gate: id=%s status=%s host=%s ip=%s msg=%s",
+                 gate_id, status, host, ip, message[:200])
         _last_state[gate_id] = state
         db.add(AuditLog(username="legacy-agent", action="LEGACY_GATE_STATUS",
                         entity="gate", entity_id=str(gate_id)[:60],
@@ -70,9 +72,11 @@ async def legacy_catchall(rest: str, request: Request, db: Session = Depends(get
     """Агент ӨӨР ямар зам дууддагийг илрүүлнэ — зам бүрийг нэг л удаа аудитад бичнэ."""
     host = request.headers.get("host", "")
     ip = _client_ip(request)
-    log.info("legacy call: /api/v1.0/parkings/%s host=%s ip=%s query=%s",
-             rest, host, ip, str(dict(request.query_params))[:200])
     if rest not in _seen_paths:
+        # Зам бүрийг НЭГ л удаа логлоно (add-middleware-log нь секундэд хэдэн
+        # удаа ирдэг — бүгдийг логловол журналыг дүүргэнэ)
+        log.info("legacy call: /api/v1.0/parkings/%s host=%s ip=%s query=%s",
+                 rest, host, ip, str(dict(request.query_params))[:200])
         _seen_paths.add(rest)
         db.add(AuditLog(username="legacy-agent", action="LEGACY_UNKNOWN_PATH",
                         entity="path", entity_id=rest[:60],

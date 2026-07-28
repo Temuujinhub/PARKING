@@ -98,6 +98,20 @@ MIGRATIONS = [
 
     # v1.x — зөвхөн орох камерт уншигдсан session-ийг үнэгүйгээр авто хаах босго
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS entry_only_free_hours INTEGER",
+
+    # v1.9 — ХАЛУУН ЗАМЫН индексүүд (2026-07-29 аудит). Машин орох/гарах бүрд
+    # ажилладаг query-үүд болон retention-ы устгалт эдгээргүйгээр бүтэн хүснэгт
+    # уншдаг байв (lpr_events нь DB-ийн 36%).
+    # 1) dedup/burst шалгалт: site_id + lane_dir + created_at (event бүрд 2 удаа)
+    "CREATE INDEX IF NOT EXISTS ix_lpr_site_lane_created ON lpr_events (site_id, lane_dir, created_at)",
+    # 2) хаалтны cooldown шалгалт + эрүүл мэндийн самбар: device_id + created_at
+    "CREATE INDEX IF NOT EXISTS ix_cmd_device_created ON barrier_commands (device_id, created_at)",
+    # 3) retention устгалт + гүйцэтгэлийн тайлан: created_at
+    "CREATE INDEX IF NOT EXISTS ix_cmd_created_at ON barrier_commands (created_at)",
+    # 4) гарах бүрд өр шалгах: plate_number + status
+    "CREATE INDEX IF NOT EXISTS ix_comp_plate_status ON compensations (plate_number, status)",
+    # 5) гэрээт машин шалгах (гарах/орох бүрд): plate + идэвхтэй эсэх
+    "CREATE INDEX IF NOT EXISTS ix_driver_plate_active ON registered_drivers (plate_number, is_active)",
 ]
 
 
