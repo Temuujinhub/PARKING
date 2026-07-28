@@ -99,6 +99,26 @@ async def probe(ip: str) -> None:
                 except Exception as e:  # noqa: BLE001
                     print(f"    ✗ {name}: {type(e).__name__}")
                 await asyncio.sleep(PAUSE)
+
+            # ── 2.5 Мөр таслалын хувилбарууд (3 мөрт харуулах) ──
+            # Зарим firmware «\n»-ийг үл ойшоож бүх текстийг НЭГ мөрөнд урсгадаг.
+            # Хувилбар бүрийг 6 секунд зайтай илгээнэ — LED-ийг НҮДЭЭР ажиглаж,
+            # аль дугаартай нь 3 ТУСДАА мөрөнд гарснаар PARKING_SCREEN_LINE_BREAK-ийг
+            # тохируулна.
+            print("\n  Мөр таслалын хувилбарууд — LED-ийг ажиглана уу (3 мөр гарах ёстой):")
+            breaks = [("1: \\n", "\n"), ("2: \\r\\n", "\r\n"), ("3: \\r", "\r"),
+                      ("4: | тэмдэг", "|"), ("5: ; тэмдэг", ";")]
+            for name, br in breaks:
+                text3 = br.join([f"MUR-{name[0]} 1234ABC", "1ts 05min", "Tulbur 3000"])
+                try:
+                    res = await rpc._call("trafficParking.setScreenDisplay", {"Custom": text3})
+                    print(f"    {name}: илгээв ({'OK' if res.get('result') else 'татгалзав'})"
+                          f" — LED дээр 3 мөр гарсан эсэхийг тэмдэглэ")
+                except Exception as e:  # noqa: BLE001
+                    print(f"    {name}: {type(e).__name__}")
+                await asyncio.sleep(6.0)
+            print("    → 3 мөр гаргасан хувилбараа .env-д бичнэ:")
+            print("      PARKING_SCREEN_LINE_BREAK='\\r\\n'   # (жишээ: 2-р хувилбар ажилласан бол)")
         finally:
             await rpc.logout()
 

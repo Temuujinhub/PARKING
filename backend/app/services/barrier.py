@@ -225,137 +225,168 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     )
     _inflight = command in ("open", "force_open")
     if _inflight:
-        _open_inflight.add(device.id)   # давхар зэрэгцээ командаас сэргийлнэ
-    db.add(cmd)
-    db.flush()
-
-    ip, target = _resolve_device(db, device)
-
-    if settings.barrier_mock:
-        cmd.status = "SUCCESS"
-        cmd.response_text = f"MOCK: barrier {command}"
-        cmd.executed_at = datetime.utcnow()
-        _open_inflight.discard(device.id)
-        db.commit()
-        return cmd
-
-    if not ip:
-        # IP тодорхойгүй бол команд явуулах газаргүй — SUCCESS гэж хуурамчаар
-        # тэмдэглэвэл barrier_opened=true болж оператор андуурна.
-        lane_ru = "орох" if device.lane_dir == "entry" else "гарах"
-        cmd.status = "FAILED"
-        cmd.response_text = (
-            f"IP олдсонгүй: энэ хаалт ({device.name}) өөрийн IP-гүй бөгөөд ижил "
-            f"эгнээний ({lane_ru}) камерын IP ч бүртгэлгүй байна. Тохиргоо → Төхөөрөмж "
-            f"дээр {lane_ru} камерын IP-г бүртгэнэ үү (эсвэл хаалтад шууд IP өгнө үү)."
-        )
-        cmd.executed_at = datetime.utcnow()
-        _open_inflight.discard(device.id)
-        db.commit()
-        return cmd
-
-    # Нэвтрэлт нь командыг ХҮЛЭЭН АВАХ төхөөрөмжийнх (хаалт камерын IP зээлсэн бол камерынх)
-    username, password = barrier_credentials(target)
-    cmd.status = "FAILED"
-    # Машин хаалганы өмнө зогсож байгаа тул нэг удаагийн сүлжээний саатлаар
-    # бууж өгөхгүй — timeout/холболтын алдаанд хэд дахин оролдоно.
-    attempts = max(1, settings.barrier_retries + 1)
-    last_err = ""
-    _t0 = time.monotonic()
-    # Нэг камерт нэг RPC — дэлгэцтэй мөргөлдөхөөс сэргийлнэ (хаалт тэргүүлэх эрхтэй)
-    # НИЙТ хугацааны таслалт. ЧУХАЛ: httpx-ийн timeout нь ХҮСЭЛТ БҮРД үйлчилдэг,
-    # харин нэг хаалт нээхэд 5 хүсэлт явдаг (login×2 + factory.instance + strobe +
-    # logout). Тиймээс timeout=12 гэдэг нь нэг оролдлого 60 секунд хүртэл үргэлжилж
-    # болно гэсэн үг байв — 3 оролдлоготой бол 180с. Production дээр 51275мс
-    # (51 секунд) болж бүртгэгдсэн. Одоо оролдлого БҮРИЙГ болон НИЙТ хугацааг
-    # asyncio.wait_for-оор хатуу таслана.
-    _deadline = time.monotonic() + settings.barrier_total_budget_sec
-    async with _BarrierPriority(ip):
-      for attempt in range(attempts):
-          if attempt:
-              if time.monotonic() >= _deadline:
-                  last_err = last_err or "нийт хугацаа дууслаа"
-                  cmd.response_text = f"{last_err} (нийт {settings.barrier_total_budget_sec:.0f}с хэтэрлээ)"
-                  break
-              await asyncio.sleep(settings.barrier_retry_delay_sec)
-          # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
-          # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
-          _remaining = _deadline - time.monotonic()
-          if _remaining <= 0.2:
-              break
-          # Оролдлого бүр БОГИНО, харин ОЛОН. Production нотолгоо: MONNIS-ийн камер
-          # event стрим барьж байхад RPC-д завгүй болж хариу өгөхөө болино, гэвч
-          # дахин оролдоход СЭРГЭДЭГ (10:08:12 — 2-р оролдлогоор амжилттай).
-          # Өмнө нь 4с + 12с гэсэн 2 оролдлого л багтдаг байсан тул нийт 15-18
-          # секунд хүлээгээд бүтэлгүйтдэг байв. Богино оролдлогоор ижил төсөвт
-          # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
-          _timeout = min(_remaining, settings.barrier_attempt_timeout_sec)
-          async def _one_attempt():
-              """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой.
-
-              Хуваалцсан клиент: шинэ TCP холболт нээхгүй, камерын холболтын
-              санг шавхахгүй (дээрх camera_client-ийн тайлбарыг үзнэ үү)."""
-              if True:
-                  client = camera_client(ip)
-                  if command == "open" and settings.barrier_open_path:
-                      # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
-                      auth = httpx.DigestAuth(username, password)
-                      resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
-                      body = (resp.text or "").strip()
-                      if resp.status_code == 200 and "error" not in body.lower():
-                          cmd.status = "SUCCESS"
-                      cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
-                  else:
-                      rpc = DahuaRpc(client, ip, username, password)
-                      await rpc.login()
-                      try:
-                          res = await rpc.strobe(RPC_METHODS[command],
-                                                 settings.barrier_channel, plate)
-                          cmd.status = "SUCCESS"
-                          cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
-                                               + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
-                      finally:
-                          await rpc.logout()
-
-          try:
-              # wait_for нь ОРОЛДЛОГЫГ БҮХЭЛД нь таслана (нэг хүсэлт биш) —
-              # login+strobe+logout цуврал хүсэлт нийлээд хугацаа хэтрүүлэхээс сэргийлнэ
-              await asyncio.wait_for(_one_attempt(), timeout=_timeout)
-              if cmd.status == "SUCCESS":
-                  break
-          except (asyncio.TimeoutError, TimeoutError):
-              last_err = f"хугацаа хэтэрлээ ({_timeout:.1f}с)"
-              cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
-                                   if attempt + 1 < attempts
-                                   else f"{last_err} ({attempts} удаа оролдсон)")
-          except Exception as e:
-              last_err = f"{type(e).__name__}: {str(e)[:300]}"
-              cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
-                                   if attempt + 1 < attempts
-                                   else f"{last_err} ({attempts} удаа оролдсон)")
-    if _inflight:
-        _open_inflight.discard(device.id)   # дууслаа — дараагийн оролдлого чөлөөтэй
-    cmd.executed_at = datetime.utcnow()
-    # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
-    _ms = int((time.monotonic() - _t0) * 1000)
-    cmd.duration_ms = _ms
-    # АЛЬ камер/зогсоол удаашралтай байгааг заавал хэлнэ — эс бол олон зогсоолтой
-    # орчинд «дундаж 1102мс» гэсэн тоо аль талбайн асуудал болохыг заахгүй.
-    _site = ""
+        _open_inflight[device.id] = time.monotonic()   # давхар зэрэгцээ командаас сэргийлнэ
+    # ЧУХАЛ: доорх бүх зам try/finally дотор — өмнө нь цэвэрлэгээ шугаман кодоор
+    # явдаг байсан тул дуудагчийн HTTP хүсэлт (POS/QPay/frontend/камерын push)
+    # таслагдахад CancelledError цэвэрлэгээг алгасаж, _open_inflight-д тэмдэглэгээ
+    # МӨНХӨД үлддэг байв. Түүнээс хойш ensure_entry_barrier/ensure_exit_barrier_
+    # if_cleared «аль хэдийн нээж байна» гэж худал үзээд команд огт илгээхгүй —
+    # бүртгэлтэй машин ч нээгдэхгүй, restart хийтэл гацна (MONNIS 2026-07-28).
+    _detached = False   # True: цэвэрлэгээг background done-callback хариуцна
     try:
-        _st = getattr(target or device, "site", None)
-        _site = f" {_st.site_code}" if _st is not None else ""
-    except Exception:  # noqa: BLE001
+        db.add(cmd)
+        db.flush()
+
+        ip, target = _resolve_device(db, device)
+
+        if settings.barrier_mock:
+            cmd.status = "SUCCESS"
+            cmd.response_text = f"MOCK: barrier {command}"
+            cmd.executed_at = datetime.utcnow()
+            db.commit()
+            return cmd
+
+        if not ip:
+            # IP тодорхойгүй бол команд явуулах газаргүй — SUCCESS гэж хуурамчаар
+            # тэмдэглэвэл barrier_opened=true болж оператор андуурна.
+            lane_ru = "орох" if device.lane_dir == "entry" else "гарах"
+            cmd.status = "FAILED"
+            cmd.response_text = (
+                f"IP олдсонгүй: энэ хаалт ({device.name}) өөрийн IP-гүй бөгөөд ижил "
+                f"эгнээний ({lane_ru}) камерын IP ч бүртгэлгүй байна. Тохиргоо → Төхөөрөмж "
+                f"дээр {lane_ru} камерын IP-г бүртгэнэ үү (эсвэл хаалтад шууд IP өгнө үү)."
+            )
+            cmd.executed_at = datetime.utcnow()
+            db.commit()
+            return cmd
+
+        # Нэвтрэлт нь командыг ХҮЛЭЭН АВАХ төхөөрөмжийнх (хаалт камерын IP зээлсэн бол камерынх)
+        username, password = barrier_credentials(target)
+        cmd.status = "FAILED"
+        # Машин хаалганы өмнө зогсож байгаа тул нэг удаагийн сүлжээний саатлаар
+        # бууж өгөхгүй — timeout/холболтын алдаанд хэд дахин оролдоно.
+        attempts = max(1, settings.barrier_retries + 1)
+        last_err = ""
+        _t0 = time.monotonic()
+        # НИЙТ хугацааны таслалт. ЧУХАЛ: httpx-ийн timeout нь ХҮСЭЛТ БҮРД үйлчилдэг,
+        # харин нэг хаалт нээхэд 5 хүсэлт явдаг (login×2 + factory.instance + strobe +
+        # logout). Тиймээс timeout=12 гэдэг нь нэг оролдлого 60 секунд хүртэл үргэлжилж
+        # болно гэсэн үг байв — 3 оролдлоготой бол 180с. Production дээр 51275мс
+        # (51 секунд) болж бүртгэгдсэн. Одоо оролдлого БҮРИЙГ болон НИЙТ хугацааг
+        # asyncio.wait_for-оор хатуу таслана.
+        _deadline = time.monotonic() + settings.barrier_total_budget_sec
+
+        async def _attempts():
+            nonlocal last_err
+            # Нэг камерт нэг RPC — дэлгэцтэй мөргөлдөхөөс сэргийлнэ (хаалт тэргүүлэх эрхтэй)
+            async with _BarrierPriority(ip):
+              for attempt in range(attempts):
+                  if attempt:
+                      if time.monotonic() >= _deadline:
+                          last_err = last_err or "нийт хугацаа дууслаа"
+                          cmd.response_text = f"{last_err} (нийт {settings.barrier_total_budget_sec:.0f}с хэтэрлээ)"
+                          break
+                      await asyncio.sleep(settings.barrier_retry_delay_sec)
+                  # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
+                  # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
+                  _remaining = _deadline - time.monotonic()
+                  if _remaining <= 0.2:
+                      break
+                  # Оролдлого бүр БОГИНО, харин ОЛОН. Production нотолгоо: MONNIS-ийн камер
+                  # event стрим барьж байхад RPC-д завгүй болж хариу өгөхөө болино, гэвч
+                  # дахин оролдоход СЭРГЭДЭГ (10:08:12 — 2-р оролдлогоор амжилттай).
+                  # Өмнө нь 4с + 12с гэсэн 2 оролдлого л багтдаг байсан тул нийт 15-18
+                  # секунд хүлээгээд бүтэлгүйтдэг байв. Богино оролдлогоор ижил төсөвт
+                  # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
+                  _timeout = min(_remaining, settings.barrier_attempt_timeout_sec)
+                  async def _one_attempt():
+                      """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой.
+
+                      Хуваалцсан клиент: шинэ TCP холболт нээхгүй, камерын холболтын
+                      санг шавхахгүй (дээрх camera_client-ийн тайлбарыг үзнэ үү)."""
+                      if True:
+                          client = camera_client(ip)
+                          if command == "open" and settings.barrier_open_path:
+                              # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
+                              auth = httpx.DigestAuth(username, password)
+                              resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
+                              body = (resp.text or "").strip()
+                              if resp.status_code == 200 and "error" not in body.lower():
+                                  cmd.status = "SUCCESS"
+                              cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
+                          else:
+                              rpc = DahuaRpc(client, ip, username, password)
+                              await rpc.login()
+                              try:
+                                  res = await rpc.strobe(RPC_METHODS[command],
+                                                         settings.barrier_channel, plate)
+                                  cmd.status = "SUCCESS"
+                                  cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
+                                                       + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
+                              finally:
+                                  await rpc.logout()
+
+                  try:
+                      # wait_for нь ОРОЛДЛОГЫГ БҮХЭЛД нь таслана (нэг хүсэлт биш) —
+                      # login+strobe+logout цуврал хүсэлт нийлээд хугацаа хэтрүүлэхээс сэргийлнэ
+                      await asyncio.wait_for(_one_attempt(), timeout=_timeout)
+                      if cmd.status == "SUCCESS":
+                          break
+                  except (asyncio.TimeoutError, TimeoutError):
+                      last_err = f"хугацаа хэтэрлээ ({_timeout:.1f}с)"
+                      cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
+                                           if attempt + 1 < attempts
+                                           else f"{last_err} ({attempts} удаа оролдсон)")
+                  except Exception as e:
+                      last_err = f"{type(e).__name__}: {str(e)[:300]}"
+                      cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
+                                           if attempt + 1 < attempts
+                                           else f"{last_err} ({attempts} удаа оролдсон)")
+
+        _task = asyncio.ensure_future(_attempts())
+        try:
+            # shield: дуудагчийн хүсэлт таслагдсан ч (камер push-аа хаях, POS/QPay
+            # bridge timeout, оператор таб хаах) хаалт нээх RPC-г ХАМТ ТАСЛАХГҮЙ —
+            # машин хаалганы өмнө зогсож байгаа тул нээлт заавал дуустал явна.
+            await asyncio.shield(_task)
+        except asyncio.CancelledError:
+            _detached = True
+
+            def _bg_done(t: asyncio.Task):
+                _open_inflight.pop(device.id, None)
+                _exc = t.exception()
+                log.warning("хаалт %s: дуудагчийн хүсэлт таслагдсан ч команд ард нь "
+                            "дууслаа [%s] status=%s%s", command, ip, cmd.status,
+                            f" ({_exc!r})" if _exc else "")
+            _task.add_done_callback(_bg_done)
+            raise
+
+        cmd.executed_at = datetime.utcnow()
+        # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
+        _ms = int((time.monotonic() - _t0) * 1000)
+        cmd.duration_ms = _ms
+        # АЛЬ камер/зогсоол удаашралтай байгааг заавал хэлнэ — эс бол олон зогсоолтой
+        # орчинд «дундаж 1102мс» гэсэн тоо аль талбайн асуудал болохыг заахгүй.
         _site = ""
-    _where = f"{ip}{_site}"
-    if _ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
-        log.warning("хаалт %s: %s — %dмс [%s] (%s, %d оролдлого) %s",
-                    command, cmd.status, _ms, _where, source, attempts,
-                    (cmd.response_text or "")[:120])
-    else:
-        log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
-    db.commit()
-    return cmd
+        try:
+            _st = getattr(target or device, "site", None)
+            _site = f" {_st.site_code}" if _st is not None else ""
+        except Exception:  # noqa: BLE001
+            _site = ""
+        _where = f"{ip}{_site}"
+        if _ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
+            log.warning("хаалт %s: %s — %dмс [%s] (%s, %d оролдлого) %s",
+                        command, cmd.status, _ms, _where, source, attempts,
+                        (cmd.response_text or "")[:120])
+        else:
+            log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
+        db.commit()
+        return cmd
+    finally:
+        # Ямар ч замаар гарсан (амжилт, алдаа, таслалт) in-flight тэмдэглэгээ
+        # заавал цэвэрлэгдэнэ. Таслагдсан үед background таск өөрөө цэвэрлэнэ.
+        if _inflight and not _detached:
+            _open_inflight.pop(device.id, None)
 
 
 async def open_barrier(db: Session, device: Device, session_id: str | None, source: str,
@@ -418,12 +449,24 @@ def barrier_is_waiting(ip: str) -> bool:
 #   • явж байгаа   → алгасна (зэрэгцээ RPC-ээс сэргийлнэ)
 #   • амжилттай дууссан → DB-ийн cooldown барина
 #   • амжилтгүй дууссан → дахин оролдоно (яг хүссэн зан төлөв)
-_open_inflight: set[str] = set()
+# Утга нь ЭХЭЛСЭН цаг (monotonic): тэмдэглэгээ ямар нэг шалтгаанаар цэвэрлэгдэлгүй
+# үлдвэл (production 2026-07-28, MONNIS: картын төлбөрийн хүсэлт таслагдаад
+# CancelledError цэвэрлэгээг алгасаж) НЭГ удаагийн леак хаалтыг restart хүртэл
+# «нээж байна» гэж худал мэдээлж, бүртгэлтэй машиныг ч нээхгүй болгодог байв.
+# Тиймээс хугацаа нь илт хэтэрсэн тэмдэглэгээг өөрөө хүчингүй болгоно.
+_open_inflight: dict[str, float] = {}
 
 
 def open_in_flight(barrier_id: str) -> bool:
     """Тухайн хаалтад «нээх» команд ЯГ ОДОО явж байна уу."""
-    return barrier_id in _open_inflight
+    t0 = _open_inflight.get(barrier_id)
+    if t0 is None:
+        return False
+    if time.monotonic() - t0 > settings.barrier_total_budget_sec + 10:
+        _open_inflight.pop(barrier_id, None)   # гацсан тэмдэглэгээ — өөрөө сэргэнэ
+        log.warning("хаалт %s: гацсан in-flight тэмдэглэгээг цэвэрлэв", barrier_id)
+        return False
+    return True
 
 
 class _BarrierPriority:
@@ -578,12 +621,25 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
     asyncio.create_task(display_on_screen(ip, text, voice_text, creds=creds))
 
 
+def format_duration(minutes: float | int | None) -> str:
+    """Зогссон хугацааг LED-д багтахаар богино бичнэ: «45min», «2ts 05min».
+    LED фонт кирилл дэмжихгүй байж болзошгүй тул латинаар (ts=цаг, min=минут)."""
+    if minutes is None:
+        return ""
+    m = max(0, int(round(float(minutes))))
+    h, mm = divmod(m, 60)
+    return f"{h}ts {mm:02d}min" if h else f"{mm}min"
+
+
 def render_screen_text(template: str, amount: float | int | None = None,
-                       plate: str = "") -> str:
-    """Template-ийн {amount}/{plate}-ийг орлуулна. Дүн бүхэл тоогоор.
+                       plate: str = "", duration_minutes: float | int | None = None) -> str:
+    """Template-ийн {amount}/{plate}/{duration}-ийг орлуулна. Дүн бүхэл тоогоор,
+    {duration} нь зогссон хугацаа («2ts 05min»).
     Мөр таслал: .env-д «|» эсвэл literal «\\n» бичвэл LED-ийн жинхэнэ мөр таслал (\\n)
-    болгоно — дугаар/төлбөрийг 2 тусдаа мөрөнд харуулах боломжтой."""
+    болгоно — дугаар/хугацаа/төлбөрийг тусдаа мөрүүдэд харуулах боломжтой."""
     amt = "" if amount is None else f"{int(round(float(amount)))}"
-    text = template.replace("{amount}", amt).replace("{plate}", plate or "")
+    text = (template.replace("{amount}", amt).replace("{plate}", plate or "")
+            .replace("{duration}", format_duration(duration_minutes)))
     text = text.replace("\\n", "\n").replace("|", "\n")  # .env мөр таслалыг хөрвүүлнэ
-    return "\n".join(line.strip() for line in text.split("\n")).strip("\n")
+    # Хоосон мөрийг хаяна: {duration} өгөгдөөгүй үед дундаа цоорхой мөр үлдэхгүй
+    return "\n".join(line.strip() for line in text.split("\n") if line.strip())

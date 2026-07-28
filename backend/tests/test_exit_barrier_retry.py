@@ -127,12 +127,19 @@ from app.services import barrier as _B  # noqa: E402
 
 _B._open_inflight.clear()
 check("эхлээд явж буй команд алга", not _B.open_in_flight("bar-1"))
-_B._open_inflight.add("bar-1")
+_B._open_inflight["bar-1"] = time.monotonic()
 check("явж байхад 'in flight' гэж үзнэ", _B.open_in_flight("bar-1"))
 check("өөр хаалт хамааралгүй", not _B.open_in_flight("bar-2"))
-_B._open_inflight.discard("bar-1")
+_B._open_inflight.pop("bar-1", None)
 check("дуусмагц дахин нээх боломжтой (УНАСАН ч дахин оролдоно)",
       not _B.open_in_flight("bar-1"))
+# Леак хамгаалалт: цэвэрлэгдэлгүй үлдсэн (хугацаа нь илт хэтэрсэн) тэмдэглэгээ
+# «нээж байна» гэж худал мэдээлж хаалтыг restart хүртэл гацаадаг байсан —
+# одоо өөрөө хүчингүй болно.
+_B._open_inflight["bar-1"] = time.monotonic() - 1000
+check("гацсан (хуучирсан) тэмдэглэгээ өөрөө цэвэрлэгдэнэ",
+      not _B.open_in_flight("bar-1"))
+check("цэвэрлэсний дараа dict-ээс арилсан", "bar-1" not in _B._open_inflight)
 
 print(f"\n{PASS} PASS, {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)

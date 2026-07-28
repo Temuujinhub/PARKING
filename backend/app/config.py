@@ -216,9 +216,13 @@ class Settings(BaseSettings):
     # бол явчихсан гэж үзэж өртэй хаана. 0 = унтраах (ердийн 12ц-аар хаагдана).
     auto_close_awaiting_hours: int = 2
 
-    # 2 мөр: дугаар дээд мөрөнд, төлбөр доод мөрөнд (LED-ийн Custom-д «\n» = мөр таслал).
-    # .env-д мөр таслалыг «|» эсвэл «\n»-ээр бичиж болно (render_screen_text хөрвүүлнэ).
-    screen_fee_text: str = "{plate}\nTulbur: {amount}"  # AWAITING_PAYMENT үед
+    # 3 мөр: дугаар / зогссон хугацаа / төлбөр (LED-ийн Custom-д «\n» = мөр таслал).
+    # {duration} = зогссон хугацаа («2ts 05min»). .env-д мөр таслалыг «|» эсвэл
+    # «\n»-ээр бичиж болно (render_screen_text хөрвүүлнэ). Хэрэв LED бүх текстийг
+    # НЭГ мөрөнд урсгаж байвал мөр таслалын тэмдэг нь тухайн firmware-д таарахгүй
+    # байна гэсэн үг — tools/screen_probe.py-ээр туршиж PARKING_SCREEN_LINE_BREAK-ийг
+    # тохируулна («\r\n» г.м).
+    screen_fee_text: str = "{plate}\n{duration}\nTulbur: {amount}"  # AWAITING_PAYMENT үед
     screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
     # Орох LED — дугаар + мэндчилгээ (Managed горимд камер өөрөө харуулахгүй тул сервер илгээнэ)

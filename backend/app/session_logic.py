@@ -558,12 +558,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "amount_due": due_now,
             "has_debt": True, "debt_amount": debt_amount, "blocked": True})
         # Дэлгэцэнд өнөөдрийн төлбөр + өмнөх өрийн нийлбэрийг харуулна
-        schedule_display(device.ip_address,
-                         render_screen_text(settings.screen_fee_text,
-                                            amount=due_now + debt_amount, plate=plate),
-                         render_screen_text(settings.screen_fee_text,
-                                            amount=due_now + debt_amount, plate=plate)
-                         if settings.screen_voice else None,
+        _txt = render_screen_text(settings.screen_fee_text,
+                                  amount=due_now + debt_amount, plate=plate,
+                                  duration_minutes=fee["duration_minutes"])
+        schedule_display(device.ip_address, _txt,
+                         _txt if settings.screen_voice else None,
                          camera_credentials(device))
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
 
@@ -603,7 +602,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй).
     # Өртэй машинд ӨМНӨХ ӨРИЙГ НИЙЛҮҮЛЖ нэхэмжилнэ (жолооч нийт дүнгээ шууд харна).
     fee_text = render_screen_text(settings.screen_fee_text,
-                                  amount=due + debt_amount, plate=plate)
+                                  amount=due + debt_amount, plate=plate,
+                                  duration_minutes=fee["duration_minutes"])
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
                          camera_credentials(device))
