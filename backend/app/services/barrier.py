@@ -247,9 +247,13 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
           _remaining = _deadline - time.monotonic()
           if _remaining <= 0.2:
               break
-          _timeout = min(_remaining,
-                         settings.barrier_first_timeout_sec if attempt == 0
-                         else settings.barrier_timeout_sec)
+          # Оролдлого бүр БОГИНО, харин ОЛОН. Production нотолгоо: MONNIS-ийн камер
+          # event стрим барьж байхад RPC-д завгүй болж хариу өгөхөө болино, гэвч
+          # дахин оролдоход СЭРГЭДЭГ (10:08:12 — 2-р оролдлогоор амжилттай).
+          # Өмнө нь 4с + 12с гэсэн 2 оролдлого л багтдаг байсан тул нийт 15-18
+          # секунд хүлээгээд бүтэлгүйтдэг байв. Богино оролдлогоор ижил төсөвт
+          # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
+          _timeout = min(_remaining, settings.barrier_attempt_timeout_sec)
           async def _one_attempt():
               """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой."""
               async with httpx.AsyncClient(timeout=_timeout) as client:
