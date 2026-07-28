@@ -82,7 +82,16 @@ fi
 echo "    HEAD: $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s | cut -c1-60)"
 
 echo "==> 3/7 Backend deps"
-backend/venv/bin/pip install -q -r backend/requirements.txt
+# Офлайн/хаалттай сүлжээтэй сервер: pypi.org хүрэхгүй бол pip 5 удаа дахин
+# оролдож МӨНХӨД гацдаг байв (deploy тэр чигтээ зогсоно). Хурдан бууж өгөөд
+# ЦААШ ҮРГЭЛЖИЛНЭ — шинэ хамаарал нь заавал биш (cryptography нь зөвхөн
+# PARKING_SECRET_ENC_KEY тохируулсан үед хэрэгтэй; байхгүй бол шифрлэлт
+# автоматаар унтарч систем хэвийн ажиллана).
+if ! backend/venv/bin/pip install -q --timeout 15 --retries 1 \
+        -r backend/requirements.txt; then
+  echo "    АНХААР: pip амжилтгүй (интернэт хаалттай байж болзошгүй) — цааш үргэлжилж байна."
+  echo "    Дутуу сан байвал лог дээр гарна: journalctl -u parking-backend -n 50"
+fi
 
 echo "==> 4/7 Snapshot хавтас бэлэн эсэхийг шалгах"
 # LPR зургийн нөхөн таталт энэ хавтас руу бичдэг. Байхгүй бол backend бичиж
@@ -92,7 +101,17 @@ echo "    $SNAP_DIR ($(df -h "$SNAP_DIR" | awk 'NR==2{print $4}') сул зай)
 
 echo "==> 5/7 Frontend build"
 cd frontend
-npm install --no-audit --no-fund --silent
+# npm install-ыг зөвхөн хамаарал ӨӨРЧЛӨГДСӨН үед (эсвэл node_modules байхгүй үед)
+# ажиллуулна — офлайн серверт шаардлагагүй gacaa үүсгэхгүй.
+if [ ! -d node_modules ] || ! cmp -s package-lock.json node_modules/.parking-lock-stamp; then
+  if npm install --no-audit --no-fund --silent; then
+    cp -f package-lock.json node_modules/.parking-lock-stamp 2>/dev/null || true
+  else
+    echo "    АНХААР: npm install амжилтгүй — байгаа node_modules-ээр build хийж үзнэ."
+  fi
+else
+  echo "    npm хамаарал өөрчлөгдөөгүй — install алгасав"
+fi
 NODE_OPTIONS=--max-old-space-size=1400 npm run build
 cp -r dist/* /var/www/parking/
 chown -R www-data:www-data /var/www/parking
