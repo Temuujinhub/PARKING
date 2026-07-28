@@ -92,6 +92,11 @@ if ! backend/venv/bin/pip install -q --timeout 15 --retries 1 \
   echo "    АНХААР: pip амжилтгүй (интернэт хаалттай байж болзошгүй) — цааш үргэлжилж байна."
   echo "    Дутуу сан байвал лог дээр гарна: journalctl -u parking-backend -n 50"
 fi
+# Заавал биш сангууд (cryptography г.м) — амжилтгүй бол ЧИМЭЭГҮЙ алгасна.
+# Эдгээргүйгээр систем бүрэн ажиллана (дэлгэрэнгүй: requirements-optional.txt).
+backend/venv/bin/pip install -q --timeout 10 --retries 0 \
+    -r backend/requirements-optional.txt >/dev/null 2>&1 \
+    || echo "    (заавал биш сангууд суугаагүй — систем хэвийн ажиллана)"
 
 echo "==> 4/7 Snapshot хавтас бэлэн эсэхийг шалгах"
 # LPR зургийн нөхөн таталт энэ хавтас руу бичдэг. Байхгүй бол backend бичиж

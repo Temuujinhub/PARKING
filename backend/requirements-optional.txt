@@ -1,0 +1,10 @@
+# Заавал биш сангууд — интернэтгүй серверт суулгах шаардлагагүй.
+#
+# cryptography: ЗӨВХӨН PARKING_SECRET_ENC_KEY тохируулсан үед хэрэгтэй
+#   (DB доторх QPay client_secret / төхөөрөмжийн нууц үгийг шифрлэх).
+#   Байхгүй бол app/secretbox.py автоматаар унтарч, хуучин plaintext горимоор
+#   ажиллана — систем бүрэн ажиллагаатай хэвээр.
+#
+# Суулгах (интернэттэй сервер дээр):
+#   venv/bin/pip install -r requirements-optional.txt
+cryptography

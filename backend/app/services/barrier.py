@@ -222,15 +222,31 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     last_err = ""
     _t0 = time.monotonic()
     # Нэг камерт нэг RPC — дэлгэцтэй мөргөлдөхөөс сэргийлнэ (хаалт тэргүүлэх эрхтэй)
+    # НИЙТ хугацааны таслалт. ЧУХАЛ: httpx-ийн timeout нь ХҮСЭЛТ БҮРД үйлчилдэг,
+    # харин нэг хаалт нээхэд 5 хүсэлт явдаг (login×2 + factory.instance + strobe +
+    # logout). Тиймээс timeout=12 гэдэг нь нэг оролдлого 60 секунд хүртэл үргэлжилж
+    # болно гэсэн үг байв — 3 оролдлоготой бол 180с. Production дээр 51275мс
+    # (51 секунд) болж бүртгэгдсэн. Одоо оролдлого БҮРИЙГ болон НИЙТ хугацааг
+    # asyncio.wait_for-оор хатуу таслана.
+    _deadline = time.monotonic() + settings.barrier_total_budget_sec
     async with _BarrierPriority(ip):
       for attempt in range(attempts):
           if attempt:
+              if time.monotonic() >= _deadline:
+                  last_err = last_err or "нийт хугацаа дууслаа"
+                  cmd.response_text = f"{last_err} (нийт {settings.barrier_total_budget_sec:.0f}с хэтэрлээ)"
+                  break
               await asyncio.sleep(settings.barrier_retry_delay_sec)
           # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
           # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
-          _timeout = (settings.barrier_first_timeout_sec if attempt == 0
-                      else settings.barrier_timeout_sec)
-          try:
+          _remaining = _deadline - time.monotonic()
+          if _remaining <= 0.2:
+              break
+          _timeout = min(_remaining,
+                         settings.barrier_first_timeout_sec if attempt == 0
+                         else settings.barrier_timeout_sec)
+          async def _one_attempt():
+              """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой."""
               async with httpx.AsyncClient(timeout=_timeout) as client:
                   if command == "open" and settings.barrier_open_path:
                       # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
@@ -251,8 +267,18 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                                                + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
                       finally:
                           await rpc.logout()
+
+          try:
+              # wait_for нь ОРОЛДЛОГЫГ БҮХЭЛД нь таслана (нэг хүсэлт биш) —
+              # login+strobe+logout цуврал хүсэлт нийлээд хугацаа хэтрүүлэхээс сэргийлнэ
+              await asyncio.wait_for(_one_attempt(), timeout=_timeout)
               if cmd.status == "SUCCESS":
                   break
+          except (asyncio.TimeoutError, TimeoutError):
+              last_err = f"хугацаа хэтэрлээ ({_timeout:.1f}с)"
+              cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
+                                   if attempt + 1 < attempts
+                                   else f"{last_err} ({attempts} удаа оролдсон)")
           except Exception as e:
               last_err = f"{type(e).__name__}: {str(e)[:300]}"
               cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
