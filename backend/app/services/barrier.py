@@ -299,11 +299,21 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
     _ms = int((time.monotonic() - _t0) * 1000)
     cmd.duration_ms = _ms
+    # АЛЬ камер/зогсоол удаашралтай байгааг заавал хэлнэ — эс бол олон зогсоолтой
+    # орчинд «дундаж 1102мс» гэсэн тоо аль талбайн асуудал болохыг заахгүй.
+    _site = ""
+    try:
+        _st = getattr(target or device, "site", None)
+        _site = f" {_st.site_code}" if _st is not None else ""
+    except Exception:  # noqa: BLE001
+        _site = ""
+    _where = f"{ip}{_site}"
     if _ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
-        log.warning("хаалт %s: %s — %dмс (%s, %d оролдлого) %s",
-                    command, cmd.status, _ms, source, attempts, (cmd.response_text or "")[:120])
+        log.warning("хаалт %s: %s — %dмс [%s] (%s, %d оролдлого) %s",
+                    command, cmd.status, _ms, _where, source, attempts,
+                    (cmd.response_text or "")[:120])
     else:
-        log.info("хаалт %s: SUCCESS — %dмс (%s)", command, _ms, source)
+        log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
     db.commit()
     return cmd
 
