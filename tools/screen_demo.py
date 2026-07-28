@@ -10,6 +10,9 @@
     # Тодорхой дугаараар (жагсаалтаас хамгийн сүүлийнх биш):
     sudo ... screen_demo.py exit 192.168.6.11 1234УБА
 
+    # ДУРЫН текст (фонт туршихад — кирилл/₮ дэмжих эсэхийг шалгах), мөр бүр тусдаа аргумент:
+    sudo ... screen_demo.py text 192.168.6.10 "Тавтай морил" "Welcome" "5000₮"
+
 Юу хийдэг: тухайн камерын зогсоолын хамгийн сүүлийн идэвхтэй (OPEN/AWAITING_
 PAYMENT) session-ий бодит дугаар, зогссон хугацаа, төлөх дүнг аваад ажиллаж буй
 системтэй ЯГ ИЖИЛ замаар (display_on_screen: 4 давталт × 1.5с ≈ 6 секунд)
@@ -33,11 +36,11 @@ from app.session_logic import amount_due, session_fee_info  # noqa: E402
 
 
 async def main() -> int:
-    if len(sys.argv) < 3 or sys.argv[1] not in ("exit", "entry"):
+    if len(sys.argv) < 3 or sys.argv[1] not in ("exit", "entry", "text"):
         print(__doc__)
         return 1
     mode, ip = sys.argv[1], sys.argv[2]
-    want_plate = sys.argv[3].upper() if len(sys.argv) > 3 else None
+    want_plate = sys.argv[3].upper() if len(sys.argv) > 3 and mode != "text" else None
 
     db = SessionLocal()
     try:
@@ -45,6 +48,22 @@ async def main() -> int:
         if not device:
             print(f"✗ {ip} хаягтай төхөөрөмж бүртгэлгүй байна")
             return 1
+
+        if mode == "text":
+            # Фонтын туршилт: аргумент бүр = нэг мөр. Кирилл/₮ зэрэг тэмдэгт
+            # дэлгэцэнд гарч чадах эсэхийг .env/restart-гүйгээр шалгана.
+            lines = sys.argv[3:] or ["Тавтай морил", "Welcome", "5000₮"]
+            text = "\n".join(lines)
+            print(f"Илгээж буй {len(lines)} мөр:")
+            for i, ln in enumerate(lines, 1):
+                print(f"  {i}: {ln}")
+            err = await display_on_screen(ip, text, creds=camera_credentials(device))
+            if err:
+                print(f"✗ Дэлгэцэд бичиж чадсангүй: {err}")
+                return 1
+            print("✓ Илгээлээ — мөр бүр ЗӨВ ҮСГЭЭР гарсан эсэхийг ажиглана уу "
+                  "(хоосон/дөрвөлжин гарвал фонт тухайн тэмдэгтийг дэмжихгүй)")
+            return 0
         q = db.query(ParkingSession).filter(
             ParkingSession.site_id == device.site_id,
             ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
