@@ -42,9 +42,12 @@ ship_http() {
   openssl enc -aes-256-cbc -pbkdf2 -salt -in "$F" -out "$ENC" -pass "file:$TOKEN_FILE"
   NAME="$(basename "$ENC")"
   for u in "${URLS[@]}"; do
-    if curl -fsS -m 180 -k -X POST -H "X-Backup-Token: $(cat "$TOKEN_FILE")" \
-         -H "X-Backup-Name: $NAME" --data-binary @"$ENC" "$u" \
-         >/dev/null 2>>/tmp/backup-ship.err; then
+    # ЧУХАЛ: зөвхөн HTTP код биш, серверийн {"ok":true} хариуг шалгана —
+    # nginx-ийн 301 redirect-ийг curl «амжилт» гэж андуурдаг байсан (2026-07-29)
+    local resp
+    if resp=$(curl -fsS -m 180 -k -X POST -H "X-Backup-Token: $(cat "$TOKEN_FILE")" \
+         -H "X-Backup-Name: $NAME" --data-binary @"$ENC" "$u" 2>>/tmp/backup-ship.err) \
+       && echo "$resp" | grep -q '"ok"'; then
       rm -f "$ENC"
       echo "$u" > /tmp/backup-ship.last-url
       return 0

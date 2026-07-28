@@ -694,10 +694,15 @@ def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  limit: int = 200, db: Session = Depends(get_db),
                  user: User = Depends(require("vat", "reports"))):
     start, end = _range(date_from, date_to)
-    rows = (db.query(VatReceipt).filter(VatReceipt.created_at >= start,
-                                        VatReceipt.created_at < end)
+    # Дугаар/зогсоолыг хамт өгнө — «энэ баримт аль машин, аль зогсоолынх вэ»
+    # гэдэг UI дээр харагдахгүй байсан (нэг query, session→site join)
+    rows = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
+            .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+            .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+            .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end)
             .order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all())
-    return [to_dict(r) for r in rows]
+    return [to_dict(r, extra={"plate_number": plate, "site_name": site_name})
+            for r, plate, site_name in rows]
 
 
 @router.get("/audit-logs")

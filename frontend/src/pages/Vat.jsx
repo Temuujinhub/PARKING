@@ -74,9 +74,11 @@ export default function Vat() {
           {info.mock && <span className="text-amber-400 text-xs">MOCK горим</span>}
         </div>
       )}
-      <Table headers={['ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'QR']} empty={rows.length === 0}>
+      <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'QR']} empty={rows.length === 0}>
         {rows.map((r) => (
           <tr key={r.id}>
+            <td className="td font-mono font-bold">{r.plate_number || '—'}</td>
+            <td className="td text-xs">{r.site_name || '—'}</td>
             <td className="td font-mono text-[10px] max-w-[16rem] break-all">{r.ebarimt_id || '-'}</td>
             <td className="td font-mono font-semibold">{r.lottery_code || '-'}</td>
             <td className="td font-mono">{fmt(r.amount)}₮</td>
