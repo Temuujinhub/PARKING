@@ -150,17 +150,30 @@ class DahuaRpc:
         Камерын Web 5.0 клиентийн InoutGeneralConfig/DeviceTest хуудас яг ийм
         дуудлага хийдэг (клиент JS-ээс батлагдсан). Дэлгэц "Managed Mode
         (Platform)" горимд байх шаардлагатай.
-        «|» эсвэл «\\n» = мөр таслал (дугаар/төлбөрийг 2 мөрөнд харуулна)."""
-        br = settings.screen_line_break.replace("\\n", "\n").replace("\\r", "\r")
-        text = text.replace("\\n", "\n").replace("|", "\n").replace("\n", br)
-        params = {"Custom": text}
+
+        ОЛОН МӨР (Monnis 2026-07-28 туршилтаар батлагдсан): энэ firmware Custom
+        доторх ЯМАР Ч мөр таслалыг (\\n, \\r\\n, |, ;) үл ойшоож бүгдийг 1-р мөрөнд
+        урсгадаг. Харин Custom-ыг ЖАГСААЛТААР өгвөл элемент тус бүр дэлгэцийн
+        LogicScreens-ийн 1/2/3-р мөрөнд ТУСДАА гарна. Тиймээс олон мөртэй текстийг
+        жагсаалтаар илгээж, татгалзвал (хуучин firmware) мөрүүдийг
+        screen_line_break-ээр нийлүүлж нэг мөрөөр дахин илгээнэ."""
+        text = text.replace("\\n", "\n").replace("|", "\n")
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
         # Камер «хэдэн секунд харуулах» талбар дэмждэг бол НЭГ команд хангалттай —
         # давталт хэрэггүй болж RPC сесс богиносно (хаалттай мөргөлдөх нь буурна).
         # Ямар талбар дэмжигдэхийг tools/screen_probe.py-ээр камераас нь асууж
         # тогтооно; олдвол .env-д PARKING_SCREEN_HOLD_FIELD/SEC-ээр асаана.
-        if settings.screen_hold_sec > 0 and settings.screen_hold_field:
-            params[settings.screen_hold_field] = settings.screen_hold_sec
-        res = await self._call("trafficParking.setScreenDisplay", params)
+        extra = ({settings.screen_hold_field: settings.screen_hold_sec}
+                 if settings.screen_hold_sec > 0 and settings.screen_hold_field else {})
+        if len(lines) > 1:
+            res = await self._call("trafficParking.setScreenDisplay",
+                                   {"Custom": lines, **extra})
+            if res.get("result"):
+                return res
+            # Жагсаалт дэмжихгүй firmware — нэг мөрийн хуучин арга руу буцна
+        br = settings.screen_line_break.replace("\\n", "\n").replace("\\r", "\r")
+        res = await self._call("trafficParking.setScreenDisplay",
+                               {"Custom": br.join(lines), **extra})
         if not res.get("result"):
             raise DahuaRpcError(f"setScreenDisplay амжилтгүй: {res}")
         return res
