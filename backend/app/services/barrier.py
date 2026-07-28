@@ -214,41 +214,43 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     attempts = max(1, settings.barrier_retries + 1)
     last_err = ""
     _t0 = time.monotonic()
-    for attempt in range(attempts):
-        if attempt:
-            await asyncio.sleep(settings.barrier_retry_delay_sec)
-        # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
-        # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
-        _timeout = (settings.barrier_first_timeout_sec if attempt == 0
-                    else settings.barrier_timeout_sec)
-        try:
-            async with httpx.AsyncClient(timeout=_timeout) as client:
-                if command == "open" and settings.barrier_open_path:
-                    # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
-                    auth = httpx.DigestAuth(username, password)
-                    resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
-                    body = (resp.text or "").strip()
-                    if resp.status_code == 200 and "error" not in body.lower():
-                        cmd.status = "SUCCESS"
-                    cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
-                else:
-                    rpc = DahuaRpc(client, ip, username, password)
-                    await rpc.login()
-                    try:
-                        res = await rpc.strobe(RPC_METHODS[command],
-                                               settings.barrier_channel, plate)
-                        cmd.status = "SUCCESS"
-                        cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
-                                             + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
-                    finally:
-                        await rpc.logout()
-            if cmd.status == "SUCCESS":
-                break
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {str(e)[:300]}"
-            cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
-                                 if attempt + 1 < attempts
-                                 else f"{last_err} ({attempts} удаа оролдсон)")
+    # Нэг камерт нэг RPC — дэлгэцтэй мөргөлдөхөөс сэргийлнэ (хаалт тэргүүлэх эрхтэй)
+    async with _BarrierPriority(ip):
+      for attempt in range(attempts):
+          if attempt:
+              await asyncio.sleep(settings.barrier_retry_delay_sec)
+          # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
+          # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
+          _timeout = (settings.barrier_first_timeout_sec if attempt == 0
+                      else settings.barrier_timeout_sec)
+          try:
+              async with httpx.AsyncClient(timeout=_timeout) as client:
+                  if command == "open" and settings.barrier_open_path:
+                      # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
+                      auth = httpx.DigestAuth(username, password)
+                      resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
+                      body = (resp.text or "").strip()
+                      if resp.status_code == 200 and "error" not in body.lower():
+                          cmd.status = "SUCCESS"
+                      cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
+                  else:
+                      rpc = DahuaRpc(client, ip, username, password)
+                      await rpc.login()
+                      try:
+                          res = await rpc.strobe(RPC_METHODS[command],
+                                                 settings.barrier_channel, plate)
+                          cmd.status = "SUCCESS"
+                          cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
+                                               + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
+                      finally:
+                          await rpc.logout()
+              if cmd.status == "SUCCESS":
+                  break
+          except Exception as e:
+              last_err = f"{type(e).__name__}: {str(e)[:300]}"
+              cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
+                                   if attempt + 1 < attempts
+                                   else f"{last_err} ({attempts} удаа оролдсон)")
     cmd.executed_at = datetime.utcnow()
     # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
     _ms = int((time.monotonic() - _t0) * 1000)
@@ -275,6 +277,61 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
     """Хаалт хаах (closeStrobe). Ихэвчлэн гараар — авто хаалт нь газрын
     мэдрэгч/радараар төхөөрөмж талдаа хийгддэг."""
     return await _execute(db, device, "close", session_id, source, issued_by)
+
+
+# ─── Нэг камерт нэг RPC — дараалуулагч ───────────────────────────────────────
+# Dahua ITC камер нэгэн зэрэг цөөхөн RPC2 сесс л зөвшөөрдөг. Хязгаараас хэтэрвэл
+# «User or password not valid» гэж ХУДАЛ хариу өгдөг (нууц үг зөв атлаа) —
+# 2026-07-28-нд production дээр яг ийм зүйл болж, LED дэлгэц 18 секунд (6 давталт
+# × 3с) сесс барьж байхад ирсэн ХААЛТНЫ команд татгалзаж, 10-30 секундын саатал
+# үүсгэж байв.
+#
+# Шийдэл: камерын IP тус бүрд түгжээ — манай систем нэг камерт хоёр RPC-г ХЭЗЭЭ Ч
+# зэрэг явуулахгүй. ХААЛТ нь ТЭРГҮҮЛЭХ эрхтэй: дэлгэц түгжээг барьж байвал
+# хаалт ирмэгц дэлгэц давталтаа тасалж бууж өгнө. Хаалт нь түгжээг хэт удаан
+# хүлээхгүй (max 2с) — авч чадаагүй ч команд явуулна, учир нь хаалт нээх нь
+# хамгийн чухал.
+_rpc_locks: dict[str, asyncio.Lock] = {}
+_barrier_waiting: dict[str, int] = {}     # ip -> хүлээж буй хаалтны командын тоо
+
+
+def _rpc_lock(ip: str) -> asyncio.Lock:
+    lock = _rpc_locks.get(ip)
+    if lock is None:
+        lock = _rpc_locks[ip] = asyncio.Lock()
+    return lock
+
+
+def barrier_is_waiting(ip: str) -> bool:
+    """Тухайн камерт хаалтны команд дараалалд байгаа эсэх (дэлгэц бууж өгөхөд)."""
+    return _barrier_waiting.get(ip, 0) > 0
+
+
+class _BarrierPriority:
+    """Хаалтны командын хугацаанд «хүлээж байна» гэж тэмдэглэнэ + түгжээг
+    богино хугацаанд авахыг оролдоно (аваагүй ч цааш явна)."""
+
+    def __init__(self, ip: str):
+        self.ip = ip
+        self.held = False
+
+    async def __aenter__(self):
+        _barrier_waiting[self.ip] = _barrier_waiting.get(self.ip, 0) + 1
+        try:
+            await asyncio.wait_for(_rpc_lock(self.ip).acquire(),
+                                   timeout=settings.barrier_lock_wait_sec)
+            self.held = True
+        except (asyncio.TimeoutError, TimeoutError):
+            # Түгжээг авч чадсангүй — ХҮЛЭЭХГҮЙ. Хаалт нээх нь бүхнээс чухал.
+            log.warning("%s: RPC түгжээг %.1fс дотор авч чадсангүй — команд ЯГ ОДОО явуулж байна",
+                        self.ip, settings.barrier_lock_wait_sec)
+        return self
+
+    async def __aexit__(self, *exc):
+        _barrier_waiting[self.ip] = max(0, _barrier_waiting.get(self.ip, 1) - 1)
+        if self.held:
+            _rpc_lock(self.ip).release()
+        return False
 
 
 # ─── Нэвтрэлтийн таслуур (circuit breaker) ───────────────────────────────────
@@ -346,22 +403,33 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         return "нэвтрэлтийн таслуур идэвхтэй"
     username, password = creds or barrier_credentials(None)
     times = max(1, repeat if repeat is not None else settings.screen_repeat)
+    shown = 0
     try:
-        async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
-            rpc = DahuaRpc(client, ip, username, password)
-            await rpc.login()
-            try:
-                for i in range(times):
-                    if i:
-                        await asyncio.sleep(settings.screen_repeat_interval)
-                    await rpc.set_screen(text)
-                    if i == 0 and voice_text:
-                        await rpc.set_voice(voice_text)
-            finally:
-                await rpc.logout()
+        # Нэг камерт нэг RPC — хаалтны командтай мөргөлдвөл камер «нууц үг буруу»
+        # гэж ХУДАЛ татгалздаг. Дэлгэц бол заавал биш тул хаалт ирвэл бууж өгнө.
+        async with _rpc_lock(ip):
+            async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
+                rpc = DahuaRpc(client, ip, username, password)
+                await rpc.login()
+                try:
+                    for i in range(times):
+                        if i:
+                            await asyncio.sleep(settings.screen_repeat_interval)
+                            # Хаалтны команд хүлээж байвал сессээ ЯГ ОДОО чөлөөлнө —
+                            # машин хаалганы өмнө зогсохоос дэлгэцийн давталт чухал биш
+                            if barrier_is_waiting(ip):
+                                log.info("[screen] %s: хаалт хүлээж байна — давталтыг "
+                                         "%d/%d дээр тасаллаа", ip, i, times)
+                                break
+                        await rpc.set_screen(text)
+                        shown = i + 1
+                        if i == 0 and voice_text:
+                            await rpc.set_voice(voice_text)
+                finally:
+                    await rpc.logout()
         # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
-        log.info(f"[screen] {ip}: OK ×{times} «{text}»")
+        log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
         _auth_ok(ip)
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
