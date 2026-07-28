@@ -350,14 +350,20 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         db.query(LprEvent.device_id, func.max(LprEvent.created_at))
         .filter(LprEvent.device_id.in_(cam_ids), LprEvent.accepted.is_(True))
         .group_by(LprEvent.device_id).all()) if cam_ids else {}
+    from ..services.camera_sessions import foreign_info
     out = []
     for d in devices:
         online = bool(d.last_seen and d.last_seen >= online_cutoff)
         # Сүүлд дугаар уншсан цаг — "онлайн боловч танихаа больсон" гацааг илрүүлнэ
         last_plate = last_plate_by_dev.get(d.id) if d.device_type == "camera" else None
+        # Камерт манайхаас ӨӨР IP холбогдсон бол UI-д харуулна (өөр систем зэрэг
+        # ашиглаж буйн баримт — camera_sessions сервис 5 мин тутам шинэчилдэг)
+        who = foreign_info(d.id) if d.device_type == "camera" else None
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
-                                     "last_plate_at": last_plate.isoformat() if last_plate else None}))
+                                     "last_plate_at": last_plate.isoformat() if last_plate else None,
+                                     "foreign_ips": (who or {}).get("ips") or [],
+                                     "foreign_checked_at": (who or {}).get("checked_at")}))
     return out
 
 

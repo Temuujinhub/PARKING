@@ -208,6 +208,10 @@ async def start_vat_auto_send():
     from .services.auto_close import supervisor as auto_close_supervisor
     _bg_task(auto_close_supervisor(), "auto-close")
 
+    # Камерт МАНАЙХААС ӨӨР IP холбогдсоныг илрүүлэх (Тохиргоо → Төхөөрөмжид харуулна)
+    from .services.camera_sessions import supervisor as camera_who_supervisor
+    _bg_task(camera_who_supervisor(), "camera-who")
+
 
 @app.on_event("shutdown")
 async def stop_background_tasks():

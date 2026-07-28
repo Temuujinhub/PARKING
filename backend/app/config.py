@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     # Хөдөлгөөн багатай зогсоолд шөнөдөө удаан чимээгүй байж болох тул өгөөмөр.
     camera_silence_warn_min: int = 60
     camera_silence_check_sec: int = 300
+    # Камерын идэвхтэй сессүүдийг хэдэн секунд тутам асуух вэ (0 = унтраах).
+    # Манайхаас өөр IP илэрвэл Тохиргоо → Төхөөрөмжид харуулж, WARNING логлоно —
+    # өөр систем камерыг зэрэг ашиглаж буйн баримт (2026-07-28 Monnis).
+    camera_sessions_check_sec: int = 300
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)

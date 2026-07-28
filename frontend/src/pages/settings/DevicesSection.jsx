@@ -89,7 +89,17 @@ export default function DevicesSection() {
                     <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
                     <td className="td font-mono">{d.lane_no}</td>
                     <td className="td text-xs">{d.lane_dir === 'entry' ? 'Орох' : d.lane_dir === 'exit' ? 'Гарах' : 'Хоёулаа'}</td>
-                    <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
+                    <td className="td font-mono text-[10px] text-slate-500">
+                      {d.device_key}
+                      {d.foreign_ips?.length > 0 && (
+                        <div
+                          className="mt-0.5 font-sans text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded inline-block"
+                          title={`Камерт манай серверээс ӨӨР IP холбогдсон байна — өөр систем зэрэг ашиглаж байна. Шалгасан: ${d.foreign_checked_at ? new Date(d.foreign_checked_at + 'Z').toLocaleTimeString() : '?'}`}
+                        >
+                          ⚠ Өөр IP: {d.foreign_ips.join(', ')}
+                        </div>
+                      )}
+                    </td>
                     <td className="td text-right whitespace-nowrap">
                       {d.status === 'deleted' ? (
                         <button className="btn-primary py-1 text-xs" onClick={() => restore(d)}>Сэргээх</button>
