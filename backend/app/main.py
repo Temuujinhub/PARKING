@@ -75,11 +75,16 @@ def health():
     return {"status": "ok", "app": settings.app_name}
 
 
+# Асаалттай background task-ууд — shutdown дээр ЦЭВЭР зогсоохын тулд хөтөлнө
+_bg_tasks: list = []
+
+
 def _bg_task(coro, name: str):
     """Background task үүсгэхдээ уналтыг нь ЗААВАЛ логлоно — чимээгүй үхсэн task
     (жишээ нь камерын поллер зогсчихсоныг хэн ч мэдэхгүй байх) илэрдэг болно."""
     import asyncio
     task = asyncio.get_event_loop().create_task(coro, name=name)
+    _bg_tasks.append(task)
 
     def _done(t: asyncio.Task):
         if t.cancelled():
@@ -202,6 +207,35 @@ async def start_vat_auto_send():
     # Гацсан session-ийн авто цэвэрлэгээ (site.auto_close_hours / default 72ц)
     from .services.auto_close import supervisor as auto_close_supervisor
     _bg_task(auto_close_supervisor(), "auto-close")
+
+
+@app.on_event("shutdown")
+async def stop_background_tasks():
+    """Restart/зогсоохын өмнө камер руу нээсэн стримийг ЦЭВЭР хаана.
+
+    ЯАГААД ЧУХАЛ ВЭ: cgi_poller нь камер бүрт eventManager.cgi?action=attach
+    гэсэн БАЙНГЫН HTTP холболт барьдаг. Процесс шууд үхэхэд камер тал холболтоо
+    удаан хугацаанд «нээлттэй» гэж үзсээр байдаг. Dahua камер зэрэгцээ
+    subscription-ийн ХЯЗГААРТАЙ тул орхигдсон холболт хуримтлагдвал шинэ attach
+    хүсэлтийг HTTP 400-аар татгалздаг — 2026-07-28-нд MONNIS гарах камер өглөө
+    ажиллаж байгаад олон удаагийн deploy-ийн дараа бүх attach хүсэлтийг
+    татгалзаж, 9 цаг машин таниагүй.
+
+    Одоо task-уудыг cancel хийж стримийг хаалгана (httpx холболтоо таслана)."""
+    import asyncio
+    if not _bg_tasks:
+        return
+    log.info("зогсож байна — %d background task-ыг цэвэр хаана", len(_bg_tasks))
+    for t in _bg_tasks:
+        if not t.done():
+            t.cancel()
+    # Стрим хаагдах хүртэл богино хугацаанд хүлээнэ (deploy-г удаашруулахгүй)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*_bg_tasks, return_exceptions=True), timeout=5.0)
+    except (asyncio.TimeoutError, TimeoutError):
+        log.warning("зарим task 5с дотор зогсоогүй — албадан хаалаа")
+    _bg_tasks.clear()
 
 
 @app.websocket("/ws/sites/{site_id}")
