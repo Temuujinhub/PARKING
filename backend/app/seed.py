@@ -20,18 +20,39 @@ def run():
             print("Seed аль хэдийн хийгдсэн байна — алгаслаа.")
             return
 
-        # Хэрэглэгчид
-        users = [
-            User(username="temuujin", password_hash=hash_password("Temuujin@2026"),
-                 full_name="Тэмүүжин (Super Admin)", role="SUPER_ADMIN"),
-            User(username="admin", password_hash=hash_password("Admin@2026"),
-                 full_name="Системийн админ", role="ADMIN"),
-            User(username="sanhuu", password_hash=hash_password("Sanhuu@2026"),
-                 full_name="Санхүүгийн ажилтан", role="FINANCE"),
-            User(username="operator", password_hash=hash_password("Operator@2026"),
-                 full_name="Зогсоолын оператор", role="OPERATOR"),
+        # Хэрэглэгчид — нууц үгийг САНАМСАРГҮЙ үүсгэж НЭГ УДАА хэвлэнэ.
+        #
+        # Өмнө нь энд "Temuujin@2026" гэх мэт нууц үг ШУУД бичигдсэн байсан. Repo
+        # нээлттэй болсноор тэдгээр нь олон нийтэд задарч, суулгасан бүр систем
+        # SUPER_ADMIN эрхээрээ нээлттэй үлдэж байв (2026-07-28-нд илрүүлсэн).
+        # Одоо кодод ямар ч нууц үг байхгүй — суулгагч гарсан утгыг тэмдэглэж авна.
+        import secrets as _secrets
+
+        def _pw() -> str:
+            return _secrets.token_urlsafe(15)  # ~20 тэмдэгт, CSPRNG
+
+        seeded = [
+            ("temuujin", "Тэмүүжин (Super Admin)", "SUPER_ADMIN"),
+            ("admin", "Системийн админ", "ADMIN"),
+            ("sanhuu", "Санхүүгийн ажилтан", "FINANCE"),
+            ("operator", "Зогсоолын оператор", "OPERATOR"),
         ]
+        users, creds = [], []
+        for username, full_name, role in seeded:
+            pw = _pw()
+            users.append(User(username=username, password_hash=hash_password(pw),
+                              full_name=full_name, role=role))
+            creds.append((username, role, pw))
         db.add_all(users)
+
+        print("\n" + "=" * 66)
+        print("АНХНЫ НУУЦ ҮГ — ЭНЭ МЭДЭЭЛЭЛ ДАХИН ХАРАГДАХГҮЙ, ОДОО ТЭМДЭГЛЭЖ АВНА УУ")
+        print("=" * 66)
+        for username, role, pw in creds:
+            print(f"  {username:<10} {role:<12} {pw}")
+        print("=" * 66)
+        print("Нэвтэрсний дараа UI-аас нууц үгээ солино уу.")
+        print("Дараа солих:  sudo venv/bin/python ../tools/set_password.py <хэрэглэгч>\n")
 
         # Тарифын загвар (easy-park-ийн бүтэцтэй ижил: 60→1000, 120→2000, 180→5000)
         template = TariffTemplate(name="Үндсэн загвар", free_minutes=30, grace_minutes=15,
@@ -79,11 +100,7 @@ def run():
                                 contract_type="MONTHLY", monthly_fee=150000,
                                 valid_to=datetime.utcnow() + timedelta(days=365)))
         db.commit()
-        print("Seed амжилттай:")
-        print("  Super admin: temuujin / Temuujin@2026")
-        print("  Admin:       admin / Admin@2026")
-        print("  Санхүү:      sanhuu / Sanhuu@2026")
-        print("  Оператор:    operator / Operator@2026")
+        print("Seed амжилттай. Нэвтрэх мэдээллийг ДЭЭР хэвлэсэн (дахин харагдахгүй).")
     finally:
         db.close()
 
