@@ -14,7 +14,12 @@ import getpass
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend"))
+BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+sys.path.insert(0, BACKEND)
+# config.py-ийн env_file нь ".env" (CWD-д харьцангуй) тул backend хавтас руу шилжинэ —
+# эс бол DATABASE_URL нь кодын default утга болж «password authentication failed» өгнө
+# (add_site.py-тай ижил хэв маяг).
+os.chdir(BACKEND)
 
 from app.auth import hash_password, verify_password  # noqa: E402
 from app.database import SessionLocal  # noqa: E402

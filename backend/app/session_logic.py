@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from .billing import calculate_fee
 from .config import settings
-from .services.device_auth import barrier_credentials, camera_credentials
+from .services.device_auth import camera_credentials
 from .models import (
     AuditLog, BarrierCommand, BlacklistEntry, Device, LprEvent, ParkingSession,
     ParkingSite, Payment, RegisteredDriver,
@@ -435,7 +435,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     if not black:
         schedule_display(device.ip_address,
                          render_screen_text(settings.screen_welcome_text, plate=plate),
-                         barrier_credentials(device))
+                         camera_credentials(device))
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
@@ -509,7 +509,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 "registered": True, "barrier_opened": opened})
             schedule_display(device.ip_address,
                              render_screen_text(settings.screen_bye_text, plate=plate),
-                             barrier_credentials(device))
+                             camera_credentials(device))
             return {"action": "registered_exit", "plate": plate, "barrier_opened": opened}
 
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
@@ -518,7 +518,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                 {"plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount})
         schedule_display(device.ip_address,
                          render_screen_text(settings.screen_nosession_text, plate=plate),
-                         barrier_credentials(device))
+                         camera_credentials(device))
         return {"action": "no_session", "plate": plate}
 
     session.exit_device_id = device.id
@@ -550,7 +550,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                          render_screen_text(settings.screen_fee_text,
                                             amount=due_now + debt_amount, plate=plate)
                          if settings.screen_voice else None,
-                         barrier_credentials(device))
+                         camera_credentials(device))
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
 
     # Төлчихсөн — grace хугацаа дотор гарч байна
@@ -592,7 +592,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                   amount=due + debt_amount, plate=plate)
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
-                         barrier_credentials(device))
+                         camera_credentials(device))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
             "debt_amount": debt_amount}
@@ -624,7 +624,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
     schedule_display(exit_device.ip_address,
                      render_screen_text(settings.screen_bye_text,
                                         plate=session.plate_number),
-                         barrier_credentials(exit_device))
+                         camera_credentials(exit_device))
     return {"action": "exit_completed", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
