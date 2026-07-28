@@ -113,5 +113,26 @@ async def main():
 
 asyncio.run(main())
 db.close()
+
+
+
+# ─── Давхар «нээх» команд таслагдах (2026-07-28 production) ──────────────────
+# Нэг машин гарахад камер 2-3 удаа уншдаг: 1-р уншилт auto_exit-ээр нээж,
+# 2-р уншилт exit_retry-ээр ДАХИН нээхийг оролддог байв. DB-ийн cooldown нь
+# SUCCESS болсныг л хайдаг тул ЯГ ОДОО явж буй командыг олж хардаггүй →
+# нэг камерт хоёр RPC зэрэг очиж хоёулаа удаашрана (ганц 87-410мс,
+# давхацсан 749-985мс, нэг тохиолдолд хоёул 15с timeout).
+print("\nДавхар «нээх» команд таслагдах:")
+from app.services import barrier as _B  # noqa: E402
+
+_B._open_inflight.clear()
+check("эхлээд явж буй команд алга", not _B.open_in_flight("bar-1"))
+_B._open_inflight.add("bar-1")
+check("явж байхад 'in flight' гэж үзнэ", _B.open_in_flight("bar-1"))
+check("өөр хаалт хамааралгүй", not _B.open_in_flight("bar-2"))
+_B._open_inflight.discard("bar-1")
+check("дуусмагц дахин нээх боломжтой (УНАСАН ч дахин оролдоно)",
+      not _B.open_in_flight("bar-1"))
+
 print(f"\n{PASS} PASS, {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)

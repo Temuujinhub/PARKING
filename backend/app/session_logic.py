@@ -235,6 +235,13 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     barrier = _find_barrier(db, device.site_id, device)
     if not barrier:
         return False
+    # ЯГ ОДОО явж буй команд байвал давтахгүй: DB-ийн cooldown нь SUCCESS болсныг
+    # л хайдаг тул хараахан дуусаагүй командыг олж хардаггүй. Үр дүнд нэг камерт
+    # хоёр RPC зэрэг очиж хоёулаа удаашрана (production: ганц команд 87-410мс,
+    # давхацсан үед 749-985мс, нэг тохиолдолд хоёул 15 СЕКУНДЭД timeout болсон).
+    from .services.barrier import open_in_flight
+    if open_in_flight(barrier.id):
+        return True
     # Саяхан амжилттай нээсэн бол дахин команд илгээхгүй (командын үер үүсгэхгүй)
     cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
     recent = (db.query(BarrierCommand)
@@ -302,6 +309,13 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
             .first())
     if not entitled:
         return False
+    # ЭРХ баталгаажсаны ДАРАА: яг одоо явж буй команд байвал давтахгүй. DB-ийн
+    # cooldown нь SUCCESS болсныг л хайдаг тул хараахан дуусаагүй командыг олж
+    # хардаггүй — нэг камерт хоёр RPC зэрэг очиж хоёулаа удаашрана (production:
+    # ганц команд 87-410мс, давхацсан үед 749-985мс, нэг удаа хоёул 15с timeout).
+    from .services.barrier import open_in_flight
+    if open_in_flight(barrier.id):
+        return True
     cmd = await open_barrier(db, barrier, session.id if session else None,
                              "exit_retry", plate=plate)
     if cmd.status != "SUCCESS":

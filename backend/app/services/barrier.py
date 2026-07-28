@@ -187,6 +187,9 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
         session_id=session_id, device_id=device.id, command=command,
         command_source=source, issued_by=issued_by,
     )
+    _inflight = command in ("open", "force_open")
+    if _inflight:
+        _open_inflight.add(device.id)   # давхар зэрэгцээ командаас сэргийлнэ
     db.add(cmd)
     db.flush()
 
@@ -196,6 +199,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
         cmd.status = "SUCCESS"
         cmd.response_text = f"MOCK: barrier {command}"
         cmd.executed_at = datetime.utcnow()
+        _open_inflight.discard(device.id)
         db.commit()
         return cmd
 
@@ -210,6 +214,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
             f"дээр {lane_ru} камерын IP-г бүртгэнэ үү (эсвэл хаалтад шууд IP өгнө үү)."
         )
         cmd.executed_at = datetime.utcnow()
+        _open_inflight.discard(device.id)
         db.commit()
         return cmd
 
@@ -284,6 +289,8 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
               cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
                                    if attempt + 1 < attempts
                                    else f"{last_err} ({attempts} удаа оролдсон)")
+    if _inflight:
+        _open_inflight.discard(device.id)   # дууслаа — дараагийн оролдлого чөлөөтэй
     cmd.executed_at = datetime.utcnow()
     # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
     _ms = int((time.monotonic() - _t0) * 1000)
@@ -338,6 +345,31 @@ def _rpc_lock(ip: str) -> asyncio.Lock:
 def barrier_is_waiting(ip: str) -> bool:
     """Тухайн камерт хаалтны команд дараалалд байгаа эсэх (дэлгэц бууж өгөхөд)."""
     return _barrier_waiting.get(ip, 0) > 0
+
+
+# ─── Давхар «нээх» командыг таслах ───────────────────────────────────────────
+# Нэг машин гарахад камер 2-3 удаа уншдаг: 1-р уншилт auto_exit-ээр хаалт нээнэ,
+# 2-р уншилт dedup дээр exit_retry-ээр ДАХИН нээхийг оролдоно. DB дэх cooldown
+# шалгалт нь SUCCESS болсон командыг хайдаг тул ЯГ ОДОО ЯВЖ БУЙ (хараахан
+# дуусаагүй) командыг олж хардаггүй — үр дүнд нь нэг камерт хоёр RPC зэрэг очиж
+# хоёулаа удаашрана (production: ганц команд 87-410мс, давхацсан үед 749-985мс,
+# нэг тохиолдолд хоёул 15 СЕКУНДЭД timeout болсон).
+#
+# Тиймээс процессын доторх (агшин зуурын) хамгаалалт: сүүлд ОРОЛДСОН цагийг
+# санаж, cooldown дотор давтахгүй. Гараар нээх (manual) энэ хамгаалалтад
+# ОРОХГҮЙ — оператор дарвал ямагт явна.
+# Хугацаанд суурилсан хамгаалалт БУРУУ байсан: эхний команд УНАСАН тохиолдолд
+# дахин оролдохыг ч хаачихдаг (гарах талын дахин нээлтийн гол зорилго нь тэр).
+# Тиймээс «ЯГ ОДОО ЯВЖ БАЙГАА эсэх»-ийг л хардаг:
+#   • явж байгаа   → алгасна (зэрэгцээ RPC-ээс сэргийлнэ)
+#   • амжилттай дууссан → DB-ийн cooldown барина
+#   • амжилтгүй дууссан → дахин оролдоно (яг хүссэн зан төлөв)
+_open_inflight: set[str] = set()
+
+
+def open_in_flight(barrier_id: str) -> bool:
+    """Тухайн хаалтад «нээх» команд ЯГ ОДОО явж байна уу."""
+    return barrier_id in _open_inflight
 
 
 class _BarrierPriority:
