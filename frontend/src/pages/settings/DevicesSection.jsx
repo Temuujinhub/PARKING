@@ -77,7 +77,7 @@ export default function DevicesSection() {
                   {list.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}{bars ? ` · ${bars} хаалт` : ''}
                 </span>
               </div>
-              <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', '']} empty={false}>
+              <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', 'Гадны хандалт', '']} empty={false}>
                 {list.map((d) => (
                   <tr key={d.id} className={d.status === 'deleted' ? 'opacity-50' : ''}>
                     <td className="td font-medium">
@@ -89,15 +89,26 @@ export default function DevicesSection() {
                     <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
                     <td className="td font-mono">{d.lane_no}</td>
                     <td className="td text-xs">{d.lane_dir === 'entry' ? 'Орох' : d.lane_dir === 'exit' ? 'Гарах' : 'Хоёулаа'}</td>
-                    <td className="td font-mono text-[10px] text-slate-500">
-                      {d.device_key}
-                      {d.foreign_ips?.length > 0 && (
+                    <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
+                    <td className="td">
+                      {d.foreign_sessions?.length > 0 ? (
                         <div
-                          className="mt-0.5 font-sans text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded inline-block"
-                          title={`Камерт манай серверээс ӨӨР IP холбогдсон байна — өөр систем зэрэг ашиглаж байна. Шалгасан: ${d.foreign_checked_at ? new Date(d.foreign_checked_at + 'Z').toLocaleTimeString() : '?'}`}
+                          className="cursor-help"
+                          title={`Камерын нэвтрэлтийн логоос: манай серверээс ӨӨР систем/хүн камерт хандаж байна.\n${d.foreign_sessions.map((s) => `${s.user} @ ${s.ip} — сүүлд ${s.last}`).join('\n')}\nШалгасан: ${d.foreign_checked_at ? new Date(d.foreign_checked_at + 'Z').toLocaleTimeString() : '?'}`}
                         >
-                          ⚠ Өөр IP: {d.foreign_ips.join(', ')}
+                          {d.foreign_sessions.slice(0, 2).map((s) => (
+                            <div key={s.user + s.ip} className="text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded mb-0.5 inline-block mr-1 whitespace-nowrap">
+                              ⚠ {s.user}@{s.ip}
+                            </div>
+                          ))}
+                          {d.foreign_sessions.length > 2 && (
+                            <span className="text-[10px] text-red-400">+{d.foreign_sessions.length - 2}</span>
+                          )}
                         </div>
+                      ) : (
+                        d.device_type === 'camera' && d.foreign_checked_at ? (
+                          <span className="text-[10px] text-slate-600" title={`Гадны хандалт илрээгүй. Шалгасан: ${new Date(d.foreign_checked_at + 'Z').toLocaleTimeString()}`}>—</span>
+                        ) : null
                       )}
                     </td>
                     <td className="td text-right whitespace-nowrap">

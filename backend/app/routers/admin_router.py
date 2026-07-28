@@ -362,7 +362,7 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
-                                     "foreign_ips": (who or {}).get("ips") or [],
+                                     "foreign_sessions": (who or {}).get("sessions") or [],
                                      "foreign_checked_at": (who or {}).get("checked_at")}))
     return out
 

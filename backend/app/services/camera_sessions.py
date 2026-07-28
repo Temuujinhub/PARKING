@@ -1,41 +1,38 @@
-"""Камерын идэвхтэй сессүүдийг үе үе асууж, МАНАЙХААС ӨӨР IP-г илрүүлнэ.
+"""Камерын нэвтрэлтийн логоос МАНАЙХААС ӨӨР хэрэглэгч/IP-г илрүүлнэ.
 
-Юуны учир (2026-07-28): хуучин easy-park систем камеруудад зэрэг хандаж нөөцийг
-нь булааж, бүртгэл түгжиж байгаа нь хаалтны 15с timeout-уудын эх үүсвэр гэж
-үзэж байгаа. Үүнийг таамаг биш БАРИМТ болгохын тулд камераас өөрөөс нь
-(UserManager.getActiveUserInfo*) «яг одоо хэн холбогдсон бэ» гэдгийг 5 минут
-тутам асууж, манай серверийнхээс өөр IP илэрвэл:
-  • Тохиргоо → Төхөөрөмж хүснэгтэд (Callback түлхүүрийн доор) улаанаар харуулна
-  • Лог дээр WARNING бичнэ (админд өгөх нотолгоо өөрөө хуримтлагдана)
+Юуны учир (2026-07-28): хуучин систем камеруудад зэрэг хандаж нөөцийг булааж,
+хаалтны 15с timeout үүсгэдэг гэсэн таамгийг БАРИМТ болгох. camera_who.py-ийн
+туршилтаар энэ firmware UserManager.getActiveUserInfo* ДЭМЖДЭГГҮЙ (Method not
+found) харин log.startFind/doFind нэвтрэлтийн логоо IP-тэй нь өгдөг нь батлагдсан
+(жишээ: user=Meguun ip=172.10.0.18 5 мин тутам Login/Logout). Тиймээс 5 минут
+тутам сүүлийн цагийн Login/Logout логийг татаж, манай серверийн IP-ээс өөр
+хандалтыг:
+  • Тохиргоо → Төхөөрөмж хүснэгтийн «Гадны хандалт» баганад харуулна
+  • Шинээр илэрвэл WARNING логлоно (нотолгоо өөрөө хуримтлагдана)
 
-Болгоомжлол: камерын RPC нөөц ховор тул (1) IP тус бүрийн rpc lock-ийг ашиглана,
-(2) хаалтны команд хүлээж байвал шалгалтыг алгасна, (3) нэвтрэлтийн таслуур
-(auth circuit breaker) идэвхтэй үед огт хандахгүй, (4) barrier_mock үед унтарна.
+Болгоомжлол: IP тус бүрийн rpc lock ашиглана, хаалтны команд хүлээж байвал
+алгасна, нэвтрэлтийн таслуур идэвхтэй үед хандахгүй, barrier_mock үед унтарна.
 """
 import asyncio
-import json
 import logging
-import re
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..config import settings
 from ..database import SessionLocal
 from ..models import Device, ParkingSite
-from .barrier import (DahuaRpc, _auth_failed, _is_auth_error, _auth_ok, _rpc_lock,
+from .barrier import (DahuaRpc, _auth_failed, _auth_ok, _is_auth_error, _rpc_lock,
                       auth_block_remaining, barrier_is_waiting, camera_client)
 from .device_auth import camera_credentials
 
 log = logging.getLogger("parking.camera_who")
 
-# device_id -> {"ips": [...], "checked_at": iso, "supported": bool}
+# device_id -> {"sessions": [{"user","ip","last"}], "checked_at": iso, "supported": bool}
 _state: dict[str, dict] = {}
-
-_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
 
 def foreign_info(device_id: str) -> dict | None:
-    """Тухайн камерт сүүлд илэрсэн гадны IP-үүд (UI-д харуулахад)."""
+    """Тухайн камерт сүүлд илэрсэн гадны хандалтууд (UI-д харуулахад)."""
     return _state.get(device_id)
 
 
@@ -52,35 +49,74 @@ def _our_ip_toward(cam_ip: str) -> str:
         return ""
 
 
+async def _fetch_log_entries(rpc: DahuaRpc) -> tuple[bool, dict]:
+    """Сүүлийн цагийн Login/Logout бичлэгүүд: (user, ip) -> сүүлийн цаг.
+    Цагийн муж: camera_who туршилтаар серверийн datetime.now()-д суурилсан муж
+    ажиллаж байсан тул мөн адил; төгсгөлд +1ц маржин (камерын цагийн зөрүүд)."""
+    end = datetime.now() + timedelta(hours=1)
+    start = datetime.now() - timedelta(minutes=settings.camera_sessions_window_min)
+    cond = {"StartTime": start.strftime("%Y-%m-%d %H:%M:%S"),
+            "EndTime": end.strftime("%Y-%m-%d %H:%M:%S"),
+            "Translate": True, "Types": ["Login", "Logout"]}
+    r = await rpc._call("log.startFind", {"condition": cond})
+    token = (r.get("params") or {}).get("token")
+    if not token:
+        cond.pop("Types", None)
+        r = await rpc._call("log.startFind", {"condition": cond})
+        token = (r.get("params") or {}).get("token")
+    if not token:
+        return False, {}
+    entries: dict[tuple[str, str], str] = {}
+    try:
+        for _ in range(6):   # хамгийн ихдээ 600 бичлэг — хангалттай
+            rr = await rpc._call("log.doFind", {"token": token, "count": 100})
+            items = (rr.get("params") or {}).get("items") or []
+            for it in items:
+                typ = str(it.get("Type", "")).lower()
+                if "login" not in typ and "logout" not in typ:
+                    continue
+                user = str(it.get("User") or it.get("user") or "?")
+                det = it.get("Detail") or {}
+                rip = str(det.get("RemoteIP") or det.get("Address")
+                          or it.get("RemoteIP") or "").strip()
+                if rip:
+                    key = (user, rip)
+                    t = str(it.get("Time", ""))
+                    if t > entries.get(key, ""):
+                        entries[key] = t
+            if len(items) < 100:
+                break
+    finally:
+        try:
+            await rpc._call("log.stopFind", {"token": token})
+        except Exception:  # noqa: BLE001
+            pass
+    return True, entries
+
+
 async def _check_one(device_id: str, ip: str, creds: tuple[str, str]) -> None:
     if auth_block_remaining(ip) or barrier_is_waiting(ip):
         return
-    ips: set[str] = set()
-    supported = False
     async with _rpc_lock(ip):
         rpc = DahuaRpc(camera_client(ip), ip, *creds)
         await rpc.login()
         try:
-            for method in ("UserManager.getActiveUserInfoAll",
-                           "UserManager.getActiveUserInfo"):
-                res = await rpc._call(method)
-                if res.get("result"):
-                    supported = True
-                    ips.update(_IP_RE.findall(json.dumps(res.get("params") or {})))
-                    break
+            supported, entries = await _fetch_log_entries(rpc)
         finally:
             await rpc.logout()
     _auth_ok(ip)
-    ours = {_our_ip_toward(ip), ip, "127.0.0.1", "0.0.0.0"}
-    foreign = sorted(i for i in ips
-                     if i not in ours and not i.startswith(("255.", "224."))
-                     and not i.endswith(".255"))
-    prev = (_state.get(device_id) or {}).get("ips")
-    _state[device_id] = {"ips": foreign, "supported": supported,
+    ours = {_our_ip_toward(ip), ip, "127.0.0.1", ""}
+    sessions = [{"user": u, "ip": i, "last": t}
+                for (u, i), t in sorted(entries.items(), key=lambda kv: kv[1], reverse=True)
+                if i not in ours][:5]
+    prev = {(s["user"], s["ip"]) for s in (_state.get(device_id) or {}).get("sessions", [])}
+    _state[device_id] = {"sessions": sessions, "supported": supported,
                          "checked_at": datetime.utcnow().isoformat()}
-    if foreign and foreign != prev:
-        log.warning("%s: камерт МАНАЙХААС ӨӨР IP холбогдсон байна: %s "
-                    "(өөр систем зэрэг ашиглаж байгаагийн баримт)", ip, ", ".join(foreign))
+    fresh = [s for s in sessions if (s["user"], s["ip"]) not in prev]
+    if fresh:
+        log.warning("%s: камерт МАНАЙХААС ӨӨР хандалт илэрлээ: %s "
+                    "(өөр систем зэрэг ашиглаж байгаагийн баримт)", ip,
+                    ", ".join(f"{s['user']}@{s['ip']}" for s in fresh))
 
 
 async def supervisor():
@@ -88,7 +124,8 @@ async def supervisor():
     if settings.barrier_mock or settings.camera_sessions_check_sec <= 0:
         return
     await asyncio.sleep(90)   # startup — эхлээд поллер/хаалт тогтвортой болог
-    log.info("камерын сессийн хяналт идэвхжлээ (%dс тутам)", settings.camera_sessions_check_sec)
+    log.info("камерын нэвтрэлтийн хяналт идэвхжлээ (%dс тутам, сүүлийн %d мин цонх)",
+             settings.camera_sessions_check_sec, settings.camera_sessions_window_min)
     while True:
         db = SessionLocal()
         try:
@@ -105,10 +142,10 @@ async def supervisor():
             db.close()
         for did, ip, creds in cam_list:
             try:
-                await asyncio.wait_for(_check_one(did, ip, creds), timeout=10)
+                await asyncio.wait_for(_check_one(did, ip, creds), timeout=15)
             except Exception as e:  # noqa: BLE001
                 if _is_auth_error(e):
                     _auth_failed(ip)
-                log.debug("%s: сесс шалгалт амжилтгүй (%s)", ip, type(e).__name__)
+                log.debug("%s: нэвтрэлтийн лог шалгалт амжилтгүй (%s)", ip, type(e).__name__)
             await asyncio.sleep(2)   # камеруудыг зэрэг цохихгүй
         await asyncio.sleep(settings.camera_sessions_check_sec)
