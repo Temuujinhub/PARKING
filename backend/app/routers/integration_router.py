@@ -148,12 +148,16 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     """Wallet өөрийн талд төлбөрийг амжилттай авсныг баталгаажуулна.
     body: {transaction_id, amount}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
     нээгдэхгүй). Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
-    from .payments_router import _finalize_paid
+    from .payments_router import _finalize_paid, _lock_payment
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
     if payment.provider != partner:
         raise HTTPException(403, "Энэ төлбөр өөр түншийнх")
+    # Мөрийг түгжинэ — wallet-ийн давхар confirm/retry зэрэг ирвэл нэг нь л finalize хийнэ
+    payment = _lock_payment(db, payment.id)
+    if payment is None:
+        raise HTTPException(409, "Төлбөр боловсруулагдаж байна — дахин оролдоно уу")
     if payment.status == "PAID":
         return {"status": "PAID", "payment_id": payment.id}  # idempotent
     if payment.status != "PENDING":

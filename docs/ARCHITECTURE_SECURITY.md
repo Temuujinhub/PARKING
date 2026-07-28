@@ -110,3 +110,21 @@ router-ууд аль хэдийн тусгаарлагдсан, DB/гадаад 
 тохируулагддаг. Цорын ганц заавал хийх ажил бол **Redis нэмж 3 in-memory төлвийг
 шилжүүлэх** — үүнгүйгээр олон процесс/сервер найдваргүй. Энэ нь ~1 өдрийн ажил бөгөөд
 эхний зогсоол ажиллаж эхэлсний дараа өсөлтийн шаардлагаар хийхэд тохиромжтой.
+
+## Сервисийг root-оос салгах төлөвлөгөө (2026-07-27)
+
+Одоо `parking-backend.service` нь `User=root`, код `/root/PARKING` дотор тул unprivileged
+хэрэглэгч рүү шилжихэд суулгацыг нүүлгэх шаардлагатай. Ажлын цонхонд (жич: шөнө) дараах
+дарааллаар хийнэ — **нэг алхам алдвал сервис асахгүй тул яаралгүй, шалгаж явна**:
+
+1. `useradd -r -s /usr/sbin/nologin parking`
+2. `/opt/parking` руу нүүлгэх: `rsync -a /root/PARKING/ /opt/parking/` (venv-ийг шинээр
+   `python3 -m venv venv && pip install -r requirements.txt` — зам нь venv дотор хатуу бичигдсэн)
+3. `.env`, `/var/lib/parking/snapshots`, `.last_ebarimt_send`-ийн эзэмшлийг `parking:parking` болгох
+4. systemd unit: `User=parking`, `WorkingDirectory=/opt/parking/backend`, `ProtectSystem=strict`,
+   `ReadWritePaths=/var/lib/parking /opt/parking/backend`, `ProtectHome=true`
+5. `update.sh`-ийн `APP_DIR`, cron watchdog, nginx snapshot alias замуудыг шинэчлэх
+6. Backup-ийг `/var/backups/parking` (root:root 700) руу шилжүүлэх
+
+Түр арга хэмжээ (хэрэгжсэн): unit-д `NoNewPrivileges=true`, `PrivateTmp=true`;
+backup файлууд 600; DB доторх нууц утгууд Fernet-ээр шифрлэгдэнэ (`app/secretbox.py`).

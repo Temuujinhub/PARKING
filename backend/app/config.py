@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production-9f8a7b6c5d4e"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 12  # 12 цаг
+    # DB доторх нууц утгын (QPay client_secret, төхөөрөмжийн нууц үг) Fernet түлхүүр.
+    # Хоосон бол шифрлэхгүй. Үүсгэх:
+    # venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    secret_enc_key: str = ""
 
     # Database
     database_url: str = "postgresql+psycopg2://parking:parking_secret_2026@localhost:5432/parking"
@@ -92,10 +96,20 @@ class Settings(BaseSettings):
     # Хаалтны RPC2 timeout. 5с богино байсан тул ачаалалтай үед ConnectTimeout/
     # ReadTimeout болж хаалт нээгддэггүй байв (камер ANPR боловсруулалтад завгүй).
     barrier_timeout_sec: float = 12.0
+    # ЭХНИЙ оролдлогын timeout — богино байлгаж хурдан дахин оролдоно. Хариу
+    # өгөхгүй төхөөрөмж дээр 12с бүтэн хүлээвэл жолооч хаалганы өмнө тэр чигээрээ
+    # зогсдог; 4с-д хариу ирээгүй бол дахин илгээх нь илүү хурдан нээдэг
+    # (open команд идемпотент — давхар илгээхэд хортой зүйлгүй).
+    barrier_first_timeout_sec: float = 4.0
     # Сүлжээний түр саатлын улмаас команд унасан бол хэдэн удаа дахин оролдох.
     # Машин хаалганы өмнө зогсож байгаа тул нэг оролдлого хангалтгүй.
     barrier_retries: int = 2
     barrier_retry_delay_sec: float = 0.8
+    # Хаалт нээх нийт хугацаа энэ хэмжээнээс (мс) удвал WARNING логлоно —
+    # «удаан нээгдэж байна» гомдлыг лог дээрээс шууд тоогоор нотлох боломжтой.
+    barrier_slow_warn_ms: int = 1500
+    # LPR event ирснээс хаалт нээх/шийдвэр гарах хүртэлх нийт хугацааны WARNING босго (мс)
+    lpr_slow_warn_ms: int = 2000
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)

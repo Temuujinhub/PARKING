@@ -13,12 +13,15 @@
   - Session бүр өөрийн try/except — нэг алдаа бусдыг зогсоохгүй.
 """
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, ParkingSession, ParkingSite
 from ..session_logic import close_session_forced, is_valid_plate
+
+log = logging.getLogger("parking.auto_close")
 
 
 def run_once() -> int:
@@ -67,11 +70,11 @@ def run_once() -> int:
                                             "hours": hours, "debt": debt}))
                     db.commit()
                     closed += 1
-                    print(f"[auto_close] {site.name}: {s.plate_number} хаагдлаа "
-                          f"({hours}ц+, өр {debt:.0f}₮)")
+                    log.info(f"{site.name}: {s.plate_number} хаагдлаа "
+                             f"({hours}ц+, өр {debt:.0f}₮)")
                 except Exception as e:  # noqa: BLE001 — нэг session бусдыг зогсоохгүй
                     db.rollback()
-                    print(f"[auto_close] {s.plate_number} хааж чадсангүй: {e}")
+                    log.error(f"{s.plate_number} хааж чадсангүй: {e}")
     finally:
         db.close()
     return closed
@@ -84,7 +87,7 @@ async def supervisor():
         try:
             n = run_once()
             if n:
-                print(f"[auto_close] нийт {n} гацсан session хаагдлаа")
+                log.info(f"нийт {n} гацсан session хаагдлаа")
         except Exception as e:  # noqa: BLE001
-            print(f"[auto_close] давталтын алдаа: {e}")
+            log.error(f"давталтын алдаа: {e}")
         await asyncio.sleep(1800)

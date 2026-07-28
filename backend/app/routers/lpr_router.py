@@ -4,8 +4,10 @@
   URL: http://{server}/api/lpr/callback?device_key={device_key}
 device_key нь тухайн камерыг СИСТЕМД бүртгэсэн Device.device_key-тэй таарна.
 """
+import logging
 import base64
 import json as _json
+import time as _time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +17,8 @@ from ..config import settings
 from ..database import get_db
 from ..models import Device, LprEvent
 from ..session_logic import handle_entry, handle_exit, normalize_plate, strip_images
+
+log = logging.getLogger("parking.lpr")
 
 router = APIRouter(prefix="/api/lpr", tags=["lpr"])
 
@@ -112,7 +116,7 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     _p0 = _extract_plate(events[0])[0] if events and isinstance(events[0], dict) else ""
     # БҮХ ирж буй push-ийг (амжилттай/амжилтгүй) логлоно — камерын "Push Results" 0
     # байвал энэ мөрөөс шалтгааныг (device танихгүй / зураг ирээгүй) шууд харна.
-    print(f"[lpr_push] ip={client_ip} key={device_key or '-'} "
+    log.info(f"lpr_push: ip={client_ip} key={device_key or '-'} "
           f"device={device.name if device else 'ОЛДСОНГҮЙ'} plate={_p0 or '-'} "
           f"image={len(image) if image else 0}b events={len(events)} "
           f"ctype={(request.headers.get('content-type') or '')[:30]} "
@@ -120,7 +124,7 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     # Firmware яг ЯМАР бүтэцтэй илгээж байгааг харах (зураггүй, тайрсан) — парсинг
     # тохирч байгаа эсэхийг батлах/засахад
     try:
-        print(f"[lpr_push] RAW: {_json.dumps(strip_images(payload), ensure_ascii=False)[:600]}")
+        log.info(f"lpr_push RAW: {_json.dumps(strip_images(payload), ensure_ascii=False)[:600]}")
     except Exception:
         pass
     if not device:
@@ -152,10 +156,18 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
                             reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=strip_images(event)))
             db.commit()
             continue
+        # Дугаар танигдмагц хаалт нээх хүртэлх БҮТЭН хугацааг хэмжинэ — «удаан
+        # нээгдэж байна» гомдлыг лог дээрээс тоогоор шалгах боломжтой болно
+        _t0 = _time.monotonic()
         if device.lane_dir == "exit":
-            results.append(await handle_exit(db, device, plate, conf, event))
+            res = await handle_exit(db, device, plate, conf, event)
         else:
-            results.append(await handle_entry(db, device, plate, conf, event))
+            res = await handle_entry(db, device, plate, conf, event)
+        _ms = int((_time.monotonic() - _t0) * 1000)
+        res["elapsed_ms"] = _ms
+        (log.warning if _ms >= settings.lpr_slow_warn_ms else log.info)(
+            "lpr %s %s → %s: %dмс", device.lane_dir, plate, res.get("action", "?"), _ms)
+        results.append(res)
     return {"ok": True, "results": results}
 
 
@@ -195,6 +207,15 @@ async def simulate_lpr(body: dict, db: Session = Depends(get_db)):
     conf = float(body.get("confidence", 99))
     raw = {"simulated": True}
     device.last_seen = datetime.utcnow()
+    # Бодит callback-той ижил хугацааны хэмжилт — оношилгоонд simulate-аар
+    # хэмжсэн үзүүлэлт бодитыг төлөөлнө
+    _t0 = _time.monotonic()
     if device.lane_dir == "exit":
-        return await handle_exit(db, device, plate, conf, raw)
-    return await handle_entry(db, device, plate, conf, raw)
+        res = await handle_exit(db, device, plate, conf, raw)
+    else:
+        res = await handle_entry(db, device, plate, conf, raw)
+    _ms = int((_time.monotonic() - _t0) * 1000)
+    res["elapsed_ms"] = _ms
+    (log.warning if _ms >= settings.lpr_slow_warn_ms else log.info)(
+        "lpr(sim) %s %s → %s: %dмс", device.lane_dir, plate, res.get("action", "?"), _ms)
+    return res

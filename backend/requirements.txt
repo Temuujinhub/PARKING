@@ -10,3 +10,4 @@ alembic
 openpyxl
 psutil
 python-multipart
+cryptography

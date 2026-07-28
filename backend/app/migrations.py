@@ -4,9 +4,13 @@ SQLAlchemy create_all() нь шинэ ХҮСНЭГТ үүсгэдэг ч бай�
 Тиймээс шинэ багана нэмэх бүрд энд `ADD COLUMN IF NOT EXISTS` мөр нэмнэ.
 Startup бүрт ажиллах ба аль хэдийн байгаа бол алгасна (аюулгүй, давтагдах боломжтой).
 """
+import logging
+
 from sqlalchemy import text
 
 from .database import engine
+
+log = logging.getLogger("parking.migrations")
 
 MIGRATIONS = [
     # v1.1 — НӨАТ байгууллагаар авах (ТТД)
@@ -84,6 +88,9 @@ MIGRATIONS = [
     "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS note TEXT",
     "CREATE INDEX IF NOT EXISTS ix_registered_drivers_company ON registered_drivers (company)",
 
+    # v2.6 — Хаалтны командын гүйцэтгэлийн хугацаа (мс) — удаашралыг хэмжих
+    "ALTER TABLE barrier_commands ADD COLUMN IF NOT EXISTS duration_ms INTEGER",
+
     # Ирээдүйд багана нэмэхэд ДООР нь ALTER ... ADD COLUMN IF NOT EXISTS бичнэ ↓
 ]
 
@@ -94,4 +101,4 @@ def run_migrations():
             try:
                 conn.execute(text(stmt))
             except Exception as e:  # нэг миграц алдвал бусдыг зогсоохгүй
-                print(f"[migration skip] {stmt[:60]}... — {e}")
+                log.warning(f"[migration skip] {stmt[:60]}... — {e}")

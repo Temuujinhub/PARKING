@@ -66,8 +66,9 @@ def _snapshot_storage() -> dict | None:
     return {"bytes": total, "files": files}
 
 
-def _db_storage(db) -> dict:
-    """Өгөгдлийн сан дахь хүснэгтүүдийн эзлэх зайг ангиллаар бүлэглэж хувиар гаргана."""
+def _db_storage(db, snapshots: dict | None = None) -> dict:
+    """Өгөгдлийн сан дахь хүснэгтүүдийн эзлэх зайг ангиллаар бүлэглэж хувиар гаргана.
+    snapshots-ийг thread дээр урьдчилан тооцсон утгаар өгнө (os.walk удаан)."""
     try:
         rows = db.execute(text(
             "SELECT relname, pg_total_relation_size(relid) AS bytes "
@@ -86,7 +87,7 @@ def _db_storage(db) -> dict:
     for t in tops:
         t["percent"] = round(t["bytes"] * 100 / total, 1) if total else 0
     return {"total_bytes": total, "categories": categories, "top_tables": tops[:6],
-            "snapshots": _snapshot_storage()}
+            "snapshots": snapshots}
 
 _START = time.time()  # backend асаасан цаг (uptime тооцох)
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -287,9 +288,30 @@ async def _qpay_reachable() -> dict:
         return {"ok": False, "error": str(e)[:120], "ms": int((time.time() - t0) * 1000)}
 
 
+def _blocking_probe() -> dict:
+    """Удаан/blocking шалгалтууд НЭГ дор — тусдаа thread дээр ажиллана.
+
+    psutil.cpu_percent (0.3с унтдаг), subprocess (git/systemctl), os.walk
+    (snapshot хавтаст хэдэн арван мянган зураг байж болно), SSL handshake —
+    эдгээрийг event loop дээр шууд дуудвал нэг админ Health хуудас нээхэд
+    хаалт/LPR боловсруулалт хэдэн секунд царцдаг байсан."""
+    return {
+        "system": _system_metrics(),
+        "kernel": _kernel(),
+        "reboot_required": _reboot_required(),
+        "services": [{"name": n, "status": _service_status(s)} for n, s in _service_list()],
+        "version": _git_version(),
+        "ssl": _ssl_expiry(),
+        "snapshots": _snapshot_storage(),
+    }
+
+
 @router.get("/system")
 async def system_health(db=Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     now = time.time()
+
+    # Blocking хэсгүүд thread дээр — event loop-ыг чөлөөтэй үлдээнэ
+    probe = await asyncio.to_thread(_blocking_probe)
 
     # ── Database статистик ──
     database = {"ok": False}
@@ -300,7 +322,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         # Health = ажиллагааны мониторинг: санхүү/session тоо биш, харин САНГИЙН эрүүл мэнд —
         # хэмжээ, холболт, ямар төрлийн датагаар хэдэн хувь дүүрсэн (storage breakdown)
         database = {"ok": True, "size_bytes": int(size or 0), "active_connections": int(conns or 0),
-                    "max_connections": int(maxc or 0), "storage": _db_storage(db)}
+                    "max_connections": int(maxc or 0), "storage": _db_storage(db, probe["snapshots"])}
     except Exception as e:  # noqa: BLE001
         database = {"ok": False, "error": str(e)[:120]}
 
@@ -325,7 +347,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
     return {
         "app": {
             "name": settings.app_name,
-            "version": _git_version(),
+            "version": probe["version"],
             "uptime_seconds": int(now - _START),
             "started_at": int(_START),  # backend хамгийн сүүлд restart хийсэн epoch
             "debug": settings.debug,
@@ -335,10 +357,10 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
                      "ebarimt": settings.ebarimt_mock and not (settings.qpay_ebarimt and not settings.qpay_mock),
                      "simulate": settings.allow_simulate},
         },
-        "system": _system_metrics(),
-        "kernel": _kernel(),
-        "reboot_required": _reboot_required(),
-        "services": [{"name": n, "status": _service_status(s)} for n, s in _service_list()],
+        "system": probe["system"],
+        "kernel": probe["kernel"],
+        "reboot_required": probe["reboot_required"],
+        "services": probe["services"],
         "database": database,
         "integrations": {
             "cameras": cameras,
@@ -348,7 +370,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         },
         # Үйл ажиллагаа / хамгаалалт — SSL, backup, ТЕГ авто-илгээлт
         "ops": {
-            "ssl": _ssl_expiry(),
+            "ssl": probe["ssl"],
             "backup": _pg_backup(db),
             "ebarimt_last_send": ebarimt.last_send_at(),
         },

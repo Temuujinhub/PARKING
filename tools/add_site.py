@@ -179,6 +179,9 @@ def main() -> int:
                       f"'{val}' биш.\n       Цэвэрлэх бол: --qpay-district-code ''",
                       file=sys.stderr)
                 return 1
+            if f == "qpay_password":
+                from app.secretbox import encrypt_secret
+                val = encrypt_secret(val)  # DB-д ил бичихгүй
             setattr(site, f, val)
         site.is_active = not args.inactive
 

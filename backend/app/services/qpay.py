@@ -79,8 +79,11 @@ def account_for(site) -> QpayAccount:
     g = global_account()
     if site is None:
         return g
+    from ..secretbox import decrypt_secret
     user = (getattr(site, "qpay_username", None) or "").strip()
-    pwd = (getattr(site, "qpay_password", None) or "").strip()
+    # DB-д шифрлэгдсэн байж болно ("enc:" угтвар); тайлж чадахгүй бол ЧАНГА алдаа
+    # шидэгдэнэ — түрээслэгчийн төлбөр глобал данс руу чимээгүй унахгүй
+    pwd = decrypt_secret((getattr(site, "qpay_password", None) or "").strip())
     if not (user and pwd):
         # Хэсэгчилсэн тохиргоо (зөвхөн дүүрэг/салбар) — данс нь глобал хэвээр
         return QpayAccount(

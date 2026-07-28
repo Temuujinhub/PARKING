@@ -10,6 +10,7 @@
 """
 import asyncio
 import base64
+import logging
 import os
 import re
 from datetime import datetime
@@ -19,6 +20,8 @@ import httpx
 from ..config import settings
 from .device_auth import camera_credentials
 from ..database import SessionLocal
+
+log = logging.getLogger("parking.snapshot")
 
 _SAFE = re.compile(r"[^0-9A-ZА-ЯЁӨҮ]")
 
@@ -68,14 +71,14 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                     r = await client.get(url, auth=auth)
                 if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
                     if attempt > 1 or url != urls[0]:
-                        print(f"[snapshot] {ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
+                        log.info(f"{ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
                     return r.content
                 last_err = f"{url.split('cgi-bin/')[-1]} → HTTP {r.status_code} ({len(r.content)}b)"
             except Exception as e:
                 last_err = f"{type(e).__name__}: {str(e)[:50]}"
         if attempt < 3:
             await asyncio.sleep(1.5)
-    print(f"[snapshot] {ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
+    log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
     return None
 
 
@@ -92,7 +95,7 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
             f.write(data)
         return rel
     except OSError as e:
-        print(f"[snapshot] хадгалж чадсангүй: {e}")
+        log.error(f"хадгалж чадсангүй: {e}")
         return None
 
 
@@ -105,9 +108,12 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         data = await _fetch_from_camera(camera_ip, creds)
         source = "snapshot.cgi"
     if data is None:
-        print(f"[snapshot] {plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
+        log.warning(f"{plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
         return
-    rel = _save(data, plate, lane_dir)
+    # Дискний бичилт (≈1MB JPEG) нь SYNC — event loop дээр шууд хийвэл тэр хугацаанд
+    # дараагийн машины хаалт нээх команд ХҮЛЭЭДЭГ (1 vCPU дээр мэдэгдэхүйц).
+    # Тусдаа thread дээр бичнэ.
+    rel = await asyncio.to_thread(_save, data, plate, lane_dir)
     if not rel:
         return
     # Session мөр commit хийгдэж амжаагүй байж болзошгүй (payload зурагтай үед
@@ -122,19 +128,19 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                 # snapshot.cgi нь ердөө "одоогийн кадр" тул чанараар дутуу
                 existing = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
                 if existing:
-                    print(f"[snapshot] {plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
+                    log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
                     return
                 if lane_dir == "exit":
                     s.exit_snapshot = rel
                 else:
                     s.entry_snapshot = rel
                 db.commit()
-                print(f"[snapshot] {plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
+                log.info(f"{plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
                 return
         finally:
             db.close()
         await asyncio.sleep(1)
-    print(f"[snapshot] {plate} {lane_dir}: session {session_id} DB-д олдсонгүй — зам бичигдээгүй")
+    log.warning(f"{plate} {lane_dir}: session {session_id} DB-д олдсонгүй — зам бичигдээгүй")
 
 
 def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,

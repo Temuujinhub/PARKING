@@ -1,4 +1,5 @@
 """Орох/гарах урсгалын гол логик — LPR event-ээс session үүсгэх, хаах, barrier нээх."""
+import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -12,10 +13,12 @@ from .models import (
 )
 from .services.barrier import open_barrier, render_screen_text, schedule_display
 from .services.snapshot import schedule_capture
-from .ws import manager
+from .ws import manager, notify
 
 
 import re
+
+log = logging.getLogger("parking.session_logic")
 
 # Монгол улсын дугаарын формат: 4 орон + 3 кирилл үсэг (Ө, Ү орно). Жишээ: 1234УБА
 PLATE_RE = re.compile(r"^\d{4}[А-ЯЁӨҮ]{3}$")
@@ -247,6 +250,65 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     return cmd.status == "SUCCESS"
 
 
+async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str) -> bool:
+    """Давхар уншилт дээр ГАРАХ хаалтыг дахин нээх — зөвхөн эрхтэй машинд.
+
+    Орох талын ensure_entry_barrier-ийн гарах хувилбар. Ялгаа: орох талд болзолгүй
+    нээж болдог бол энд ЗААВАЛ эрхийг шалгана — төлбөрөө төлөөгүй машиныг
+    гаргах ёсгүй. Эрхтэй гэж үзэх тохиолдол:
+      - өргүй гэрээт машин
+      - PAID (grace дотор) / үнэгүй / үлдэгдэлгүй нээлттэй session
+      - саяхан (5 мин дотор) гаргахаар хаагдсан session: хаалт нь амжилтгүй
+        болсон ч session нь CLOSED болчихсон тохиолдол
+    """
+    barrier = _find_barrier(db, device.site_id, device)
+    if not barrier:
+        return False
+    now = datetime.utcnow()
+    # Саяхан АМЖИЛТТАЙ нээсэн бол хаалт нээлттэй хэвээр - команд давтахгүй
+    cooldown = now - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    recent_ok = (db.query(BarrierCommand)
+                 .filter(BarrierCommand.device_id == barrier.id,
+                         BarrierCommand.command == "open",
+                         BarrierCommand.status == "SUCCESS",
+                         BarrierCommand.created_at >= cooldown)
+                 .first())
+    if recent_ok:
+        return True
+
+    from .models import Compensation
+    if db.query(Compensation).filter(Compensation.plate_number == plate,
+                                     Compensation.status == "PENDING").count():
+        return False  # өртэй - оператор шийднэ
+
+    session, _fuzzy = match_open_session(db, plate, device.site_id)
+    entitled = False
+    if session:
+        if session.status == "PAID" and (not session.exit_deadline or now <= session.exit_deadline):
+            entitled = True
+        else:
+            fee = session_fee_info(db, session, at=now)
+            entitled = fee["is_free"] or amount_due(db, session, fee) <= 0
+    elif find_registered(db, plate, device.site_id):
+        entitled = True
+    else:
+        # Саяхан гарахаар хаагдсан (хаалт нь амжилтгүй байж болзошгүй) машин
+        entitled = bool(
+            db.query(ParkingSession)
+            .filter(ParkingSession.site_id == device.site_id,
+                    ParkingSession.plate_number == plate,
+                    ParkingSession.status.in_(["CLOSED", "FREE"]),
+                    ParkingSession.exit_time >= now - timedelta(minutes=5))
+            .first())
+    if not entitled:
+        return False
+    cmd = await open_barrier(db, barrier, session.id if session else None,
+                             "exit_retry", plate=plate)
+    if cmd.status != "SUCCESS":
+        log.warning("[exit] давхар уншилт дээр хаалт дахин нээх оролдлого амжилтгүй: %s", plate)
+    return cmd.status == "SUCCESS"
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол)."""
     site_id = device.site_id
@@ -294,8 +356,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                                 detail={"old": old_plate, "new": plate,
                                         "reason": "цуврал уншилт — сүүлийн зөв уншилтаар"}))
                 db.commit()
-                print(f"[entry] цуврал уншилт: {old_plate} → {plate} (session {prev_session.id})")
-                await manager.broadcast(site_id, "PLATE_EDITED", {
+                log.info(f"[entry] цуврал уншилт: {old_plate} → {plate} (session {prev_session.id})")
+                notify(site_id, "PLATE_EDITED", {
                     "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
                     "by": "system:autocorrect"})
                 opened = await ensure_entry_barrier(db, device, plate, prev_session.id,
@@ -332,7 +394,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # uq_active_session: шинэ OPEN session оруулахын ӨМНӨ хаалтыг DB-д тулгана
         db.flush()
         if due > 0:
-            await manager.broadcast(site_id, "DEBT_ALERT", {
+            notify(site_id, "DEBT_ALERT", {
                 "plate": plate, "debt_count": 1, "debt_amount": float(due),
                 "note": "Төлбөргүй гарсан машин дахин орж ирлээ — өр үүсгэв",
             })
@@ -357,13 +419,13 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
 
     barrier_opened = False
     if black:
-        await manager.broadcast(site_id, "BLACKLIST_ALERT", {
+        notify(site_id, "BLACKLIST_ALERT", {
             "plate": plate, "reason": black.reason, "lane": "entry",
         })
     elif device.auto_open:
         barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered)
 
-    await manager.broadcast(site_id, "ENTRY_EVENT", {
+    notify(site_id, "ENTRY_EVENT", {
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
         "registered": registered is not None, "blacklisted": black is not None,
         "barrier_opened": barrier_opened,
@@ -397,7 +459,15 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         ).all()
     ]
     if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
-        return {"action": "dedup", "plate": plate}
+        # Давхар уншилт — session/төлбөрийг ДАХИН боловсруулахгүй. ГЭХДЭЭ өмнөх
+        # уншилтын хаалтны команд амжилтгүй болсон бол машин хаалганы өмнө
+        # lpr_dedup_seconds (20с) турш ГАЦНА: жолооч ухраад дахин ойртох бүрд
+        # «дахин уншсан» гэж тооцогдоод хаалт огт нээгддэггүй байв (орох талд
+        # энэ алдаа аль хэдийн зассан, гарах талд үлдсэн байсан).
+        # Тиймээс ГАРАХ ЭРХТЭЙ (гэрээт/төлсөн/үнэгүй) машинд хаалтыг дахин нээнэ.
+        opened = await ensure_exit_barrier_if_cleared(db, device, plate)
+        db.commit()
+        return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
@@ -411,7 +481,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         db.add(AuditLog(username="system", action="EXIT_OCR_MATCH", entity="session",
                         entity_id=session.id,
                         detail={"read_plate": plate, "matched_plate": session.plate_number}))
-        print(f"[exit] OCR зөрүү тохов: уншсан {plate} → session {session.plate_number}")
+        log.info(f"[exit] OCR зөрүү тохов: уншсан {plate} → session {session.plate_number}")
 
     # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
     from .models import Compensation
@@ -419,7 +489,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                           Compensation.status == "PENDING").all()
     debt_amount = float(sum(c.amount for c in debts))
     if debts:
-        await manager.broadcast(site_id, "DEBT_ALERT", {
+        notify(site_id, "DEBT_ALERT", {
             "plate": plate, "debt_count": len(debts), "debt_amount": debt_amount})
 
     if not session:
@@ -434,7 +504,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             if barrier:
                 cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate)
                 opened = cmd.status == "SUCCESS"
-            await manager.broadcast(site_id, "EXIT_NO_SESSION", {
+            notify(site_id, "EXIT_NO_SESSION", {
                 "plate": plate, "has_debt": False, "debt_amount": 0,
                 "registered": True, "barrier_opened": opened})
             schedule_display(device.ip_address,
@@ -444,7 +514,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
         db.commit()
-        await manager.broadcast(site_id, "EXIT_NO_SESSION",
+        notify(site_id, "EXIT_NO_SESSION",
                                 {"plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount})
         schedule_display(device.ip_address,
                          render_screen_text(settings.screen_nosession_text, plate=plate),
@@ -467,7 +537,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             fee["base_fee"], fee["vat_amount"], fee["total_fee"])
         db.commit()
         due_now = amount_due(db, session, fee)
-        await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
+        notify(site_id, "EXIT_LPR_EVENT", {
             "session_id": session.id, "plate": plate,
             "entry_time": session.entry_time.isoformat(),
             "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
@@ -509,7 +579,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     session.total_fee = fee["total_fee"]
     db.commit()
 
-    await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
+    notify(site_id, "EXIT_LPR_EVENT", {
         "session_id": session.id, "plate": plate,
         "entry_time": session.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
@@ -545,7 +615,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         barrier_opened = cmd.status == "SUCCESS"
     db.commit()
 
-    await manager.broadcast(session.site_id, "EXIT_COMPLETED", {
+    notify(session.site_id, "EXIT_COMPLETED", {
         "session_id": session.id, "plate": session.plate_number,
         "status": session.status, "barrier_opened": barrier_opened,
         "total_fee": float(session.total_fee or 0),
@@ -586,7 +656,7 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
             await _close_and_open(db, exit_device, session, now, fee, source="payment")
             return
     db.commit()
-    await manager.broadcast(session.site_id, "PAYMENT_COMPLETED", {
+    notify(session.site_id, "PAYMENT_COMPLETED", {
         "session_id": session.id, "plate": session.plate_number,
         "exit_deadline": session.exit_deadline.isoformat(),
     })

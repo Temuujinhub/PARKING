@@ -18,6 +18,8 @@ barrier_mock=True үед бодит төхөөрөмж рүү хүсэлт яв�
 """
 import asyncio
 import hashlib
+import logging
+import time
 from datetime import datetime
 
 import httpx
@@ -26,6 +28,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import BarrierCommand, Device
 from .device_auth import barrier_credentials
+
+log = logging.getLogger("parking.barrier")
 
 RPC_METHODS = {
     "open": "trafficSnap.openStrobe",
@@ -209,11 +213,16 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     # бууж өгөхгүй — timeout/холболтын алдаанд хэд дахин оролдоно.
     attempts = max(1, settings.barrier_retries + 1)
     last_err = ""
+    _t0 = time.monotonic()
     for attempt in range(attempts):
         if attempt:
             await asyncio.sleep(settings.barrier_retry_delay_sec)
+        # Эхний оролдлого богино timeout-тай — хариугүй төхөөрөмж дээр 12с бүтэн
+        # хүлээхийн оронд хурдан дахин илгээж хаалтыг эрт нээнэ
+        _timeout = (settings.barrier_first_timeout_sec if attempt == 0
+                    else settings.barrier_timeout_sec)
         try:
-            async with httpx.AsyncClient(timeout=settings.barrier_timeout_sec) as client:
+            async with httpx.AsyncClient(timeout=_timeout) as client:
                 if command == "open" and settings.barrier_open_path:
                     # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
                     auth = httpx.DigestAuth(username, password)
@@ -241,6 +250,14 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                                  if attempt + 1 < attempts
                                  else f"{last_err} ({attempts} удаа оролдсон)")
     cmd.executed_at = datetime.utcnow()
+    # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
+    _ms = int((time.monotonic() - _t0) * 1000)
+    cmd.duration_ms = _ms
+    if _ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
+        log.warning("хаалт %s: %s — %dмс (%s, %d оролдлого) %s",
+                    command, cmd.status, _ms, source, attempts, (cmd.response_text or "")[:120])
+    else:
+        log.info("хаалт %s: SUCCESS — %dмс (%s)", command, _ms, source)
     db.commit()
     return cmd
 
@@ -272,7 +289,7 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
     ~5-6 секунд тогтвортой харагдуулна. Дуут зарлал зөвхөн эхний удаад.
     Амжилттай бол хоосон мөр, алдаатай бол алдааны тайлбар буцаана."""
     if settings.barrier_mock:
-        print(f"[screen] MOCK {ip}: {text}")
+        log.info(f"[screen] MOCK {ip}: {text}")
         return ""
     username, password = creds or barrier_credentials(None)
     times = max(1, repeat if repeat is not None else settings.screen_repeat)
@@ -291,11 +308,11 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                 await rpc.logout()
         # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
-        print(f"[screen] {ip}: OK ×{times} «{text}»")
+        log.info(f"[screen] {ip}: OK ×{times} «{text}»")
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
-        print(f"[screen] {ip}: бичиж чадсангүй ({err})")
+        log.warning(f"[screen] {ip}: бичиж чадсангүй ({err})")
         return err
 
 

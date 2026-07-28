@@ -1,9 +1,8 @@
-"""Тайлан: dashboard статистик, зогсоолын орлого, Excel экспорт, НӨАТ баримт, лог."""
-import io
+"""Тайлан: dashboard статистик, зогсоолын орлого, Excel экспорт, НӨАТ баримт, лог.
+Excel workbook угсрах код: reports_excel.py (энд endpoint-ууд нь нимгэн wrapper)."""
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -13,6 +12,7 @@ from ..models import (
     AuditLog, LprEvent, ParkingSession, ParkingSite, Payment, User, VatReceipt,
 )
 from ..serializers import to_dict
+from . import reports_excel as _excel
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -34,55 +34,52 @@ def _range(date_from: str | None, date_to: str | None):
     return start, end
 
 
-def _daily_rows(db, start, end, site_id):
-    """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
-    daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов."""
-    out = []
+def _day_list(start, end):
+    """[start-ийн локал өдрийн 00:00 UTC; end) хүртэлх өдрийн заагуудын жагсаалт.
+    Хуучин давталтын day/nxt цонхнуудтай ЯГ ижил (эхний цонх start-аас өмнө эхэлж,
+    сүүлийн цонх end-ээс хэтэрч болно)."""
+    days = []
     day = _local_midnight_utc(start)
     while day < end:
-        nxt = day + timedelta(days=1)
-        sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
-                                             ParkingSession.entry_time < nxt)
-        pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-              .join(ParkingSession, Payment.session_id == ParkingSession.id)
-              .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
-        if site_id:
-            sq = sq.filter(ParkingSession.site_id == site_id)
-            pq = pq.filter(ParkingSession.site_id == site_id)
-        prov = dict(pq.group_by(Payment.provider).all())
+        days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _daily_rows(db, start, end, site_id):
+    """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
+    daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов.
+    Өдөр бүр 2-3 query биш — бүх хугацааг ЛОКАЛ өдрөөр бүлэглэсэн 2 query."""
+    keys = ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")
+    days = _day_list(start, end)
+    if not days:
+        return [], {k: 0 for k in keys}
+    lo, hi = days[0], days[-1] + timedelta(days=1)
+    sess_day = func.date(ParkingSession.entry_time + TZ)
+    sq = (db.query(sess_day, func.count(), func.count(ParkingSession.exit_time))
+          .filter(ParkingSession.entry_time >= lo, ParkingSession.entry_time < hi))
+    pay_day = func.date(Payment.paid_at + TZ)
+    pq = (db.query(pay_day, Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
+          .join(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi))
+    if site_id:
+        sq = sq.filter(ParkingSession.site_id == site_id)
+        pq = pq.filter(ParkingSession.site_id == site_id)
+    counts = {str(d): (int(n), int(x)) for d, n, x in sq.group_by(sess_day).all()}
+    pays = {}
+    for d, provider, amt in pq.group_by(pay_day, Payment.provider).all():
+        pays.setdefault(str(d), {})[provider] = amt
+    out = []
+    for day in days:
+        ds = (day + TZ).strftime("%Y-%m-%d")
+        entered, exited = counts.get(ds, (0, 0))
+        prov = pays.get(ds, {})
         cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        out.append({"date": (day + TZ).strftime("%Y-%m-%d"), "entered": sq.count(),
-                    "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
+        out.append({"date": ds, "entered": entered, "exited": exited,
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
                     "paid_amount": cash + qpay_amt + pos})
-        day = nxt
-    totals = {k: sum(r[k] for r in out) for k in
-              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
+    totals = {k: sum(r[k] for r in out) for k in keys}
     return out, totals
-
-
-def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
-    """Нэг хуудастай Excel файл үүсгэх стандарт helper — header тод, мөрүүд, нийлбэр мөр,
-    баганы өргөн. 9 Excel endpoint-ийн давхардсан boilerplate-ийг орлоно."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
-    from openpyxl.utils import get_column_letter
-    wb = Workbook()
-    ws = wb.active
-    ws.title = title[:31]
-    ws.append(list(headers))
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in rows:
-        ws.append(list(r))
-    if total_row is not None:
-        ws.append(list(total_row))
-        for c in ws[ws.max_row]:
-            c.font = Font(bold=True)
-    if widths:
-        for i, w in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = w
-    return _excel_response(wb, prefix)
 
 
 @router.get("/dashboard")
@@ -99,29 +96,35 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
     total_capacity = db.query(func.coalesce(func.sum(ParkingSite.capacity), 0)).filter(
         ParkingSite.is_active.is_(True)).scalar()
 
+    # Зогсоол тус бүрийн дүүргэлт/орлого — сайт бүрд 2 query биш, 2 бүлэглэсэн query
+    occ_by_site = dict(db.query(ParkingSession.site_id, func.count())
+                       .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+                       .group_by(ParkingSession.site_id).all())
+    rev_by_site = {sid: float(a) for sid, a in
+                   db.query(ParkingSession.site_id, func.coalesce(func.sum(Payment.amount), 0))
+                   .join(Payment, Payment.session_id == ParkingSession.id)
+                   .filter(Payment.status == "PAID", Payment.paid_at >= today)
+                   .group_by(ParkingSession.site_id).all()}
     sites = []
     for s in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
-        occupied = db.query(ParkingSession).filter(
-            ParkingSession.site_id == s.id,
-            ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
-        revenue = float(db.query(func.coalesce(func.sum(Payment.amount), 0))
-                        .join(ParkingSession, Payment.session_id == ParkingSession.id)
-                        .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
-                                Payment.paid_at >= today).scalar())
+        occupied = int(occ_by_site.get(s.id, 0))
         sites.append({"id": s.id, "name": s.name, "capacity": s.capacity,
                       # capacity=0 → дүүргэлтгүй: сул тоо null
                       "occupied": occupied,
                       "free": max(0, s.capacity - occupied) if s.capacity else None,
-                      "today_revenue": revenue})
+                      "today_revenue": rev_by_site.get(s.id, 0.0)})
 
-    # Сүүлийн 7 хоногийн орлого (график)
+    # Сүүлийн 7 хоногийн орлого (график) — өдөр бүр query биш, 1 бүлэглэсэн query
+    wk_day = func.date(Payment.paid_at + TZ)
+    wk = {str(d): float(a) for d, a in
+          db.query(wk_day, func.coalesce(func.sum(Payment.amount), 0))
+          .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=6),
+                  Payment.paid_at < today + timedelta(days=1)).group_by(wk_day).all()}
     week = []
     for i in range(6, -1, -1):
         day = today - timedelta(days=i)
-        rev = float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
-            Payment.status == "PAID", Payment.paid_at >= day,
-            Payment.paid_at < day + timedelta(days=1)).scalar())
-        week.append({"date": (day + TZ).strftime("%m-%d"), "revenue": rev})
+        week.append({"date": (day + TZ).strftime("%m-%d"),
+                     "revenue": wk.get((day + TZ).strftime("%Y-%m-%d"), 0.0)})
 
     # Өнөөдрийн цагийн ачаалал — цаг тус бүрийн орц/гарц (0–23)
     from sqlalchemy import Integer, cast
@@ -231,16 +234,7 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
 def revenue_excel(date_from: str | None = None, date_to: str | None = None,
                   db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     data = revenue_report(date_from, date_to, None, db, user)
-    rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"], r["cash_amount"],
-             r["qpay_amount"], r["pos_amount"], r["paid_amount"], r["unpaid_amount"]]
-            for r in data["rows"]]
-    t = data["totals"]
-    total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"], t["cash_amount"],
-                 t["qpay_amount"], t["pos_amount"], t["paid_amount"], t["unpaid_amount"]]
-    return _xlsx("revenue", "Орлогын тайлан",
-                 ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
-                  "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"],
-                 rows, widths=(30, 10, 10, 12, 14, 14, 14, 18, 16), total_row=total_row)
+    return _excel.revenue_excel(data)
 
 
 @router.get("/daily")
@@ -399,35 +393,11 @@ def transactions_excel(date_from: str | None = None, date_to: str | None = None,
                        date_field: str = "entry",
                        db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Шүүсэн бичилтүүдийг Excel болгон багцалж татна (одоогийн шүүлтээр)."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
     sessions = (_txn_query(db, start, end, site_id, provider, car_type, status, date_field)
                 .order_by(ParkingSession.entry_time.desc()).limit(20000).all())
     rows = _txn_rows(db, sessions)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Бичилт"
-    headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа(мин)", "Машины төрөл",
-               "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)", "НӨАТ(₮)", "Нийт(₮)", "Төлсөн(₮)",
-               "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
-    ws.append(headers)
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in rows:
-        ws.append([r["plate_number"], r["site_name"],
-                   (r["entry_time"] or "").replace("T", " ")[:16],
-                   (r["exit_time"] or "").replace("T", " ")[:16], r["duration_minutes"],
-                   r["car_type"], r["discount_name"] or "", r["base_fee"], r["discount_amount"],
-                   r["vat_amount"], r["total_fee"], r["paid_amount"], r["provider"] or "",
-                   r["invoice_no"] or "",
-                   r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
-                   r["customer_tin"] or ""])
-    for col, w in zip(["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N",
-                       "O", "P", "Q", "R", "S"],
-                      (11, 14, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 26, 15, 14, 20, 12, 12)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "bichilt")
+    return _excel.transactions_excel(rows)
 
 
 @router.get("/by-payment")
@@ -467,7 +437,7 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
 
 
 def _shift_rows(db, start, end, site_id):
-    """Ээлжийн өдрөөр (өдрийг shift_change_hour-аар тасалж) төлбөрийг задлана.
+    """Ээлжийн өдөрөөр (өдрийг shift_change_hour-аар тасалж) төлбөрийг задлана.
     Ээлжийн өдөр D = [D + Hц, D+1 + Hц). Өдөрөөртэй ижил бүтэц, зөвхөн зааг цаг өөр."""
     from ..config import settings
     h = settings.shift_change_hour
@@ -522,19 +492,37 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
     start, end = _range(date_from, date_to)
     setts = {s.date: s for s in db.query(DailySettlement).filter(
         DailySettlement.site_id == site_id).all()}
+    days = _day_list(start, end)
+    # Өдөр бүр 3-4 query биш — бүх хугацааг ЛОКАЛ өдрөөр бүлэглэсэн 3 query
+    pay_map, debt_map, workers_map = {}, {}, {}
+    if days:
+        lo, hi = days[0], days[-1] + timedelta(days=1)
+        pay_day = func.date(Payment.paid_at + TZ)
+        for d, provider, src, amt in (
+                db.query(pay_day, Payment.provider, Payment.source,
+                         func.coalesce(func.sum(Payment.amount), 0))
+                .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi,
+                        ParkingSession.site_id == site_id)
+                .group_by(pay_day, Payment.provider, Payment.source).all()):
+            pay_map.setdefault(str(d), []).append((provider, src, amt))
+        comp_day = func.date(Compensation.created_at + TZ)
+        debt_map = {str(d): float(a) for d, a in
+                    db.query(comp_day, func.coalesce(func.sum(Compensation.amount), 0))
+                    .filter(Compensation.site_id == site_id, Compensation.created_at >= lo,
+                            Compensation.created_at < hi).group_by(comp_day).all()}
+        for sh in db.query(CashierShift).filter(CashierShift.site_id == site_id,
+                                                CashierShift.opened_at >= lo,
+                                                CashierShift.opened_at < hi).all():
+            if sh.user:
+                workers_map.setdefault((sh.opened_at + TZ).strftime("%Y-%m-%d"), set()).add(
+                    sh.user.full_name or sh.user.username)
     out = []
-    day = _local_midnight_utc(start)
-    while day < end:
-        nxt = day + timedelta(days=1)
+    for day in days:
         ds = (day + TZ).strftime("%Y-%m-%d")
         # Төлбөрийг provider+source-оор
-        rows = (db.query(Payment.provider, Payment.source, func.coalesce(func.sum(Payment.amount), 0))
-                .join(ParkingSession, Payment.session_id == ParkingSession.id)
-                .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt,
-                        ParkingSession.site_id == site_id)
-                .group_by(Payment.provider, Payment.source).all())
         card = pos_qpay = qr_qpay = cash = 0.0
-        for prov, src, amt in rows:
+        for prov, src, amt in pay_map.get(ds, ()):
             amt = float(amt)
             if prov == "POS":
                 card += amt
@@ -547,16 +535,11 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
                 cash += amt
         st_total = card + pos_qpay + qr_qpay + cash
         # Тухайн өдөр үүссэн өр (нөхөн төлбөр)
-        debt = float(db.query(func.coalesce(func.sum(Compensation.amount), 0)).filter(
-            Compensation.site_id == site_id, Compensation.created_at >= day,
-            Compensation.created_at < nxt).scalar() or 0)
+        debt = debt_map.get(ds, 0.0)
         # Ажилласан ажилтнууд (тухайн өдөр ээлж нээсэн)
-        workers = sorted({(sh.user.full_name or sh.user.username) for sh in db.query(CashierShift).filter(
-            CashierShift.site_id == site_id, CashierShift.opened_at >= day,
-            CashierShift.opened_at < nxt).all() if sh.user})
+        workers = sorted(workers_map.get(ds, set()))
         st = setts.get(ds)
         if st_total <= 0 and debt <= 0 and not st:
-            day = nxt
             continue
         confirmed_cash = float(st.confirmed_cash) if st else 0.0
         # Карт/QPay электрон баталгаажсан = систем; зөвхөн бэлэн санхүү баталгаажуулна
@@ -568,7 +551,6 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
                     "status": st.status if st else "OPEN", "note": (st.note if st else "") or "",
                     "closed_by": st.closed_by if st else None,
                     "closed_at": st.closed_at.isoformat() if st and st.closed_at else None})
-        day = nxt
     out.reverse()
     return {"rows": out}
 
@@ -605,32 +587,8 @@ def settlement_upsert(body: dict, db: Session = Depends(get_db), user: User = De
 def settlement_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
                      db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Санхүүгийн тооцооны Excel."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     data = settlement(site_id, date_from, date_to, db, user)
-    wb = Workbook(); ws = wb.active; ws.title = "Мөнгөн тооцоо"
-    ws.append(["Огноо", "pos-Карт", "pos-QPay", "QR-QPay", "Бэлэн", "Систем нийт",
-               "Баталгаа бэлэн", "Баталгаа нийт", "Зөрүү", "Өр (үүссэн)", "Ажилтан", "Төлөв", "Хаасан"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in data["rows"]:
-        ws.append([r["date"], r["card"], r["pos_qpay"], r["qr_qpay"], r["cash"], r["system_total"],
-                   r["confirmed_cash"], r["confirmed_total"], r["difference"], r["debt"],
-                   ", ".join(r["workers"]), "Хаагдсан" if r["status"] == "CLOSED" else "Нээлттэй",
-                   r["closed_by"] or ""])
-    for col, w in zip("ABCDEFGHIJKLM", (12, 11, 11, 11, 11, 12, 13, 13, 12, 12, 20, 11, 14)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "monggon_tootsoo")
-
-
-def _excel_response(wb, prefix: str):
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    fname = f"{prefix}_{datetime.utcnow():%Y%m%d_%H%M}.xlsx"
-    return StreamingResponse(
-        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={fname}"})
+    return _excel.settlement_excel(data["rows"])
 
 
 @router.get("/daily/excel")
@@ -640,109 +598,41 @@ def daily_excel(date_from: str | None = None, date_to: str | None = None,
     """Өдөр өдрөөр задарсан тайлангийн Excel."""
     start, end = _range(date_from, date_to)
     out, tot = _daily_rows(db, start, end, site_id)
-    rows = [[r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
-             r["pos_amount"], r["paid_amount"]] for r in out]
-    total_row = ["НИЙТ", tot["entered"], tot["exited"], tot["cash_amount"], tot["qpay_amount"],
-                 tot["pos_amount"], tot["paid_amount"]]
-    return _xlsx("daily", "Өдрийн тайлан",
-                 ["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"],
-                 rows, widths=(14, 10, 10, 14, 14, 14, 16), total_row=total_row)
+    return _excel.daily_excel(out, tot)
 
 
 @router.get("/by-shift/excel")
 def by_shift_excel(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                    db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Ээлжээр тайлангийн Excel."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
     rows = _shift_rows(db, start, end, site_id)
-    wb = Workbook(); ws = wb.active; ws.title = "Ээлжээр"
-    ws.append(["Ээлжийн өдөр", "Зааг", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт (₮)"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in rows:
-        ws.append([r["date"], r["window"], r["entered"], r["exited"],
-                   r["cash_amount"], r["qpay_amount"], r["pos_amount"], r["paid_amount"]])
-    for col, w in zip("ABCDEFGH", (14, 14, 9, 9, 13, 13, 13, 14)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "eeljeer")
+    return _excel.by_shift_excel(rows)
 
 
 @router.get("/monthly/excel")
 def monthly_excel(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                   db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Сараар тайлангийн Excel (төлбөрийн хэрэгслээр)."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
     data = monthly_report(date_from, date_to, site_id, db, user)
-    wb = Workbook()
-    # Sheet 1 — сарын нэгтгэл
-    ws = wb.active
-    ws.title = "Сарын нэгтгэл"
-    ws.append(["Сар", "Гүйлгээ", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in data["rows"]:
-        ws.append([r["month"], r["count"], r["cash"], r["qpay"], r["pos"], r["total"]])
-    t = data["totals"]
-    ws.append(["НИЙТ", t["count"], t["cash"], t["qpay"], t["pos"], t["total"]])
-    for c in ws[ws.max_row]:
-        c.font = Font(bold=True)
-    for col, w in zip("ABCDEF", (12, 10, 14, 14, 14, 16)):
-        ws.column_dimensions[col].width = w
-    # Sheet 2 — доторх өдрийн задаргаа (нэгтгэлийн дэлгэрэнгүй)
-    ws2 = wb.create_sheet("Өдрөөр задаргаа")
-    ws2.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
-    for c in ws2[1]:
-        c.font = Font(bold=True)
-    out2, _ = _daily_rows(db, start, end, site_id)
-    for r in out2:
-        ws2.append([r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
-                    r["pos_amount"], r["paid_amount"]])
-    for col, w in zip("ABCDEFG", (12, 10, 10, 14, 14, 14, 16)):
-        ws2.column_dimensions[col].width = w
-    return _excel_response(wb, "sariin_negtgel")
+    daily, _ = _daily_rows(db, start, end, site_id)
+    return _excel.monthly_excel(data, daily)
 
 
 @router.get("/by-payment/excel")
 def by_payment_excel(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
                      db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Төлбөрийн төрлөөр тайлангийн Excel."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     data = by_payment(date_from, date_to, site_id, db, user)
     start, end = _range(date_from, date_to)
-    wb = Workbook(); ws = wb.active; ws.title = "Төлбөрийн төрлөөр"
-    # Хамрах хугацаа (хэднээс хэд хүртэлх өдрүүд)
-    period = ws.cell(row=1, column=1,
-                     value=f"Хугацаа: {start:%Y-%m-%d} – {(end - timedelta(days=1)):%Y-%m-%d}  "
-                           f"({(end - start).days} хоног)")
-    period.font = Font(bold=True)
-    ws.append([])
-    ws.append(["Төлбөрийн хэрэгсэл", "Гүйлгээ", "Дүн (₮)"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for r in data["by_method"]:
-        ws.append([r["key"], r["count"], r["amount"]])
-    ws.append([])
-    ws.append(["Машины төрөл", "Тоо", "Дүн (₮)"])
-    for c in ws[ws.max_row]:
-        c.font = Font(bold=True)
-    for r in data["by_car"]:
-        ws.append([r["key"], r["count"], r["amount"]])
-    for col, w in zip("ABC", (22, 12, 14)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "tolboriin_torol")
+    return _excel.by_payment_excel(data, start, end)
 
 
 @router.get("/site-sessions/excel")
 def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
                         db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Нэг зогсоолын session-уудын дэлгэрэнгүй Excel (тайлангийн мөрийн 'Татах' үйлдэл)."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     start, end = _range(date_from, date_to)
     site = db.get(ParkingSite, site_id)
     if not site:
@@ -751,70 +641,19 @@ def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str
             .filter(ParkingSession.site_id == site_id,
                     ParkingSession.entry_time >= start, ParkingSession.entry_time < end)
             .order_by(ParkingSession.entry_time.desc()).limit(20000).all())
-    STATUS_MN = {"OPEN": "Зогсож байна", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
-                 "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
-                 "MANUAL_CLOSED": "Гараар хаасан"}
-    wb = Workbook()
-    ws = wb.active
-    ws.title = site.name[:30]
-    ws.append(["Дугаар", "Орсон", "Гарсан", "Хугацаа (мин)", "Дүн (₮)", "НӨАТ (₮)",
-               "Хөнгөлөлт (₮)", "Гэрээт", "Төлөв"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    for s in rows:
-        ws.append([
-            s.plate_number,
-            (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
-            (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
-            s.duration_minutes or "",
-            float(s.total_fee or 0), float(s.vat_amount or 0), float(s.discount_amount or 0),
-            "Тийм" if s.is_registered else "",
-            STATUS_MN.get(s.status, s.status),
-        ])
-    for col, w in zip("ABCDEFGHI", (12, 18, 18, 14, 12, 10, 14, 8, 18)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, f"sessions_{site.site_code}")
+    return _excel.site_sessions_excel(site, rows)
 
 
 @router.get("/shifts/excel")
 def shifts_excel(date_from: str | None = None, date_to: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Касс хаалтын тайлангийн Excel."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
-
-    from ..models import CashierShift, Payment
-    from sqlalchemy import func as f
+    from ..models import CashierShift
     start, end = _range(date_from, date_to)
     shifts = (db.query(CashierShift).filter(CashierShift.opened_at >= start,
                                             CashierShift.opened_at < end)
               .order_by(CashierShift.opened_at.desc()).limit(2000).all())
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Касс хаалтын тайлан"
-    ws.append(["Кассчин", "Төлөв", "Нээсэн цаг", "Хаасан цаг", "Эхэлсэн дүн (₮)",
-               "Гүйлгээний тоо", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    grand = 0.0
-    for s in shifts:
-        totals = dict(db.query(Payment.provider, f.coalesce(f.sum(Payment.amount), 0))
-                      .filter(Payment.shift_id == s.id, Payment.status == "PAID")
-                      .group_by(Payment.provider).all())
-        count = db.query(Payment).filter(Payment.shift_id == s.id, Payment.status == "PAID").count()
-        cash, qpay_amt, pos = (float(totals.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        total = cash + qpay_amt + pos
-        grand += total
-        ws.append([s.user.username if s.user else "", "Нээлттэй" if s.status == "OPEN" else "Хаагдсан",
-                   (s.opened_at + TZ).strftime("%Y-%m-%d %H:%M"),
-                   (s.closed_at + TZ).strftime("%Y-%m-%d %H:%M") if s.closed_at else "",
-                   float(s.opening_amount or 0), count, cash, qpay_amt, pos, total])
-    ws.append(["НИЙТ", "", "", "", "", "", "", "", "", grand])
-    ws[f"A{ws.max_row}"].font = Font(bold=True)
-    ws[f"J{ws.max_row}"].font = Font(bold=True)
-    for col, w in zip("ABCDEFGHIJ", (14, 10, 18, 18, 14, 14, 12, 12, 12, 16)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "cashier_shifts")
+    return _excel.shifts_excel(db, shifts)
 
 
 @router.get("/vat-info")
@@ -876,28 +715,13 @@ def audit_logs(username: str | None = None, action: str | None = None, limit: in
 def audit_logs_excel(username: str | None = None, action: str | None = None,
                      db: Session = Depends(get_db), user: User = Depends(require("logs"))):
     """Үйлдлийн логийг Excel болгон татна (ADMIN/FINANCE)."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
     q = db.query(AuditLog)
     if username:
         q = q.filter(AuditLog.username == username)
     if action:
         q = q.filter(AuditLog.action == action)
     rows = q.order_by(AuditLog.created_at.desc()).limit(10000).all()
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Үйлдлийн лог"
-    ws.append(["Огноо", "Хэрэглэгч", "Үйлдэл", "Объект", "Объект ID", "Дэлгэрэнгүй"])
-    for c in ws[1]:
-        c.font = Font(bold=True)
-    import json as _json
-    for a in rows:
-        ws.append([(a.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S"), a.username, a.action,
-                   a.entity or "", a.entity_id or "",
-                   _json.dumps(a.detail, ensure_ascii=False) if a.detail else ""])
-    for col, w in zip("ABCDEF", (20, 14, 18, 12, 38, 50)):
-        ws.column_dimensions[col].width = w
-    return _excel_response(wb, "uildliin_log")
+    return _excel.audit_logs_excel(rows)
 
 
 @router.get("/lpr-events")
@@ -955,14 +779,7 @@ def lpr_events_excel(site_id: str | None = None, plate: str | None = None,
     dev_ids = {e.device_id for e in events if e.device_id}
     names = ({d.id: d.name for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()}
              if dev_ids else {})
-    rows = [[(e.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S"),
-             "Орох" if e.lane_dir == "entry" else "Гарах",
-             e.plate_number, names.get(e.device_id, ""),
-             round(e.confidence or 0), "Тийм" if e.accepted else "Үгүй",
-             e.reject_reason or ""] for e in events]
-    return _xlsx("kamer_unshilt", "Камерын уншилт",
-                 ["Огноо", "Чиглэл", "Дугаар", "Камер", "Итгэлцүүр %", "Хүлээн авсан", "Шалтгаан"],
-                 rows, widths=[20, 8, 12, 18, 12, 14, 30])
+    return _excel.lpr_events_excel(events, names)
 
 
 # Хаалт нээх командын эх сурвалжийн монгол нэр — "хэн/юугаар нээгдсэн"-ийг харуулна
@@ -1013,11 +830,4 @@ def barrier_commands_excel(site_id: str | None = None, plate: str | None = None,
                            source: str | None = None, limit: int = 5000,
                            db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
     cmds, plates, dev = _barrier_command_rows(db, site_id, plate, source, limit)
-    rows = [[(c.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S") if c.created_at else "",
-             plates.get(c.session_id, ""), c.command,
-             _CMD_SRC_MN.get(c.command_source, c.command_source), c.status,
-             dev.get(c.device_id, ""), c.issued_by or "", (c.response_text or "")[:120]]
-            for c in cmds]
-    return _xlsx("haalt_komand", "Хаалтны команд",
-                 ["Огноо", "Дугаар", "Команд", "Эх сурвалж", "Төлөв", "Хаалт", "Оператор", "Хариу"],
-                 rows, widths=[20, 12, 10, 22, 10, 16, 14, 30])
+    return _excel.barrier_commands_excel(cmds, plates, dev, _CMD_SRC_MN)

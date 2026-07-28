@@ -29,7 +29,9 @@ class ConnectionManager:
         targets = list(self.connections.get(site_id, set()) | self.connections.get("*", set()))
         for ws in targets:
             try:
-                await ws.send_text(message)
+                # Гацсан (хагас үхсэн TCP) клиент broadcast-ыг ТҮГЖИЖ орох/гарах
+                # боловсруулалтыг зогсоохгүй — 2 сек хүлээгээд салгана
+                await asyncio.wait_for(ws.send_text(message), timeout=2.0)
             except Exception:
                 for group in self.connections.values():
                     group.discard(ws)
@@ -38,10 +40,21 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-def broadcast_sync(site_id: str, event_type: str, data: dict):
-    """Sync код (router) дотроос дуудахад event loop руу даалгана."""
+def notify(site_id: str, event_type: str, data: dict):
+    """Мэдэгдлийг ХҮЛЭЭЛГЭЛГҮЙ илгээнэ (fire-and-forget).
+
+    Хаалт нээх зам дээр ашиглана: WS мэдэгдэл нь зөвхөн дэлгэц шинэчлэх зорилготой
+    боловч `await broadcast(...)` нь удаан/хагас үхсэн клиент бүрд 2 сек хүртэл
+    хүлээдэг — 5 клиент гацвал хаалт 10 секунд оройтоно. Мэдэгдэл ард нь явж,
+    хаалтны команд саадгүй эхэлнэ."""
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(manager.broadcast(site_id, event_type, data))
     except RuntimeError:
-        pass
+        return
+    task = loop.create_task(manager.broadcast(site_id, event_type, data))
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+
+def broadcast_sync(site_id: str, event_type: str, data: dict):
+    """Sync код (router) дотроос дуудахад event loop руу даалгана."""
+    notify(site_id, event_type, data)

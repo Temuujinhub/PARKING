@@ -8,6 +8,7 @@
    Startup бүрт + камер шинээр бүртгэх бүрт ажиллана — админаас нэмэлт ажил шаардахгүй.
 2. fetch_camera_model() — камерын марк/загварыг өөрөөс нь (magicBox CGI) татна.
 """
+import logging
 import secrets
 
 import httpx
@@ -16,6 +17,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import Device
 from .device_auth import camera_credentials
+
+log = logging.getLogger("parking.device_auto")
 
 
 def fetch_camera_model(ip: str, device=None) -> str | None:
@@ -64,5 +67,5 @@ def ensure_lane_barriers(db: Session) -> dict:
         created += 1
     if restored or created:
         db.commit()
-        print(f"[device_auto] хаалт баталгаажуулалт: {restored} сэргээв, {created} шинээр үүсгэв")
+        log.info(f"хаалт баталгаажуулалт: {restored} сэргээв, {created} шинээр үүсгэв")
     return {"restored": restored, "created": created}

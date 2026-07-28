@@ -9,6 +9,7 @@
 session хаагдсаны дараа DetachedInstanceError өгнө.
 """
 from ..config import settings
+from ..secretbox import decrypt_secret
 
 Creds = tuple[str, str]
 
@@ -16,7 +17,7 @@ Creds = tuple[str, str]
 def camera_credentials(device=None) -> Creds:
     """Камерын CGI/RPC нэвтрэлт: төхөөрөмжийнх → .env глобал."""
     user = (getattr(device, "username", None) or "").strip()
-    pwd = (getattr(device, "password", None) or "").strip()
+    pwd = decrypt_secret((getattr(device, "password", None) or "").strip())
     return (user or settings.camera_username, pwd or settings.camera_password)
 
 
@@ -26,6 +27,6 @@ def barrier_credentials(device=None) -> Creds:
     Dahua ANPR кит дээр хаалт нь камерынхаа релеэр ажилладаг тул ихэвчлэн
     камерын нэвтрэлттэй ижил."""
     user = (getattr(device, "username", None) or "").strip()
-    pwd = (getattr(device, "password", None) or "").strip()
+    pwd = decrypt_secret((getattr(device, "password", None) or "").strip())
     return (user or settings.barrier_username or settings.camera_username,
             pwd or settings.barrier_password or settings.camera_password)

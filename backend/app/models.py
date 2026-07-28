@@ -272,6 +272,9 @@ class BarrierCommand(Base):
     issued_by = Column(String(60), nullable=True)        # хэрэглэгчийн username (manual үед)
     status = Column(String(30), nullable=False, default="PENDING")  # PENDING, SUCCESS, FAILED
     response_text = Column(Text, default="")
+    # Команд илгээж хариу авах хүртэлх хугацаа (мс) — «хаалт удаан нээгдэж
+    # байна» гомдлыг тоогоор шалгах, удаан төхөөрөмжийг ялгах
+    duration_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     executed_at = Column(DateTime, nullable=True)
 

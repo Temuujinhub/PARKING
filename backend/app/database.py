@@ -6,15 +6,20 @@ from .config import settings
 # Backend нь async event loop дотроос sync psycopg2 ашигладаг тул нэг query
 # түгжээнд хязгааргүй хүлээвэл бүх систем царцана. Тиймээс DB талд хатуу дээд
 # хугацаанууд: query 30с, lock хүлээлт 10с, идэвхгүй transaction 5мин дотор тасарна.
+# connect_timeout/options нь Postgres-ийн л параметр — өөр DB (тест дэх SQLite) дээр
+# create_engine унадаг тул зөвхөн postgres URL үед өгнө. Postgres-ийн зан төлөв ӨӨРЧЛӨГДӨӨГҮЙ.
+_connect_args = {}
+if settings.database_url.startswith("postgres"):
+    _connect_args = {
+        "connect_timeout": 10,
+        "options": "-c statement_timeout=30000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=300000",
+    }
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
-    connect_args={
-        "connect_timeout": 10,
-        "options": "-c statement_timeout=30000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=300000",
-    },
+    connect_args=_connect_args,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

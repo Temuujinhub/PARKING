@@ -21,8 +21,12 @@ cd "$APP_DIR"
 
 echo "==> 1/7 DB backup (аюулгүй байдлын үүднээс)"
 BACKUP="/root/parking-backup-$(date +%Y%m%d-%H%M%S).sql"
+umask 077                       # backup дотор нууц үг байж болзошгүй — зөвхөн root уншина
 sudo -u postgres pg_dump parking > "$BACKUP"
+chmod 600 "$BACKUP"
 echo "    хадгалав: $BACKUP"
+# 14 хоногоос хуучин backup-уудыг цэвэрлэнэ (диск дүүрэхээс сэргийлнэ)
+find /root -maxdepth 1 -name 'parking-backup-*.sql' -mtime +14 -delete 2>/dev/null || true
 
 echo "==> 2/7 Код татах"
 if [ -n "$BUNDLE" ]; then

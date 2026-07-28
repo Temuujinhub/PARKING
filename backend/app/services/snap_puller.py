@@ -18,6 +18,7 @@ web клиент бүгдийг RPC2 + WebSocket-оор хийдэг (docs/barri
 """
 import asyncio
 import json
+import logging
 import re
 import sys
 import time
@@ -30,6 +31,8 @@ from .device_auth import camera_credentials
 from ..database import SessionLocal
 from ..models import Device, ParkingSession
 from .barrier import DahuaRpc
+
+log = logging.getLogger("parking.snap_puller")
 
 _tasks: dict[str, asyncio.Task] = {}
 
@@ -96,7 +99,8 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
     from ..session_logic import normalize_plate
     from .snapshot import _save
     plate_n = normalize_plate(plate) or plate.strip().upper()
-    rel = _save(data, plate_n, lane_dir)
+    # Дискний бичилт thread дээр — event loop блоклохгүй (хаалт нээх хугацаанд нөлөөлнө)
+    rel = await asyncio.to_thread(_save, data, plate_n, lane_dir)
     if not rel:
         return
     for attempt in range(5):
@@ -116,14 +120,14 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                 else:
                     s.entry_snapshot = rel
                 db.commit()
-                print(f"[snap_pull] {plate_n} {lane_dir}: event зураг OK ({len(data)}b) → {rel}")
+                log.info(f"{plate_n} {lane_dir}: event зураг OK ({len(data)}b) → {rel}")
                 return
         except Exception as e:
-            print(f"[snap_pull] {plate_n}: session холбох алдаа: {e}")
+            log.error(f"{plate_n}: session холбох алдаа: {e}")
         finally:
             db.close()
         await asyncio.sleep(1.5)
-    print(f"[snap_pull] {plate_n} {lane_dir}: session олдсонгүй, файл {rel} хадгалагдав")
+    log.warning(f"{plate_n} {lane_dir}: session олдсонгүй, файл {rel} хадгалагдав")
 
 
 # ─── Лайв WS стрим ───────────────────────────────────────────────────────────
@@ -195,8 +199,8 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
                     err = json.dumps((resp or {}).get("error") or resp or "хариугүй",
                                      ensure_ascii=False)[:150]
                     raise AttachRejected(err)
-                print(f"[snap_pull] {ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK, "
-                      f"filter={flt.get('Flags')}/{flt.get('Events')})")
+                log.info(f"{ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK, "
+                         f"filter={flt.get('Flags')}/{flt.get('Events')})")
 
                 # Дугааргүй notification-д хамгийн сүүлийн дугаарыг оноох (event-ийн
                 # зургууд хэдэн секундын дотор цувж ирдэг)
@@ -232,8 +236,8 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
                     m = payload.get("method")
                     if m and m not in seen_methods:
                         seen_methods.add(m)
-                        print(f"[snap_pull] {ip}: notification «{m}» ирж эхлэв "
-                              f"(bin={len(binary)}b, эхлэл={binary[:4].hex() if binary else '-'})")
+                        log.info(f"{ip}: notification «{m}» ирж эхлэв "
+                                 f"(bin={len(binary)}b, эхлэл={binary[:4].hex() if binary else '-'})")
                     if m != "client.notifySnapFile":
                         continue
                     # Support:["Ack"] амласан тул файл бүрийг хүлээж авснаа мэдэгдэнэ —
@@ -288,14 +292,14 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
         try:
             await _ws_session(ip, on_picture, flt, creds=creds)
         except AttachRejected as e:
-            print(f"[snap_pull] {ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
-                  f"дараагийн хувилбар 10с дараа")
+            log.warning(f"{ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
+                        f"дараагийн хувилбар 10с дараа")
             vi += 1
             await flush_stale(force=True)
             await asyncio.sleep(10)
             continue
         except Exception as e:
-            print(f"[snap_pull] {ip}: WS тасарлаа ({type(e).__name__}: {str(e)[:120]}) — 15с дараа дахин")
+            log.warning(f"{ip}: WS тасарлаа ({type(e).__name__}: {str(e)[:120]}) — 15с дараа дахин")
         await flush_stale(force=True)
         await asyncio.sleep(15)
 
@@ -304,7 +308,7 @@ async def supervisor():
     """Идэвхтэй камер бүрд зургийн WS task ажиллуулна (cgi_poller-тай ижил хэв маяг)."""
     if not settings.snap_pull:
         return
-    print("[snap_pull] идэвхжлээ — камеруудаас event зураг татаж эхэлж байна (WS/RPC2)")
+    log.info("идэвхжлээ — камеруудаас event зураг татаж эхэлж байна (WS/RPC2)")
     while True:
         db = SessionLocal()
         try:
@@ -319,13 +323,13 @@ async def supervisor():
                     _tasks[c.id] = asyncio.create_task(
                         _pull_one(c.id, c.ip_address, c.lane_dir or "entry",
                                   camera_credentials(c)))
-                    print(f"[snap_pull] {c.name} ({c.ip_address}) зургийн стрим эхэллээ")
+                    log.info(f"{c.name} ({c.ip_address}) зургийн стрим эхэллээ")
             for did in list(_tasks):
                 if did not in active:
                     _tasks[did].cancel()
                     del _tasks[did]
         except Exception as e:
-            print(f"[snap_pull] supervisor алдаа: {e}")
+            log.error(f"supervisor алдаа: {e}")
         finally:
             db.close()
         await asyncio.sleep(60)
@@ -526,8 +530,8 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
                             except Exception as e:
                                 data, note = None, f"{type(e).__name__}: {str(e)[:60]}"
                             if data:
-                                print(f"[snap_pull] {ip}: нөхөн таталт OK — "
-                                      f"{name} (off{off:+d}/±{w}s, {len(data)}b)")
+                                log.info(f"{ip}: нөхөн таталт OK — "
+                                         f"{name} (off{off:+d}/±{w}s, {len(data)}b)")
                                 return data, ""
                             diag.append(f"{name}[off{off:+d}/±{w}s]: {note}")
             finally:
@@ -540,7 +544,7 @@ async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
         from .snapshot import _fetch_from_camera
         live = await _fetch_from_camera(ip, creds)
         if live:
-            print(f"[snap_pull] {ip}: нөхөн таталт — амьд кадраар нөхөв ({len(live)}b)")
+            log.info(f"{ip}: нөхөн таталт — амьд кадраар нөхөв ({len(live)}b)")
             return live, ""
         diag.append("snapshot.cgi: амьд кадр татагдсангүй")
     except Exception as e:

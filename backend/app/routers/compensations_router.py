@@ -7,6 +7,7 @@
   3. Хориг: нэг дугаар 3+ ТӨЛӨГДӨӨГҮЙ нэхэмжлэлтэй бол автоматаар хар жагсаалтад орно
   4. Касс/шалгах дэлгэцэд нөхөн төлбөртэй машин улаанаар тэмдэглэгдэнэ
 """
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,8 @@ from ..models import AuditLog, BlacklistEntry, Compensation, ParkingSession, Use
 from ..serializers import to_dict
 from ..session_logic import session_fee_info
 from ..ws import manager
+
+log = logging.getLogger("parking.compensations")
 
 router = APIRouter(prefix="/api/compensations", tags=["compensations"])
 
@@ -72,18 +75,25 @@ def list_compensations(status: str | None = None, plate: str | None = None,
     def _bucket(days):
         return "0-7" if days <= 7 else "8-30" if days <= 30 else "31-90" if days <= 90 else "90+"
 
+    # Дугаар бүрийн PENDING тоог нэг query-ээр (мөр бүрт COUNT хийхгүй)
+    from sqlalchemy import func
+    plates = {c.plate_number for c in rows}
+    pending_by_plate: dict[str, int] = dict(
+        db.query(Compensation.plate_number, func.count())
+        .filter(Compensation.plate_number.in_(plates), Compensation.status == "PENDING")
+        .group_by(Compensation.plate_number).all()) if plates else {}
     out_rows = []
     for c in rows:
         d = _age(c)
         out_rows.append(to_dict(c, extra={"site_name": c.site.name if c.site else None,
                                           "days_old": d, "age_bucket": _bucket(d),
-                                          "pending_count": pending_count(db, c.plate_number)}))
+                                          "pending_count": pending_by_plate.get(c.plate_number, 0)}))
     # Нийлбэрүүд: төлөгдөөгүй нийт + настжуулалт (aging) + цугларсан
     pq = db.query(Compensation).filter(Compensation.status == "PENDING")
     paidq = db.query(Compensation).filter(Compensation.status == "PAID")
-    if osid:
-        pq = pq.filter(Compensation.site_id == osid)
-        paidq = paidq.filter(Compensation.site_id == osid)
+    if allowed:
+        pq = pq.filter(Compensation.site_id.in_(allowed))
+        paidq = paidq.filter(Compensation.site_id.in_(allowed))
     pending = pq.all()
     aging = {"0-7": 0.0, "8-30": 0.0, "31-90": 0.0, "90+": 0.0}
     for c in pending:
@@ -123,7 +133,7 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
                                                 customer_tin=tin)
         ebarimt.cache_qr(comp.id, receipt.get("qrData"))
     except Exception as e:  # noqa: BLE001
-        print(f"[compensation ebarimt FAILED] {comp_id}: {e}")
+        log.error(f"нөхөн төлбөрийн e-Barimt амжилтгүй: {comp_id}: {e}")
     db.add(AuditLog(username=user.username, action="COMPENSATION_PAID", entity="compensation",
                     entity_id=comp_id,
                     detail={"plate": comp.plate_number, "amount": amount, "method": method}))

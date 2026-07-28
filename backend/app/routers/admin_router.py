@@ -14,6 +14,8 @@ from ..models import (
     RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
 )
 from ..config import settings
+from .. import schemas
+from ..secretbox import encrypt_secret
 from ..serializers import SECRET_COLUMNS, site_pay_url, to_dict
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -98,12 +100,15 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
     if allowed:
         q = q.filter(ParkingSite.id.in_(allowed))
     sites = q.order_by(ParkingSite.created_at).all()
+    # Зогсоол бүрийн эзэлсэн тоог НЭГ query-ээр (site тус бүрт COUNT хийхгүй)
+    from sqlalchemy import func
+    occupied_by_site = dict(
+        db.query(ParkingSession.site_id, func.count())
+        .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+        .group_by(ParkingSession.site_id).all())
     out = []
     for s in sites:
-        occupied = db.query(ParkingSession).filter(
-            ParkingSession.site_id == s.id,
-            ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
-        ).count()
+        occupied = occupied_by_site.get(s.id, 0)
         out.append(to_dict(s, extra={
             "occupied": occupied,
             # capacity=0 → дүүргэлтгүй (хязгааргүй) зогсоол: сул тоо тооцохгүй
@@ -117,7 +122,8 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
 
 
 @router.post("/sites")
-def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+    body = payload.dump()
     if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"]).first():
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
@@ -126,6 +132,7 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code")
                           if k in body})
+    site.qpay_password = encrypt_secret(site.qpay_password)  # DB-д ил бичихгүй
     _check_district(site.qpay_district_code)
     db.add(site)
     db.flush()
@@ -135,8 +142,9 @@ def create_site(body: dict, db: Session = Depends(get_db), user: User = Depends(
 
 
 @router.put("/sites/{site_id}")
-def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
+def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends(get_db),
                 user: User = Depends(require("settings"))):
+    body = payload.dump()
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -149,6 +157,8 @@ def update_site(site_id: str, body: dict, db: Session = Depends(get_db),
             # Мөр талбарууд: хоосон → NULL (глобал .env тохиргоо руу уналт хийнэ)
             if isinstance(val, str) and k != "name":
                 val = val.strip() or None
+            if k == "qpay_password":
+                val = encrypt_secret(val)  # DB-д ил бичихгүй
             setattr(site, k, val)
     _check_district(site.qpay_district_code)
     _audit(db, user, "UPDATE", "site", site_id, body)
@@ -332,15 +342,19 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         q = q.filter(Device.site_id == site_id)
     # Онлайн = сүүлийн 3 минутад холбогдсон (heartbeat эсвэл LPR event)
     online_cutoff = datetime.utcnow() - timedelta(minutes=3)
+    devices = q.order_by(Device.created_at).all()
+    # Камер бүрийн сүүлд дугаар уншсан цагийг НЭГ query-ээр (төхөөрөмж тус бүрт MAX хийхгүй)
+    from sqlalchemy import func
+    cam_ids = [d.id for d in devices if d.device_type == "camera"]
+    last_plate_by_dev = dict(
+        db.query(LprEvent.device_id, func.max(LprEvent.created_at))
+        .filter(LprEvent.device_id.in_(cam_ids), LprEvent.accepted.is_(True))
+        .group_by(LprEvent.device_id).all()) if cam_ids else {}
     out = []
-    for d in q.order_by(Device.created_at).all():
+    for d in devices:
         online = bool(d.last_seen and d.last_seen >= online_cutoff)
         # Сүүлд дугаар уншсан цаг — "онлайн боловч танихаа больсон" гацааг илрүүлнэ
-        last_plate = None
-        if d.device_type == "camera":
-            from sqlalchemy import func
-            last_plate = db.query(func.max(LprEvent.created_at)).filter(
-                LprEvent.device_id == d.id, LprEvent.accepted.is_(True)).scalar()
+        last_plate = last_plate_by_dev.get(d.id) if d.device_type == "camera" else None
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
                                      "last_plate_at": last_plate.isoformat() if last_plate else None}))
@@ -348,11 +362,13 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
 
 
 @router.post("/devices")
-def create_device(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+    body = payload.dump()
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
                         "lane_no", "lane_dir", "auto_open", "username", "password")
                        if k in body})
+    device.password = encrypt_secret(device.password)  # DB-д ил бичихгүй
     device.device_key = f"{body.get('device_type','dev')}-{secrets.token_hex(8)}"
     if device.device_type == "camera" and device.ip_address and not device.model:
         # Загварыг камераас нь автоматаар татна (magicBox CGI, 4с timeout)
@@ -370,8 +386,9 @@ def create_device(body: dict, db: Session = Depends(get_db), user: User = Depend
 
 
 @router.put("/devices/{device_id}")
-def update_device(device_id: str, body: dict, db: Session = Depends(get_db),
+def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = Depends(get_db),
                   user: User = Depends(require("settings"))):
+    body = payload.dump()
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
@@ -382,6 +399,8 @@ def update_device(device_id: str, body: dict, db: Session = Depends(get_db),
             # Нэвтрэх мэдээллийг хоосноор илгээвэл цэвэрлэнэ (глобал .env руу уналт)
             if k in ("username", "password") and isinstance(val, str):
                 val = val.strip() or None
+            if k == "password":
+                val = encrypt_secret(val)  # DB-д ил бичихгүй
             setattr(device, k, val)
     _audit(db, user, "UPDATE", "device", device_id, body)
     db.commit()
@@ -434,7 +453,8 @@ def list_templates(db: Session = Depends(get_db), user: User = Depends(get_curre
 
 
 @router.post("/tariff-templates")
-def create_template(body: dict, db: Session = Depends(get_db), user: User = Depends(require("settings", "discounts"))):
+def create_template(payload: schemas.TariffTemplateCreate, db: Session = Depends(get_db), user: User = Depends(require("settings", "discounts"))):
+    body = payload.dump()
     t = TariffTemplate(
         name=body["name"],
         free_minutes=body.get("free_minutes", 0),
@@ -454,8 +474,9 @@ def create_template(body: dict, db: Session = Depends(get_db), user: User = Depe
 
 
 @router.put("/tariff-templates/{template_id}")
-def update_template(template_id: str, body: dict, db: Session = Depends(get_db),
+def update_template(template_id: str, payload: schemas.TariffTemplateUpdate, db: Session = Depends(get_db),
                     user: User = Depends(require("settings", "discounts"))):
+    body = payload.dump()
     t = db.get(TariffTemplate, template_id)
     if not t:
         raise HTTPException(404, "Загвар олдсонгүй")
@@ -537,16 +558,25 @@ def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(re
     return [{"company": c, "count": n} for c, n in rows]
 
 
+def _parse_dt(value: str, field: str) -> datetime:
+    """ISO огноог уншина — буруу формат 500 биш 400 өгнө."""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(400, f"{field}: огнооны формат буруу (ISO байх ёстой): {value!r}")
+
+
 @router.post("/drivers")
-def create_driver(body: dict, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
+def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
+    body = payload.dump()
     d = RegisteredDriver(
         plate_number=body["plate_number"].upper().replace(" ", ""),
         full_name=body.get("full_name", ""), phone=body.get("phone", ""),
         company=body.get("company", ""), note=body.get("note", ""),
         contract_type=body.get("contract_type", "MONTHLY"),
         site_id=body.get("site_id"), monthly_fee=body.get("monthly_fee", 0),
-        valid_from=datetime.fromisoformat(body["valid_from"]) if body.get("valid_from") else datetime.utcnow(),
-        valid_to=datetime.fromisoformat(body["valid_to"]),
+        valid_from=_parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow(),
+        valid_to=_parse_dt(body["valid_to"], "valid_to"),
     )
     db.add(d)
     db.flush()
@@ -556,8 +586,9 @@ def create_driver(body: dict, db: Session = Depends(get_db), user: User = Depend
 
 
 @router.put("/drivers/{driver_id}")
-def update_driver(driver_id: str, body: dict, db: Session = Depends(get_db),
+def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = Depends(get_db),
                   user: User = Depends(require("drivers"))):
+    body = payload.dump()
     d = db.get(RegisteredDriver, driver_id)
     if not d:
         raise HTTPException(404, "Жолооч олдсонгүй")
@@ -569,7 +600,7 @@ def update_driver(driver_id: str, body: dict, db: Session = Depends(get_db),
         d.plate_number = body["plate_number"].upper().replace(" ", "")
     for k in ("valid_from", "valid_to"):
         if body.get(k):
-            setattr(d, k, datetime.fromisoformat(body[k]))
+            setattr(d, k, _parse_dt(body[k], k))
     _audit(db, user, "UPDATE", "driver", driver_id, body)
     db.commit()
     return to_dict(d)
@@ -597,7 +628,10 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
         raise HTTPException(400, "Файл хэт том (10MB дээш)")
 
     try:
-        rows, warnings = parse_workbook(data)
+        # openpyxl parse нь sync — thread дээр ажиллуулж event loop-ыг блоклохгүй
+        # (том файл дээр хэдэн секунд үргэлжилж хаалт/LPR-ийг царцаадаг байсан)
+        import asyncio as _aio
+        rows, warnings = await _aio.to_thread(parse_workbook, data)
     except Exception as e:  # noqa: BLE001 — эвдэрсэн файлд ойлгомжтой хариу
         raise HTTPException(400, f"Excel уншиж чадсангүй: {type(e).__name__}: {e}") from e
     if not rows:
@@ -660,7 +694,8 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_role(
 
 
 @router.post("/users")
-def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    body = payload.dump()
     if db.query(User).filter(User.username == body["username"]).first():
         raise HTTPException(400, "Нэвтрэх нэр давхардаж байна")
     # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
@@ -680,8 +715,9 @@ def create_user(body: dict, db: Session = Depends(get_db), user: User = Depends(
 
 
 @router.put("/users/{user_id}")
-def update_user(user_id: str, body: dict, db: Session = Depends(get_db),
+def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends(get_db),
                 user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    body = payload.dump()
     u = db.get(User, user_id)
     if not u:
         raise HTTPException(404, "Хэрэглэгч олдсонгүй")

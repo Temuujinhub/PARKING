@@ -131,7 +131,9 @@ def audit_sessions(site_id: str | None = None,
         ex = last_exit.get(s.plate_number)
         exit_read = bool(ex and s.entry_time and ex > s.entry_time)
         invalid = not is_valid_plate(s.plate_number)
-        stale = bool(cfg.auto_close_hours and hours >= cfg.auto_close_hours)
+        limit_h = (s.site.auto_close_hours if s.site and s.site.auto_close_hours is not None
+                   else settings.auto_close_hours)
+        stale = bool(limit_h and hours >= limit_h)
         flags = ([f for f, on in (("exit_read", exit_read), ("invalid_plate", invalid),
                                   ("stale", stale)) if on])
         d = _session_out(db, s, with_fee=True)

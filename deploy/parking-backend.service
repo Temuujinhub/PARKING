@@ -12,6 +12,10 @@ Restart=always
 RestartSec=3
 TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
+# Hardening (root хэвээр ч халдлагын гадаргууг багасгана; бүрэн de-root
+# төлөвлөгөө: docs/ARCHITECTURE_SECURITY.md)
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

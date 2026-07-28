@@ -9,6 +9,7 @@ HTTP холболт нээж, камерын дугаар таних event-ий�
 """
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime
 
@@ -19,6 +20,8 @@ from .device_auth import camera_credentials
 from ..database import SessionLocal
 from ..models import Device, LprEvent
 from ..session_logic import handle_entry, handle_exit, normalize_plate
+
+log = logging.getLogger("parking.cgi_poller")
 
 _tasks: dict[str, asyncio.Task] = {}
 
@@ -111,7 +114,7 @@ async def _process_event(device_id: str, data: dict):
         else:
             await handle_entry(db, device, plate, conf, data)
     except Exception as e:
-        print(f"[cgi_poll] event боловсруулах алдаа: {e}")
+        log.error(f"event боловсруулах алдаа: {e}")
     finally:
         db.close()
 
@@ -146,16 +149,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             why = ("нууц үг буруу" if resp.status_code == 401 else
                                    "камер энэ IP-г ТҮР ХОРИГЛОСОН (олон удаа буруу "
                                    "нэвтрэлт эсвэл холболтын хязгаар дүүрсэн)")
-                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — {why}. "
-                                  f"Түгжээг уртасгахгүйн тулд "
-                                  f"{settings.camera_auth_retry_sec}с хүлээнэ.")
+                            log.error(f"{ip}: HTTP {resp.status_code} — {why}. "
+                                      f"Түгжээг уртасгахгүйн тулд "
+                                      f"{settings.camera_auth_retry_sec}с хүлээнэ.")
                             await asyncio.sleep(settings.camera_auth_retry_sec)
                         else:
-                            print(f"[cgi_poll] {ip}: HTTP {resp.status_code} — "
-                                  f"{settings.camera_event_reconnect_sec}с дараа дахин")
+                            log.warning(f"{ip}: HTTP {resp.status_code} — "
+                                        f"{settings.camera_event_reconnect_sec}с дараа дахин")
                             await asyncio.sleep(settings.camera_event_reconnect_sec)
                         continue
-                    print(f"[cgi_poll] {ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
+                    log.info(f"{ip}: ХОЛБОГДЛОО (200), event хүлээж байна")
                     last_touch = 0.0
                     async for chunk in resp.aiter_text():
                         buffer += chunk
@@ -166,13 +169,13 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                         # Дибаг: Code= мөр бүрийг логд харуулна (камер юу илгээж байгааг харах)
                         for line in chunk.splitlines():
                             if line.startswith("Code="):
-                                print(f"[cgi_poll] {ip} event: {line[:90]}")
+                                log.info(f"{ip} event: {line[:90]}")
                         blocks, buffer = _extract_json_blocks(buffer)
                         for data in blocks:
                             await _process_event(device_id, data)
         except Exception as e:
-            print(f"[cgi_poll] {ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
-                  f"{settings.camera_event_reconnect_sec}с дараа дахин")
+            log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
+                        f"{settings.camera_event_reconnect_sec}с дараа дахин")
             await asyncio.sleep(settings.camera_event_reconnect_sec)
 
 
@@ -180,7 +183,7 @@ async def supervisor():
     """Идэвхтэй камер бүрд poller task эхлүүлж, тасарсныг сэргээнэ."""
     if not settings.cgi_poll:
         return
-    print("[cgi_poll] идэвхжлээ — камеруудаас ANPR татаж эхэлж байна")
+    log.info("идэвхжлээ — камеруудаас ANPR татаж эхэлж байна")
     while True:
         db = SessionLocal()
         try:
@@ -195,13 +198,13 @@ async def supervisor():
                     # creds-ийг session амьд байхад мөр болгож шийднэ
                     _tasks[c.id] = asyncio.create_task(
                         _poll_one(c.id, c.ip_address, camera_credentials(c)))
-                    print(f"[cgi_poll] {c.name} ({c.ip_address}) сонсож эхэллээ")
+                    log.info(f"{c.name} ({c.ip_address}) сонсож эхэллээ")
             for did in list(_tasks):
                 if did not in active:
                     _tasks[did].cancel()
                     del _tasks[did]
         except Exception as e:
-            print(f"[cgi_poll] supervisor алдаа: {e}")
+            log.error(f"supervisor алдаа: {e}")
         finally:
             db.close()
         await asyncio.sleep(60)

@@ -129,13 +129,26 @@ def shift_report(date_from: str | None = None, date_to: str | None = None, site_
     if date_to:
         q = q.filter(CashierShift.opened_at < datetime.fromisoformat(date_to) + timedelta(days=1))
     shifts = q.order_by(CashierShift.opened_at.desc()).limit(200).all()
+    # Бүх ээлжийн provider-аар бүлэглэсэн дүнг НЭГ query-ээр (ээлж тус бүрт query хийхгүй)
+    shift_ids = [s.id for s in shifts]
+    totals_rows = (
+        db.query(Payment.shift_id, Payment.provider,
+                 func.coalesce(func.sum(Payment.amount), 0), func.count())
+        .filter(Payment.shift_id.in_(shift_ids), Payment.status == "PAID")
+        .group_by(Payment.shift_id, Payment.provider).all()) if shift_ids else []
+    by_shift: dict[str, dict] = {}
+    for sid, prov, amt, cnt in totals_rows:
+        by_shift.setdefault(sid, {})[prov] = {"amount": float(amt), "count": cnt}
     out = []
     for s in shifts:
         end = s.closed_at or datetime.utcnow()
         dur_min = int((end - s.opened_at).total_seconds() // 60)
+        by_provider = by_shift.get(s.id, {})
         out.append(to_dict(s, extra={
             "cashier": (s.user.full_name or s.user.username) if s.user else None,
             "site_name": s.site.name if s.site else "Бүх зогсоол",
             "duration_minutes": dur_min,
-            **_shift_totals(db, s)}))
+            "by_provider": by_provider,
+            "total": sum(v["amount"] for v in by_provider.values()),
+            "count": sum(v["count"] for v in by_provider.values())}))
     return out
