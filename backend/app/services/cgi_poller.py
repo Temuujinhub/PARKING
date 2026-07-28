@@ -183,15 +183,32 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
     # гарах камер: 400 Bad Request → стрим огт холбогдоогүй → 9 цаг машин
     # танихгүй). Тиймээс 400 ирвэл дараагийн хувилбар руу ӨӨРӨӨ шилжинэ.
     # Ажилласан хувилбарыг санаж дараа нь шууд түүгээр холбогдоно.
-    variants = [settings.camera_event_codes] + [
+    # Хувилбар бүр нь БҮТЭН URL — codes-оос гадна дараах зүйлс firmware хооронд
+    # ялгаатай байдаг: [ ] хаалт URL-encode хийгдсэн эсэх (шинэ firmware хатуу
+    # шалгадаг), heartbeat параметр байгаа эсэх/утга нь.
+    from urllib.parse import quote as _q
+
+    def _urls(code_list: list[str]) -> list[str]:
+        base = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes="
+        out = []
+        for c in code_list:
+            out.append(f"{base}{c}&heartbeat={hb}")          # хэвийн
+            out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}")  # хаалт encode хийсэн
+            out.append(f"{base}{c}")                          # heartbeat-гүй
+            out.append(f"{base}{_q(c, safe='')}")             # encode + heartbeat-гүй
+        return out
+
+    codes_list = [settings.camera_event_codes] + [
         v for v in ("[TrafficJunction,TrafficSnapPicture,TrafficControl]",
                     "[TrafficJunction]", "[TrafficSnapPicture]", "[All]")
         if v != settings.camera_event_codes]
+    variants = _urls(codes_list)
     vi = _codes_ok.get(device_id, 0)
+    cycle_start = vi
     auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     while True:
-        codes = variants[vi % len(variants)]
-        url = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes={codes}&heartbeat={hb}"
+        url = variants[vi % len(variants)]
+        codes = url.split("codes=")[1].split("&")[0]
         buffer = ""
         try:
             # read timeout: энэ хугацаанд юу ч ирэхгүй бол холболт үхсэн гэж үзэж
@@ -204,13 +221,32 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     timeout=httpx.Timeout(10, read=settings.camera_event_read_timeout_sec)) as client:
                 async with client.stream("GET", url, auth=auth) as resp:
                     if resp.status_code == 400:
-                        # Энэ firmware тухайн codes-ыг ойлгохгүй — дараагийнхыг оролдоно
+                        # Камер ЯАГААД татгалзсаныг өөрөөс нь асууна — Dahua ихэвчлэн
+                        # "Error\r\nInvalid param" гэх мэт тодорхой шалтгаан бичдэг.
+                        try:
+                            body = (await resp.aread()).decode("utf-8", "replace").strip()
+                        except Exception:  # noqa: BLE001
+                            body = ""
                         vi += 1
-                        nxt = variants[vi % len(variants)]
-                        log.warning("%s: codes=%s-ыг татгалзлаа (HTTP 400) — %s-аар "
-                                    "оролдоно", ip, codes, nxt)
+                        # Бүх хувилбарыг нэг тойрог туршиж дууссан бол УДААН завсарлана —
+                        # эс бол камерыг 2 секунд тутам мөнхөд цохино
+                        full_cycle = (vi - cycle_start) >= len(variants)
+                        log.warning("%s: татгалзлаа (HTTP 400) codes=%s%s — хариу: %r",
+                                    ip, codes,
+                                    " [heartbeat-гүй]" if "heartbeat" not in url else "",
+                                    body[:200])
                         _codes_ok[device_id] = vi
-                        await asyncio.sleep(2)
+                        if full_cycle:
+                            cycle_start = vi
+                            log.error("%s: eventManager.cgi-ийн БҮХ хувилбарыг татгалзлаа. "
+                                      "Энэ камер CGI attach дэмжихгүй байж магадгүй — "
+                                      "камерын веб → Тохиргоо → Сүлжээ → Платформ хэсгээс "
+                                      "HTTP push (Alarm Server) тохируулах шаардлагатай. "
+                                      "%dс дараа дахин оролдоно.",
+                                      ip, settings.camera_event_reconnect_sec)
+                            await asyncio.sleep(settings.camera_event_reconnect_sec)
+                        else:
+                            await asyncio.sleep(2)
                         continue
                     if resp.status_code != 200:
                         # 401 үед ХУРДАН давтаж болохгүй: Dahua камер хэд хэдэн
@@ -234,6 +270,7 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             await asyncio.sleep(settings.camera_event_reconnect_sec)
                         continue
                     _codes_ok[device_id] = vi   # энэ хувилбар ажиллалаа — санана
+                    cycle_start = vi
                     log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}), event хүлээж байна")
                     last_touch = 0.0
                     async for chunk in resp.aiter_text():
