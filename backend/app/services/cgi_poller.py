@@ -98,13 +98,14 @@ def _enqueue(device_id: str, data: dict):
     global _queue
     if _queue is None:
         _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
+    item = (device_id, data, time.monotonic())
     try:
-        _queue.put_nowait((device_id, data))
+        _queue.put_nowait(item)
     except asyncio.QueueFull:
         try:
             _queue.get_nowait()
             _queue.task_done()
-            _queue.put_nowait((device_id, data))
+            _queue.put_nowait(item)
             log.warning("event дараалал дүүрлээ — хамгийн хуучин event хаягдав")
         except Exception:  # noqa: BLE001
             log.error("event дараалалд нэмж чадсангүй — event АЛДАГДЛАА")
@@ -117,9 +118,16 @@ async def _event_worker(idx: int):
         _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
     log.info("event worker #%d эхэллээ", idx)
     while True:
-        device_id, data = await _queue.get()
+        device_id, data, ts = await _queue.get()
         try:
-            await _process_event(device_id, data)
+            # Дараалалд гацаж ХОЦОРСОН event хаалт нээх эрхгүй: машиныг ажилтан
+            # аль хэдийн гараар оруулчихсан байхад хожуу ирсэн команд хоосон
+            # зам руу хаалт онгойлгодог байв (Monnis: оруулснаас 20с дараа).
+            age = time.monotonic() - ts
+            allow_open = age <= settings.camera_event_stale_open_sec
+            if not allow_open:
+                log.warning("event %.1fс хоцорчээ — бүртгэнэ, хаалт НЭЭХГҮЙ", age)
+            await _process_event(device_id, data, allow_open=allow_open)
         except Exception as e:  # noqa: BLE001 — нэг event-ийн алдаа бусдыг зогсоохгүй
             log.error("event боловсруулахад алдаа: %r", e)
         finally:
@@ -134,7 +142,7 @@ def ensure_workers():
         _workers.append(asyncio.create_task(_event_worker(len(_workers) + 1)))
 
 
-async def _process_event(device_id: str, data: dict):
+async def _process_event(device_id: str, data: dict, allow_open: bool = True):
     """Нэг ANPR event-ийг боловсруулж session үүсгэнэ."""
     db = SessionLocal()
     try:
@@ -161,9 +169,9 @@ async def _process_event(device_id: str, data: dict):
             db.commit()
             return
         if device.lane_dir == "exit":
-            await handle_exit(db, device, plate, conf, data)
+            await handle_exit(db, device, plate, conf, data, allow_open=allow_open)
         else:
-            await handle_entry(db, device, plate, conf, data)
+            await handle_entry(db, device, plate, conf, data, allow_open=allow_open)
     except Exception as e:
         log.error(f"event боловсруулах алдаа: {e}")
     finally:

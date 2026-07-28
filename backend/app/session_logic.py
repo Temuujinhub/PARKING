@@ -328,8 +328,12 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     return cmd.status == "SUCCESS"
 
 
-async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
-    """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол)."""
+async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict,
+                       allow_open: bool = True) -> dict:
+    """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол).
+
+    allow_open=False: дараалалд ХОЦОРСОН event — бүртгэлийг хэвийн хийнэ, харин
+    хаалт НЭЭХГҮЙ (машиныг гараар оруулчихсан байхад хоосон зам руу онгойхгүй)."""
     site_id = device.site_id
     now = datetime.utcnow()
 
@@ -346,7 +350,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
         # Давхар уншилт — шинэ session үүсгэхгүй, ГЭХДЭЭ хаалтыг заавал нээнэ:
         # машин хаалганы өмнө зогсож байгаа тул уншилт давтагдсан байж болно.
-        opened = await ensure_entry_barrier(db, device, plate)
+        opened = await ensure_entry_barrier(db, device, plate) if allow_open else False
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
@@ -379,13 +383,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                 notify(site_id, "PLATE_EDITED", {
                     "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
                     "by": "system:autocorrect"})
-                opened = await ensure_entry_barrier(db, device, plate, prev_session.id,
-                                                    find_registered(db, plate, site_id))
+                opened = (await ensure_entry_barrier(db, device, plate, prev_session.id,
+                                                     find_registered(db, plate, site_id))
+                          if allow_open else False)
                 db.commit()
                 return {"action": "plate_autocorrect", "session_id": prev_session.id,
                         "old": old_plate, "new": plate, "barrier_opened": opened}
-        opened = await ensure_entry_barrier(db, device, plate,
-                                            registered=find_registered(db, plate, site_id))
+        opened = (await ensure_entry_barrier(db, device, plate,
+                                             registered=find_registered(db, plate, site_id))
+                  if allow_open else False)
         db.commit()
         return {"action": "burst_dedup", "plate": plate, "barrier_opened": opened}
 
@@ -441,7 +447,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         notify(site_id, "BLACKLIST_ALERT", {
             "plate": plate, "reason": black.reason, "lane": "entry",
         })
-    elif device.auto_open:
+    elif device.auto_open and allow_open:
         barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered)
 
     notify(site_id, "ENTRY_EVENT", {
@@ -461,10 +467,14 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
-async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict) -> dict:
+async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict,
+                      allow_open: bool = True) -> dict:
     """Гарах камерын event:
     - Төлсөн (grace хугацаанд) эсвэл үнэгүй/гэрээт бол barrier нээж session хаана.
     - Үгүй бол AWAITING_PAYMENT болгож касс/PAX/QR руу мэдэгдэнэ.
+
+    allow_open=False: дараалалд ХОЦОРСОН event — бүртгэл/төлбөрийн урсгал хэвийн,
+    харин хаалт НЭЭХГҮЙ (машин аль хэдийн гарчихсан байж болно).
     """
     site_id = device.site_id
     now = datetime.utcnow()
@@ -487,7 +497,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # «дахин уншсан» гэж тооцогдоод хаалт огт нээгддэггүй байв (орох талд
         # энэ алдаа аль хэдийн зассан, гарах талд үлдсэн байсан).
         # Тиймээс ГАРАХ ЭРХТЭЙ (гэрээт/төлсөн/үнэгүй) машинд хаалтыг дахин нээнэ.
-        opened = await ensure_exit_barrier_if_cleared(db, device, plate)
+        opened = await ensure_exit_barrier_if_cleared(db, device, plate) if allow_open else False
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
@@ -526,7 +536,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             db.commit()
             barrier = _find_barrier(db, site_id, device)
             opened = False
-            if barrier:
+            if barrier and allow_open:
                 cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate)
                 opened = cmd.status == "SUCCESS"
             notify(site_id, "EXIT_NO_SESSION", {
@@ -582,20 +592,23 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Төлчихсөн — grace хугацаа дотор гарч байна
     if session.status == "PAID":
         if not session.exit_deadline or now <= session.exit_deadline:
-            return await _close_and_open(db, device, session, now, fee, source="auto_exit")
+            return await _close_and_open(db, device, session, now, fee, source="auto_exit",
+                                         allow_open=allow_open)
         # Grace хэтэрсэн — нэмэлт төлбөр шаардана (доор үлдэгдлээр шалгана)
         session.status = "AWAITING_PAYMENT"
 
     if fee["is_free"]:
         session.status = "PAID"  # үнэгүй тул шууд гаргана
-        return await _close_and_open(db, device, session, now, fee, source="auto_exit")
+        return await _close_and_open(db, device, session, now, fee, source="auto_exit",
+                                     allow_open=allow_open)
 
     # Үлдэгдэл тооцох: өмнө нь төлсөн бол (grace хэтэрсэн тохиолдол) зөвхөн зөрүүг нэхнэ.
     # Тарифын шатлал ахиагүй бол зөрүү 0 — нэмэлт төлбөргүйгээр гаргана.
     due = amount_due(db, session, fee)
     if due <= 0 and session.paid_at:
         session.status = "PAID"
-        return await _close_and_open(db, device, session, now, fee, source="auto_exit")
+        return await _close_and_open(db, device, session, now, fee, source="auto_exit",
+                                     allow_open=allow_open)
 
     # Төлбөртэй — төлбөр хүлээнэ
     session.status = "AWAITING_PAYMENT"
@@ -626,7 +639,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
 
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
-                          now: datetime, fee: dict, source: str) -> dict:
+                          now: datetime, fee: dict, source: str,
+                          allow_open: bool = True) -> dict:
     session.exit_time = now
     session.duration_minutes = fee["duration_minutes"]
     if session.total_fee is None:
@@ -645,7 +659,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
-    if barrier:
+    if barrier and allow_open:
         cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number)
         barrier_opened = cmd.status == "SUCCESS"
 

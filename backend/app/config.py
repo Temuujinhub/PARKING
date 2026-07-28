@@ -46,8 +46,16 @@ class Settings(BaseSettings):
     #   PARKING_CAMERA_EVENT_CODES=[TrafficJunction,TrafficSnapPicture]
     camera_event_codes: str = "[All]"
     # Стримээс салгасан боловсруулах worker-ийн тоо ба дарааллын багтаамж
-    camera_event_workers: int = 2
+    # 2 байхад нэг хаалтны команд (15с хүртэл) worker-ийг эзлэхэд дараалал гацаж,
+    # event-үүд хоцорч боловсруулагддаг байв (Monnis: хаалт 40с хожуу нээгдэх).
+    # Камер-IP тус бүрийн RPC түгжээ давхардлаас хамгаалдаг тул олон worker аюулгүй.
+    camera_event_workers: int = 4
     camera_event_queue_size: int = 500
+    # Event үүсгэснээс хойш энэ хугацаанаас ХОЖУУ боловсруулагдсан (дараалалд
+    # гацсан) event хаалт НЭЭХГҮЙ — машиныг ажилтан гараар оруулчихсан байхад
+    # хоосон зам руу хаалт онгойхоос сэргийлнэ (2026-07-28 Monnis: оруулснаас
+    # 20с дараа хоосон онгойсон). Session/өрийн бүртгэл хэвийн үүснэ.
+    camera_event_stale_open_sec: float = 12.0
     camera_event_read_timeout_sec: int = 120  # энэ хугацаанд юу ч ирэхгүй бол дахин холбоно
     camera_event_reconnect_sec: int = 15   # тасарсны дараа дахин холбогдох хүлээлт
 
