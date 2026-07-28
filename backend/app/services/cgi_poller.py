@@ -168,10 +168,18 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
                             reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=data))
             db.commit()
             return
+        # Шийдвэрийг ЗААВАЛ логлоно — push горимын lpr_router шиг. Үгүй бол
+        # «гарах уншилт яагаад хаалт нээгээгүй вэ» гэдгийг лог дээрээс мөшгих
+        # аргагүй байв (2026-07-28 Monnis-ийн оношилгооны цоорхой).
+        _t0 = time.monotonic()
         if device.lane_dir == "exit":
-            await handle_exit(db, device, plate, conf, data, allow_open=allow_open)
+            res = await handle_exit(db, device, plate, conf, data, allow_open=allow_open)
         else:
-            await handle_entry(db, device, plate, conf, data, allow_open=allow_open)
+            res = await handle_entry(db, device, plate, conf, data, allow_open=allow_open)
+        _ms = int((time.monotonic() - _t0) * 1000)
+        (log.warning if _ms >= settings.lpr_slow_warn_ms else log.info)(
+            "lpr %s %s → %s: %dмс%s", device.lane_dir, plate, res.get("action", "?"), _ms,
+            "" if allow_open else " [хоцорсон event — хаалт нээгээгүй]")
     except Exception as e:
         log.error(f"event боловсруулах алдаа: {e}")
     finally:
