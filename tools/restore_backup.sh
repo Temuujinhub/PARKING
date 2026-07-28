@@ -11,7 +11,7 @@
 # өмнөх parking_old дарагдана.
 set -euo pipefail
 
-F="${1:-$(ls -t /root/prod-backups/parking-prod-*.sql.gz 2>/dev/null | head -1)}"
+F="${1:-$(ls -t /root/prod-backups/parking-prod-*.sql.gz* 2>/dev/null | head -1)}"
 [ -n "$F" ] && [ -f "$F" ] || { echo "✗ Backup файл олдсонгүй (/root/prod-backups/ хоосон байна)"; exit 1; }
 
 echo "СЭРГЭЭХ ФАЙЛ: $F ($(du -h "$F" | cut -f1), $(date -r "$F" '+%Y-%m-%d %H:%M'))"
@@ -24,7 +24,15 @@ sudo -u postgres psql -qc "SELECT pg_terminate_backend(pid) FROM pg_stat_activit
 sudo -u postgres psql -qc "DROP DATABASE IF EXISTS parking_old;"
 sudo -u postgres psql -qc "ALTER DATABASE parking RENAME TO parking_old;"
 sudo -u postgres createdb -O parking parking
-gunzip -c "$F" | sudo -u postgres psql -q -d parking >/dev/null
+if [[ "$F" == *.enc ]]; then
+  # HTTP сувгаар ирсэн шифрлэгдсэн backup — .env дэх токеноор задална
+  TOKEN=$(grep -oP '^PARKING_DR_UPLOAD_TOKEN=\K.*' /root/PARKING/backend/.env || true)
+  [ -n "$TOKEN" ] || { echo "✗ PARKING_DR_UPLOAD_TOKEN .env-д алга — задлах боломжгүй"; exit 1; }
+  openssl enc -d -aes-256-cbc -pbkdf2 -in "$F" -pass pass:"$TOKEN" | gunzip -c \
+    | sudo -u postgres psql -q -d parking >/dev/null
+else
+  gunzip -c "$F" | sudo -u postgres psql -q -d parking >/dev/null
+fi
 systemctl start parking-backend
 sleep 3
 curl -fsS http://127.0.0.1:8000/api/health && echo
