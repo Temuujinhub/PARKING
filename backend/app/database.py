@@ -12,7 +12,13 @@ _connect_args = {}
 if settings.database_url.startswith("postgres"):
     _connect_args = {
         "connect_timeout": 10,
-        "options": "-c statement_timeout=30000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=300000",
+        # lock_timeout 10с → 3с. ЯАГААД ЧУХАЛ ВЭ: psycopg2 нь СИНХРОН тул
+        # түгжээ хүлээх хугацаанд event loop БҮХЭЛДЭЭ царцана — тэр үед хаалтны
+        # asyncio.wait_for таймер ч ажиллахгүй. Production дээр 46 удаагийн
+        # түгжээний зөрчил хаалтыг 101 СЕКУНД хүлээлгэсэн (15с төсөвтэй байхад).
+        # 3с бол хэвийн ажиллагаанд илүү хангалттай (транзакцууд миллисекундээр
+        # дуусдаг), харин гацсан тохиолдолд системийг чөлөөлнө.
+        "options": "-c statement_timeout=30000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=300000",
     }
 engine = create_engine(
     settings.database_url,

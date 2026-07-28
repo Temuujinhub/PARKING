@@ -118,6 +118,26 @@ async def start_vat_auto_send():
 
     _bg_task(daily_send(), "ebarimt-daily-send")
 
+    async def loop_lag_monitor():
+        """Event loop царцаж байгааг ИЛРҮҮЛНЭ.
+
+        Backend нь async loop дотроос СИНХРОН psycopg2 ашигладаг тул удаан
+        query/түгжээ хүлээлт бүх системийг зэрэг царцаадаг — тэр үед хаалтны
+        asyncio.wait_for таймер ч ажиллахгүй (production дээр 15с төсөвтэй
+        хаалт 101 секунд үргэлжилсэн). Энэ ажиглагч 1с тутам сэрж, ХИЧНЭЭН
+        хоцорсныг хэмжинэ: хоцролт нь loop блоклогдсон хугацаа юм."""
+        import time as _t
+        while True:
+            t0 = _t.monotonic()
+            await asyncio.sleep(1.0)
+            lag_ms = int((_t.monotonic() - t0 - 1.0) * 1000)
+            if lag_ms >= settings.loop_lag_warn_ms:
+                log.warning("event loop %dмс ЦАРЦЛАА — тэр хугацаанд хаалт/LPR "
+                            "боловсруулалт бүхэлдээ зогссон (удаан DB query эсвэл "
+                            "түгжээ хүлээлт байх магадлалтай)", lag_ms)
+
+    _bg_task(loop_lag_monitor(), "loop-lag-monitor")
+
     # CGI event pull — камераас ANPR татах (PARKING_CGI_POLL=true үед)
     from .services.cgi_poller import supervisor as cgi_supervisor
     _bg_task(cgi_supervisor(), "cgi-poller")

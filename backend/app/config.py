@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     barrier_total_budget_sec: float = 15.0
     # LPR event ирснээс хаалт нээх/шийдвэр гарах хүртэлх нийт хугацааны WARNING босго (мс)
     lpr_slow_warn_ms: int = 2000
+    # Event loop хэдэн мс царцвал WARNING логлох вэ (синхрон DB дуудлага бүх
+    # системийг зэрэг зогсоодог — үүнийг тоогоор илрүүлнэ)
+    loop_lag_warn_ms: int = 500
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)
