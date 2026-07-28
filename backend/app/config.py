@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     # Event loop хэдэн мс царцвал WARNING логлох вэ (синхрон DB дуудлага бүх
     # системийг зэрэг зогсоодог — үүнийг тоогоор илрүүлнэ)
     loop_lag_warn_ms: int = 500
+    # Камер хэдэн минут чимээгүй бол «event илгээхээ больсон» гэж анхааруулах вэ.
+    # Хөдөлгөөн багатай зогсоолд шөнөдөө удаан чимээгүй байж болох тул өгөөмөр.
+    camera_silence_warn_min: int = 60
+    camera_silence_check_sec: int = 300
     barrier_username: str = "admin"
     barrier_password: str = ""
     barrier_channel: int = 0       # trafficSnap.factory.instance-ийн channel (баталгаажсан: 0)

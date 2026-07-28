@@ -138,6 +138,59 @@ async def start_vat_auto_send():
 
     _bg_task(loop_lag_monitor(), "loop-lag-monitor")
 
+    async def camera_silence_monitor():
+        """Камер event ИЛГЭЭХЭЭ БОЛЬСОН эсэхийг ажиглана.
+
+        Камер сервер рүү хүрч байгаа (гараар хаалт нээгддэг) атлаа машин ирэхэд
+        огт танихгүй байх тохиолдол гардаг: камер→сервер чиглэл тасарсан байна.
+        Үүнийг хэн ч ажиглахгүй бол зогсоол хагас өдөр «танихгүй» ажиллана
+        (2026-07-28: MONNIS гарах камер 06:38-аас 8 цаг чимээгүй байсныг зөвхөн
+        гомдол ирсний дараа мэдсэн). Одоо лог дээр өөрөө анхааруулна."""
+        from datetime import datetime, timedelta
+        from .models import Device, ParkingSite
+        warned: set[str] = set()
+        await asyncio.sleep(120)   # startup-ийн дараа камерууд холбогдох завсар
+        while True:
+            try:
+                db = SessionLocal()
+                try:
+                    cutoff = datetime.utcnow() - timedelta(
+                        minutes=settings.camera_silence_warn_min)
+                    cams = db.query(Device).filter(
+                        Device.device_type == "camera", Device.status == "active",
+                        Device.ip_address != "").all()
+                    # Камер бүрийн сүүлийн ЖИНХЭНЭ уншилт (heartbeat илгээдэггүй
+                    # firmware-т last_seen хоцордог тул хоёуланг нь харна)
+                    from sqlalchemy import func as _f
+                    from .models import LprEvent as _Ev
+                    last_ev = dict(
+                        db.query(_Ev.device_id, _f.max(_Ev.created_at))
+                        .filter(_Ev.device_id.in_([c.id for c in cams]))
+                        .group_by(_Ev.device_id).all()) if cams else {}
+                    for c in cams:
+                        marks = [t for t in (c.last_seen, last_ev.get(c.id)) if t]
+                        newest = max(marks) if marks else None
+                        silent = newest is None or newest < cutoff
+                        site = db.get(ParkingSite, c.site_id)
+                        tag = f"{site.site_code if site else '?'} {c.name} ({c.ip_address})"
+                        if silent and c.id not in warned:
+                            warned.add(c.id)
+                            mins = ("хэзээ ч" if not newest else
+                                    f"{int((datetime.utcnow() - newest).total_seconds()/60)} мин")
+                            log.warning("КАМЕР ЧИМЭЭГҮЙ: %s — %s мэдээлээгүй. Машин ирэхэд "
+                                        "танихгүй байж магадгүй. Шалгах: tools/camera_push_check.py %s",
+                                        tag, mins, c.ip_address)
+                        elif not silent and c.id in warned:
+                            warned.discard(c.id)
+                            log.info("камер сэргэлээ: %s", tag)
+                finally:
+                    db.close()
+            except Exception as e:  # noqa: BLE001
+                log.error("камерын чимээгүй байдлын шалгалт алдаа: %r", e)
+            await asyncio.sleep(settings.camera_silence_check_sec)
+
+    _bg_task(camera_silence_monitor(), "camera-silence-monitor")
+
     # CGI event pull — камераас ANPR татах (PARKING_CGI_POLL=true үед)
     from .services.cgi_poller import supervisor as cgi_supervisor
     _bg_task(cgi_supervisor(), "cgi-poller")
