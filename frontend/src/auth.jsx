@@ -7,12 +7,17 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [permissions, setPermissions] = useState([])
   const [testMode, setTestMode] = useState(false)
+  // Задарсан анхны нууц үгээр нэвтэрсэн эсэх — UI дээр анхааруулга харуулна
+  const [pwWeak, setPwWeak] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!getToken()) { setLoading(false); return }
     api('/api/auth/me')
-      .then((d) => { setUser(d.user); setPermissions(d.permissions); setTestMode(!!d.test_mode) })
+      .then((d) => {
+        setUser(d.user); setPermissions(d.permissions)
+        setTestMode(!!d.test_mode); setPwWeak(!!d.pw_weak)
+      })
       .catch(() => clearToken())
       .finally(() => setLoading(false))
   }, [])
@@ -23,13 +28,14 @@ export function AuthProvider({ children }) {
     setUser(d.user)
     setPermissions(d.permissions)
     setTestMode(!!d.test_mode)
+    setPwWeak(!!d.pw_weak)
     return d
   }
   const logout = () => { clearToken(); setUser(null); setPermissions([]) }
   const can = (module) => permissions.includes('*') || permissions.includes(module)
 
   return (
-    <AuthContext.Provider value={{ user, permissions, loading, login, logout, can, testMode }}>
+    <AuthContext.Provider value={{ user, permissions, loading, login, logout, can, testMode, pwWeak, setPwWeak }}>
       {children}
     </AuthContext.Provider>
   )

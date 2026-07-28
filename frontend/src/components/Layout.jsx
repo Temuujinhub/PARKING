@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { api } from '../api'
+import { api, setToken } from '../api'
 import { useAuth } from '../auth'
 import { isDark, toggleTheme } from '../theme'
 import Logo from './Logo'
@@ -49,7 +49,7 @@ const ROLE_LABELS = {
 }
 
 export default function Layout() {
-  const { user, can, logout } = useAuth()
+  const { user, can, logout, pwWeak, setPwWeak } = useAuth()
   const navigate = useNavigate()
   const toast = useToast()
   const [dark, setDark] = useState(isDark())
@@ -68,10 +68,14 @@ export default function Layout() {
     e.preventDefault()
     if (pwModal.new_password !== pwModal.confirm) return toast('Шинэ нууц үг давхцахгүй байна', 'error')
     try {
-      await api('/api/auth/change-password', {
+      const res = await api('/api/auth/change-password', {
         method: 'POST',
         body: { old_password: pwModal.old_password, new_password: pwModal.new_password },
       })
+      // Нууц үг солиход хуучин токен ХҮЧИНГҮЙ болдог тул шинийг нь тэр даруй хадгална
+      // (эс бол дараагийн хүсэлт 401 өгч хэрэглэгч гэнэт гарчихна)
+      if (res?.access_token) setToken(res.access_token)
+      setPwWeak(false)
       toast('Нууц үг солигдлоо')
       setPwModal(null)
     } catch (err) { toast(err.message, 'error') }
@@ -152,6 +156,26 @@ export default function Layout() {
         </Modal>
       </aside>
       <main className="flex-1 min-w-0 p-6 overflow-y-auto">
+        {/* Задарсан анхны нууц үгээр нэвтэрсэн бол ЗААВАЛ солиулна.
+            Нууц үг нь нээлттэй GitHub repo-д ил бичигдсэн байсан тул хэн ч
+            нэвтрэх боломжтой байв — солих хүртэл энэ анхааруулга арилахгүй. */}
+        {pwWeak && (
+          <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3
+                          flex items-start gap-3">
+            <ShieldAlert size={20} className="text-red-400 shrink-0 mt-0.5" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium text-red-300">Нууц үгээ ЗААВАЛ солино уу</div>
+              <div className="text-sm text-slate-300 mt-0.5">
+                Та системийн анхны нууц үгээр нэвтэрсэн байна. Энэ нууц үг олон нийтэд
+                задарсан тул хэн ч таны эрхээр нэвтрэх боломжтой. Одоо солино уу.
+              </div>
+            </div>
+            <button onClick={() => setPwModal({ old_password: '', new_password: '', confirm: '' })}
+              className="btn-primary text-xs py-1.5 shrink-0">
+              <KeyRound size={13} /> Одоо солих
+            </button>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

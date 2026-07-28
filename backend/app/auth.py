@@ -45,7 +45,19 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(user: User) -> str:
+# Нээлттэй repo-д задарсан анхны нууц үгүүд (seed.py-д ил бичигдэж байсан).
+# Эдгээрээр нэвтэрсэн хэрэглэгчид дэлгэц дээр анхааруулга харуулж, солиулна.
+LEAKED_PASSWORDS = frozenset({
+    "Temuujin@2026", "Admin@2026", "Operator@2026",
+    "Sanhuu@2026", "Cashier@2026", "Manager@2026", "Finance@2026",
+})
+
+
+def is_leaked_password(pw: str) -> bool:
+    return pw in LEAKED_PASSWORDS
+
+
+def create_access_token(user: User, pw_weak: bool = False) -> str:
     now = datetime.utcnow()
     payload = {
         "sub": user.id,
@@ -57,6 +69,9 @@ def create_access_token(user: User) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
+    if pw_weak:
+        # Задарсан/анхны нууц үгээр нэвтэрсэн — UI дээр анхааруулга харуулна
+        payload["pw_weak"] = True
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 

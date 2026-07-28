@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from ..auth import create_access_token, effective_permissions, get_current_user, verify_password
+from ..auth import (create_access_token, effective_permissions, get_current_user,
+                    is_leaked_password, oauth2_scheme, verify_password)
 from ..database import get_db
 from ..models import AuditLog, User
 from ..serializers import to_dict
@@ -57,20 +58,28 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Ses
     _login_shift(db, user)
     db.commit()
     from ..config import settings
+    # Задарсан анхны нууц үгээр нэвтэрсэн бол токенд болон хариунд тэмдэглэнэ —
+    # UI дээр анхааруулга гарч, солих хүртэл сануулсаар байна
+    pw_weak = is_leaked_password(form.password)
     return {
-        "access_token": create_access_token(user),
+        "access_token": create_access_token(user, pw_weak=pw_weak),
         "token_type": "bearer",
         "user": to_dict(user),
         "permissions": sorted(effective_permissions(user)),
         "test_mode": settings.allow_simulate,
+        "pw_weak": pw_weak,
     }
 
 
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
+def me(token: str = Depends(oauth2_scheme), user: User = Depends(get_current_user)):
+    from ..auth import decode_token
     from ..config import settings
+    # pw_weak — задарсан анхны нууц үгээр нэвтэрсэн эсэх (нэвтрэх үед токенд
+    # тэмдэглэгддэг). Хуудас дахин ачаалагдсан ч анхааруулга алга болохгүй.
+    pw_weak = bool(decode_token(token).get("pw_weak"))
     return {"user": to_dict(user), "permissions": sorted(effective_permissions(user)),
-            "test_mode": settings.allow_simulate}
+            "test_mode": settings.allow_simulate, "pw_weak": pw_weak}
 
 
 @router.post("/change-password")
@@ -83,7 +92,16 @@ def change_password(body: dict, db: Session = Depends(get_db),
         raise HTTPException(400, "Одоогийн нууц үг буруу байна.")
     if len(new) < 8:
         raise HTTPException(400, "Шинэ нууц үг дор хаяж 8 тэмдэгт байх ёстой.")
+    from datetime import datetime
+    from ..auth import is_leaked_password as _leaked
+    if _leaked(new):
+        raise HTTPException(400, "Энэ нууц үг олон нийтэд задарсан байна — өөр нууц үг сонгоно уу.")
+    if new == old:
+        raise HTTPException(400, "Шинэ нууц үг хуучинтайгаа ижил байна.")
     user.password_hash = hash_password(new)
+    # Хуучин токенуудыг хүчингүй болгоно (хулгайлагдсан байж болзошгүй)
+    user.password_changed_at = datetime.utcnow()
     db.add(AuditLog(username=user.username, action="CHANGE_PASSWORD", entity="user", entity_id=user.id))
     db.commit()
-    return {"ok": True}
+    # Шинэ токен буцаана — хуучин нь энэ агшнаас хүчингүй тул UI шууд солино
+    return {"ok": True, "access_token": create_access_token(user)}
