@@ -64,12 +64,20 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
             f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
             f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
     last_err = ""
-    for attempt in range(1, 4):
+    # Зургийн таталт нь digest auth-тай — камерын хувьд ЭНЭ Ч БАС нэвтрэлт.
+    # Гарах үед зураг татах ба дэлгэц бичих нь ЯГ НЭГ агшинд тохиолддог тул
+    # мөргөлдөж «User or password not valid» (remainLoginTimes буурах) үүсгэдэг
+    # байв (2026-07-29). Тиймээс таталтыг ЗАВСРЫН дүрэмд оруулна: зураг нь
+    # цаг мэдрэмтгий (кадр өөрчлөгдөнө) тул ХҮЛЭЭЛГЭХГҮЙ, харин дэлгэц үүний
+    # дараа завсар барина.
+    from .barrier import camera_client, note_rpc_done
+    note_rpc_done(ip)
+    try:
+      for attempt in range(1, 4):
         for url in urls:
             try:
                 # Хуваалцсан клиент — машин бүрд шинэ TCP холболт нээвэл камерын
                 # холболтын сан дүүрч хаалтны команд ч хариу авахаа болино
-                from .barrier import camera_client
                 client = camera_client(ip)
                 r = await client.get(url, auth=auth, timeout=timeout)
                 if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
@@ -81,6 +89,8 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                 last_err = f"{type(e).__name__}: {str(e)[:50]}"
         if attempt < 3:
             await asyncio.sleep(1.5)
+    finally:
+        note_rpc_done(ip)   # дэлгэц энэ агшнаас хойш завсар барина
     log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
     return None
 
