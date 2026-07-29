@@ -117,3 +117,25 @@ async def test_transient_error_is_retried(_fast, monkeypatch):
     monkeypatch.setattr(B, "display_on_screen", _busy)
     await B._display_with_retry("10.0.0.7", "текст", None, None, 1)
     assert len(calls) == 3
+
+
+@pytest.mark.anyio
+async def test_rpc_gap_waits_after_barrier(monkeypatch):
+    """Хаалтны RPC-ийн дараа дэлгэц ЗАВСАР хүлээнэ — камер сессээ чөлөөлж
+    амжаагүй байхад нэвтэрвэл remainLoginTimes буурч түгжээ рүү ойртдог."""
+    import time as _t
+    monkeypatch.setattr(settings, "camera_rpc_gap_sec", 0.2)
+    B.note_rpc_done("10.0.0.9")
+    t0 = _t.monotonic()
+    await B.wait_rpc_gap("10.0.0.9")
+    assert _t.monotonic() - t0 >= 0.15, "завсар хүлээх ёстой"
+
+
+@pytest.mark.anyio
+async def test_rpc_gap_no_wait_when_idle(monkeypatch):
+    import time as _t
+    monkeypatch.setattr(settings, "camera_rpc_gap_sec", 0.5)
+    B._last_rpc_done.pop("10.0.0.10", None)
+    t0 = _t.monotonic()
+    await B.wait_rpc_gap("10.0.0.10")
+    assert _t.monotonic() - t0 < 0.1, "саяхан RPC байхгүй бол хүлээхгүй"

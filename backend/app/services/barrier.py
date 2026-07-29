@@ -488,6 +488,28 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
 _rpc_locks: dict[str, asyncio.Lock] = {}
 _barrier_waiting: dict[str, int] = {}     # ip -> хүлээж буй хаалтны командын тоо
 
+# Камер сесс чөлөөлөхөд ХОЦРОГДОЛТОЙ: logout буцсаны дараа ч сессийн слот шууд
+# сулардаггүй. Тиймээс хаалт нээгээд ШУУД дэлгэц бичихэд камер «хязгаар давлаа»
+# гэж үзэж «User or password not valid» гэсэн ХУДАЛ хариу өгдөг — бүр аюултай нь
+# энэ нь remainLoginTimes-ыг БУУРУУЛЖ түгжээ рүү ойртуулдаг (2026-07-29 Monnis:
+# LED-ийн 51 алдаа бүгд ийм, remainLoginTimes 4→3). Тиймээс ЗААВАЛ БИШ RPC-үүд
+# (дэлгэц, сессийн хяналт) сүүлийн RPC-ээс хойш завсар үлдээж хүлээнэ.
+_last_rpc_done: dict[str, float] = {}
+
+
+def note_rpc_done(ip: str):
+    _last_rpc_done[ip] = time.monotonic()
+
+
+async def wait_rpc_gap(ip: str):
+    """Заавал биш RPC-ийн өмнө: сүүлийн RPC-ээс хойш завсар үлдээнэ."""
+    gap = settings.camera_rpc_gap_sec
+    if gap <= 0:
+        return
+    left = gap - (time.monotonic() - _last_rpc_done.get(ip, 0.0))
+    if left > 0:
+        await asyncio.sleep(min(left, gap))
+
 
 def _rpc_lock(ip: str) -> asyncio.Lock:
     lock = _rpc_locks.get(ip)
@@ -560,6 +582,7 @@ class _BarrierPriority:
 
     async def __aexit__(self, *exc):
         _barrier_waiting[self.ip] = max(0, _barrier_waiting.get(self.ip, 1) - 1)
+        note_rpc_done(self.ip)   # дэлгэц энэ агшнаас хойш завсар хүлээнэ
         if self.held:
             _rpc_lock(self.ip).release()
         return False
@@ -670,9 +693,14 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         times = max(1, repeat if repeat is not None else settings.screen_repeat)
     shown = 0
     try:
+        # Сүүлийн RPC-ээс хойш завсар хүлээнэ — камер сессээ чөлөөлж амжаагүй
+        # байхад нэвтэрвэл ХУДАЛ «нууц үг буруу» авч remainLoginTimes буурна
+        await wait_rpc_gap(ip)
         # Нэг камерт нэг RPC — хаалтны командтай мөргөлдвөл камер «нууц үг буруу»
         # гэж ХУДАЛ татгалздаг. Дэлгэц бол заавал биш тул хаалт ирвэл бууж өгнө.
         async with _rpc_lock(ip):
+            if barrier_is_waiting(ip):
+                return "хаалт хүлээж байна"   # хаалт тэргүүлэх эрхтэй — дараа оролдоно
             if True:
                 client = camera_client(ip)   # хуваалцсан холболт
                 rpc = DahuaRpc(client, ip, username, password)
@@ -697,12 +725,18 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
         log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
         _auth_ok(ip)
+        note_rpc_done(ip)
         _screen_record(ip, True)
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
+        note_rpc_done(ip)
         if _is_auth_error(e):
-            _auth_failed(ip)   # дараалсан эрхийн алдаа → түр зогсооно
+            # ЧУХАЛ: энэ нь камерын remainLoginTimes-ыг БУУРУУЛДАГ — түгжээнд
+            # хүрвэл ХААЛТ ч нээгдэхгүй болно. Тиймээс дэлгэцийг нэг л алдаанд
+            # түр зогсооно (нөхцөл сайжирвал дараагийн машин дээр сэргэнэ).
+            _auth_failed(ip)
+            _mark_camera_sick(ip, settings.camera_auth_retry_sec)
         log.warning(f"[screen] {ip}: бичиж чадсангүй ({err})")
         _screen_record(ip, False)
         return err
