@@ -60,7 +60,31 @@ async def probe(ip: str) -> None:
         except Exception as e:  # noqa: BLE001
             print(f"  ✗ Нэвтэрч чадсангүй: {str(e)[:200]}")
             return
-        print("  ✓ RPC2 нэвтрэлт амжилттай\n  ── Идэвхтэй хэрэглэгчид/сесс ──")
+        print("  ✓ RPC2 нэвтрэлт амжилттай")
+        # ── Камерын өөрийн ачаалал (CPU/санах ой) — «камер завгүй байна» гэдгийг
+        # таамаглахын оронд ӨӨРӨӨС НЬ асууна. CPU 90%+ бол RPC-д хариу өгөхгүй
+        # байгаагийн шууд шалтгаан (2026-07-29: ICMP-д хүртэл 48% алдагдал гарсан).
+        print("  ── Камерын ачаалал ──")
+        try:
+            r = await rpc._call("magicBox.getCPUUsage")
+            if r.get("result"):
+                usage = (r.get("params") or {}).get("usage")
+                mark = "  ⚠ ХЭТ ӨНДӨР" if isinstance(usage, (int, float)) and usage >= 85 else ""
+                print(f"    CPU: {usage}%{mark}")
+        except Exception as e:  # noqa: BLE001
+            print(f"    CPU: асууж чадсангүй ({type(e).__name__})")
+        try:
+            r = await rpc._call("magicBox.getMemoryInfo")
+            p = r.get("params") or {}
+            if r.get("result") and p.get("total"):
+                total, free = float(p["total"]), float(p.get("free") or 0)
+                used_pct = round((total - free) * 100 / total)
+                mark = "  ⚠ ХЭТ ӨНДӨР" if used_pct >= 90 else ""
+                print(f"    Санах ой: {used_pct}% ашиглагдсан "
+                      f"({(total - free) / 1e6:.0f}/{total / 1e6:.0f} MB){mark}")
+        except Exception as e:  # noqa: BLE001
+            print(f"    Санах ой: асууж чадсангүй ({type(e).__name__})")
+        print("  ── Идэвхтэй хэрэглэгчид/сесс ──")
         try:
             for method in ("UserManager.getActiveUserInfoAll",
                            "UserManager.getActiveUserInfo",
