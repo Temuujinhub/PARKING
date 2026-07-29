@@ -281,7 +281,11 @@ class Settings(BaseSettings):
     # тул жолооч дүнгээ харах гэж хүлээнэ. Тиймээс 3-р мөр нь «Tulbur: 5000» биш
     # зөвхөн «5000T» (₮ тэмдгийг LED фонт дэмжихгүй бол T болгож .env-ээс солино).
     screen_fee_text: str = "{plate}\n{duration}\n{amount}T"  # AWAITING_PAYMENT үед
-    screen_bye_text: str = "Sain yavaarai!"        # төлөгдөж/үнэгүй гарахад
+    # Гарах үеийн 3 хувилбар — жолоочид ЯАГААД үнэгүй гарч байгааг нь хэлнэ
+    # (кирилл LED дээр ажилладаг нь 2026-07-29 туршилтаар батлагдсан).
+    screen_bye_text: str = "{plate}\n{duration}\nБаяртай"              # төлбөрөө төлж гарахад
+    screen_bye_registered_text: str = "{plate}\n{duration}\nГэрээт"     # бүртгэлтэй машин
+    screen_bye_free_text: str = "{plate}\n{duration}\nТүр зогссон"      # үнэгүй хугацаанд багтсан
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
     # Орох LED — 3 мөр: орсон цаг / дугаар / мэндчилгээ ({time} = локал HH:MM)
     screen_welcome_text: str = "{time}\n{plate}\nTavtai moril"

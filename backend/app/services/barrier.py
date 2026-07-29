@@ -863,13 +863,12 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
 
 
 def format_duration(minutes: float | int | None) -> str:
-    """Зогссон хугацааг LED-д багтахаар богино бичнэ: «45min», «2ts 05min».
-    LED фонт кирилл дэмжихгүй байж болзошгүй тул латинаар (ts=цаг, min=минут)."""
+    """Зогссон хугацааг LED-д багтахаар богино бичнэ: «45м», «2ц 05м»."""
     if minutes is None:
         return ""
     m = max(0, int(round(float(minutes))))
     h, mm = divmod(m, 60)
-    return f"{h}ts {mm:02d}min" if h else f"{mm}min"
+    return f"{h}ц {mm:02d}м" if h else f"{mm}м"
 
 
 def render_screen_text(template: str, amount: float | int | None = None,

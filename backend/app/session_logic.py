@@ -544,7 +544,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             db.commit()
             barrier = _find_barrier(db, site_id, device)
             opened = False
-            _bye_reg = render_screen_text(settings.screen_bye_text, plate=plate)
+            _bye_reg = render_screen_text(settings.screen_bye_registered_text, plate=plate)
             if barrier and allow_open:
                 cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate,
                                          screen_text=_bye_reg)
@@ -646,6 +646,25 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "debt_amount": debt_amount}
 
 
+def _bye_screen_text(session: ParkingSession, fee: dict) -> str:
+    """Гарах дэлгэцийн текст — ЯАГААД гарч байгааг нь жолоочид хэлнэ:
+      • Гэрээт        — бүртгэлтэй машины жагсаалтад байгаа (төлбөр авдаггүй)
+      • Түр зогссон   — үнэгүй хугацаанд (ж: эхний 15 мин) багтсан
+      • Баяртай       — төлбөрөө төлж гарч байна
+    fee["reason"] нь billing.calculate_fee-ээс ирнэ («Бүртгэлтэй жолооч»,
+    «Эхний N минут үнэгүй», «Хөнгөлөлт: ...»)."""
+    reason = (fee or {}).get("reason") or ""
+    if session.is_registered or reason == "Бүртгэлтэй жолооч":
+        tmpl = settings.screen_bye_registered_text
+    elif fee.get("is_free") and not session.paid_at:
+        tmpl = settings.screen_bye_free_text
+    else:
+        tmpl = settings.screen_bye_text
+    return render_screen_text(tmpl, plate=session.plate_number,
+                              duration_minutes=fee.get("duration_minutes"),
+                              amount=fee.get("total_fee"))
+
+
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
                           now: datetime, fee: dict, source: str,
                           allow_open: bool = True) -> dict:
@@ -667,7 +686,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
-    _bye = render_screen_text(settings.screen_bye_text, plate=session.plate_number)
+    _bye = _bye_screen_text(session, fee)
     if barrier and allow_open:
         cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number,
                                  screen_text=_bye)
