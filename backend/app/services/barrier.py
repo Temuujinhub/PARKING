@@ -725,6 +725,19 @@ def _retry_delays() -> list[float]:
     return out
 
 
+def _is_transient_screen_error(err: str) -> bool:
+    """Дэлгэцийн алдаа ТҮР ЗУУРЫН уу (дахин оролдох утгатай юу)?
+
+    Түр зуурын: нэвтрэлт/сесс дүүрсэн, timeout, холболт тасарсан — суваг
+    чөлөөлөгдвөл бүтнэ. ТОГТМОЛ: камер командыг өөрийг нь татгалзаж байна
+    (жишээ нь дэлгэц «Managed Mode» горимд биш) — дахин оролдох нь зөвхөн
+    камерыг дэмий цохино, тиймээс НЭГ л удаа оролдоод болино."""
+    e = (err or "").lower()
+    if "setscreendisplay амжилтгүй" in e or "method not found" in e:
+        return False
+    return True
+
+
 async def _display_with_retry(ip: str, text: str, voice_text: str | None,
                               creds: tuple[str, str] | None, gen: int):
     """Дэлгэцийг харуулах — амжилтгүй бол ХОЖУУ дахин оролдоно.
@@ -744,6 +757,10 @@ async def _display_with_retry(ip: str, text: str, voice_text: str | None,
         if not err:
             if i:
                 log.info("[screen] %s: %d-р оролдлогоор амжиллаа", ip, i + 1)
+            return
+        if not _is_transient_screen_error(err):
+            # Камер командыг өөрийг нь татгалзлаа — дахин оролдох нь ашиггүй
+            log.info("[screen] %s: тогтмол алдаа — дахин оролдохгүй (%s)", ip, err[:80])
             return
 
 

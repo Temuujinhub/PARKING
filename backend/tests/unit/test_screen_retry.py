@@ -87,3 +87,33 @@ async def test_schedule_display_sets_generation(_fast, monkeypatch):
     B.schedule_display("10.0.0.5", "хоёр")
     assert B._display_gen["10.0.0.5"] == 2
     await asyncio.sleep(0.01)
+
+
+@pytest.mark.anyio
+async def test_permanent_error_not_retried(_fast, monkeypatch):
+    """Камер командыг ТАТГАЛЗвал дахин оролдохгүй (дэмий цохилт нэмэхгүй)."""
+    calls, _unused = _fast
+    B._display_gen["10.0.0.6"] = 1
+
+    async def _reject(ip, text, voice_text=None, repeat=None, creds=None):
+        calls.append((ip, text))
+        return "DahuaRpcError: setScreenDisplay амжилтгүй: {'result': False}"
+
+    monkeypatch.setattr(B, "display_on_screen", _reject)
+    await B._display_with_retry("10.0.0.6", "текст", None, None, 1)
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_transient_error_is_retried(_fast, monkeypatch):
+    """Нэвтрэлт/сессийн алдаа нь ТҮР зуурын — суваг сулрахад дахин оролдоно."""
+    calls, _unused = _fast
+    B._display_gen["10.0.0.7"] = 1
+
+    async def _busy(ip, text, voice_text=None, repeat=None, creds=None):
+        calls.append((ip, text))
+        return "DahuaRpcError: login амжилтгүй: User or password not valid!"
+
+    monkeypatch.setattr(B, "display_on_screen", _busy)
+    await B._display_with_retry("10.0.0.7", "текст", None, None, 1)
+    assert len(calls) == 3
