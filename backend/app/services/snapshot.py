@@ -70,7 +70,24 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
     # байв (2026-07-29). Тиймээс таталтыг ЗАВСРЫН дүрэмд оруулна: зураг нь
     # цаг мэдрэмтгий (кадр өөрчлөгдөнө) тул ХҮЛЭЭЛГЭХГҮЙ, харин дэлгэц үүний
     # дараа завсар барина.
-    from .barrier import camera_client, note_rpc_done
+    from .barrier import (_rpc_lock, barrier_is_waiting, camera_client,
+                          note_rpc_done)
+    # 1) ХААЛТ тэргүүлэх эрхтэй: команд хүлээж байвал эхлээд түүнд зам тавина
+    #    (машин хаалганы өмнө зогсож байна; зураг 0.5с хожуу татагдах нь хамаагүй).
+    for _ in range(int(settings.snapshot_barrier_wait_sec * 10)):
+        if not barrier_is_waiting(ip):
+            break
+        await asyncio.sleep(0.1)
+    # 2) Дэлгэц/хяналттай НЭГ ДАРААЛАЛД орно — зэрэг хандвал камер «нууц үг буруу»
+    #    гэж татгалзаж remainLoginTimes буурдаг. Түгжээг авч чадаагүй ч цааш явна:
+    #    зураг нь цаг мэдрэмтгий (кадр өөрчлөгдөнө).
+    _lock = _rpc_lock(ip)
+    _held = False
+    try:
+        await asyncio.wait_for(_lock.acquire(), timeout=settings.snapshot_lock_wait_sec)
+        _held = True
+    except (asyncio.TimeoutError, TimeoutError):
+        log.debug("%s: RPC дараалалд орж чадсангүй — зургийг шууд татна", ip)
     note_rpc_done(ip)
     try:
       for attempt in range(1, 4):
@@ -91,6 +108,8 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
             await asyncio.sleep(1.5)
     finally:
         note_rpc_done(ip)   # дэлгэц энэ агшнаас хойш завсар барина
+        if _held:
+            _lock.release()
     log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
     return None
 
