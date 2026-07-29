@@ -139,3 +139,28 @@ async def test_rpc_gap_no_wait_when_idle(monkeypatch):
     t0 = _t.monotonic()
     await B.wait_rpc_gap("10.0.0.10")
     assert _t.monotonic() - t0 < 0.1, "саяхан RPC байхгүй бол хүлээхгүй"
+
+
+@pytest.mark.anyio
+async def test_recently_shown_text_is_skipped(_fast, monkeypatch):
+    """Хаалттай ХАМТ бичигдсэн текстийг schedule_display давхардуулахгүй."""
+    monkeypatch.setattr(settings, "screen_dedup_sec", 10.0)
+    calls, fake = _fast
+    fake.ok_from = 0
+    B._shown_recent.clear()
+    B._note_screen_shown("10.0.0.11", "1234УБА\nТавтай морил")   # хаалттай хамт бичигдэв
+    B.schedule_display("10.0.0.11", "1234УБА\nТавтай морил")
+    await asyncio.sleep(0.05)
+    assert calls == [], "давхардсан бичилт камерт хүрэх ёсгүй"
+
+
+@pytest.mark.anyio
+async def test_different_text_still_sent(_fast, monkeypatch):
+    monkeypatch.setattr(settings, "screen_dedup_sec", 10.0)
+    calls, fake = _fast
+    fake.ok_from = 0
+    B._shown_recent.clear()
+    B._note_screen_shown("10.0.0.12", "хуучин текст")
+    B.schedule_display("10.0.0.12", "ШИНЭ текст")
+    await asyncio.sleep(0.05)
+    assert len(calls) == 1, "өөр текст бол илгээгдэнэ"

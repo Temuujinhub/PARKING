@@ -263,7 +263,8 @@ def _resolve_ip(db: Session, device: Device) -> str | None:
 
 
 async def _execute(db: Session, device: Device, command: str, session_id: str | None,
-                   source: str, issued_by: str | None = None, plate: str = "") -> BarrierCommand:
+                   source: str, issued_by: str | None = None, plate: str = "",
+                   screen_text: str = "") -> BarrierCommand:
     cmd = BarrierCommand(
         session_id=session_id, device_id=device.id, command=command,
         command_source=source, issued_by=issued_by,
@@ -343,7 +344,8 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                   # Өмнө нь 4с + 12с гэсэн 2 оролдлого л багтдаг байсан тул нийт 15-18
                   # секунд хүлээгээд бүтэлгүйтдэг байв. Богино оролдлогоор ижил төсөвт
                   # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
-                  _timeout = min(_remaining, settings.barrier_attempt_timeout_sec)
+                  _timeout = min(_remaining, settings.barrier_attempt_timeout_sec
+                                 + (settings.barrier_screen_timeout_sec if screen_text else 0))
                   async def _one_attempt():
                       """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой.
 
@@ -368,6 +370,27 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                                   cmd.status = "SUCCESS"
                                   cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
                                                        + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
+                                  # ── Дэлгэцийг ЯГ ЭНЭ СЕССЭЭР бичнэ ──
+                                  # Тусад нь бичвэл хоёр дахь login камерын сессийн
+                                  # слот чөлөөлөгдөхөөс өмнө очиж «нууц үг буруу»
+                                  # гэсэн ХУДАЛ хариу авдаг байв (remainLoginTimes
+                                  # буурч түгжээ рүү ойртоно). Нэг сесс = нэг
+                                  # нэвтрэлт = давхцалгүй. Хаалт аль хэдийн
+                                  # нээгдсэн тул энэ хэсэг унасан ч командын үр
+                                  # дүнд НӨЛӨӨГҮЙ (богино timeout-той).
+                                  if screen_text and settings.screen_enabled:
+                                      try:
+                                          await asyncio.wait_for(
+                                              rpc.set_screen(screen_text),
+                                              timeout=settings.barrier_screen_timeout_sec)
+                                          _screen_record(ip, True)
+                                          _note_screen_shown(ip, screen_text)
+                                          log.info("[screen] %s: хаалттай ХАМТ бичив «%s»",
+                                                   ip, screen_text.replace("\n", "|"))
+                                      except Exception as _se:  # noqa: BLE001
+                                          _screen_record(ip, False)
+                                          log.info("[screen] %s: хаалттай хамт бичиж чадсангүй (%s)",
+                                                   ip, type(_se).__name__)
                               finally:
                                   await rpc.logout()
 
@@ -378,11 +401,15 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                       if cmd.status == "SUCCESS":
                           break
                   except (asyncio.TimeoutError, TimeoutError):
+                      if cmd.status == "SUCCESS":
+                          break   # хаалт нээгдчихсэн (дэлгэц удаассан) — ДАХИН нээхгүй
                       last_err = f"хугацаа хэтэрлээ ({_timeout:.1f}с)"
                       cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
                                            if attempt + 1 < attempts
                                            else f"{last_err} ({attempts} удаа оролдсон)")
                   except Exception as e:
+                      if cmd.status == "SUCCESS":
+                          break   # хаалт нээгдчихсэн — дараагийн алдаа түүнийг үгүйсгэхгүй
                       last_err = f"{type(e).__name__}: {str(e)[:300]}"
                       cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
                                            if attempt + 1 < attempts
@@ -460,10 +487,13 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
 
 async def open_barrier(db: Session, device: Device, session_id: str | None, source: str,
                        issued_by: str | None = None, plate: str = "",
-                       force: bool = False) -> BarrierCommand:
-    """Хаалт нээх. force=True үед forceBreaking (албадан онгойлгоод барих)."""
+                       force: bool = False, screen_text: str = "") -> BarrierCommand:
+    """Хаалт нээх. force=True үед forceBreaking (албадан онгойлгоод барих).
+
+    screen_text өгвөл дэлгэцийг ЯГ ТЭР сессээр бичнэ — тусад нь нэвтрэхгүй
+    (камерын сессийн давхцлаас сэргийлнэ, нэвтрэлт хоёр дахин цөөрнө)."""
     return await _execute(db, device, "force_open" if force else "open",
-                          session_id, source, issued_by, plate)
+                          session_id, source, issued_by, plate, screen_text)
 
 
 async def close_barrier(db: Session, device: Device, session_id: str | None = None,
@@ -726,6 +756,7 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
         _auth_ok(ip)
         note_rpc_done(ip)
+        _note_screen_shown(ip, text)
         _screen_record(ip, True)
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
@@ -740,6 +771,21 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         log.warning(f"[screen] {ip}: бичиж чадсангүй ({err})")
         _screen_record(ip, False)
         return err
+
+
+# Саяхан ХАРУУЛСАН текст — хаалттай хамт бичигдсэн бол дараагийн schedule_display
+# давхардуулж камерт дахин хүрэхгүй (нэг машинд нэг л дэлгэцийн бичилт).
+_shown_recent: dict[str, tuple[str, float]] = {}
+
+
+def _note_screen_shown(ip: str, text: str):
+    _shown_recent[ip] = (text, time.monotonic())
+
+
+def _screen_recently_shown(ip: str, text: str) -> bool:
+    item = _shown_recent.get(ip)
+    return bool(item and item[0] == text
+                and time.monotonic() - item[1] < settings.screen_dedup_sec)
 
 
 # Тухайн камерт хамгийн сүүлд хүсэгдсэн дэлгэцийн «үе» — хожуу оролдлого хийж
@@ -808,6 +854,10 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
         asyncio.get_running_loop()
     except RuntimeError:
         return  # event loop-гүй орчин (тест г.м) — алгасна
+    if _screen_recently_shown(ip, text):
+        # Хаалттай ХАМТ бичигдсэн — камерт дахин хүрэх шаардлагагүй
+        log.debug("[screen] %s: саяхан харуулсан текст — алгасав", ip)
+        return
     gen = _display_gen[ip] = _display_gen.get(ip, 0) + 1
     asyncio.create_task(_display_with_retry(ip, text, voice_text, creds, gen))
 

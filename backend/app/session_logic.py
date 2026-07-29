@@ -219,7 +219,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
 
 async def ensure_entry_barrier(db: Session, device: Device, plate: str,
                                session_id: str | None = None,
-                               registered=None) -> bool:
+                               registered=None, screen_text: str = "") -> bool:
     """Орох хаалтыг нээх — ХАРИН саяхан нээсэн бол давтахгүй.
 
     Яагаад хэрэгтэй вэ: давхар уншилтын (dedup/burst) шүүлтүүрүүд нь ДАВХАР
@@ -253,7 +253,9 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     if recent:
         return True   # хаалт нээлттэй байгаа — дахин нээх шаардлагагүй
     source = "whitelist" if registered else "auto_entry"
-    cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
+    # Дэлгэцийг хаалттай ХАМТ (нэг сессээр) бичнэ — тусад нь нэвтрэхгүй
+    cmd = await open_barrier(db, barrier, session_id, source, plate=plate,
+                             screen_text=screen_text)
     return cmd.status == "SUCCESS"
 
 
@@ -442,13 +444,21 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     schedule_capture(session.id, device.ip_address, plate, "entry", raw,
                              camera_credentials(device))
 
+    # Орох дэлгэцийн текстийг УРЬДЧИЛЖ бэлдэнэ — хаалт нээх командтай ХАМТ
+    # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
+    # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
+    _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+    _welcome = "" if black else render_screen_text(settings.screen_welcome_text,
+                                                   plate=plate, time_str=_local_hm)
+
     barrier_opened = False
     if black:
         notify(site_id, "BLACKLIST_ALERT", {
             "plate": plate, "reason": black.reason, "lane": "entry",
         })
     elif device.auto_open and allow_open:
-        barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered)
+        barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered,
+                                                    screen_text=_welcome)
 
     notify(site_id, "ENTRY_EVENT", {
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
@@ -458,12 +468,10 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Орох LED дэлгэцэнд орсон цаг + дугаар + мэндчилгээ (Managed горимд камер өөрөө
     # харуулахгүй тул сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг
     # хүлээлгэхгүй, ард нь. {time} = УБ-ын локал цаг (DB нь UTC хадгалдаг).
-    if not black:
-        local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-        schedule_display(device.ip_address,
-                         render_screen_text(settings.screen_welcome_text, plate=plate,
-                                            time_str=local_hm),
-                         camera_credentials(device))
+    # Хаалттай хамт бичигдсэн бол энэ дуудлага өөрөө алгасагдана (screen_dedup_sec);
+    # хаалтгүй/mock/амжилтгүй үед л камерт тусад нь очно.
+    if _welcome:
+        schedule_display(device.ip_address, _welcome, camera_credentials(device))
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
@@ -536,15 +544,15 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             db.commit()
             barrier = _find_barrier(db, site_id, device)
             opened = False
+            _bye_reg = render_screen_text(settings.screen_bye_text, plate=plate)
             if barrier and allow_open:
-                cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate)
+                cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate,
+                                         screen_text=_bye_reg)
                 opened = cmd.status == "SUCCESS"
             notify(site_id, "EXIT_NO_SESSION", {
                 "plate": plate, "has_debt": bool(debts), "debt_amount": debt_amount,
                 "registered": True, "barrier_opened": opened})
-            schedule_display(device.ip_address,
-                             render_screen_text(settings.screen_bye_text, plate=plate),
-                             camera_credentials(device))
+            schedule_display(device.ip_address, _bye_reg, camera_credentials(device))
             return {"action": "registered_exit", "plate": plate, "barrier_opened": opened}
 
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
@@ -659,8 +667,10 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
+    _bye = render_screen_text(settings.screen_bye_text, plate=session.plate_number)
     if barrier and allow_open:
-        cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number)
+        cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number,
+                                 screen_text=_bye)
         barrier_opened = cmd.status == "SUCCESS"
 
     notify(session.site_id, "EXIT_COMPLETED", {
@@ -669,10 +679,8 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         "total_fee": float(session.total_fee or 0),
     })
     # Дэлгэцэнд мэндчилгээ (төлбөр төлөгдсөн/үнэгүй — хаалт нээгдэж байна)
-    schedule_display(exit_device.ip_address,
-                     render_screen_text(settings.screen_bye_text,
-                                        plate=session.plate_number),
-                         camera_credentials(exit_device))
+    # Хаалттай хамт бичигдсэн бол алгасагдана (screen_dedup_sec)
+    schedule_display(exit_device.ip_address, _bye, camera_credentials(exit_device))
     return {"action": "exit_completed", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
