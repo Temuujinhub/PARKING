@@ -65,9 +65,10 @@ export default function Users() {
   const save = async (e) => {
     e.preventDefault()
     try {
-      const siteIds = editing.role === 'OPERATOR' ? editing.site_ids : []
-      const primary = editing.role === 'OPERATOR'
-        ? (siteIds.includes(editing.site_id) ? editing.site_id : siteIds[0] || null) : null
+      // Tenant салгалт: ямар ч роль хариуцах зогсоолуудтай байж болно —
+      // хоосон = компанийн (EasyParking) түвшний хэрэглэгч, бүх зогсоол хардаг
+      const siteIds = editing.site_ids
+      const primary = siteIds.includes(editing.site_id) ? editing.site_id : siteIds[0] || null
       const body = {
         ...editing, perms: undefined,
         site_id: primary,
@@ -121,9 +122,8 @@ export default function Users() {
               {u.permissions && <span className="ml-1 text-[10px] text-amber-400" title="Тусгай эрхийн матриц тохируулсан">тусгай</span>}
             </td>
             <td className="td text-xs">
-              {u.role !== 'OPERATOR' ? 'Бүгд'
-                : (u.site_ids?.length ? u.site_ids : (u.site_id ? [u.site_id] : []))
-                  .map((id) => sites.find((s) => s.id === id)?.name || '?').join(', ') || 'Бүгд'}
+              {(u.site_ids?.length ? u.site_ids : (u.site_id ? [u.site_id] : []))
+                .map((id) => sites.find((s) => s.id === id)?.name || '?').join(', ') || 'Бүгд'}
             </td>
             <td className="td font-mono text-xs">{fmtDate(u.created_at).split(' ')[0]}</td>
             <td className="td"><Badge value={u.is_active ? 'active' : 'FAILED'} /></td>
@@ -193,7 +193,7 @@ export default function Users() {
               )}
             </Field>
 
-            {editing.role === 'OPERATOR' && (
+            {(
               <Field label="Хариуцах зогсоолууд (олон сонгож болно)">
                 <div className="grid grid-cols-2 gap-1 border border-surface-border/60 rounded-lg p-3">
                   {sites.map((s) => (
@@ -211,7 +211,11 @@ export default function Users() {
                   {sites.length === 0 && <span className="text-xs text-slate-500">Зогсоол бүртгэгдээгүй</span>}
                 </div>
                 {editing.site_ids.length === 0 && (
-                  <div className="text-[11px] text-slate-500 mt-1">Юу ч сонгоогүй бол бүх зогсоолд хандана</div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Юу ч сонгоогүй бол БҮХ зогсоолд хандана (EasyParking компанийн түвшин).
+                    Түрээслэгч (tenant) байгууллагын ажилтанд зогсоолыг нь заавал сонгоно —
+                    тайлан, төлбөр, бүртгэлтэй машин бүгд зөвхөн тэр зогсоолоор хязгаарлагдана.
+                  </div>
                 )}
                 {editing.site_ids.length > 1 && (
                   <div className="mt-2">

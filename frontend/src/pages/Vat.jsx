@@ -66,7 +66,7 @@ export default function Vat() {
           ))}
         </div>
       )}
-      {info && (
+      {info && !info.scoped && (
         <div className="card py-3 flex flex-wrap gap-6 text-sm text-slate-400">
           <span>Сугалааны үлдэгдэл: <b className="font-mono text-slate-200">{fmt(info.leftLotteries)}</b></span>
           <span>Илгээгдээгүй баримт: <b className="font-mono text-slate-200">{fmt(info.unsentCount)}</b></span>

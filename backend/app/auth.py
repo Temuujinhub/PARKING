@@ -133,9 +133,12 @@ def require_role(*roles: str):
 
 
 def operator_sites(user: User) -> list[str] | None:
-    """Оператор бол хандах эрхтэй зогсоолуудын жагсаалт, үгүй бол None (бүх зогсоол).
-    site_ids (олон сонголт) тохируулсан бол түүгээр, үгүй бол [site_id]."""
-    if user.role != "OPERATOR":
+    """Хэрэглэгчийн хандах эрхтэй зогсоолуудын жагсаалт, үгүй бол None (бүх зогсоол).
+    Tenant салгалт: SUPER_ADMIN-аас бусад ямар ч роль (ADMIN/FINANCE/HR/OPERATOR)
+    "Хариуцах зогсоолууд" (site_ids) эсвэл үндсэн зогсоол (site_id) тохируулсан бол
+    зөвхөн тэдгээр зогсоолын хүрээнд хязгаарлагдана. Тохируулаагүй хэрэглэгч =
+    компанийн (EasyParking) түвшний хэрэглэгч, бүх зогсоол хардаг."""
+    if user.role == "SUPER_ADMIN":
         return None
     ids = [s for s in (user.site_ids or []) if s]
     if not ids and user.site_id:
@@ -144,9 +147,9 @@ def operator_sites(user: User) -> list[str] | None:
 
 
 def operator_site(user: User) -> str | None:
-    """Оператор бол ҮНДСЭН зогсоолын site_id (ганц site шаардлагатай газарт —
-    ээлж, кассын default). Олон зогсоолын шүүлтэд operator_sites/scoped_site ашиглана."""
-    if user.role == "OPERATOR" and user.site_id:
+    """ҮНДСЭН зогсоолын site_id (ганц site шаардлагатай газарт — ээлж, кассын
+    default). Олон зогсоолын шүүлтэд operator_sites/scoped_site ашиглана."""
+    if user.role != "SUPER_ADMIN" and user.site_id:
         return user.site_id
     ids = operator_sites(user)
     return ids[0] if ids else None

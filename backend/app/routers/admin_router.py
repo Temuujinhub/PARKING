@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from ..auth import (ALL_MODULES, get_current_user, hash_password, operator_sites,
-                    require, require_role)
+from ..auth import (ALL_MODULES, enforce_site, get_current_user, hash_password,
+                    operator_sites, require, require_role)
 from ..database import get_db
 from ..models import (
     AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
@@ -145,6 +145,7 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
 def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends(get_db),
                 user: User = Depends(require("settings"))):
     body = payload.dump()
+    enforce_site(user, site_id)  # tenant админ өөр зогсоолын тохиргоог засахгүй
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -172,6 +173,7 @@ def delete_site(site_id: str, force: bool = False, db: Session = Depends(get_db)
     """Зогсоол устгах. Сешн түүхтэй бол force=true шаардана (тест дата цэвэрлэхэд).
     force үед тухайн зогсоолын бүх хамаарах бичлэг (сешн, төлбөр, НӨАТ, LPR лог,
     хаалтны команд, нөхөн төлбөр, тооцоо, төхөөрөмж) бүрмөсөн устна."""
+    enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -223,6 +225,7 @@ async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_
     Зогсоолын бүртгэл (session/payment) үүсгэхгүй тул тайланг бохирдуулахгүй."""
     from ..services import qpay as qpay_svc
 
+    enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -277,6 +280,7 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
     байгууллагын нэрээр үүссэнийг батална."""
     from ..services import qpay as qpay_svc
 
+    enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -321,6 +325,7 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
 def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("settings", "discounts"))):
     """Зогсоолд мөрдөх тарифыг өөрчлөх (Санхүү/Админ) — /tariffs Зогсоол-тариф таб."""
+    enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -338,8 +343,12 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
     q = db.query(Device)
     if not include_deleted:  # устгасан төхөөрөмж UI-д харагдахгүй (Хаалт/Тохиргоо/Камер)
         q = q.filter(Device.status != "deleted")
+    allowed = operator_sites(user)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолын төхөөрөмж
     if site_id:
+        enforce_site(user, site_id)
         q = q.filter(Device.site_id == site_id)
+    elif allowed:
+        q = q.filter(Device.site_id.in_(allowed))
     # Онлайн = сүүлийн 3 минутад холбогдсон (heartbeat эсвэл LPR event)
     online_cutoff = datetime.utcnow() - timedelta(minutes=3)
     devices = q.order_by(Device.created_at).all()
@@ -370,6 +379,7 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
 @router.post("/devices")
 def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     body = payload.dump()
+    enforce_site(user, body.get("site_id"))
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
                         "lane_no", "lane_dir", "auto_open", "username", "password")
@@ -398,6 +408,9 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
+    enforce_site(user, device.site_id)
+    if body.get("site_id"):
+        enforce_site(user, body["site_id"])
     for k in ("name", "device_type", "vendor", "model", "ip_address", "lane_no",
               "lane_dir", "auto_open", "status", "site_id", "username", "password"):
         if k in body:
@@ -445,6 +458,7 @@ def delete_device(device_id: str, db: Session = Depends(get_db), user: User = De
     device = db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Төхөөрөмж олдсонгүй")
+    enforce_site(user, device.site_id)
     device.status = "deleted"
     _audit(db, user, "DELETE", "device", device_id)
     db.commit()
@@ -547,8 +561,12 @@ def list_drivers(q: str | None = None, company: str | None = None,
             | RegisteredDriver.company.ilike(like))
     if company:
         query = query.filter(RegisteredDriver.company == company)
+    allowed = operator_sites(user)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолын машинууд
     if site_id:
+        enforce_site(user, site_id)
         query = query.filter(RegisteredDriver.site_id == site_id)
+    elif allowed:
+        query = query.filter(RegisteredDriver.site_id.in_(allowed))
     return [to_dict(d, extra={"site_name": d.site.name if d.site else "Бүх зогсоол"})
             for d in query.limit(2000).all()]
 
@@ -557,10 +575,12 @@ def list_drivers(q: str | None = None, company: str | None = None,
 def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     """Байгууллагын жагсаалт + машины тоо — шүүлтүүрт."""
     from sqlalchemy import func as _f
-    rows = (db.query(RegisteredDriver.company, _f.count(RegisteredDriver.id))
-            .filter(RegisteredDriver.company.isnot(None), RegisteredDriver.company != "")
-            .group_by(RegisteredDriver.company)
-            .order_by(RegisteredDriver.company).all())
+    q = (db.query(RegisteredDriver.company, _f.count(RegisteredDriver.id))
+         .filter(RegisteredDriver.company.isnot(None), RegisteredDriver.company != ""))
+    allowed = operator_sites(user)
+    if allowed:
+        q = q.filter(RegisteredDriver.site_id.in_(allowed))
+    rows = q.group_by(RegisteredDriver.company).order_by(RegisteredDriver.company).all()
     return [{"company": c, "count": n} for c, n in rows]
 
 
@@ -575,6 +595,11 @@ def _parse_dt(value: str, field: str) -> datetime:
 @router.post("/drivers")
 def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     body = payload.dump()
+    # Tenant хэрэглэгч зөвхөн өөрийн зогсоолд бүртгэнэ — site_id=null («Бүх зогсоол»)
+    # бол бусад зогсоолд ч хүчинтэй болох тул хориглоно
+    allowed = operator_sites(user)
+    if allowed is not None and body.get("site_id") not in allowed:
+        raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд машин бүртгэх эрхтэй.")
     d = RegisteredDriver(
         plate_number=body["plate_number"].upper().replace(" ", ""),
         full_name=body.get("full_name", ""), phone=body.get("phone", ""),
@@ -598,6 +623,13 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
     d = db.get(RegisteredDriver, driver_id)
     if not d:
         raise HTTPException(404, "Жолооч олдсонгүй")
+    allowed = operator_sites(user)
+    if allowed is not None:
+        # Өөрийн зогсоолын бүртгэлийг л засна; өөр/бүх зогсоол руу шилжүүлэхгүй
+        if d.site_id not in allowed:
+            raise HTTPException(403, "Энэ бүртгэл таны хариуцах зогсоолынх биш байна.")
+        if "site_id" in body and body["site_id"] not in allowed:
+            raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоол руу шилжүүлэх эрхтэй.")
     for k in ("full_name", "phone", "contract_type", "site_id", "monthly_fee",
               "is_active", "company", "note"):
         if k in body:
@@ -626,6 +658,11 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
     хараад баталгаажуулна. replace=true бол файлд байхгүй хуучин бүртгэлийг
     ИДЭВХГҮЙ болгоно (устгахгүй — буруу импортоос сэргээх боломж үлдэнэ)."""
     from ..services.driver_import import import_rows, parse_workbook
+
+    allowed = operator_sites(user)
+    if allowed is not None and (site_id or None) not in allowed:
+        raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд импорт хийх эрхтэй "
+                                 "(зогсоолоо сонгоно уу).")
 
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Зөвхөн .xlsx файл дэмжинэ")
@@ -694,9 +731,30 @@ def update_blacklist(entry_id: str, body: dict, db: Session = Depends(get_db),
 
 
 # ─────────────────────────── Хэрэглэгч (SUPER_ADMIN) ───────────────────────────
+def _user_sites(u: User) -> set:
+    """Хэрэглэгчийн хамаарах зогсоолуудын олонлог (хоосон = бүх зогсоол/компанийн түвшин)."""
+    return {s for s in (u.site_ids or []) if s} or ({u.site_id} if u.site_id else set())
+
+
+def _enforce_user_scope(user: User, target_sites: set, action: str):
+    """Tenant админ зөвхөн ӨӨРИЙН зогсоолуудын хүрээн доторх хэрэглэгчийг удирдана.
+    Компанийн түвшний (зогсоолгүй) хэрэглэгч рүү халдахыг хориглоно."""
+    allowed = operator_sites(user)
+    if allowed is None:
+        return
+    if not target_sites or not target_sites.issubset(set(allowed)):
+        raise HTTPException(403, f"Зөвхөн өөрийн хариуцах зогсоолын ажилтныг {action} эрхтэй.")
+
+
 @router.get("/users")
 def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
-    return [to_dict(u) for u in db.query(User).order_by(User.created_at).all()]
+    users = db.query(User).order_by(User.created_at).all()
+    allowed = operator_sites(user)
+    if allowed is not None:
+        # Tenant админ зөвхөн өөрийн зогсоолуудтай огтлолцсон ажилтнууд + өөрийгөө харна
+        aset = set(allowed)
+        users = [u for u in users if u.id == user.id or (_user_sites(u) & aset)]
+    return [to_dict(u) for u in users]
 
 
 @router.post("/users")
@@ -707,6 +765,9 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db), user
     # SUPER_ADMIN-ыг API/UI-аас үүсгэхийг хориглоно (зөвхөн DB-ээр) — аюулгүй байдал
     if body.get("role") not in CREATABLE_ROLES:
         raise HTTPException(400, "role буруу байна (SUPER_ADMIN-ыг зөвхөн DB-ээр үүсгэнэ)")
+    new_sites = {s for s in (body.get("site_ids") or []) if s} or (
+        {body["site_id"]} if body.get("site_id") else set())
+    _enforce_user_scope(user, new_sites, "нэмэх")
     _check_password(body.get("password", ""))
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),
@@ -732,6 +793,12 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
         raise HTTPException(403, "SUPER_ADMIN хэрэглэгчийг зөвхөн DB-ээр удирдана")
     if "role" in body and body["role"] not in CREATABLE_ROLES:
         raise HTTPException(400, "role буруу байна")
+    if u.id != user.id:
+        _enforce_user_scope(user, _user_sites(u), "засах")
+    if "site_ids" in body or "site_id" in body:
+        new_sites = {s for s in (body.get("site_ids") or []) if s} or (
+            {body["site_id"]} if body.get("site_id") else set())
+        _enforce_user_scope(user, new_sites, "оноох")
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])

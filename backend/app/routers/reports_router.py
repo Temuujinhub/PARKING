@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import operator_sites, require
 from ..database import get_db
 from ..models import (
     AuditLog, LprEvent, ParkingSession, ParkingSite, Payment, User, VatReceipt,
@@ -46,6 +46,29 @@ def _day_list(start, end):
     return days
 
 
+def _scope(user, site_id=None):
+    """Tenant салгалт: хүссэн site_id-г хэрэглэгчийн хариуцах зогсоолуудаар хязгаарлана.
+    Буцаана: None (бүх зогсоол) | str (нэг зогсоол) | list[str] (хэд хэдэн зогсоол).
+    Эрхгүй зогсоол хүсвэл 403 — тайлан/лог бүр энэ шүүлтээр дамжина."""
+    allowed = operator_sites(user)
+    if allowed is None:
+        return site_id or None
+    if site_id:
+        if site_id not in allowed:
+            raise HTTPException(403, "Энэ зогсоолын мэдээлэл харах эрхгүй.")
+        return site_id
+    return allowed[0] if len(allowed) == 1 else allowed
+
+
+def _flt(q, col, scope):
+    """_scope-ийн утгаар query шүүнэ (None=шүүхгүй, str=нэг, list=олон зогсоол)."""
+    if scope is None:
+        return q
+    if isinstance(scope, list):
+        return q.filter(col.in_(scope))
+    return q.filter(col == scope)
+
+
 def _daily_rows(db, start, end, site_id):
     """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
     daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов.
@@ -62,9 +85,8 @@ def _daily_rows(db, start, end, site_id):
     pq = (db.query(pay_day, Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
           .join(ParkingSession, Payment.session_id == ParkingSession.id)
           .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi))
-    if site_id:
-        sq = sq.filter(ParkingSession.site_id == site_id)
-        pq = pq.filter(ParkingSession.site_id == site_id)
+    sq = _flt(sq, ParkingSession.site_id, site_id)
+    pq = _flt(pq, ParkingSession.site_id, site_id)
     counts = {str(d): (int(n), int(x)) for d, n, x in sq.group_by(sess_day).all()}
     pays = {}
     for d, provider, amt in pq.group_by(pay_day, Payment.provider).all():
@@ -84,17 +106,27 @@ def _daily_rows(db, start, end, site_id):
 
 @router.get("/dashboard")
 def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
-    """Нүүр хуудасны статистик."""
+    """Нүүр хуудасны статистик. Хариуцах зогсоолтой хэрэглэгчид зөвхөн өөрийн
+    зогсоолуудын тоо баримт харагдана (tenant салгалт)."""
+    scope = _scope(user)
     today = _local_midnight_utc(datetime.utcnow())
-    open_count = db.query(ParkingSession).filter(
-        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).count()
-    awaiting = db.query(ParkingSession).filter(ParkingSession.status == "AWAITING_PAYMENT").count()
-    today_entries = db.query(ParkingSession).filter(ParkingSession.entry_time >= today).count()
-    today_exits = db.query(ParkingSession).filter(ParkingSession.exit_time >= today).count()
-    today_revenue = float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
-        Payment.status == "PAID", Payment.paid_at >= today).scalar())
-    total_capacity = db.query(func.coalesce(func.sum(ParkingSite.capacity), 0)).filter(
-        ParkingSite.is_active.is_(True)).scalar()
+    open_count = _flt(db.query(ParkingSession).filter(
+        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])),
+        ParkingSession.site_id, scope).count()
+    awaiting = _flt(db.query(ParkingSession).filter(ParkingSession.status == "AWAITING_PAYMENT"),
+                    ParkingSession.site_id, scope).count()
+    today_entries = _flt(db.query(ParkingSession).filter(ParkingSession.entry_time >= today),
+                         ParkingSession.site_id, scope).count()
+    today_exits = _flt(db.query(ParkingSession).filter(ParkingSession.exit_time >= today),
+                       ParkingSession.site_id, scope).count()
+    rev_q = db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
+        Payment.status == "PAID", Payment.paid_at >= today)
+    if scope is not None:
+        rev_q = _flt(rev_q.join(ParkingSession, Payment.session_id == ParkingSession.id),
+                     ParkingSession.site_id, scope)
+    today_revenue = float(rev_q.scalar())
+    total_capacity = _flt(db.query(func.coalesce(func.sum(ParkingSite.capacity), 0)).filter(
+        ParkingSite.is_active.is_(True)), ParkingSite.id, scope).scalar()
 
     # Зогсоол тус бүрийн дүүргэлт/орлого — сайт бүрд 2 query биш, 2 бүлэглэсэн query
     occ_by_site = dict(db.query(ParkingSession.site_id, func.count())
@@ -106,7 +138,8 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
                    .filter(Payment.status == "PAID", Payment.paid_at >= today)
                    .group_by(ParkingSession.site_id).all()}
     sites = []
-    for s in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
+    for s in _flt(db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)),
+                  ParkingSite.id, scope).all():
         occupied = int(occ_by_site.get(s.id, 0))
         sites.append({"id": s.id, "name": s.name, "capacity": s.capacity,
                       # capacity=0 → дүүргэлтгүй: сул тоо null
@@ -116,10 +149,13 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
 
     # Сүүлийн 7 хоногийн орлого (график) — өдөр бүр query биш, 1 бүлэглэсэн query
     wk_day = func.date(Payment.paid_at + TZ)
-    wk = {str(d): float(a) for d, a in
-          db.query(wk_day, func.coalesce(func.sum(Payment.amount), 0))
-          .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=6),
-                  Payment.paid_at < today + timedelta(days=1)).group_by(wk_day).all()}
+    wk_q = (db.query(wk_day, func.coalesce(func.sum(Payment.amount), 0))
+            .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=6),
+                    Payment.paid_at < today + timedelta(days=1)))
+    if scope is not None:
+        wk_q = _flt(wk_q.join(ParkingSession, Payment.session_id == ParkingSession.id),
+                    ParkingSession.site_id, scope)
+    wk = {str(d): float(a) for d, a in wk_q.group_by(wk_day).all()}
     week = []
     for i in range(6, -1, -1):
         day = today - timedelta(days=i)
@@ -129,13 +165,15 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
     # Өнөөдрийн цагийн ачаалал — цаг тус бүрийн орц/гарц (0–23)
     from sqlalchemy import Integer, cast
     hourly = {h: {"hour": h, "entries": 0, "exits": 0} for h in range(24)}
-    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.entry_time + TZ), Integer),
-                             func.count()).filter(ParkingSession.entry_time >= today)
+    for hr, cnt in (_flt(db.query(cast(func.extract("hour", ParkingSession.entry_time + TZ), Integer),
+                                  func.count()).filter(ParkingSession.entry_time >= today),
+                         ParkingSession.site_id, scope)
                     .group_by(func.extract("hour", ParkingSession.entry_time + TZ)).all()):
         if hr is not None:
             hourly[int(hr)]["entries"] = int(cnt)
-    for hr, cnt in (db.query(cast(func.extract("hour", ParkingSession.exit_time + TZ), Integer),
-                             func.count()).filter(ParkingSession.exit_time >= today)
+    for hr, cnt in (_flt(db.query(cast(func.extract("hour", ParkingSession.exit_time + TZ), Integer),
+                                  func.count()).filter(ParkingSession.exit_time >= today),
+                         ParkingSession.site_id, scope)
                     .group_by(func.extract("hour", ParkingSession.exit_time + TZ)).all()):
         if hr is not None:
             hourly[int(hr)]["exits"] = int(cnt)
@@ -144,7 +182,8 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
     # Төхөөрөмжийн холболтын статус (сүүлийн 3 минутад холбогдсон = онлайн)
     from ..models import Device
     online_cutoff = datetime.utcnow() - timedelta(minutes=3)
-    devices = db.query(Device).filter(Device.status == "active").all()
+    devices = _flt(db.query(Device).filter(Device.status == "active"),
+                   Device.site_id, scope).all()
     device_status = []
     online_n = 0
     for d in devices:
@@ -160,7 +199,8 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
     # Ажиллаж буй ээлж — хэн аль зогсоолд POS/системд нэвтэрч ажиллаж байгаа
     from ..models import CashierShift
     active_shifts = []
-    for sh in (db.query(CashierShift).filter(CashierShift.status == "OPEN")
+    for sh in (_flt(db.query(CashierShift).filter(CashierShift.status == "OPEN"),
+                    CashierShift.site_id, scope)
                .order_by(CashierShift.opened_at.desc()).all()):
         rev = float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
             Payment.status == "PAID", Payment.cashier_id == sh.user_id,
@@ -190,9 +230,7 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
     """Зогсоол тус бүрийн орлогын тайлан (easy-park 'Зогсоолын төлбөрийн тайлан')."""
     start, end = _range(date_from, date_to)
     out = []
-    sites = db.query(ParkingSite).all()
-    if site_id:
-        sites = [s for s in sites if s.id == site_id]
+    sites = _flt(db.query(ParkingSite), ParkingSite.id, _scope(user, site_id)).all()
     for s in sites:
         base = db.query(ParkingSession).filter(ParkingSession.site_id == s.id,
                                                ParkingSession.entry_time >= start,
@@ -243,7 +281,7 @@ def daily_report(date_from: str | None = None, date_to: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Өдөр өдрөөр задарсан тайлан (easy-park UAT item 3)."""
     start, end = _range(date_from, date_to)
-    out, totals = _daily_rows(db, start, end, site_id)
+    out, totals = _daily_rows(db, start, end, _scope(user, site_id))
     return {"rows": out, "totals": totals}
 
 
@@ -260,8 +298,7 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
                   func.coalesce(func.sum(Payment.amount), 0), func.count())
          .join(ParkingSession, Payment.session_id == ParkingSession.id)
          .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    if site_id:
-        q = q.filter(ParkingSession.site_id == site_id)
+    q = _flt(q, ParkingSession.site_id, _scope(user, site_id))
     months = {}
     for ym, prov, amt, cnt in q.group_by("ym", Payment.provider).all():
         m = months.setdefault(int(ym), {"cash": 0.0, "qpay": 0.0, "pos": 0.0, "count": 0})
@@ -302,8 +339,7 @@ def _txn_query(db, start, end, site_id, provider, car_type, status, date_field="
     else:
         q = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
                                             ParkingSession.entry_time < end)
-    if site_id:
-        q = q.filter(ParkingSession.site_id == site_id)
+    q = _flt(q, ParkingSession.site_id, site_id)
     if status:
         q = q.filter(ParkingSession.status == status)
     if car_type == "contract":
@@ -377,7 +413,7 @@ def transactions(date_from: str | None = None, date_to: str | None = None,
     Шүүлт: огноо (date_field=entry орсон / paid төлсөн), зогсоол, төлбөрийн хэрэгсэл,
     машины төрөл (contract/discount/normal), төлөв. Багцалж татахад /transactions/excel."""
     start, end = _range(date_from, date_to)
-    q = _txn_query(db, start, end, site_id, provider, car_type, status, date_field)
+    q = _txn_query(db, start, end, _scope(user, site_id), provider, car_type, status, date_field)
     total = q.count()
     paid_sum = float(q.with_entities(func.coalesce(func.sum(ParkingSession.total_fee), 0)).scalar() or 0)
     sessions = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 2000)).all()
@@ -394,7 +430,7 @@ def transactions_excel(date_from: str | None = None, date_to: str | None = None,
                        db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Шүүсэн бичилтүүдийг Excel болгон багцалж татна (одоогийн шүүлтээр)."""
     start, end = _range(date_from, date_to)
-    sessions = (_txn_query(db, start, end, site_id, provider, car_type, status, date_field)
+    sessions = (_txn_query(db, start, end, _scope(user, site_id), provider, car_type, status, date_field)
                 .order_by(ParkingSession.entry_time.desc()).limit(20000).all())
     rows = _txn_rows(db, sessions)
     return _excel.transactions_excel(rows)
@@ -407,19 +443,18 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
     машины төрлөөр 2 задаргаа ИЖИЛ нийлбэрт нийлнэ (тэнцвэржинэ).
     Үнэгүй гарсан нь орлогогүй тул тусад нь тоогоор (info) харуулна."""
     start, end = _range(date_from, date_to)
+    sid = _scope(user, site_id)
     # Хэрэгслээр — төлсөн гүйлгээ
     pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0), func.count())
           .join(ParkingSession, Payment.session_id == ParkingSession.id)
           .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    if site_id:
-        pq = pq.filter(ParkingSession.site_id == site_id)
+    pq = _flt(pq, ParkingSession.site_id, sid)
     by_method = [{"key": PROVIDER_MN.get(p, p), "amount": float(a), "count": int(c)}
                  for p, a, c in pq.group_by(Payment.provider).all()]
     # Машины төрлөөр — ИЖИЛ төлсөн гүйлгээг session-ий төрлөөр бүлэглэнэ (тэнцвэржинэ)
     payq = (db.query(Payment).join(ParkingSession, Payment.session_id == ParkingSession.id)
             .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    if site_id:
-        payq = payq.filter(ParkingSession.site_id == site_id)
+    payq = _flt(payq, ParkingSession.site_id, sid)
     buckets = {"Гэрээт": [0, 0.0], "Хөнгөлөлттэй": [0, 0.0], "Энгийн": [0, 0.0]}
     for p in payq.all():
         buckets[_car_type(p.session)][0] += 1
@@ -429,8 +464,7 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
     free_q = db.query(ParkingSession).filter(ParkingSession.status == "FREE",
                                              ParkingSession.exit_time >= start,
                                              ParkingSession.exit_time < end)
-    if site_id:
-        free_q = free_q.filter(ParkingSession.site_id == site_id)
+    free_q = _flt(free_q, ParkingSession.site_id, sid)
     total = sum(m["amount"] for m in by_method)
     return {"by_method": by_method, "by_car": by_car,
             "total": total, "free_count": free_q.count()}
@@ -453,9 +487,8 @@ def _shift_rows(db, start, end, site_id):
         pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
               .join(ParkingSession, Payment.session_id == ParkingSession.id)
               .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
-        if site_id:
-            sq = sq.filter(ParkingSession.site_id == site_id)
-            pq = pq.filter(ParkingSession.site_id == site_id)
+        sq = _flt(sq, ParkingSession.site_id, site_id)
+        pq = _flt(pq, ParkingSession.site_id, site_id)
         prov = dict(pq.group_by(Payment.provider).all())
         cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
         out.append({"date": (day + TZ).strftime("%Y-%m-%d"),
@@ -476,7 +509,7 @@ def by_shift_report(date_from: str | None = None, date_to: str | None = None,
     боловч зааг нь шөнө дунд биш, ээлж солигдох цаг)."""
     from ..config import settings
     start, end = _range(date_from, date_to)
-    out = _shift_rows(db, start, end, site_id)
+    out = _shift_rows(db, start, end, _scope(user, site_id))
     totals = {k: sum(r[k] for r in out) for k in
               ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
     return {"rows": out, "shift_hour": settings.shift_change_hour, "totals": totals}
@@ -489,6 +522,7 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
     Карт ба QPay нь электрон баталгаажсан тул систем=баталгаа (засахгүй); зөвхөн бэлэнг
     санхүү дансны хуулгаас баталгаажуулна. Мөн ажилтан + тухайн өдөр үүссэн өрийн дүн."""
     from ..models import CashierShift, Compensation, DailySettlement
+    _scope(user, site_id)  # хариуцаагүй зогсоолын тооцоо руу хандахыг хориглоно
     start, end = _range(date_from, date_to)
     setts = {s.date: s for s in db.query(DailySettlement).filter(
         DailySettlement.site_id == site_id).all()}
@@ -562,6 +596,7 @@ def settlement_upsert(body: dict, db: Session = Depends(get_db), user: User = De
     from ..models import DailySettlement
     if not body.get("site_id") or not body.get("date"):
         raise HTTPException(400, "site_id болон date шаардлагатай")
+    _scope(user, body["site_id"])  # хариуцаагүй зогсоолын тооцоог хаах/засахыг хориглоно
     st = (db.query(DailySettlement)
           .filter(DailySettlement.site_id == body["site_id"], DailySettlement.date == body["date"]).first())
     if not st:
@@ -597,7 +632,7 @@ def daily_excel(date_from: str | None = None, date_to: str | None = None,
                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Өдөр өдрөөр задарсан тайлангийн Excel."""
     start, end = _range(date_from, date_to)
-    out, tot = _daily_rows(db, start, end, site_id)
+    out, tot = _daily_rows(db, start, end, _scope(user, site_id))
     return _excel.daily_excel(out, tot)
 
 
@@ -606,7 +641,7 @@ def by_shift_excel(date_from: str | None = None, date_to: str | None = None, sit
                    db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Ээлжээр тайлангийн Excel."""
     start, end = _range(date_from, date_to)
-    rows = _shift_rows(db, start, end, site_id)
+    rows = _shift_rows(db, start, end, _scope(user, site_id))
     return _excel.by_shift_excel(rows)
 
 
@@ -616,7 +651,7 @@ def monthly_excel(date_from: str | None = None, date_to: str | None = None, site
     """Сараар тайлангийн Excel (төлбөрийн хэрэгслээр)."""
     start, end = _range(date_from, date_to)
     data = monthly_report(date_from, date_to, site_id, db, user)
-    daily, _ = _daily_rows(db, start, end, site_id)
+    daily, _ = _daily_rows(db, start, end, _scope(user, site_id))
     return _excel.monthly_excel(data, daily)
 
 
@@ -633,6 +668,7 @@ def by_payment_excel(date_from: str | None = None, date_to: str | None = None, s
 def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str | None = None,
                         db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Нэг зогсоолын session-уудын дэлгэрэнгүй Excel (тайлангийн мөрийн 'Татах' үйлдэл)."""
+    _scope(user, site_id)  # хариуцаагүй зогсоолын дэлгэрэнгүйг татахыг хориглоно
     start, end = _range(date_from, date_to)
     site = db.get(ParkingSite, site_id)
     if not site:
@@ -650,8 +686,9 @@ def shifts_excel(date_from: str | None = None, date_to: str | None = None,
     """Касс хаалтын тайлангийн Excel."""
     from ..models import CashierShift
     start, end = _range(date_from, date_to)
-    shifts = (db.query(CashierShift).filter(CashierShift.opened_at >= start,
-                                            CashierShift.opened_at < end)
+    shifts = (_flt(db.query(CashierShift).filter(CashierShift.opened_at >= start,
+                                                 CashierShift.opened_at < end),
+                   CashierShift.site_id, _scope(user))
               .order_by(CashierShift.opened_at.desc()).limit(2000).all())
     return _excel.shifts_excel(db, shifts)
 
@@ -662,6 +699,12 @@ async def vat_info(user: User = Depends(require("vat", "reports"))):
     Frontend үүнийг ашиглан анхааруулга харуулна."""
     from ..config import settings
     from ..services import ebarimt
+    if operator_sites(user) is not None:
+        # Хариуцах зогсоолтой (tenant) хэрэглэгч — глобал PosAPI (EasyParking-ийн ТТД)
+        # мэдээлэл хамаагүй тул хоосон буцаана; тэдний e-Barimt QPay ebarimt_v3-ээр үүсдэг
+        return {"warnings": [], "scoped": True,
+                "qpay_ebarimt": settings.qpay_ebarimt and not settings.qpay_mock,
+                "local_posapi_mock": settings.ebarimt_mock}
     info = await ebarimt.get_information()
     warnings = []
     if int(info.get("leftLotteries") or 0) < 500:
@@ -682,6 +725,8 @@ async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("
     """Борлуулалтын мэдээг ТЕГ рүү ГАРААР илгээх (ТЕГ шаардлага №5 — гэмтэл саатлын үед)."""
     from ..models import AuditLog
     from ..services import ebarimt
+    if operator_sites(user) is not None:
+        raise HTTPException(403, "Глобал PosAPI мэдээ илгээх нь EasyParking-ийн санхүүгийн үйлдэл.")
     result = await ebarimt.send_data()
     db.add(AuditLog(username=user.username, action="VAT_SEND_DATA", entity="ebarimt",
                     detail={"result": result.get("message", str(result.get("success")))}))
@@ -696,19 +741,40 @@ def vat_receipts(date_from: str | None = None, date_to: str | None = None,
     start, end = _range(date_from, date_to)
     # Дугаар/зогсоолыг хамт өгнө — «энэ баримт аль машин, аль зогсоолынх вэ»
     # гэдэг UI дээр харагдахгүй байсан (нэг query, session→site join)
-    rows = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
-            .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-            .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
-            .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end)
-            .order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all())
+    q = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
+         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+         .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+         .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end))
+    # Tenant хэрэглэгч зөвхөн өөрийн зогсоолын баримт харна (session-гүй баримт орохгүй)
+    q = _flt(q, ParkingSession.site_id, _scope(user))
+    rows = q.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
     return [to_dict(r, extra={"plate_number": plate, "site_name": site_name})
             for r, plate, site_name in rows]
+
+
+def _scoped_usernames(db, user) -> list[str] | None:
+    """Tenant хэрэглэгчид үйлдлийн логоос зөвхөн ӨӨРИЙН зогсоолуудтай огтлолцсон
+    хэрэглэгчдийн (болон өөрийн) үйлдлийг харуулна. AuditLog-д site_id байхгүй тул
+    хэрэглэгчээр нь ойролцоолж шүүнэ. None = хязгааргүй (EasyParking түвшин)."""
+    allowed = operator_sites(user)
+    if allowed is None:
+        return None
+    aset = set(allowed)
+    names = {user.username}
+    for u in db.query(User).all():
+        sites = {s for s in (u.site_ids or []) if s} or ({u.site_id} if u.site_id else set())
+        if sites & aset:
+            names.add(u.username)
+    return sorted(names)
 
 
 @router.get("/audit-logs")
 def audit_logs(username: str | None = None, action: str | None = None, limit: int = 200,
                db: Session = Depends(get_db), user: User = Depends(require("logs"))):
     q = db.query(AuditLog)
+    scoped = _scoped_usernames(db, user)
+    if scoped is not None:
+        q = q.filter(AuditLog.username.in_(scoped))
     if username:
         q = q.filter(AuditLog.username == username)
     if action:
@@ -721,6 +787,9 @@ def audit_logs_excel(username: str | None = None, action: str | None = None,
                      db: Session = Depends(get_db), user: User = Depends(require("logs"))):
     """Үйлдлийн логийг Excel болгон татна (ADMIN/FINANCE)."""
     q = db.query(AuditLog)
+    scoped = _scoped_usernames(db, user)
+    if scoped is not None:
+        q = q.filter(AuditLog.username.in_(scoped))
     if username:
         q = q.filter(AuditLog.username == username)
     if action:
@@ -738,9 +807,7 @@ def lpr_events(site_id: str | None = None, plate: str | None = None,
     агшинд нээлттэй session ЯГ таарч байсан эсэхийг (matched) тэмдэглэнэ."""
     from ..models import Device
     from ..session_logic import normalize_plate
-    q = db.query(LprEvent)
-    if site_id:
-        q = q.filter(LprEvent.site_id == site_id)
+    q = _flt(db.query(LprEvent), LprEvent.site_id, _scope(user, site_id))
     if plate:
         q = q.filter(LprEvent.plate_number.ilike(f"{normalize_plate(plate)}%"))
     if lane in ("entry", "exit"):
@@ -773,9 +840,7 @@ def lpr_events_excel(site_id: str | None = None, plate: str | None = None,
     plate/lane шүүлт lpr-events-тэй ижил."""
     from ..models import Device
     from ..session_logic import normalize_plate
-    q = db.query(LprEvent)
-    if site_id:
-        q = q.filter(LprEvent.site_id == site_id)
+    q = _flt(db.query(LprEvent), LprEvent.site_id, _scope(user, site_id))
     if plate:
         q = q.filter(LprEvent.plate_number.ilike(f"{normalize_plate(plate)}%"))
     if lane in ("entry", "exit"):
@@ -796,8 +861,7 @@ _CMD_SRC_MN = {"auto_entry": "Авто орох", "auto_exit": "Авто гар�
 def _barrier_command_rows(db, site_id, plate, source, limit):
     from ..models import BarrierCommand, Device
     q = db.query(BarrierCommand).join(Device, BarrierCommand.device_id == Device.id)
-    if site_id:
-        q = q.filter(Device.site_id == site_id)
+    q = _flt(q, Device.site_id, site_id)
     if source:
         q = q.filter(BarrierCommand.command_source == source)
     cmds = q.order_by(BarrierCommand.created_at.desc()).limit(min(limit, 2000)).all()
@@ -821,7 +885,7 @@ def barrier_commands(site_id: str | None = None, plate: str | None = None,
     """Хаалт нээх командын лог — аль машинд, ямар эх сурвалжаар (авто гарах / төлбөр /
     гараар), амжилттай эсэхийг харуулна. Төлбөргүй машин гарсан бол ХААЛТ ХЭРХЭН
     нээгдсэнийг эндээс шалгана (эсвэл команд огт байхгүй = tailgating)."""
-    cmds, plates, dev = _barrier_command_rows(db, site_id, plate, source, limit)
+    cmds, plates, dev = _barrier_command_rows(db, _scope(user, site_id), plate, source, limit)
     return [{"id": c.id, "created_at": c.created_at.isoformat() if c.created_at else None,
              "command": c.command, "source": c.command_source,
              "source_mn": _CMD_SRC_MN.get(c.command_source, c.command_source),
@@ -834,5 +898,5 @@ def barrier_commands(site_id: str | None = None, plate: str | None = None,
 def barrier_commands_excel(site_id: str | None = None, plate: str | None = None,
                            source: str | None = None, limit: int = 5000,
                            db: Session = Depends(get_db), user: User = Depends(require("logs", "dashboard"))):
-    cmds, plates, dev = _barrier_command_rows(db, site_id, plate, source, limit)
+    cmds, plates, dev = _barrier_command_rows(db, _scope(user, site_id), plate, source, limit)
     return _excel.barrier_commands_excel(cmds, plates, dev, _CMD_SRC_MN)

@@ -311,15 +311,20 @@ async def create_ebarimt(payment_id: str, receiver_type: str = "CITIZEN",
     return _normalize_ebarimt(data)
 
 
-async def cancel_ebarimt(ebarimt_id: str, acc: QpayAccount | None = None) -> bool:
-    """DELETE /v2/ebarimt_v3/{id} — e-Barimt цуцлах."""
+async def cancel_ebarimt(payment_id: str, note: str = "Гүйлгээ буцаав",
+                         acc: QpayAccount | None = None) -> bool:
+    """DELETE /v2/ebarimt_v3/{payment_id} — e-Barimt цуцлах.
+
+    Шинэ спек (2026.3.17 V2 API with Ebarimt 3.0): path параметр нь БАРИМТ ҮҮСГЭСЭН
+    ТӨЛБӨРИЙН payment_id (ebarimt id биш), body-д note заавал."""
     acc = acc or global_account()
     if acc.mock:
         return True
     token = await _get_token(acc)
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.delete(f"{acc.base_url}/ebarimt_v3/{ebarimt_id}",
-                                   headers={"Authorization": f"Bearer {token}"})
+        resp = await client.request("DELETE", f"{acc.base_url}/ebarimt_v3/{payment_id}",
+                                    json={"note": note},
+                                    headers={"Authorization": f"Bearer {token}"})
     return resp.status_code in (200, 204)
 
 

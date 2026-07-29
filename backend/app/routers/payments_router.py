@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, require, require_role
+from ..auth import enforce_site, require, require_role, scoped_site
 from ..config import settings
 from ..database import get_db
 from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Payment,
@@ -594,8 +594,11 @@ def list_payments(
 ):
     from datetime import timedelta
     q = db.query(Payment).join(ParkingSession, Payment.session_id == ParkingSession.id)
+    site_id, site_ids = scoped_site(user, site_id)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолууд
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
+    elif site_ids:
+        q = q.filter(ParkingSession.site_id.in_(site_ids))
     if status:
         q = q.filter(Payment.status == status)
     if provider:
@@ -687,6 +690,8 @@ async def retry_ebarimt_endpoint(payment_id: str, db: Session = Depends(get_db),
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Төлбөр олдсонгүй")
+    site = _site_of(payment)
+    enforce_site(user, site.id if site else None)  # өөр зогсоолын баримтыг дахин үүсгэхгүй
     payment = _lock_payment(db, payment_id)  # давхар товшилтоос давхар баримт гаргахгүй
     if payment is None:
         raise HTTPException(409, "Баримт үүсгэх ажиллагаа явагдаж байна — түр хүлээнэ үү")

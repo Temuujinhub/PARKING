@@ -102,6 +102,13 @@ def hr_worked_days(month: str, db: Session = Depends(get_db), user: User = Depen
     start = _dt(y, m, 1)
     end = _dt(y + 1, 1, 1) if m == 12 else _dt(y, m + 1, 1)
     ops = db.query(User).filter(User.role == "OPERATOR", User.is_active.is_(True)).order_by(User.full_name).all()
+    from ..auth import operator_sites
+    allowed = operator_sites(user)
+    if allowed is not None:
+        # Tenant хэрэглэгч (ж: Моннис) зөвхөн өөрийн зогсоолуудын операторуудыг харна
+        aset = set(allowed)
+        ops = [o for o in ops
+               if ({s for s in (o.site_ids or []) if s} or ({o.site_id} if o.site_id else set())) & aset]
     out = []
     for op in ops:
         shifts = db.query(CashierShift).filter(
