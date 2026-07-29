@@ -708,6 +708,45 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         return err
 
 
+# Тухайн камерт хамгийн сүүлд хүсэгдсэн дэлгэцийн «үе» — хожуу оролдлого хийж
+# байх зуур ШИНЭ текст ирвэл хуучныг орхиж, камерыг дэмий цохихгүй байхад.
+_display_gen: dict[str, int] = {}
+
+
+def _retry_delays() -> list[float]:
+    out = []
+    for part in (settings.screen_retry_delays or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(float(part))
+            except ValueError:
+                pass
+    return out
+
+
+async def _display_with_retry(ip: str, text: str, voice_text: str | None,
+                              creds: tuple[str, str] | None, gen: int):
+    """Дэлгэцийг харуулах — амжилтгүй бол ХОЖУУ дахин оролдоно.
+
+    Яагаад: гарах үед жолооч төлбөрөө төлж хэдэн арван секунд зогсдог тул
+    дүнг 10-30 секундын дараа харуулах нь ХЭРЭГТЭЙ хэвээр. Гэхдээ камерыг
+    дэмий цохихгүй: хаалтны команд хүлээж байвал эсвэл камер саяхан timeout
+    болсон бол тэр оролдлогыг алгасаад дараагийн завсарт үлдээнэ."""
+    for i, delay in enumerate([0.0] + _retry_delays()):
+        if delay:
+            await asyncio.sleep(delay)
+        if _display_gen.get(ip) != gen:
+            return   # шинэ текст ирсэн — хуучин нь хоцрогдсон
+        if barrier_is_waiting(ip) or camera_sick_remaining(ip):
+            continue   # суваг завгүй — дараагийн завсарт оролдоно
+        err = await display_on_screen(ip, text, voice_text if i == 0 else None, creds=creds)
+        if not err:
+            if i:
+                log.info("[screen] %s: %d-р оролдлогоор амжиллаа", ip, i + 1)
+            return
+
+
 def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
                      creds: tuple[str, str] | None = None):
     """Event боловсруулалтын дараа дуудна — дэлгэцний командыг АРД НЬ явуулна
@@ -718,7 +757,8 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
         asyncio.get_running_loop()
     except RuntimeError:
         return  # event loop-гүй орчин (тест г.м) — алгасна
-    asyncio.create_task(display_on_screen(ip, text, voice_text, creds=creds))
+    gen = _display_gen[ip] = _display_gen.get(ip, 0) + 1
+    asyncio.create_task(_display_with_retry(ip, text, voice_text, creds, gen))
 
 
 def format_duration(minutes: float | int | None) -> str:

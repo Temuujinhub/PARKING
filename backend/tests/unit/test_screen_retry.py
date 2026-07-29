@@ -1,0 +1,89 @@
+"""Дэлгэцийн хожуу дахин оролдлого — суваг чөлөөлөгдөхөд харуулах (2026-07-29).
+
+Хэмжилтээр манай систем камерын нэвтрэлтийн 80%-ийг эзэлж байсан тул дэлгэц
+амжилтгүй болбол ШУУД биш, хожуу (суваг сул үед) дахин оролдоно. Шалгах зүйлс:
+  1. Эхний оролдлого амжилттай бол дахин оролдохгүй.
+  2. Амжилтгүй бол хожуу дахин оролдож, амжилттай болмогц зогсоно.
+  3. Хаалт хүлээж байвал тэр оролдлогыг алгасна (хаалт тэргүүлэх эрхтэй).
+  4. Шинэ текст ирвэл хуучин оролдлого өөрөө зогсоно (камерыг дэмий цохихгүй).
+"""
+import asyncio
+
+import pytest
+
+from app.config import settings
+from app.services import barrier as B
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.fixture()
+def _fast(monkeypatch):
+    monkeypatch.setattr(settings, "screen_enabled", True)
+    monkeypatch.setattr(settings, "screen_retry_delays", "0.05,0.05")
+    B._display_gen.clear()
+    B._cam_sick_until.clear()
+    B._barrier_waiting.clear()
+    calls = []
+
+    async def _fake(ip, text, voice_text=None, repeat=None, creds=None):
+        calls.append((ip, text))
+        return "" if getattr(_fake, "ok_from", 0) <= len(calls) - 1 else "алдаа"
+
+    monkeypatch.setattr(B, "display_on_screen", _fake)
+    return calls, _fake
+
+
+@pytest.mark.anyio
+async def test_success_first_try_no_retry(_fast):
+    calls, fake = _fast
+    fake.ok_from = 0            # эхний оролдлогоос амжилттай
+    B._display_gen["10.0.0.1"] = 1
+    await B._display_with_retry("10.0.0.1", "текст", None, None, 1)
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_retries_until_success(_fast):
+    calls, fake = _fast
+    fake.ok_from = 2            # зөвхөн 3 дахь оролдлого амжилттай
+    B._display_gen["10.0.0.2"] = 1
+    await B._display_with_retry("10.0.0.2", "текст", None, None, 1)
+    assert len(calls) == 3, "амжилттай болтол хожуу дахин оролдоно"
+
+
+@pytest.mark.anyio
+async def test_skips_while_barrier_waiting(_fast):
+    calls, fake = _fast
+    fake.ok_from = 0
+    B._barrier_waiting["10.0.0.3"] = 1      # хаалтны команд хүлээж байна
+    B._display_gen["10.0.0.3"] = 1
+    await B._display_with_retry("10.0.0.3", "текст", None, None, 1)
+    assert calls == [], "хаалт хүлээж байхад камерт хүрэхгүй"
+
+
+@pytest.mark.anyio
+async def test_newer_text_cancels_old_retry(_fast, monkeypatch):
+    calls, _fake_unused = _fast
+    B._display_gen["10.0.0.4"] = 1
+
+    async def _fail_then_newer(ip, text, voice_text=None, repeat=None, creds=None):
+        calls.append((ip, text))
+        B._display_gen[ip] = 2       # эхний оролдлогын дараа ШИНЭ текст ирлээ
+        return "алдаа"
+
+    monkeypatch.setattr(B, "display_on_screen", _fail_then_newer)
+    await B._display_with_retry("10.0.0.4", "хуучин", None, None, 1)
+    assert len(calls) == 1, "хоцрогдсон текстийг дахин оролдохгүй"
+
+
+@pytest.mark.anyio
+async def test_schedule_display_sets_generation(_fast, monkeypatch):
+    B._display_gen.clear()
+    B.schedule_display("10.0.0.5", "нэг")
+    B.schedule_display("10.0.0.5", "хоёр")
+    assert B._display_gen["10.0.0.5"] == 2
+    await asyncio.sleep(0.01)
