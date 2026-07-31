@@ -146,8 +146,25 @@ async def _get_token(acc: QpayAccount | None = None) -> str:
         data = await _auth_basic(acc)  # refresh амжилтгүй бол шинээр
     tok["access"] = data["access_token"]
     tok["refresh"] = data.get("refresh_token", tok["refresh"])
-    tok["access_exp"] = now + timedelta(seconds=int(data.get("expires_in", 3600)) - 60)
+    tok["access_exp"] = _parse_expiry(data.get("expires_in"), now)
     return tok["access"]
+
+
+def _parse_expiry(raw, now: datetime) -> datetime:
+    """QPay-ийн expires_in нь баримт бичигт «секунд» гэсэн ч бодит хариунд Unix
+    epoch (жишээ: 1785561353) ирдэг — секунд гэж уншвал кэш «56 жил хүчинтэй»
+    болж, QPay талд токен дуусмагц бүх дуудлага 401 «Хандах эрхгүй байна» болдог
+    (production дээр өдөр бүр гардаг байсан гацаа). Хоёр хэлбэрийг хоёуланг нь
+    дэмжиж, 60с аюулгүйн зайтай; уншигдахгүй бол 1 цаг гэж үзнэ."""
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = 3600
+    if val > 1e9:  # Unix epoch timestamp
+        exp = datetime.utcfromtimestamp(val)
+    else:  # харьцангуй секунд
+        exp = now + timedelta(seconds=val)
+    return exp - timedelta(seconds=60)
 
 
 def _vat_of(price: float) -> float:
