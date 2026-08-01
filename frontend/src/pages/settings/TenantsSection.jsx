@@ -6,6 +6,7 @@ import { Building2, Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, PasswordInput, Table, useToast } from '../../components/ui'
+import QpayTestModal from './QpayTestModal'
 
 const EMPTY = {
   name: '', code: '', register: '', contact_name: '', phone: '', email: '', note: '',
@@ -150,6 +151,13 @@ export default function TenantsSection() {
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [modal, setModal] = useState(null)
+  const [qpayTest, setQpayTest] = useState(null)
+  // Түрээслэгчийн эхний зогсоолоор дансыг турших (данс tenant-аас урсдаг)
+  const testTenant = (t) => {
+    const first = (t.sites || [])[0]
+    if (!first) return toast('Эхлээд зогсоол оноогоод хадгална уу', 'error')
+    setQpayTest({ site: { id: first.id, name: `${t.name} · ${first.name}` } })
+  }
   const load = () => {
     api('/api/admin/tenants').then(setRows).catch((e) => toast(e.message, 'error'))
     api('/api/admin/sites').then(setSites)
@@ -181,12 +189,20 @@ export default function TenantsSection() {
             <td className="td">{t.is_active
               ? <span className="text-accent text-xs">Идэвхтэй</span>
               : <span className="text-red-400 text-xs">Идэвхгүй</span>}</td>
-            <td className="td"><button className="btn-secondary text-xs py-1"
-              onClick={() => setModal(t)}>Засах</button></td>
+            <td className="td">
+              <div className="flex gap-1.5 justify-end">
+                {t.sites?.length > 0 && (
+                  <button className="btn-secondary text-xs py-1" title="QPay дансыг турших"
+                    onClick={() => testTenant(t)}>Данс турших</button>
+                )}
+                <button className="btn-secondary text-xs py-1" onClick={() => setModal(t)}>Засах</button>
+              </div>
+            </td>
           </tr>
         ))}
       </Table>
       <TenantModal state={modal} sites={sites} onClose={() => setModal(null)} onDone={load} />
+      <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
     </div>
   )
 }

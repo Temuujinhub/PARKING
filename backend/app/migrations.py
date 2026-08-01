@@ -196,6 +196,16 @@ MIGRATIONS = [
        WHERE s.tenant_id = t.id AND coalesce(t.qpay_username,'') <> ''
          AND coalesce(s.qpay_username,'') <> ''
          AND s.qpay_username = t.qpay_username""",
+
+    # v3.1 — Давхардсан ХААЛТ цэвэрлэх: нэг зогсоол+чиглэлд нэг идэвхтэй хаалт
+    # үлдээж (хамгийн эртнийх), илүүчийг deleted болгоно. Камер+хаалт+LED цогц
+    # төхөөрөмж тул чиглэл бүрд нэг хаалт хангалттай (2026-08-02 засвар).
+    """UPDATE devices SET status = 'deleted'
+       WHERE device_type = 'barrier' AND status = 'active'
+         AND id NOT IN (
+           SELECT DISTINCT ON (site_id, lane_dir) id FROM devices
+           WHERE device_type = 'barrier' AND status = 'active'
+           ORDER BY site_id, lane_dir, created_at ASC)""",
 ]
 
 

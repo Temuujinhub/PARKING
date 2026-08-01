@@ -959,12 +959,14 @@ def _user_sites(u: User) -> set:
 
 
 def _enforce_user_scope(user: User, target_sites: set, action: str):
-    """Tenant админ зөвхөн ӨӨРИЙН зогсоолуудын хүрээн доторх хэрэглэгчийг удирдана.
-    Компанийн түвшний (зогсоолгүй) хэрэглэгч рүү халдахыг хориглоно."""
+    """Tenant админ зөвхөн ӨӨРИЙН түрээслэгчийн зогсоолуудын хүрээнд хэрэглэгч
+    удирдана. SUPER_ADMIN бүх түрээслэгчид эрхтэй. Шинэ хэрэглэгч creator-ийн
+    tenant-д ямагт хязгаарлагддаг тул хоосон target (=түрээслэгчийн бүх зогсоол) OK."""
     allowed = operator_sites(user)
     if allowed is None:
-        return
-    if not target_sites or not target_sites.issubset(set(allowed)):
+        return  # SUPER_ADMIN эсвэл системийн түвшин
+    # Заасан зогсоолууд өөрийн хүрээнд байх ёстой; хоосон бол tenant-ийн бүх зогсоол
+    if target_sites and not target_sites.issubset(set(allowed)):
         raise HTTPException(403, f"Зөвхөн өөрийн хариуцах зогсоолын ажилтныг {action} эрхтэй.")
 
 

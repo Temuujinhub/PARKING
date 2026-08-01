@@ -38,17 +38,20 @@ export function QrImage({ code, alt }) {
 // Орох/гарах хаалтын тоогоор төхөөрөмжийн загварыг динамикаар үүсгэнэ.
 // Эгнээ бүр өөрийн камер + хаалттай, ижил lane_no-той (barrier камерынхаа реле-ээр нээгддэг).
 export function genDevices(entryLanes, exitLanes) {
+  // Камер+хаалт+LED нь ЦОГЦ төхөөрөмж (ITC436/IPMECS): камерын IP-ээр хаалт
+  // нээж LED-ийг удирддаг. Тиймээс зөвхөн КАМЕР үүсгэнэ — хаалтны мөрийг
+  // ensure_lane_barriers (backend) камерынх нь IP дээр авто үүсгэнэ. Ингэснээр
+  // жагсаалт цэвэрхэн, давхар хаалт үүсэхгүй. Тусдаа IP-тэй хаалт хэрэгтэй бол
+  // Төхөөрөмж хэсгээс гараар нэмнэ.
   const list = []
   for (let i = 1; i <= entryLanes; i++) {
     const suf = entryLanes > 1 ? ` ${i}` : ''
-    list.push({ key: `entry_cam_${i}`, name: `Орох камер${suf}`, device_type: 'camera', lane_dir: 'entry', lane_no: i, auto_open: true, icon: Camera })
-    list.push({ key: `entry_bar_${i}`, name: `Орох хаалт${suf}`, device_type: 'barrier', lane_dir: 'entry', lane_no: i, auto_open: false, icon: DoorOpen })
+    list.push({ key: `entry_cam_${i}`, name: `Орох камер${suf}`, device_type: 'camera', lane_dir: 'entry', lane_no: i, auto_open: true, icon: Camera, integrated: true })
   }
   for (let j = 1; j <= exitLanes; j++) {
     const lane = entryLanes + j
     const suf = exitLanes > 1 ? ` ${j}` : ''
-    list.push({ key: `exit_cam_${j}`, name: `Гарах камер${suf}`, device_type: 'camera', lane_dir: 'exit', lane_no: lane, auto_open: false, icon: Camera })
-    list.push({ key: `exit_bar_${j}`, name: `Гарах хаалт${suf}`, device_type: 'barrier', lane_dir: 'exit', lane_no: lane, auto_open: false, icon: DoorOpen })
+    list.push({ key: `exit_cam_${j}`, name: `Гарах камер${suf}`, device_type: 'camera', lane_dir: 'exit', lane_no: lane, auto_open: false, icon: Camera, integrated: true })
   }
   return list
 }

@@ -44,15 +44,19 @@ def ensure_lane_barriers(db: Session) -> dict:
     cams = db.query(Device).filter(Device.device_type == "camera",
                                    Device.status == "active").all()
     for c in cams:
+        # Ижил ЧИГЛЭЛД (орох/гарах) идэвхтэй хаалт байвал хангалттай — lane_no
+        # таарахгүйгээс давхар хаалт үүсгэхээ больсон (2026-08-02: TESTZOGSOOL-д
+        # орох/гарах бүрд 2 хаалт үүсчихсэн байсан). Ихэнх зогсоол нэг чиглэлд
+        # нэг хаалттай (камер+хаалт+LED цогц төхөөрөмж).
         active_bar = db.query(Device).filter(
             Device.site_id == c.site_id, Device.device_type == "barrier",
-            Device.lane_no == c.lane_no, Device.status == "active").first()
+            Device.lane_dir == c.lane_dir, Device.status == "active").first()
         if active_bar:
             continue
         # 1) Устгагдсан хос байвал сэргээнэ (device_key, тохиргоо хэвээр)
         deleted_bar = (db.query(Device).filter(
             Device.site_id == c.site_id, Device.device_type == "barrier",
-            Device.lane_no == c.lane_no, Device.status == "deleted")
+            Device.lane_dir == c.lane_dir, Device.status == "deleted")
             .order_by(Device.created_at.desc()).first())
         if deleted_bar:
             deleted_bar.status = "active"

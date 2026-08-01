@@ -1,6 +1,7 @@
 // Хэрэглэгчид — зөвхөн SUPER_ADMIN
 import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useAuth } from '../auth'
 import { api, fmtDate } from '../api'
 import { Badge, Field, Modal, PasswordInput, Table, useToast } from '../components/ui'
 
@@ -51,16 +52,22 @@ export default function Users() {
   const [tab, setTab] = useState('staff')
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
+  const [tenants, setTenants] = useState([])
   const [editing, setEditing] = useState(null)
+  const { user: me } = useAuth()
+  const isSuper = me?.role === 'SUPER_ADMIN'
   const load = () => api('/api/admin/users').then(setRows)
-  useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => {
+    load(); api('/api/admin/sites').then(setSites)
+    if (me?.role === 'SUPER_ADMIN') api('/api/admin/tenants').then(setTenants).catch(() => {})
+  }, [])
   // Супер админ мөрийг жагсаалтад харуулахгүй (зөвхөн DB-ээр удирддаг)
   const visibleRows = rows.filter((u) => u.role !== 'SUPER_ADMIN')
 
   // Засах/нэмэх modal нээхэд эрхийн матриц + зогсоолуудыг бэлдэнэ
   const openEdit = (u) => setEditing(u.id
-    ? { ...u, password: '', perms: u.permissions || ROLE_DEFAULTS[u.role] || [], site_ids: u.site_ids || (u.site_id ? [u.site_id] : []) }
-    : { username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '', perms: ROLE_DEFAULTS.OPERATOR, site_ids: [] })
+    ? { ...u, password: '', perms: u.permissions || ROLE_DEFAULTS[u.role] || [], site_ids: u.site_ids || (u.site_id ? [u.site_id] : []), tenant_id: u.tenant_id || '' }
+    : { username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '', perms: ROLE_DEFAULTS.OPERATOR, site_ids: [], tenant_id: '' })
 
   const save = async (e) => {
     e.preventDefault()
@@ -76,6 +83,8 @@ export default function Users() {
         // default-той ижил бол null — role-ийн эрх өөрчлөгдвөл автоматаар дагана
         permissions: isDefaultPerms(editing.role, editing.perms) ? null : editing.perms,
       }
+      if (isSuper) body.tenant_id = editing.tenant_id || null; else delete body.tenant_id
+      if (isSuper && !editing.tenant_id) { toast('Түрээслэгчийг сонгоно уу', 'error'); return }
       if (editing.id) await api(`/api/admin/users/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/users', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -157,6 +166,15 @@ export default function Users() {
                   onChange={(e) => setEditing({ ...editing, phone: e.target.value })} />
               </Field>
             </div>
+            {isSuper && (
+              <Field label="Түрээслэгч (аль байгууллагын ажилтан бэ)" required>
+                <select className="input" value={editing.tenant_id || ''}
+                  onChange={(e) => setEditing({ ...editing, tenant_id: e.target.value, site_ids: [], site_id: '' })}>
+                  <option value="">— Түрээслэгч сонгоно уу —</option>
+                  {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+            )}
             <Field label="Эрхийн түвшин (загвар)" required>
               <select className="input" value={editing.role}
                 onChange={(e) => setEditing({ ...editing, role: e.target.value, perms: ROLE_DEFAULTS[e.target.value] || [] })}>
@@ -197,7 +215,7 @@ export default function Users() {
             {(
               <Field label="Хариуцах зогсоолууд (олон сонгож болно)">
                 <div className="grid grid-cols-2 gap-1 border border-surface-border/60 rounded-lg p-3">
-                  {sites.map((s) => (
+                  {sites.filter((s) => !isSuper || !editing.tenant_id || s.tenant_id === editing.tenant_id).map((s) => (
                     <label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
                       <input type="checkbox" checked={editing.site_ids.includes(s.id)}
                         onChange={(e) => setEditing({
@@ -213,9 +231,10 @@ export default function Users() {
                 </div>
                 {editing.site_ids.length === 0 && (
                   <div className="text-[11px] text-slate-500 mt-1">
-                    Юу ч сонгоогүй бол БҮХ зогсоолд хандана (EasyParking компанийн түвшин).
-                    Түрээслэгч (tenant) байгууллагын ажилтанд зогсоолыг нь заавал сонгоно —
-                    тайлан, төлбөр, бүртгэлтэй машин бүгд зөвхөн тэр зогсоолоор хязгаарлагдана.
+                    Юу ч сонгоогүй бол энэ хэрэглэгч <b>тухайн түрээслэгчийн БҮХ зогсоолыг</b>
+                    (ирээдүйд нэмэгдэх нь ч) хардаг — админ/санхүүд тохиромжтой. Тодорхой зогсоол
+                    сонговол зөвхөн түүгээр хязгаарлагдана (кассчинд). Түрээслэгч дамжин
+                    хэзээ ч харагдахгүй.
                   </div>
                 )}
                 {editing.site_ids.length > 1 && (
