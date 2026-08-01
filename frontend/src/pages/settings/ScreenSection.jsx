@@ -31,7 +31,7 @@ const SAMPLE = {
   payment: 'QPay', reason: 'Гэрээт',
 }
 
-const emptyLines = () => [{ type: 'none' }, { type: 'none' }, { type: 'none' }, { type: 'none' }]
+const emptyLines = () => Array.from({ length: 4 }, () => ({ type: 'none', text: '' }))
 
 // DB-ээс ирсэн (богино байж болох) жагсаалтыг ямагт 4 мөр болгоно
 const pad4 = (lines) => {
@@ -56,16 +56,16 @@ function LanePanel({ title, hint, types, lines, setLines }) {
             {types.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
           </select>
           {l.type === 'text' && (
-            <input value={l.text} maxLength={40} placeholder="LED дээр гарах текст"
+            <input value={l.text || ''} maxLength={40} placeholder="LED дээр гарах текст"
               onChange={(e) => setLine(i, { text: e.target.value })} className="input flex-1" />
           )}
         </div>
       ))}
       {/* Урьдчилан харах — LED шиг хар дэвсгэр дээр */}
       <div className="bg-black rounded-lg p-3 font-mono text-green-400 text-sm min-h-[5.5rem] space-y-0.5">
-        {lines.filter((l) => l.type !== 'none' && (l.type !== 'text' || l.text.trim()))
+        {lines.filter((l) => l.type !== 'none' && (l.type !== 'text' || (l.text || '').trim()))
           .map((l, i) => <div key={i}>{l.type === 'text' ? l.text : SAMPLE[l.type]}</div>)}
-        {lines.every((l) => l.type === 'none' || (l.type === 'text' && !l.text.trim())) && (
+        {lines.every((l) => l.type === 'none' || (l.type === 'text' && !(l.text || '').trim())) && (
           <div className="text-slate-600">(тохиргоогүй — системийн үндсэн текст гарна)</div>
         )}
       </div>
@@ -100,7 +100,7 @@ export default function ScreenSection() {
     setBusy(true)
     try {
       const clean = (lines) => lines.map((l) =>
-        l.type === 'text' ? { type: 'text', text: l.text.trim() } : { type: l.type })
+        l.type === 'text' ? { type: 'text', text: (l.text || '').trim() } : { type: l.type })
       await api(`/api/admin/sites/${siteId}`, {
         method: 'PUT', body: { screen_config: { entry: clean(entry), exit: clean(exit) } },
       })
