@@ -540,19 +540,31 @@ def by_company(date_from: str | None = None, date_to: str | None = None, site_id
             "total_minutes": sum(r["total_minutes"] for r in rows)}
 
 
+_STATUS_MN = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
+              "PAID": "Төлсөн (дотор)", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
+              "MANUAL_CLOSED": "Гараар хаасан"}
+
+_CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP", "STAFF": "Ажилтан"}
+
+
 def _company_sessions(db, user, company: str, start, end, sid):
     """Нэг байгууллагын гэрээт машинуудын session-үүд (тооцоо нийлэх дэлгэрэнгүй).
     by_company-тэй ИЖИЛ тулгалтын дүрэм: дугаар таарч, бүртгэл нь тухайн зогсоолд
-    эсвэл бүх-зогсоолд хамаарсан байх."""
+    эсвэл ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН бүх-зогсоолд хамаарсан байх (дамнахгүй).
+    Мөр бүрд санхүүд хэрэгтэй бүрэн мэдээлэл: эзэмшигч, гэрээний төрөл, сарын
+    хураамж, тухайн орц дээр төлсөн дүн, төлөв."""
     from ..models import RegisteredDriver
     q = db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True))
     if company == "(байгууллагагүй)":
         q = q.filter((RegisteredDriver.company.is_(None)) | (RegisteredDriver.company == ""))
     else:
         q = q.filter(RegisteredDriver.company == company)
-    drv = {}
+    site_tenant = {st.id: st.tenant_id for st in db.query(ParkingSite).all()}
+    drv: dict[str, list] = {}
+    dinfo: dict[str, RegisteredDriver] = {}
     for d in q.all():
-        drv.setdefault(d.plate_number, []).append(d.site_id)
+        drv.setdefault(d.plate_number, []).append((d.site_id, d.tenant_id))
+        dinfo.setdefault(d.plate_number, d)
     if not drv:
         return []
     now = datetime.utcnow()
@@ -561,19 +573,36 @@ def _company_sessions(db, user, company: str, start, end, sid):
                   ParkingSession.plate_number.in_(list(drv)))
           .order_by(ParkingSession.plate_number, ParkingSession.entry_time))
     sq = _flt(sq, ParkingSession.site_id, sid)
-    site_names = {s.id: s.name for s in db.query(ParkingSite).all()}
+    sessions = sq.all()
+    # Тухайн session-ууд дээр төлөгдсөн дүн (гэрээт ихэвчлэн 0, гэхдээ нотолгоонд чухал)
+    paid_by_session = dict(
+        db.query(Payment.session_id, func.coalesce(func.sum(Payment.amount), 0))
+        .filter(Payment.status == "PAID",
+                Payment.session_id.in_([x.id for x in sessions] or ["-"]))
+        .group_by(Payment.session_id).all())
+    site_names = {sid_: st for sid_, st in db.query(ParkingSite.id, ParkingSite.name).all()}
     rows = []
-    for s in sq.all():
-        sites_of_plate = drv[s.plate_number]
-        if not (None in sites_of_plate or s.site_id in sites_of_plate):
+    for s in sessions:
+        matches = drv[s.plate_number]
+        _stn = site_tenant.get(s.site_id)
+        ok = any(st == s.site_id for st, tn in matches) or any(
+            st is None and (tn == _stn if tn or _stn else True) for st, tn in matches)
+        if not ok:
             continue
         mins = s.duration_minutes
         if mins is None:
             mins = ((s.exit_time or now) - s.entry_time).total_seconds() / 60
-        rows.append({"plate": s.plate_number, "site": site_names.get(s.site_id, "?"),
+        d = dinfo.get(s.plate_number)
+        rows.append({"plate": s.plate_number,
+                     "owner": (d.full_name if d else "") or "",
+                     "contract": _CONTRACT_MN.get(d.contract_type if d else "", (d.contract_type if d else "")),
+                     "monthly_fee": float(d.monthly_fee or 0) if d else 0.0,
+                     "site": site_names.get(s.site_id, "?"),
                      "entry": (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
                      "exit": (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
-                     "minutes": round(float(mins)), "status": s.status})
+                     "minutes": round(float(mins)),
+                     "paid": float(paid_by_session.get(s.id, 0)),
+                     "status": _STATUS_MN.get(s.status, s.status)})
     return rows
 
 

@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { useDownload } from '../hooks/useDownload'
-import { Badge, Table, useToast } from './ui'
+import { Badge, Modal, Table, useToast } from './ui'
 
 export const siteQ = (sid) => sid ? `&site_id=${sid}` : ''
 const lastDayOf = (month) => {
@@ -276,40 +276,40 @@ function CompanyDetail({ company, from, to, siteId, onClose }) {
   const { data } = useFetch(
     `/api/reports/by-company/sessions?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
     { initial: null })
-  if (!data) return null
   return (
-    <div className="card border-accent/30">
+    <Modal open title={`${company} — тооцоо нийлэх дэлгэрэнгүй (${from} — ${to})`} onClose={onClose} wide>
+      {!data ? <div className="text-slate-500 py-6 text-center">Ачаалж байна…</div> : <>
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h2 className="font-semibold">{company} — тооцоо нийлэх дэлгэрэнгүй</h2>
-        <div className="flex gap-2">
-          <button className="btn-primary text-sm flex items-center gap-1.5"
-            onClick={() => download(`/api/reports/by-company/sessions/excel?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
-              `tootsoo_${company}_${from}_${to}.xlsx`)}>
-            <Download size={15} /> Тооцооны Excel (илгээх)
-          </button>
-          <button className="btn-secondary text-sm" onClick={onClose}>Хаах</button>
+        <div className="flex flex-wrap gap-5 text-sm text-slate-400">
+          <span>Машин: <b className="font-mono text-accent">{data.cars}</b></span>
+          <span>Орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
+          <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
         </div>
+        <button className="btn-primary text-sm flex items-center gap-1.5"
+          onClick={() => download(`/api/reports/by-company/sessions/excel?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
+            `tootsoo_${company}_${from}_${to}.xlsx`)}>
+          <Download size={15} /> Санхүүгийн Excel татах
+        </button>
       </div>
-      <div className="flex flex-wrap gap-6 text-sm mb-3 text-slate-400">
-        <span>Машин: <b className="font-mono text-accent">{data.cars}</b></span>
-        <span>Орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
-        <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
-      </div>
-      <div className="max-h-96 overflow-y-auto">
-        <Table headers={['№', 'Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа']} empty={data.rows.length === 0}>
+      <div className="max-h-[60vh] overflow-y-auto">
+        <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Төлөв']}
+          empty={data.rows.length === 0}>
           {data.rows.map((r, i) => (
             <tr key={i}>
               <td className="td text-slate-500">{i + 1}</td>
               <td className="td font-mono font-semibold">{r.plate}</td>
-              <td className="td">{r.site}</td>
+              <td className="td text-xs">{r.owner}</td>
+              <td className="td text-xs">{r.site}</td>
               <td className="td font-mono text-xs">{r.entry}</td>
               <td className="td font-mono text-xs">{r.exit || '—'}</td>
               <td className="td font-mono">{hm(r.minutes)}</td>
+              <td className="td text-xs">{r.status}</td>
             </tr>
           ))}
         </Table>
       </div>
-    </div>
+      </>}
+    </Modal>
   )
 }
 
@@ -344,7 +344,16 @@ export function CompanyTab({ from, to, siteId }) {
             <td className="td font-mono">{r.sessions}</td>
             <td className="td font-mono text-accent">{hm(r.total_minutes)}</td>
             <td className="td font-mono">{hm(r.avg_minutes)}</td>
-            <td className="td text-xs text-accent whitespace-nowrap">Тооцоо →</td>
+            <td className="td whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+              <div className="flex gap-1.5 justify-end">
+                <button className="btn-secondary text-xs py-1" onClick={() => setSel(r.company)}>Тооцоо</button>
+                <button className="btn-secondary text-xs py-1" title="Санхүүгийн Excel шууд татах"
+                  onClick={() => download(`/api/reports/by-company/sessions/excel?company=${encodeURIComponent(r.company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
+                    `tootsoo_${r.company}_${from}_${to}.xlsx`)}>
+                  <Download size={13} />
+                </button>
+              </div>
+            </td>
           </tr>
         ))}
       </Table>

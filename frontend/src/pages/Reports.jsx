@@ -29,7 +29,6 @@ export default function Reports() {
     monthly: [`/api/reports/monthly/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `saraar_${from}_${to}.xlsx`],
     shifts: [`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `eeljeer_${from}_${to}.xlsx`],
     bypayment: [`/api/reports/by-payment/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `tolboriin_torol_${from}_${to}.xlsx`],
-    company: [`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `baiguullagaar_${from}_${to}.xlsx`],
   }
   const ex = headerExcel[tab]
 
