@@ -893,8 +893,11 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_role(
     if allowed is not None:
         # Tenant админ зөвхөн өөрийн зогсоолуудтай огтлолцсон ажилтнууд + өөрийгөө харна
         aset = set(allowed)
-        users = [u for u in users if u.id == user.id or (_user_sites(u) & aset)]
-    return [to_dict(u) for u in users]
+        users = [u for u in users if u.id == user.id or (_user_sites(u) & aset)
+                 or (user.tenant_id and u.tenant_id == user.tenant_id)]
+    # Түрээслэгчийн нэр — "Бүгд" гэхийн оронд аль байгууллагынх нь харагдана
+    tnames = {t.id: t.name for t in db.query(Tenant).all()}
+    return [to_dict(u, extra={"tenant_name": tnames.get(u.tenant_id)}) for u in users]
 
 
 @router.post("/users")

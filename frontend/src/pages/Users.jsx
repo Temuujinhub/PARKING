@@ -123,7 +123,8 @@ export default function Users() {
             </td>
             <td className="td text-xs">
               {(u.site_ids?.length ? u.site_ids : (u.site_id ? [u.site_id] : []))
-                .map((id) => sites.find((s) => s.id === id)?.name || '?').join(', ') || 'Бүгд'}
+                .map((id) => sites.find((s) => s.id === id)?.name || '?').join(', ')
+                || (u.tenant_name ? `${u.tenant_name} (бүх зогсоол)` : 'Бүгд')}
             </td>
             <td className="td font-mono text-xs">{fmtDate(u.created_at).split(' ')[0]}</td>
             <td className="td"><Badge value={u.is_active ? 'active' : 'FAILED'} /></td>
