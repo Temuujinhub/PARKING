@@ -163,10 +163,14 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         db.query(ParkingSession.site_id, func.count())
         .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
         .group_by(ParkingSession.site_id).all())
+    tmap = {t.id: t for t in db.query(Tenant).all()}
     out = []
     for s in sites:
         occupied = occupied_by_site.get(s.id, 0)
+        _t = tmap.get(s.tenant_id)
         out.append(to_dict(s, extra={
+            "tenant_name": getattr(_t, "name", None),
+            "tenant_qpay_set": bool(_t and (getattr(_t, "qpay_username", None) or "").strip()),
             "occupied": occupied,
             # capacity=0 → дүүргэлтгүй (хязгааргүй) зогсоол: сул тоо тооцохгүй
             "free_spaces": max(0, s.capacity - occupied) if s.capacity else None,
@@ -406,7 +410,13 @@ async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_
         raise HTTPException(400, "Туршилтын дүн 1–10000₮ хооронд байна")
 
     acc = qpay_svc.account_for(site)
-    own = bool((site.qpay_username or "").strip() and (site.qpay_password or "").strip())
+    # Данс аль шатлалаас ирснийг тодорхойлно: зогсоол → түрээслэгч → глобал
+    _site_own = bool((site.qpay_username or "").strip() and (site.qpay_password or "").strip())
+    _ten = qpay_svc._tenant_of(site)
+    _ten_own = bool(_ten and (getattr(_ten, "qpay_username", None) or "").strip()
+                    and (getattr(_ten, "qpay_password", None) or "").strip())
+    source = "site" if _site_own else ("tenant" if _ten_own else "global")
+    own = source != "global"
     if acc.mock:
         raise HTTPException(400, "QPay туршилтын (mock) горимд байна — бодит данс "
                                  "тохируулаагүй тул шалгах боломжгүй.")
@@ -446,6 +456,8 @@ async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_
         "merchant": acc.username, "invoice_code": acc.invoice_code,
         "district_code": acc.district_code,
         "using_own_account": own,
+        "account_source": source,     # site | tenant | global
+        "tenant_name": getattr(_ten, "name", None),
     }
 
 

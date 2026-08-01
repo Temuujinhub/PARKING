@@ -65,20 +65,25 @@ export default function QpayTestModal({ state, onClose }) {
                 <b>⚠ {inv.warning}</b>
               </div>
             )}
-            {!inv.using_own_account && (
+            {inv.account_source === 'global' && (
               <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-300">
-                <b>Анхаар: энэ зогсоол өөрийн QPay дансгүй байна.</b> Төлбөр системийн
-                ерөнхий данс ({inv.merchant}) руу орж, e-Barimt мөн түүний ТТД-ээр үүснэ.
-                Түрээслэгчийн данс руу орох ёстой бол цонхыг хааж, «Төлбөрийн данс (QPay)»
-                хэсгээс «Энэ зогсоолын өөрийн данс»-ыг сонгож нэр/нууц үгийг бөглөөд
-                ЗААВАЛ «Хадгалах» дараад дахин туршина уу.
+                <b>Анхаар: энэ зогсоолд түрээслэгчийн данс тохируулаагүй байна.</b> Төлбөр
+                системийн ерөнхий данс ({inv.merchant}) руу орж, e-Barimt мөн түүний ТТД-ээр
+                үүснэ. Түрээслэгчийн данс руу орох ёстой бол Тохиргоо → Түрээслэгч → QPay
+                данс хэсэгт нэр/нууц үгийг нь оруулаад дахин туршина уу.
+              </div>
+            )}
+            {inv.account_source === 'tenant' && (
+              <div className="rounded-lg border border-accent/40 bg-accent/5 p-3 text-xs text-slate-300">
+                Түрээслэгчийн данс ашиглаж байна: <b className="text-accent">{inv.tenant_name}</b> —
+                түүний бүх зогсоолд энэ данс үйлчилнэ.
               </div>
             )}
             <div className="rounded-lg bg-surface-muted/50 p-3 space-y-1 text-xs">
               <div>Мерчант: <b className="font-mono text-slate-200">{inv.merchant}</b>
-                {inv.using_own_account
-                  ? <span className="text-accent ml-2">· энэ зогсоолын өөрийн данс</span>
-                  : <span className="text-amber-400 ml-2">· системийн ерөнхий данс!</span>}
+                {inv.account_source === 'site' && <span className="text-accent ml-2">· зогсоолын тусгай данс</span>}
+                {inv.account_source === 'tenant' && <span className="text-accent ml-2">· түрээслэгчийн данс ({inv.tenant_name})</span>}
+                {inv.account_source === 'global' && <span className="text-amber-400 ml-2">· системийн ерөнхий данс!</span>}
               </div>
               <div>Нэхэмжлэхийн код: <span className="font-mono">{inv.invoice_code}</span></div>
               <div>Дүүрэг: <span className="font-mono">{inv.district_code || '—'}</span></div>
