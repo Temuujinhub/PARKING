@@ -54,6 +54,8 @@ def show_session(db, s: ParkingSession):
           f"    Хугацаа: {int(dur) if dur else 0}м")
     if s.total_fee is not None:
         print(f"   Төлбөр: {float(s.total_fee):,.0f}₮   Төлсөн: {L(s.paid_at)}")
+    if s.vehicle_color or s.vehicle_type:
+        print(f"   Машин: {' · '.join(x for x in (s.vehicle_color, s.vehicle_type) if x)}")
     if s.note:
         print(f"   Тэмдэглэл: {s.note}")
 

@@ -206,6 +206,10 @@ MIGRATIONS = [
            SELECT DISTINCT ON (site_id, lane_dir) id FROM devices
            WHERE device_type = 'barrier' AND status = 'active'
            ORDER BY site_id, lane_dir, created_at ASC)""",
+
+    # v3.2 — Камерын машины өнгө/төрөл (дугаар буруу уншсан үед таних тусламж)
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS vehicle_color VARCHAR(30)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(30)",
 ]
 
 

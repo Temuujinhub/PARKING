@@ -55,6 +55,36 @@ def is_valid_plate(plate: str) -> bool:
     return bool(PLATE_RE.match(normalize_plate(plate)))
 
 
+# Dahua-ийн өнгө/төрлийг монголоор (оператор танихад ойлгомжтой)
+_COLOR_MN = {"white": "цагаан", "black": "хар", "gray": "саарал", "grey": "саарал",
+             "silver": "мөнгөлөг", "red": "улаан", "blue": "цэнхэр", "green": "ногоон",
+             "yellow": "шар", "brown": "бор", "gold": "алтлаг", "orange": "улбар"}
+_TYPE_MN = {"sedan": "суудлын", "suv": "жийп", "bus": "автобус", "truck": "ачааны",
+            "van": "фургон", "minivan": "микро", "motorcycle": "мотоцикл",
+            "car": "суудлын", "saloon": "суудлын", "pickup": "пикап"}
+
+
+def extract_vehicle_info(raw: dict) -> tuple[str | None, str | None]:
+    """Камерын event-ээс машины ӨНГӨ ба ТӨРЛИЙГ гаргана (Dahua-ийн олон түлхүүр).
+    Дугаар буруу уншигдсан үед машиныг таних нэмэлт шинж — оператор snapshot-той
+    тулгах, систем тохирлыг батлахад ашиглана."""
+    if not isinstance(raw, dict):
+        return None, None
+    color = _type = None
+    # Боломжит байрлалууд: дээд түвшин, Vehicle.*, Object.*, TrafficCar.*, Plate.*
+    for src in (raw, raw.get("Vehicle") or {}, raw.get("Object") or {},
+                raw.get("TrafficCar") or {}, raw.get("Plate") or {}):
+        if not isinstance(src, dict):
+            continue
+        color = color or (src.get("VehicleColor") or src.get("Color")
+                          or src.get("PlateColor"))
+        _type = _type or (src.get("VehicleType") or src.get("Category")
+                          or src.get("CarType") or src.get("ObjectType"))
+    cn = _COLOR_MN.get(str(color).strip().lower(), str(color).strip()) if color else None
+    tn = _TYPE_MN.get(str(_type).strip().lower(), str(_type).strip()) if _type else None
+    return (cn or None), (tn or None)
+
+
 def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:
     """Гэрээт машин мөн эсэх. site_id NULL («бүх зогсоол») бүртгэл нь зөвхөн
     ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН зогсоолуудад үйлчилнэ — түрээслэгч ДАМНАН үнэгүй
@@ -452,10 +482,12 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     if existing:
         session = existing  # давхар орох event — session хэвээр
     else:
+        _vcolor, _vtype = extract_vehicle_info(raw)
         session = ParkingSession(
             site_id=site_id, plate_number=plate, entry_time=now,
             entry_device_id=device.id, confidence_entry=confidence,
             is_registered=registered is not None, status="OPEN",
+            vehicle_color=_vcolor, vehicle_type=_vtype,
         )
         db.add(session)
         db.flush()
@@ -539,6 +571,14 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
+    # Гарах камерын өнгө/төрлөөр session-ий мэдээллийг нөхнө (орох дээр алга байсан
+    # эсвэл орох дутуу уншсан бол) — оператор дугаар зөрүүтэй үед машиныг таних тусламж
+    if session:
+        _xc, _xt = extract_vehicle_info(raw)
+        if _xc and not session.vehicle_color:
+            session.vehicle_color = _xc
+        if _xt and not session.vehicle_type:
+            session.vehicle_type = _xt
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="exit", confidence=confidence, accepted=True, raw=strip_images(raw)))
     if session and fuzzy:

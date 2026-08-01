@@ -208,6 +208,11 @@ export default function Check() {
             )}
             <td className="td font-mono font-bold text-base">
               {s.plate_number}
+              {(s.vehicle_color || s.vehicle_type) && (
+                <div className="text-[10px] text-slate-400 font-sans font-normal">
+                  {[s.vehicle_color, s.vehicle_type].filter(Boolean).join(' · ')}
+                </div>
+              )}
               <FlagBadges audit={s.audit} />
             </td>
             <td className="td">{s.site_name}</td>

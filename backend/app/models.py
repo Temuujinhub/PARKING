@@ -227,6 +227,10 @@ class ParkingSession(Base):
     exit_device_id = Column(UUID(as_uuid=False), ForeignKey("devices.id"), nullable=True)
     confidence_entry = Column(Float, nullable=True)
     confidence_exit = Column(Float, nullable=True)
+    # Камерын нэмэлт таних мэдээлэл (машины өнгө/төрөл) — дугаар буруу уншигдсан
+    # үед оператор/систем машиныг таних, тохирлыг батлахад тусална.
+    vehicle_color = Column(String(30), nullable=True)
+    vehicle_type = Column(String(30), nullable=True)
     is_registered = Column(Boolean, nullable=False, default=False)  # гэрээт жолооч эсэх
     base_fee = Column(Numeric(12, 2), nullable=True)
     discount_id = Column(UUID(as_uuid=False), ForeignKey("discounts.id"), nullable=True)
