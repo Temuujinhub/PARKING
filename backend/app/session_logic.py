@@ -11,7 +11,7 @@ from .models import (
     AuditLog, BarrierCommand, BlacklistEntry, Device, LprEvent, ParkingSession,
     ParkingSite, Payment, RegisteredDriver,
 )
-from .services.barrier import open_barrier, render_screen_text, schedule_display
+from .services.barrier import format_duration, open_barrier, render_screen_text, schedule_display
 from .services.snapshot import schedule_capture
 from .ws import manager, notify
 
@@ -448,8 +448,14 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
     # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-    _welcome = "" if black else render_screen_text(settings.screen_welcome_text,
-                                                   plate=plate, time_str=_local_hm)
+    _entry_lines = None if black else _site_screen_lines(db, site_id, "entry")
+    if black:
+        _welcome = ""
+    elif _entry_lines:  # Тохиргоо → LED дэлгэц: зогсоолын өөрийн мөрүүд
+        _welcome = _screen_text_from_lines(_entry_lines, plate=plate, time_str=_local_hm)
+    else:
+        _welcome = render_screen_text(settings.screen_welcome_text,
+                                      plate=plate, time_str=_local_hm)
 
     barrier_opened = False
     if black:
@@ -544,7 +550,14 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             db.commit()
             barrier = _find_barrier(db, site_id, device)
             opened = False
-            _bye_reg = render_screen_text(settings.screen_bye_registered_text, plate=plate)
+            _reg_lines = _site_screen_lines(db, site_id, "exit")
+            if _reg_lines:
+                _reg_hm = (datetime.utcnow()
+                           + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+                _bye_reg = _screen_text_from_lines(_reg_lines, plate=plate,
+                                                   time_str=_reg_hm, reason="Гэрээт")
+            else:
+                _bye_reg = render_screen_text(settings.screen_bye_registered_text, plate=plate)
             if barrier and allow_open:
                 cmd = await open_barrier(db, barrier, None, "whitelist", plate=plate,
                                          screen_text=_bye_reg)
@@ -646,17 +659,85 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "debt_amount": debt_amount}
 
 
-def _bye_screen_text(session: ParkingSession, fee: dict) -> str:
+def _site_screen_lines(db: Session, site_id: str, lane: str) -> list | None:
+    """Зогсоолын LED мөрийн тохиргоо (Тохиргоо → LED дэлгэц). None = тохиргоогүй
+    → глобал .env template-ууд хэвээр үйлчилнэ."""
+    site = db.get(ParkingSite, site_id) if site_id else None
+    cfg = getattr(site, "screen_config", None) or {}
+    lines = cfg.get(lane)
+    return lines if isinstance(lines, list) and lines else None
+
+
+def _screen_text_from_lines(lines: list, *, plate: str = "", time_str: str = "",
+                            duration_minutes=None, amount=None,
+                            payment: str = "", reason: str = "") -> str:
+    """Тохируулсан мөрүүдээс LED-ийн эцсийн текстийг угсарна. Хоосон утгатай
+    мөр (ж: төлбөртэй гарахад {reason}) өөрөө хасагдана — LED-д цоорхой үлдэхгүй."""
+    out = []
+    for ln in lines[:4]:
+        t = (ln or {}).get("type") if isinstance(ln, dict) else None
+        if t == "time":
+            v = time_str
+        elif t == "plate":
+            v = plate
+        elif t == "duration":
+            v = format_duration(duration_minutes)
+        elif t == "amount":
+            v = "" if amount is None else f"{int(round(float(amount)))}T"
+        elif t == "payment":
+            v = payment
+        elif t == "reason":
+            v = reason
+        elif t == "text":
+            v = str(ln.get("text", ""))
+        else:
+            v = ""
+        v = (v or "").strip()
+        if v:
+            out.append(v)
+    return "\n".join(out)
+
+
+# Payment.payment_method → LED дээр харуулах нэр
+_PAYMENT_LABELS = {"QR": "QPay", "CARD": "Карт", "CASH": "Бэлэн"}
+
+
+def _payment_label(db: Session, session: ParkingSession) -> str:
+    """Session-ий төлбөр ЯМАР хэрэгслээр төлөгдсөнийг буцаана (төлөөгүй бол "")."""
+    if not session.paid_at:
+        return ""
+    p = (db.query(Payment)
+         .filter(Payment.session_id == session.id, Payment.status == "PAID")
+         .order_by(Payment.created_at.desc()).first())
+    m = ((p.payment_method if p else "") or "").upper()
+    return _PAYMENT_LABELS.get(m, m.capitalize())
+
+
+def _bye_screen_text(db: Session, session: ParkingSession, fee: dict) -> str:
     """Гарах дэлгэцийн текст — ЯАГААД гарч байгааг нь жолоочид хэлнэ:
       • Гэрээт        — бүртгэлтэй машины жагсаалтад байгаа (төлбөр авдаггүй)
       • Түр зогссон   — үнэгүй хугацаанд (ж: эхний 15 мин) багтсан
       • Баяртай       — төлбөрөө төлж гарч байна
     fee["reason"] нь billing.calculate_fee-ээс ирнэ («Бүртгэлтэй жолооч»,
-    «Эхний N минут үнэгүй», «Хөнгөлөлт: ...»)."""
+    «Эхний N минут үнэгүй», «Хөнгөлөлт: ...»).
+    Зогсоолд LED мөрийн тохиргоо (screen_config.exit) байвал түүгээр угсарна:
+    {payment} = төлсөн хэрэгсэл, {reason} = үнэгүй гарсан шалтгаан."""
     reason = (fee or {}).get("reason") or ""
-    if session.is_registered or reason == "Бүртгэлтэй жолооч":
+    registered = session.is_registered or reason == "Бүртгэлтэй жолооч"
+    free = bool(fee.get("is_free")) and not session.paid_at
+    lines = _site_screen_lines(db, session.site_id, "exit")
+    if lines:
+        _local_hm = ((session.exit_time or datetime.utcnow())
+                     + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+        return _screen_text_from_lines(
+            lines, plate=session.plate_number, time_str=_local_hm,
+            duration_minutes=fee.get("duration_minutes"),
+            amount=None if free else fee.get("total_fee"),
+            payment=_payment_label(db, session),
+            reason=("Гэрээт" if registered else (reason or "Үнэгүй") if free else ""))
+    if registered:
         tmpl = settings.screen_bye_registered_text
-    elif fee.get("is_free") and not session.paid_at:
+    elif free:
         tmpl = settings.screen_bye_free_text
     else:
         tmpl = settings.screen_bye_text
@@ -686,7 +767,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
     barrier = _find_barrier(db, session.site_id, exit_device)
     barrier_opened = False
-    _bye = _bye_screen_text(session, fee)
+    _bye = _bye_screen_text(db, session, fee)
     if barrier and allow_open:
         cmd = await open_barrier(db, barrier, session.id, source, plate=session.plate_number,
                                  screen_text=_bye)

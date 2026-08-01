@@ -58,6 +58,11 @@ class ParkingSite(Base):
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
     # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
     qr_url = Column(Text, nullable=True)
+    # LED дэлгэцийн мөрүүд (Тохиргоо → LED дэлгэц):
+    #   {"entry": [{"type":"time"},...], "exit": [{"type":"payment"},...]}
+    # type: none|time|plate|duration|amount|text|payment|reason (сүүлийн 2 нь зөвхөн exit).
+    # NULL → глобал .env-ийн screen_*_text template-ууд хэвээр үйлчилнэ.
+    screen_config = Column(JSON, nullable=True)
 
     # ─── Зогсоолын ӨӨРИЙН QPay мерчант данс (заавал биш) ───
     # Түрээслэгч байгууллага бүр өөрийн QPay гэрээтэй байж болно: төлбөр нь
@@ -155,6 +160,9 @@ class RegisteredDriver(Base):
     valid_to = Column(DateTime, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # v1.9 халуун замын индекс: гэрээт машин шалгах (орох/гарах бүрд)
+    __table_args__ = (Index("ix_driver_plate_active", "plate_number", "is_active"),)
 
     site = relationship("ParkingSite", lazy="joined")
 
@@ -287,6 +295,10 @@ class BarrierCommand(Base):
 
     device = relationship("Device", lazy="joined")
 
+    # v1.9 халуун замын индексүүд: cooldown шалгалт + эрүүл мэндийн самбар + retention
+    __table_args__ = (Index("ix_cmd_device_created", "device_id", "created_at"),
+                      Index("ix_cmd_created_at", "created_at"))
+
 
 class LprEvent(Base):
     """Түүхий LPR event лог — гарах талын 'сүүлд уншигдсан дугаарууд' үүнээс гарна."""
@@ -301,6 +313,9 @@ class LprEvent(Base):
     reject_reason = Column(String(120), nullable=True)
     raw = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    # v1.9 халуун замын индекс: dedup/burst шалгалт (event бүрд 2 удаа)
+    __table_args__ = (Index("ix_lpr_site_lane_created", "site_id", "lane_dir", "created_at"),)
 
 
 class CashierShift(Base):
@@ -349,6 +364,9 @@ class Compensation(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     site = relationship("ParkingSite", lazy="joined")
+
+    # v1.9 халуун замын индекс: гарах бүрд өр шалгах
+    __table_args__ = (Index("ix_comp_plate_status", "plate_number", "status"),)
 
 
 class DailySettlement(Base):

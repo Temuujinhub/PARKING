@@ -34,6 +34,7 @@ class SiteCreate(_In):
     qpay_invoice_code: str | None = None
     qpay_branch_code: str | None = None
     qpay_district_code: str | None = None
+    screen_config: dict | None = None
 
 
 class SiteUpdate(SiteCreate):

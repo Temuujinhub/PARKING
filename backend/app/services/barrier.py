@@ -873,16 +873,18 @@ def format_duration(minutes: float | int | None) -> str:
 
 def render_screen_text(template: str, amount: float | int | None = None,
                        plate: str = "", duration_minutes: float | int | None = None,
-                       time_str: str = "") -> str:
-    """Template-ийн {amount}/{plate}/{duration}/{time}-ийг орлуулна. Дүн бүхэл
-    тоогоор, {duration} нь зогссон хугацаа («2ts 05min»), {time} нь локал цаг
-    («14:05», дуудагч бэлдэж өгнө).
+                       time_str: str = "", payment: str = "", reason: str = "") -> str:
+    """Template-ийн {amount}/{plate}/{duration}/{time}/{payment}/{reason}-ийг
+    орлуулна. Дүн бүхэл тоогоор, {duration} нь зогссон хугацаа («2ts 05min»),
+    {time} нь локал цаг («14:05», дуудагч бэлдэж өгнө), {payment} нь төлбөрийн
+    төрөл («QPay»/«Карт»/«Бэлэн»), {reason} нь үнэгүй гарсан шалтгаан.
     Мөр таслал: .env-д «|» эсвэл literal «\\n» бичвэл LED-ийн жинхэнэ мөр таслал (\\n)
     болгоно — дугаар/хугацаа/төлбөрийг тусдаа мөрүүдэд харуулах боломжтой."""
     amt = "" if amount is None else f"{int(round(float(amount)))}"
     text = (template.replace("{amount}", amt).replace("{plate}", plate or "")
             .replace("{duration}", format_duration(duration_minutes))
-            .replace("{time}", time_str or ""))
+            .replace("{time}", time_str or "")
+            .replace("{payment}", payment or "").replace("{reason}", reason or ""))
     text = text.replace("\\n", "\n").replace("|", "\n")  # .env мөр таслалыг хөрвүүлнэ
     # Хоосон мөрийг хаяна: {duration} өгөгдөөгүй үед дундаа цоорхой мөр үлдэхгүй
     return "\n".join(line.strip() for line in text.split("\n") if line.strip())

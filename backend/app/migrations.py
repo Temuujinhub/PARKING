@@ -112,6 +112,9 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_comp_plate_status ON compensations (plate_number, status)",
     # 5) гэрээт машин шалгах (гарах/орох бүрд): plate + идэвхтэй эсэх
     "CREATE INDEX IF NOT EXISTS ix_driver_plate_active ON registered_drivers (plate_number, is_active)",
+
+    # v2.5 — зогсоол бүрийн LED дэлгэцийн мөрийн тохиргоо (Тохиргоо → LED дэлгэц)
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS screen_config JSON",
 ]
 
 

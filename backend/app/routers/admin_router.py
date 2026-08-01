@@ -33,6 +33,47 @@ def _qpay_err(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"[:300]
 
 
+# LED мөрийн зөвшөөрөгдсөн төрлүүд. payment/reason нь зөвхөн ГАРАХ дэлгэцэд
+# утгатай (төлбөрийн төрөл / үнэгүй гарсан шалтгаан).
+_SCREEN_TYPES = {"none", "time", "plate", "duration", "amount", "text"}
+_SCREEN_EXIT_TYPES = _SCREEN_TYPES | {"payment", "reason"}
+
+
+def _check_screen_config(cfg):
+    """screen_config-ийг хадгалахын өмнө цэвэрлэж шалгана. Буруу бүтэц LED-д
+    биш DB-д очих учир энд л барина. Буцаах: цэвэрлэсэн dict | None."""
+    if cfg in (None, {}):
+        return None
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "screen_config буруу бүтэцтэй")
+    out = {}
+    for lane in ("entry", "exit"):
+        lines = cfg.get(lane)
+        if lines is None:
+            continue
+        if not isinstance(lines, list) or len(lines) > 4:
+            raise HTTPException(400, f"screen_config.{lane}: дээд тал нь 4 мөр байна")
+        allowed = _SCREEN_EXIT_TYPES if lane == "exit" else _SCREEN_TYPES
+        clean = []
+        for ln in lines:
+            t = (ln or {}).get("type", "none") if isinstance(ln, dict) else "none"
+            if t not in allowed:
+                raise HTTPException(400, f"screen_config.{lane}: '{t}' төрөл байхгүй")
+            item = {"type": t}
+            if t == "text":
+                txt = str((ln or {}).get("text", "")).strip()[:40]
+                if not txt:
+                    t = "none"
+                    item = {"type": "none"}
+                else:
+                    item["text"] = txt
+            clean.append(item)
+        # Бүгд хоосон бол тухайн чиглэлд тохиргоогүйтэй адил
+        if any(i["type"] != "none" for i in clean):
+            out[lane] = clean
+    return out or None
+
+
 def _check_district(code):
     """QPay-ийн district_code = дүүрэг(2 орон)+хороо(2 орон). Буруу бол нэхэмжлэл
     үүсэхгүй тул хадгалахын өмнө шалгана."""
@@ -132,6 +173,8 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code")
                           if k in body})
+    if "screen_config" in body:
+        site.screen_config = _check_screen_config(body["screen_config"])
     site.qpay_password = encrypt_secret(site.qpay_password)  # DB-д ил бичихгүй
     _check_district(site.qpay_district_code)
     db.add(site)
@@ -161,6 +204,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
             if k == "qpay_password":
                 val = encrypt_secret(val)  # DB-д ил бичихгүй
             setattr(site, k, val)
+    if "screen_config" in body:
+        site.screen_config = _check_screen_config(body["screen_config"])
     _check_district(site.qpay_district_code)
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
