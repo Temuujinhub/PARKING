@@ -115,6 +115,24 @@ MIGRATIONS = [
 
     # v2.5 — зогсоол бүрийн LED дэлгэцийн мөрийн тохиргоо (Тохиргоо → LED дэлгэц)
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS screen_config JSON",
+
+    # v2.6 — Түрээслэгч (Tenant): бие даасан зогсоол/хэрэглэгч/тооцооны нэгж
+    """CREATE TABLE IF NOT EXISTS tenants (
+        id UUID PRIMARY KEY,
+        name VARCHAR(160) NOT NULL,
+        code VARCHAR(30) NOT NULL UNIQUE,
+        register VARCHAR(20) DEFAULT '',
+        contact_name VARCHAR(120) DEFAULT '',
+        phone VARCHAR(20) DEFAULT '',
+        email VARCHAR(120) DEFAULT '',
+        note TEXT DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'))""",
+    "CREATE INDEX IF NOT EXISTS ix_tenants_code ON tenants (code)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
+    "CREATE INDEX IF NOT EXISTS ix_parking_sites_tenant_id ON parking_sites (tenant_id)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
+    "CREATE INDEX IF NOT EXISTS ix_users_tenant_id ON users (tenant_id)",
 ]
 
 

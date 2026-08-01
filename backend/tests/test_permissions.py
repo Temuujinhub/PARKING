@@ -46,7 +46,9 @@ check("ALL_MODULES-д * байхгүй, 10+ модультай",
       "*" not in ALL_MODULES and len(ALL_MODULES) >= 10)
 
 print("operator_sites:")
-check("ADMIN → None (бүх зогсоол)", operator_sites(U("ADMIN", site_id="S1")) is None)
+# e1b9187: tenant салгалт — SUPER_ADMIN-аас бусад БҮХ роль site_id-ээрээ хязгаарлагдана
+check("ADMIN site_id=S1 → [S1] (tenant салгалт)", operator_sites(U("ADMIN", site_id="S1")) == ["S1"])
+check("ADMIN site-гүй → None (компанийн түвшин)", operator_sites(U("ADMIN")) is None)
 check("OPERATOR site_ids=[S1,S2]", operator_sites(U("OPERATOR", site_ids=["S1", "S2"])) == ["S1", "S2"])
 check("OPERATOR site_ids хоосон → [site_id]", operator_sites(U("OPERATOR", site_id="S1")) == ["S1"])
 check("OPERATOR site-гүй → None (бүгд)", operator_sites(U("OPERATOR")) is None)

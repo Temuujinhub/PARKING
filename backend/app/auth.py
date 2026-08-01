@@ -143,6 +143,18 @@ def operator_sites(user: User) -> list[str] | None:
     ids = [s for s in (user.site_ids or []) if s]
     if not ids and user.site_id:
         ids = [user.site_id]
+    if not ids and getattr(user, "tenant_id", None):
+        # Түрээслэгчийн хэрэглэгч: тодорхой зогсоол заагаагүй бол түрээслэгчийнхээ
+        # БҮХ зогсоолыг хардаг (шинээр нэмэгдсэн зогсоол автоматаар орно).
+        from sqlalchemy.orm import object_session
+        from .models import ParkingSite
+        db = object_session(user)
+        if db is not None:
+            ids = [r[0] for r in db.query(ParkingSite.id)
+                   .filter(ParkingSite.tenant_id == user.tenant_id).all()]
+            # Түрээслэгчид зогсоол хараахан оноогоогүй бол ЮУ Ч харахгүй
+            # (None буцаавал бүх зогсоол харагдах аюултай)
+            return ids or ["00000000-0000-0000-0000-000000000000"]
     return ids or None
 
 

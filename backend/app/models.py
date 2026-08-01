@@ -38,6 +38,29 @@ class User(Base):
     permissions = Column(JSON, nullable=True)
     # OPERATOR-ийн хандах зогсоолууд (олон сонголт) — null бол [site_id]
     site_ids = Column(JSON, nullable=True)
+    # Түрээслэгчийн хэрэглэгч: site_ids/site_id тохируулаагүй бол тухайн
+    # түрээслэгчийн БҮХ зогсоолыг автоматаар хардаг (auth.operator_sites)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class Tenant(Base):
+    """Түрээслэгч байгууллага (ж: Моннис Пропертиес) — өөрийн зогсоолууд, хэрэглэгчид,
+    төлбөрийн данс, тайлантай бие даасан нэгж. Хэрэглэгчийн tenant_id тохирвол тухайн
+    түрээслэгчийн БҮХ зогсоолыг (шинээр нэмэгдсэнийг ч) автоматаар хардаг —
+    auth.operator_sites-ийн fallback. SUPER_ADMIN л удирдана."""
+    __tablename__ = "tenants"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    name = Column(String(160), nullable=False)
+    # богино түлхүүр (MONNIS г.м) — UNIQUE constraint + энгийн index (raw SQL миграцитай яг ижил)
+    code = Column(String(30), nullable=False, index=True)
+    __table_args__ = (UniqueConstraint("code", name="tenants_code_key"),)
+    register = Column(String(20), default="")     # ТТД / регистрийн дугаар
+    contact_name = Column(String(120), default="")
+    phone = Column(String(20), default="")
+    email = Column(String(120), default="")
+    note = Column(Text, default="")
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -75,6 +98,8 @@ class ParkingSite(Base):
     # НӨАТ-ын дүүрэг+хороо (4 орон, ж: 2318 = Хан-Уул 18-р хороо)
     qpay_district_code = Column(String(10), nullable=True)
     tariff_template_id = Column(UUID(as_uuid=False), ForeignKey("tariff_templates.id"), nullable=True)
+    # Аль түрээслэгчийнх вэ (NULL = EasyParking-ийн өөрийн/хуваарилагдаагүй)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

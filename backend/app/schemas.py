@@ -35,6 +35,7 @@ class SiteCreate(_In):
     qpay_branch_code: str | None = None
     qpay_district_code: str | None = None
     screen_config: dict | None = None
+    tenant_id: str | None = None
 
 
 class SiteUpdate(SiteCreate):
@@ -138,6 +139,7 @@ class UserCreate(_In):
     site_id: str | None = None
     site_ids: list[str] | None = None
     permissions: list[str] | None = None
+    tenant_id: str | None = None
 
 
 class UserUpdate(_In):
@@ -149,3 +151,33 @@ class UserUpdate(_In):
     permissions: list[str] | None = None
     is_active: bool | None = None
     password: str | None = None
+    tenant_id: str | None = None
+
+
+# ── Түрээслэгч (Tenant) ──
+class TenantCreate(_In):
+    name: str = Field(min_length=1, max_length=160)
+    code: str = Field(min_length=1, max_length=30)
+    register: str = ""
+    contact_name: str = ""
+    phone: str = ""
+    email: str = ""
+    note: str = ""
+    # Хамт үүсгэх админ хэрэглэгч (заавал биш)
+    admin_username: str | None = None
+    admin_password: str | None = None
+    admin_full_name: str = ""
+    # Оноох зогсоолууд (одоо байгаа зогсоолын id-ууд)
+    site_ids: list[str] | None = None
+
+
+class TenantUpdate(_In):
+    name: str | None = None
+    code: str | None = None
+    register: str | None = None
+    contact_name: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    note: str | None = None
+    is_active: bool | None = None
+    site_ids: list[str] | None = None

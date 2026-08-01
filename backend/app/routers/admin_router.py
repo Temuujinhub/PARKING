@@ -11,7 +11,7 @@ from ..database import get_db
 from ..models import (
     AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
     Device, Discount, LprEvent, ParkingSession, ParkingSite, Payment,
-    RegisteredDriver, TariffTemplate, TariffTier, User, VatReceipt,
+    RegisteredDriver, TariffTemplate, TariffTier, Tenant, User, VatReceipt,
 )
 from ..config import settings
 from .. import schemas
@@ -162,6 +162,94 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
     return out
 
 
+# ─────────────── Түрээслэгч (Tenant) — SUPER_ADMIN л удирдана ───────────────
+@router.get("/tenants")
+def list_tenants(db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Түрээслэгчдийн жагсаалт — зогсоол/хэрэглэгчийн тоотой."""
+    from sqlalchemy import func
+    site_cnt = dict(db.query(ParkingSite.tenant_id, func.count()).filter(
+        ParkingSite.tenant_id.isnot(None)).group_by(ParkingSite.tenant_id).all())
+    user_cnt = dict(db.query(User.tenant_id, func.count()).filter(
+        User.tenant_id.isnot(None)).group_by(User.tenant_id).all())
+    out = []
+    for t in db.query(Tenant).order_by(Tenant.created_at).all():
+        sites = [{"id": s.id, "name": s.name, "site_code": s.site_code}
+                 for s in db.query(ParkingSite).filter(ParkingSite.tenant_id == t.id).all()]
+        out.append(to_dict(t, extra={"site_count": int(site_cnt.get(t.id, 0)),
+                                     "user_count": int(user_cnt.get(t.id, 0)),
+                                     "sites": sites}))
+    return out
+
+
+def _assign_tenant_sites(db, tenant_id: str, site_ids: list[str] | None):
+    """Зогсоолуудыг түрээслэгчид оноох: жагсаалтад байгааг оноож, өмнө нь энэ
+    түрээслэгчид байсан ч жагсаалтаас хасагдсаныг чөлөөлнө (NULL болгоно)."""
+    if site_ids is None:
+        return
+    ids = {i for i in site_ids if i}
+    db.query(ParkingSite).filter(ParkingSite.tenant_id == tenant_id,
+                                 ~ParkingSite.id.in_(ids) if ids else True).update(
+        {"tenant_id": None}, synchronize_session=False)
+    if ids:
+        db.query(ParkingSite).filter(ParkingSite.id.in_(ids)).update(
+            {"tenant_id": tenant_id}, synchronize_session=False)
+
+
+@router.post("/tenants")
+def create_tenant(payload: schemas.TenantCreate, db: Session = Depends(get_db),
+                  user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Шинэ түрээслэгч бүртгэх — Monnis шиг: зогсоолуудаа оноож, админ хэрэглэгчийг
+    нь хамт үүсгэнэ. Тухайн админ зөвхөн өөрийн түрээслэгчийн зогсоол/тайлан/
+    хэрэглэгчийг харна (auth.operator_sites-ийн tenant fallback)."""
+    body = payload.dump()
+    code = body["code"].strip().upper()
+    if db.query(Tenant).filter(Tenant.code == code).first():
+        raise HTTPException(400, "Түрээслэгчийн код давхардаж байна")
+    t = Tenant(name=body["name"].strip(), code=code, register=body.get("register", "").strip(),
+               contact_name=body.get("contact_name", ""), phone=body.get("phone", ""),
+               email=body.get("email", ""), note=body.get("note", ""))
+    db.add(t)
+    db.flush()
+    _assign_tenant_sites(db, t.id, body.get("site_ids"))
+    admin_info = None
+    if body.get("admin_username"):
+        if db.query(User).filter(User.username == body["admin_username"]).first():
+            raise HTTPException(400, "Админы нэвтрэх нэр давхардаж байна")
+        _check_password(body.get("admin_password", ""))
+        au = User(username=body["admin_username"], password_hash=hash_password(body["admin_password"]),
+                  full_name=body.get("admin_full_name", "") or f"{t.name} админ",
+                  role="ADMIN", tenant_id=t.id)
+        db.add(au)
+        db.flush()
+        admin_info = {"id": au.id, "username": au.username}
+    _audit(db, user, "CREATE", "tenant", t.id,
+           {"name": t.name, "code": t.code, "sites": body.get("site_ids"),
+            "admin": body.get("admin_username")})
+    db.commit()
+    return to_dict(t, extra={"admin_user": admin_info})
+
+
+@router.put("/tenants/{tenant_id}")
+def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = Depends(get_db),
+                  user: User = Depends(require_role("SUPER_ADMIN"))):
+    body = payload.dump()
+    t = db.get(Tenant, tenant_id)
+    if not t:
+        raise HTTPException(404, "Түрээслэгч олдсонгүй")
+    if "code" in body:
+        code = (body["code"] or "").strip().upper()
+        if code != t.code and db.query(Tenant).filter(Tenant.code == code).first():
+            raise HTTPException(400, "Түрээслэгчийн код давхардаж байна")
+        t.code = code
+    for k in ("name", "register", "contact_name", "phone", "email", "note", "is_active"):
+        if k in body:
+            setattr(t, k, body[k])
+    _assign_tenant_sites(db, t.id, body.get("site_ids"))
+    _audit(db, user, "UPDATE", "tenant", tenant_id, body)
+    db.commit()
+    return to_dict(t)
+
+
 @router.post("/sites")
 def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     body = payload.dump()
@@ -175,6 +263,8 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
                           if k in body})
     if "screen_config" in body:
         site.screen_config = _check_screen_config(body["screen_config"])
+    if "tenant_id" in body and user.role == "SUPER_ADMIN":
+        site.tenant_id = body["tenant_id"] or None
     site.qpay_password = encrypt_secret(site.qpay_password)  # DB-д ил бичихгүй
     _check_district(site.qpay_district_code)
     db.add(site)
@@ -206,6 +296,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
             setattr(site, k, val)
     if "screen_config" in body:
         site.screen_config = _check_screen_config(body["screen_config"])
+    if "tenant_id" in body and user.role == "SUPER_ADMIN":
+        site.tenant_id = body["tenant_id"] or None
     _check_district(site.qpay_district_code)
     _audit(db, user, "UPDATE", "site", site_id, body)
     db.commit()
@@ -817,9 +909,12 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db), user
         {body["site_id"]} if body.get("site_id") else set())
     _enforce_user_scope(user, new_sites, "нэмэх")
     _check_password(body.get("password", ""))
+    # Tenant: SUPER_ADMIN хүссэнээ онооно; түрээслэгчийн админы үүсгэсэн хэрэглэгч
+    # ЗААВАЛ түүний түрээслэгчид харьяалагдана (өөр tenant руу гаргахгүй)
+    tenant_id = body.get("tenant_id") if user.role == "SUPER_ADMIN" else user.tenant_id
     u = User(username=body["username"], password_hash=hash_password(body["password"]),
              full_name=body.get("full_name", ""), phone=body.get("phone", ""),
-             role=body["role"], site_id=body.get("site_id"),
+             role=body["role"], site_id=body.get("site_id"), tenant_id=tenant_id or None,
              permissions=_clean_permissions(body.get("permissions"), body["role"]),
              site_ids=_clean_site_ids(body.get("site_ids"), body.get("site_id")))
     db.add(u)
@@ -850,6 +945,8 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])
+    if "tenant_id" in body and user.role == "SUPER_ADMIN":
+        u.tenant_id = body["tenant_id"] or None
     if "permissions" in body:
         u.permissions = _clean_permissions(body["permissions"], body.get("role", u.role))
     if "site_ids" in body:
