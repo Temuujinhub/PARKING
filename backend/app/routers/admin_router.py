@@ -223,7 +223,13 @@ def create_tenant(payload: schemas.TenantCreate, db: Session = Depends(get_db),
         raise HTTPException(400, "Түрээслэгчийн код давхардаж байна")
     t = Tenant(name=body["name"].strip(), code=code, register=body.get("register", "").strip(),
                contact_name=body.get("contact_name", ""), phone=body.get("phone", ""),
-               email=body.get("email", ""), note=body.get("note", ""))
+               email=body.get("email", ""), note=body.get("note", ""),
+               qpay_username=(body.get("qpay_username") or "").strip() or None,
+               qpay_password=encrypt_secret((body.get("qpay_password") or "").strip() or None),
+               qpay_invoice_code=(body.get("qpay_invoice_code") or "").strip() or None,
+               qpay_branch_code=(body.get("qpay_branch_code") or "").strip() or None,
+               qpay_district_code=(body.get("qpay_district_code") or "").strip() or None)
+    _check_district(t.qpay_district_code)
     db.add(t)
     db.flush()
     _assign_tenant_sites(db, t.id, body.get("site_ids"))
@@ -260,6 +266,13 @@ def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = D
     for k in ("name", "register", "contact_name", "phone", "email", "note", "is_active"):
         if k in body:
             setattr(t, k, body[k])
+    for k in ("qpay_username", "qpay_invoice_code", "qpay_branch_code", "qpay_district_code"):
+        if k in body:
+            setattr(t, k, (body[k] or "").strip() or None)
+    if "qpay_password" in body:
+        # Хоосон илгээвэл цэвэрлэнэ, хөндөөгүй бол хэвээр
+        t.qpay_password = encrypt_secret((body["qpay_password"] or "").strip() or None)
+    _check_district(t.qpay_district_code)
     _assign_tenant_sites(db, t.id, body.get("site_ids"))
     _audit(db, user, "UPDATE", "tenant", tenant_id, body)
     db.commit()

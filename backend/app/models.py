@@ -61,6 +61,14 @@ class Tenant(Base):
     phone = Column(String(20), default="")
     email = Column(String(120), default="")
     note = Column(Text, default="")
+    # ─── Түрээслэгчийн QPay данс — бүх зогсоолд нь нэг мөсөн үйлчилнэ ───
+    # (зогсоол бүрт тохируулах шаардлагагүй; зогсоолын түвшний талбар нь
+    # онцгой тохиолдлын override болж үлдсэн). password шифрлэгдэж хадгалагдана.
+    qpay_username = Column(String(80), nullable=True)
+    qpay_password = Column(String(160), nullable=True)   # API-аар БУЦААХГҮЙ
+    qpay_invoice_code = Column(String(80), nullable=True)
+    qpay_branch_code = Column(String(40), nullable=True)
+    qpay_district_code = Column(String(10), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

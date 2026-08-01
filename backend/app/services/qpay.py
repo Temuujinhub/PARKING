@@ -69,36 +69,62 @@ def global_account() -> QpayAccount:
     )
 
 
-def account_for(site) -> QpayAccount:
-    """Зогсоолын QPay данс. Зогсоолд өөрийн username/password тохируулсан бол
-    ТҮҮГЭЭР, эс бол глобал .env-ийн данснаас. Талбар тус бүр тусад нь уналт
-    хийдэг тул зөвхөн дүүргийн кодоо өөрчлөх гэх мэт хэсэгчилсэн тохиргоо бас болно.
+def _tenant_of(site):
+    """Зогсоолын түрээслэгчийн бичлэг (байхгүй/session-гүй бол None)."""
+    tid = getattr(site, "tenant_id", None)
+    if not tid:
+        return None
+    from sqlalchemy.orm import object_session
+    db = object_session(site)
+    if db is None:
+        return None
+    from ..models import Tenant
+    return db.get(Tenant, tid)
 
-    ЧУХАЛ: өөрийн данстай зогсоолд mock=False — глобал mock=true байсан ч
-    бодит гэрээтэй түрээслэгчийн төлбөрийг хуурамчаар боловсруулахгүй."""
+
+def account_for(site) -> QpayAccount:
+    """Зогсоолын QPay данс — гурван шатлалтай: ЗОГСООЛ (онцгой override) →
+    ТҮРЭЭСЛЭГЧ (үндсэн байрлал: Тохиргоо → Түрээслэгч, бүх зогсоолд нь үйлчилнэ)
+    → глобал .env. Талбар тус бүр тусад нь уналт хийдэг тул зөвхөн дүүргийн
+    кодоо өөрчлөх гэх мэт хэсэгчилсэн тохиргоо бас болно.
+
+    ЧУХАЛ: өөрийн данстай (зогсоол/түрээслэгчийн аль нэгд) үед mock=False —
+    глобал mock=true байсан ч бодит гэрээний төлбөрийг хуурамчаар боловсруулахгүй."""
     g = global_account()
     if site is None:
         return g
     from ..secretbox import decrypt_secret
+    ten = _tenant_of(site)
+
+    def _f(field):
+        """Талбарын утга: зогсоол → түрээслэгч → None."""
+        v = (getattr(site, field, None) or "").strip()
+        if not v and ten is not None:
+            v = (getattr(ten, field, None) or "").strip()
+        return v or None
+
+    # Нэвтрэх хос НЭГ шатлалаас бүтнээрээ ирнэ (зогсоолын нэр + түрээслэгчийн
+    # нууц үг хольж болохгүй — мөнгө буруу данс руу орох эрсдэл)
     user = (getattr(site, "qpay_username", None) or "").strip()
-    # DB-д шифрлэгдсэн байж болно ("enc:" угтвар); тайлж чадахгүй бол ЧАНГА алдаа
-    # шидэгдэнэ — түрээслэгчийн төлбөр глобал данс руу чимээгүй унахгүй
     pwd = decrypt_secret((getattr(site, "qpay_password", None) or "").strip())
+    if not (user and pwd) and ten is not None:
+        user = (getattr(ten, "qpay_username", None) or "").strip()
+        pwd = decrypt_secret((getattr(ten, "qpay_password", None) or "").strip())
     if not (user and pwd):
         # Хэсэгчилсэн тохиргоо (зөвхөн дүүрэг/салбар) — данс нь глобал хэвээр
         return QpayAccount(
             username=g.username, password=g.password,
-            invoice_code=(getattr(site, "qpay_invoice_code", None) or g.invoice_code),
-            branch_code=(getattr(site, "qpay_branch_code", None) or g.branch_code),
-            district_code=(getattr(site, "qpay_district_code", None) or g.district_code),
+            invoice_code=(_f("qpay_invoice_code") or g.invoice_code),
+            branch_code=(_f("qpay_branch_code") or g.branch_code),
+            district_code=(_f("qpay_district_code") or g.district_code),
             tax_type=g.tax_type, classification_code=g.classification_code,
             base_url=g.base_url, mock=g.mock,
         )
     return QpayAccount(
         username=user, password=pwd,
-        invoice_code=(getattr(site, "qpay_invoice_code", None) or g.invoice_code),
-        branch_code=(getattr(site, "qpay_branch_code", None) or g.branch_code),
-        district_code=(getattr(site, "qpay_district_code", None) or g.district_code),
+        invoice_code=(_f("qpay_invoice_code") or g.invoice_code),
+        branch_code=(_f("qpay_branch_code") or g.branch_code),
+        district_code=(_f("qpay_district_code") or g.district_code),
         tax_type=g.tax_type, classification_code=g.classification_code,
         base_url=g.base_url, mock=False,
     )

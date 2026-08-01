@@ -169,6 +169,12 @@ class TenantCreate(_In):
     admin_full_name: str = ""
     # Оноох зогсоолууд (одоо байгаа зогсоолын id-ууд)
     site_ids: list[str] | None = None
+    # Түрээслэгчийн QPay данс — бүх зогсоолд нь үйлчилнэ
+    qpay_username: str | None = None
+    qpay_password: str | None = None
+    qpay_invoice_code: str | None = None
+    qpay_branch_code: str | None = None
+    qpay_district_code: str | None = None
 
 
 class TenantUpdate(_In):
@@ -181,3 +187,8 @@ class TenantUpdate(_In):
     note: str | None = None
     is_active: bool | None = None
     site_ids: list[str] | None = None
+    qpay_username: str | None = None
+    qpay_password: str | None = None
+    qpay_invoice_code: str | None = None
+    qpay_branch_code: str | None = None
+    qpay_district_code: str | None = None

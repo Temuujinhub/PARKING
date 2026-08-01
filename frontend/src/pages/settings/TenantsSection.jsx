@@ -10,6 +10,7 @@ import { Field, Modal, PasswordInput, Table, useToast } from '../../components/u
 const EMPTY = {
   name: '', code: '', register: '', contact_name: '', phone: '', email: '', note: '',
   admin_username: '', admin_password: '', admin_full_name: '', site_ids: [],
+  qpay_username: '', qpay_password: '', qpay_invoice_code: '', qpay_branch_code: '', qpay_district_code: '',
 }
 
 function TenantModal({ state, sites, onClose, onDone }) {
@@ -18,7 +19,7 @@ function TenantModal({ state, sites, onClose, onDone }) {
   const isNew = state === 'new'
   useEffect(() => {
     if (state && state !== 'new') {
-      setF({ ...state, site_ids: (state.sites || []).map((s) => s.id) })
+      setF({ ...EMPTY, ...state, qpay_password: '', site_ids: (state.sites || []).map((s) => s.id) })
     } else setF(EMPTY)
   }, [state])
   if (!state) return null
@@ -33,13 +34,16 @@ function TenantModal({ state, sites, onClose, onDone }) {
       if (isNew) {
         const body = { ...f }
         if (!body.admin_username) { delete body.admin_username; delete body.admin_password }
+        if (!body.qpay_password) delete body.qpay_password
         await api('/api/admin/tenants', { method: 'POST', body })
         toast('Түрээслэгч бүртгэгдлээ')
       } else {
-        const { id, name, code, register, contact_name, phone, email, note, is_active, site_ids } = f
-        await api(`/api/admin/tenants/${id}`, {
-          method: 'PUT', body: { name, code, register, contact_name, phone, email, note, is_active, site_ids },
-        })
+        const { id, name, code, register, contact_name, phone, email, note, is_active, site_ids,
+          qpay_username, qpay_password, qpay_invoice_code, qpay_branch_code, qpay_district_code } = f
+        const body = { name, code, register, contact_name, phone, email, note, is_active, site_ids,
+          qpay_username, qpay_invoice_code, qpay_branch_code, qpay_district_code }
+        if (qpay_password) body.qpay_password = qpay_password  // хөндөөгүй бол хэвээр
+        await api(`/api/admin/tenants/${id}`, { method: 'PUT', body })
         toast('Хадгалагдлаа')
       }
       onClose(); onDone()
@@ -82,6 +86,29 @@ function TenantModal({ state, sites, onClose, onDone }) {
           <p className="text-xs text-slate-500 mt-1.5">
             Түрээслэгчийн хэрэглэгчид энд сонгосон зогсоолуудын мэдээллийг Л харна —
             дараа нь шинэ зогсоол нэмбэл автоматаар хамрагдана.
+          </p>
+        </div>
+
+        <div className="border border-surface-border rounded-lg p-3 space-y-3">
+          <div className="text-sm font-medium">QPay данс — түрээслэгчийн БҮХ зогсоолд үйлчилнэ</div>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <Field label="Нэвтрэх нэр (client_id)">
+              <input className="input font-mono" value={f.qpay_username || ''} onChange={set('qpay_username')}
+                placeholder="MONNIS_PROPERTIES" /></Field>
+            <Field label={state?.qpay_password_set ? 'Нууц үг (тохируулсан — солих бол бичнэ)' : 'Нууц үг'}>
+              <PasswordInput className="input" value={f.qpay_password || ''} onChange={set('qpay_password')}
+                placeholder={state?.qpay_password_set ? '••••••••' : ''} /></Field>
+            <Field label="Нэхэмжлэхийн код (ЗААВАЛ EB_-ээр эхэлнэ)">
+              <input className="input font-mono" value={f.qpay_invoice_code || ''} onChange={set('qpay_invoice_code')}
+                placeholder="EB_MONNIS_PROPERTIES_INVOICE" /></Field>
+            <Field label="НӨАТ дүүрэг+хороо (4 орон)">
+              <input className="input font-mono" value={f.qpay_district_code || ''} onChange={set('qpay_district_code')}
+                placeholder="2318" /></Field>
+          </div>
+          <p className="text-xs text-slate-500">
+            Хоосон орхивол системийн ерөнхий данс (EasyParking) ашиглагдана. EB_ угтваргүй код
+            НӨАТ давхар нэмэгдэж илүү дүн авах + e-Barimt үүсэхгүй алдаа өгдөг тул анхаараарай.
+            Тохируулсны дараа аль нэг зогсоол дээр нь «Дансыг турших»-аар шалгана.
           </p>
         </div>
 

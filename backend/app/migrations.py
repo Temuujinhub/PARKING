@@ -168,6 +168,34 @@ MIGRATIONS = [
     # v2.9 — «Бүх зогсоол» эрх түрээслэгчээр хязгаарлагдана (дамнан нэвтрэхгүй)
     "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
     "CREATE INDEX IF NOT EXISTS ix_registered_drivers_tenant_id ON registered_drivers (tenant_id)",
+
+    # v3.0 — QPay данс ТҮРЭЭСЛЭГЧИЙН түвшинд (зогсоол бүрт тохируулах шаардлагагүй)
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_username VARCHAR(80)",
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_password VARCHAR(160)",
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_invoice_code VARCHAR(80)",
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_branch_code VARCHAR(40)",
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_district_code VARCHAR(10)",
+    # Өгөгдлийн засвар (идемпотент): EB_ угтваргүй invoice code нь QPay-ийн ЭНГИЙН
+    # гэрээ рүү зааж НӨАТ давхар нэмэгдэн илүү дүн авдаг + e-Barimt үүсдэггүй
+    # (2026-08-01 Monnis: 10₮→10.91₮, EBARIMT_NOT_ENABLED) тул автоматаар залруулна.
+    r"""UPDATE parking_sites SET qpay_invoice_code = 'EB_' || qpay_invoice_code
+        WHERE coalesce(qpay_invoice_code,'') <> '' AND qpay_invoice_code NOT LIKE 'EB\_%'""",
+    # Зогсоолын түвшинд тохируулсан дансыг ТҮРЭЭСЛЭГЧ рүү нь өргөж (нэг эх сурвалж),
+    # дараа нь зогсоолын талбарыг цэвэрлэнэ — account_for site→tenant→global дарааллаар уншина.
+    """UPDATE tenants t SET
+        qpay_username = s.qpay_username, qpay_password = s.qpay_password,
+        qpay_invoice_code = s.qpay_invoice_code, qpay_branch_code = s.qpay_branch_code,
+        qpay_district_code = s.qpay_district_code
+       FROM parking_sites s
+       WHERE s.tenant_id = t.id
+         AND coalesce(t.qpay_username,'') = ''
+         AND coalesce(s.qpay_username,'') <> '' AND coalesce(s.qpay_password,'') <> ''""",
+    """UPDATE parking_sites s SET qpay_username = NULL, qpay_password = NULL,
+        qpay_invoice_code = NULL, qpay_branch_code = NULL, qpay_district_code = NULL
+       FROM tenants t
+       WHERE s.tenant_id = t.id AND coalesce(t.qpay_username,'') <> ''
+         AND coalesce(s.qpay_username,'') <> ''
+         AND s.qpay_username = t.qpay_username""",
 ]
 
 
