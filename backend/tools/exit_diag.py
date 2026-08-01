@@ -11,7 +11,7 @@
 """
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,7 +59,7 @@ def show_session(db, s: ParkingSession):
 
     # 1) Уншилтууд (орох/гарах, дутуу/буруу таних харагдана)
     win_lo = s.entry_time - timedelta(minutes=5)
-    win_hi = (s.exit_time or datetime.utcnow()) + timedelta(minutes=10)
+    win_hi = (s.exit_time or datetime.now(timezone.utc).replace(tzinfo=None)) + timedelta(minutes=10)
     evs = (db.query(LprEvent).filter(LprEvent.site_id == s.site_id,
                                      LprEvent.created_at >= win_lo,
                                      LprEvent.created_at <= win_hi)

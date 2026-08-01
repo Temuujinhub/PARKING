@@ -35,6 +35,39 @@ def run_once() -> int:
             hours = site.auto_close_hours if site.auto_close_hours is not None \
                 else settings.auto_close_hours
 
+            # ФОРМАТ БУРУУ phantom (үсэггүй/дутуу дугаар, ж «4132») — ХУРДАН цэвэрлэнэ.
+            # Ийм уншилт жинхэнэ гарах дугаартай тохирдоггүй тул мөнхөд гацдаг;
+            # 72ц entry-only хүлээхийн оронд invalid_plate_close_hours (2ц) дараа
+            # ӨРГҮЙГЭЭР үнэгүй хааж дашбоардыг цэвэрхэн байлгана.
+            ip_hours = settings.invalid_plate_close_hours
+            if ip_hours and ip_hours > 0:
+                junk = (db.query(ParkingSession)
+                        .filter(ParkingSession.site_id == site.id,
+                                ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"]),
+                                ParkingSession.entry_time < now - timedelta(hours=ip_hours),
+                                ParkingSession.updated_at < recent_guard)
+                        .limit(200).all())
+                for s in junk:
+                    if is_valid_plate(s.plate_number):
+                        continue  # зөв форматтай — энэ дүрэмд хамаарахгүй
+                    try:
+                        s.status = "FREE"
+                        s.exit_time = now
+                        s.duration_minutes = int((now - s.entry_time).total_seconds() // 60)
+                        s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
+                        s.note = f"{s.note + ' | ' if s.note else ''}авто: формат буруу (дутуу уншсан) phantom — {ip_hours}ц дараа үнэгүй хаав"[:1000]
+                        db.add(AuditLog(username="system", action="AUTO_JUNK_CLOSE",
+                                        entity="session", entity_id=s.id,
+                                        detail={"plate": s.plate_number, "site": site.name,
+                                                "hours": ip_hours, "reason": "invalid_plate"}))
+                        db.commit()
+                        closed += 1
+                        log.info(f"{site.name}: «{s.plate_number}» формат буруу phantom — "
+                                 f"{ip_hours}ц дараа ҮНЭГҮЙ хаав")
+                    except Exception as e:  # noqa: BLE001
+                        db.rollback()
+                        log.error(f"junk close алдаа ({s.plate_number}): {e}")
+
             # ЗӨВХӨН ОРОХ камерт уншигдсан (гарах уншилт огт байхгүй) OPEN session —
             # ихэвчлэн гарах уншилт алдагдсан phantom тул N цагийн дараа ӨРГҮЙГЭЭР
             # үнэгүй хаана (2026-07-29: эдгээрийг өр болгодог байсан нь худал өрийн
