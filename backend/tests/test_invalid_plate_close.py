@@ -34,8 +34,8 @@ check("«ABCDEFG» латин — буруу", not is_valid_plate("ABCDEFG"))
 
 # Логик: config босго ба сонголт
 from app.config import settings  # noqa: E402
-check("invalid_plate_close_hours тохиргоо бий (default 2)",
-      hasattr(settings, "invalid_plate_close_hours") and settings.invalid_plate_close_hours == 2)
+check("invalid_plate_close_hours тохиргоо бий (default 6)",
+      hasattr(settings, "invalid_plate_close_hours") and settings.invalid_plate_close_hours == 6)
 
 print("=" * 40)
 print(f"ҮР ДҮН: {PASS} passed, {FAIL} failed")

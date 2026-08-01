@@ -146,6 +146,20 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
     close = [s for s in opens if plates_ocr_similar(plate, s.plate_number)]
     if len(close) == 1:
         return close[0], True
+    # 3-Р ШАТ — ОРОХ ДУТУУ УНШИГДСАН, ГАРАХ ЗӨВ: гарах камер бүтэн зөв дугаар
+    # уншсан ч орох камер дутуу (үсэггүй «4132», нэг цифр дутуу «132УБИ» г.м.)
+    # уншсанаас 1-2-р шат тохироогүй. Бодит машиныг алдахгүй, phantom-ыг цэвэрлэж,
+    # ОРОХ ЦАГААР нь төлбөр авахын тулд: гарах дугаар ЗӨВ форматтай үед орох
+    # ФОРМАТ БУРУУ session-ий дугаар нь гарахынхаа дэд мөр (эхлэл/төгсгөл/дотор)
+    # байвал тохоно. Аюулгүй байдал: нэр дэвшигч ЯГ НЭГ байх ёстой (эс бол алгасна).
+    if is_valid_plate(plate):
+        partial = [s for s in opens
+                   if not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
+                   and (plate.startswith(s.plate_number)
+                        or plate.endswith(s.plate_number)
+                        or s.plate_number in plate)]
+        if len(partial) == 1:
+            return partial[0], True
     return None, False
 
 
@@ -531,12 +545,24 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # Гарах камер орох дугаараас өөр уншсан (OCR зөрүү) — ойролцоо session-д
         # тохоов. Ил тод байдлын үүднээс тэмдэглэж, аудитад бичнэ.
         from .models import AuditLog
-        note = f"Гарах OCR зөрүү: уншсан «{plate}» → «{session.plate_number}»"
+        old_plate = session.plate_number
+        # ОРОХ ДУТУУ уншсан байсан бол гарах ЗӨВ дугаараар ЗАСНА — цэвэр дата
+        # үлдээж, дараагийн тайлан/хайлт зөв дугаараар ажиллана. Төлбөр нь
+        # session-ий entry_time-аар бодогдох тул орсон цаг зөв хэвээр.
+        corrected = not is_valid_plate(old_plate) and is_valid_plate(plate)
+        if corrected:
+            session.plate_number = plate
+            note = f"Орох дутуу уншилт «{old_plate}» → гарах зөв «{plate}» (засав; төлбөр орсон цагаар)"
+        else:
+            note = f"Гарах OCR зөрүү: уншсан «{plate}» → «{old_plate}»"
         session.note = f"{session.note + ' | ' if session.note else ''}{note}"[:1000]
-        db.add(AuditLog(username="system", action="EXIT_OCR_MATCH", entity="session",
-                        entity_id=session.id,
-                        detail={"read_plate": plate, "matched_plate": session.plate_number}))
-        log.info(f"[exit] OCR зөрүү тохов: уншсан {plate} → session {session.plate_number}")
+        db.add(AuditLog(username="system",
+                        action="EXIT_PLATE_CORRECT" if corrected else "EXIT_OCR_MATCH",
+                        entity="session", entity_id=session.id,
+                        detail={"read_plate": plate, "entry_plate": old_plate,
+                                "corrected": corrected}))
+        log.info(f"[exit] {'дугаар засав' if corrected else 'OCR зөрүү тохов'}: "
+                 f"{old_plate} → {plate} (session {session.id})")
 
     # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
     from .models import Compensation
