@@ -23,7 +23,13 @@ export default function DevicesSection() {
     } catch (err) { toast(err.message, 'error') }
   }
 
-  const TYPES = { camera: 'LPR камер', barrier: 'Хаалт (barrier)', pax_terminal: 'PAX POS терминал', led: 'LED дэлгэц' }
+  // Ирээдүйн өргөтгөлүүд (киоск/мэдрэгч/EV) бүртгэлийн түвшинд бэлэн — тоног
+  // төхөөрөмж суумагц бүртгээд IP-ээр нь мониторинг (health TCP) шууд ажиллана.
+  const TYPES = {
+    camera: 'LPR камер', barrier: 'Хаалт (barrier)', pax_terminal: 'PAX POS терминал',
+    led: 'LED дэлгэц', kiosk: 'Төлбөрийн киоск', guidance: 'Сул зайн мэдрэгч/чиглүүлэгч',
+    ev_charger: 'EV цэнэглэгч',
+  }
 
   const save = async (e) => {
     e.preventDefault()
