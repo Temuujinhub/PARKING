@@ -343,6 +343,15 @@ export default function Health() {
                 <div className="text-[11px] text-slate-500">{d.app?.started_at ? new Date(d.app.started_at * 1000).toLocaleString() : ''}</div>
               </div>
             </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Сервер сүүлд асаасан (reboot)</div>
+              {sys.boot_time ? (
+                <div>
+                  <span className="font-mono font-bold">{fmtDur(sys.uptime_seconds)} өмнө</span>
+                  <div className="text-[11px] text-slate-500">{new Date(sys.boot_time * 1000).toLocaleString()}</div>
+                </div>
+              ) : <span className="text-slate-500">—</span>}
+            </div>
           </div>
           {(sys.disk_io || sys.open_files) && (
             <div className="mt-3 pt-3 border-t border-surface-border/50 text-xs text-slate-500 flex flex-wrap gap-x-6 gap-y-1">
