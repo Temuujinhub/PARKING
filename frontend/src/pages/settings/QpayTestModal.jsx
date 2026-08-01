@@ -60,6 +60,11 @@ export default function QpayTestModal({ state, onClose }) {
 
         {inv && (
           <>
+            {inv.warning && (
+              <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-3 text-xs text-red-300">
+                <b>⚠ {inv.warning}</b>
+              </div>
+            )}
             {!inv.using_own_account && (
               <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-300">
                 <b>Анхаар: энэ зогсоол өөрийн QPay дансгүй байна.</b> Төлбөр системийн
@@ -102,10 +107,17 @@ export default function QpayTestModal({ state, onClose }) {
                   <>
                     <div>ДДТД: <span className="font-mono break-all">{result.ebarimt_id}</span></div>
                     <div>Сугалаа: <span className="font-mono">{result.lottery || '—'}</span></div>
-                    <div>Баримт олгосон ТТД: <b className="font-mono text-slate-200">
+                    <div>Баримт олгогч байгууллагын код: <b className="font-mono text-slate-200">
                       {result.merchant_register || '—'}</b></div>
+                    {result.qr_png && (
+                      <div className="text-center pt-1">
+                        <img className="mx-auto rounded-lg bg-white p-2 w-40 h-40"
+                          src={result.qr_png} alt="e-Barimt QR" />
+                        <div className="text-slate-400 mt-1">Баримтын QR — eBarimt апп-аар уншуулж шалгана</div>
+                      </div>
+                    )}
                     <div className="text-slate-400 pt-1">
-                      Энэ ТТД нь түрээслэгчийнх байвал данс зөв холбогдсон.
+                      Энэ код түрээслэгч бүрд ӨӨР байвал данс зөв салгагдсан.
                     </div>
                   </>
                 ) : (

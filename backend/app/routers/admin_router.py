@@ -39,6 +39,22 @@ _SCREEN_TYPES = {"none", "time", "plate", "duration", "amount", "text"}
 _SCREEN_EXIT_TYPES = _SCREEN_TYPES | {"payment", "reason"}
 
 
+def _qr_data_uri(data: str | None) -> str:
+    """QR текстийг жижиг PNG data-URI болгоно (e-Barimt-ын баримтын QR-д)."""
+    if not data:
+        return ""
+    try:
+        import base64
+        import io as _io
+        import qrcode
+        img = qrcode.make(data, box_size=4, border=2)
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:  # noqa: BLE001 — QR зурагдаагүй ч баримтын мэдээлэл хэвээр
+        return ""
+
+
 def _check_screen_config(cfg):
     """screen_config-ийг хадгалахын өмнө цэвэрлэж шалгана. Буруу бүтэц LED-д
     биш DB-д очих учир энд л барина. Буцаах: цэвэрлэсэн dict | None."""
@@ -398,7 +414,18 @@ async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_
     _audit(db, user, "QPAY_TEST", "site", site_id,
            {"amount": amount, "invoice_no": invoice_no, "merchant": acc.username})
     db.commit()
+    # QPay-ийн e-Barimt-тэй гэрээний invoice code ямагт EB_ угтвартай байдаг.
+    # Угтваргүй код өгвөл ЭНГИЙН нэхэмжлэл үүсэж: (1) НӨАТ дээрээс нь нэмэгдэж
+    # заасан дүнгээс илүү мөнгө авна (10₮→10.91₮ болсон тохиолдол, 2026-08-01
+    # Monnis), (2) төлбөр орсон ч e-Barimt EBARIMT_NOT_ENABLED болно.
+    warning = ""
+    if settings.qpay_ebarimt and not (acc.invoice_code or "").startswith("EB_"):
+        warning = (f"Нэхэмжлэхийн код «{acc.invoice_code}» EB_ угтваргүй байна! "
+                   f"QPay-ийн e-Barimt гэрээний код EB_-ээр эхэлдэг (ж: EB_{acc.invoice_code}). "
+                   f"Ингэснээс НӨАТ давхар нэмэгдэж илүү дүн авах, e-Barimt үүсэхгүй байх "
+                   f"эрсдэлтэй — зогсоолын QPay тохиргоонд зөв кодыг оруулна уу.")
     return {
+        "warning": warning,
         "invoice_id": inv["invoice_id"], "invoice_no": invoice_no, "amount": amount,
         "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
         "deep_link": inv.get("deep_link", ""), "urls": inv.get("urls", []),
@@ -448,8 +475,13 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
             "ebarimt_id": eb.get("billId"),          # ДДТД
             "lottery": eb.get("lottery"),
             "qr_data": eb.get("qrData"),
-            # Баримт ХЭНИЙ нэрээр үүссэн — дансны зөв эсэхийн эцсийн баталгаа
-            "merchant_register": raw.get("merchant_register"),
+            # Баримтын QR-ийг серверт зурж өгнө — утсаараа eBarimt апп-д уншуулж шалгана
+            "qr_png": _qr_data_uri(eb.get("qrData")),
+            # Баримт ХЭНИЙ нэрээр үүссэн — дансны зөв эсэхийн эцсийн баталгаа.
+            # QPay хариудаа merchant_register өгөхгүй бол ДДТД-ийн 2-12-р орон
+            # нь баримт олгогч байгууллагын код тул түүгээр нөхнө.
+            "merchant_register": raw.get("merchant_register")
+                or ((eb.get("billId") or "")[1:12] if eb.get("billId") else None),
             "merchant_branch_code": raw.get("merchant_branch_code"),
             "ebarimt_status": raw.get("ebarimt_status"),
         })
