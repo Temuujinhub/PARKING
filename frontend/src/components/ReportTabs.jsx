@@ -269,43 +269,92 @@ export function ShiftsTab({ from, to, siteId }) {
 }
 
 // ── Төлбөрийн төрлөөр ──
-// ── Байгууллагаар (гэрээт машины нэгдсэн тайлан) ──
+// ── Байгууллагаар (гэрээт машины нэгдсэн тайлан + байгууллага тус бүрийн тооцоо) ──
+function CompanyDetail({ company, from, to, siteId, onClose }) {
+  const download = useDownload()
+  const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
+  const { data } = useFetch(
+    `/api/reports/by-company/sessions?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
+    { initial: null })
+  if (!data) return null
+  return (
+    <div className="card border-accent/30">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="font-semibold">{company} — тооцоо нийлэх дэлгэрэнгүй</h2>
+        <div className="flex gap-2">
+          <button className="btn-primary text-sm flex items-center gap-1.5"
+            onClick={() => download(`/api/reports/by-company/sessions/excel?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
+              `tootsoo_${company}_${from}_${to}.xlsx`)}>
+            <Download size={15} /> Тооцооны Excel (илгээх)
+          </button>
+          <button className="btn-secondary text-sm" onClick={onClose}>Хаах</button>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-6 text-sm mb-3 text-slate-400">
+        <span>Машин: <b className="font-mono text-accent">{data.cars}</b></span>
+        <span>Орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
+        <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
+      </div>
+      <div className="max-h-96 overflow-y-auto">
+        <Table headers={['№', 'Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа']} empty={data.rows.length === 0}>
+          {data.rows.map((r, i) => (
+            <tr key={i}>
+              <td className="td text-slate-500">{i + 1}</td>
+              <td className="td font-mono font-semibold">{r.plate}</td>
+              <td className="td">{r.site}</td>
+              <td className="td font-mono text-xs">{r.entry}</td>
+              <td className="td font-mono text-xs">{r.exit || '—'}</td>
+              <td className="td font-mono">{hm(r.minutes)}</td>
+            </tr>
+          ))}
+        </Table>
+      </div>
+    </div>
+  )
+}
+
 export function CompanyTab({ from, to, siteId }) {
   const download = useDownload()
+  const [sel, setSel] = useState(null)
   const { data } = useFetch(`/api/reports/by-company?date_from=${from}&date_to=${to}${siteQ(siteId)}`, { initial: null })
   if (!data) return null
   const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
   return (
+    <>
     <div className="card">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold">Байгууллагаар — гэрээт машины ашиглалт</h2>
         <button className="btn-secondary text-sm flex items-center gap-1.5"
           onClick={() => download(`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`)}>
-          <Download size={15} /> Excel татах
+          <Download size={15} /> Нэгтгэл Excel
         </button>
       </div>
       <div className="flex flex-wrap gap-6 text-sm mb-3 text-slate-400">
         <span>Нийт орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
         <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
       </div>
-      <Table headers={['Байгууллага', 'Бүртгэлтэй машин', 'Ирсэн машин', 'Орсон удаа', 'Нийт зогссон', 'Дундаж/удаа']}
+      <Table headers={['Байгууллага', 'Бүртгэлтэй машин', 'Ирсэн машин', 'Орсон удаа', 'Нийт зогссон', 'Дундаж/удаа', '']}
         empty={data.rows.length === 0}>
         {data.rows.map((r) => (
-          <tr key={r.company}>
+          <tr key={r.company} onClick={() => setSel(r.company)}
+            className={`cursor-pointer transition-colors hover:bg-surface-muted/50 ${sel === r.company ? 'bg-accent/5' : ''}`}>
             <td className="td font-medium">{r.company}</td>
             <td className="td font-mono">{r.registered_cars}</td>
             <td className="td font-mono">{r.visited_cars}</td>
             <td className="td font-mono">{r.sessions}</td>
             <td className="td font-mono text-accent">{hm(r.total_minutes)}</td>
             <td className="td font-mono">{hm(r.avg_minutes)}</td>
+            <td className="td text-xs text-accent whitespace-nowrap">Тооцоо →</td>
           </tr>
         ))}
       </Table>
       <p className="text-xs text-slate-500 mt-2">
-        Session-ийг бүртгэлтэй машины дугаартай тулгаж тоолов — тухайн зогсоолд эсвэл
-        «Бүх зогсоол» эрхтэй бүртгэл хамаарна. Хугацаанд ирээгүй байгууллага 0-тэй мөрөөр харагдана.
+        Мөр дээр дарж байгууллагын дэлгэрэнгүйг хараад «Тооцооны Excel»-ийг татаж илгээнэ.
+        Session-ийг бүртгэлтэй машины дугаартай тулгаж тоолов; ирээгүй байгууллага 0-тэй харагдана.
       </p>
     </div>
+    {sel && <CompanyDetail company={sel} from={from} to={to} siteId={siteId} onClose={() => setSel(null)} />}
+    </>
   )
 }
 

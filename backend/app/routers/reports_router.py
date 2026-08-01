@@ -534,6 +534,82 @@ def by_company(date_from: str | None = None, date_to: str | None = None, site_id
             "total_minutes": sum(r["total_minutes"] for r in rows)}
 
 
+def _company_sessions(db, user, company: str, start, end, sid):
+    """Нэг байгууллагын гэрээт машинуудын session-үүд (тооцоо нийлэх дэлгэрэнгүй).
+    by_company-тэй ИЖИЛ тулгалтын дүрэм: дугаар таарч, бүртгэл нь тухайн зогсоолд
+    эсвэл бүх-зогсоолд хамаарсан байх."""
+    from ..models import RegisteredDriver
+    q = db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True))
+    if company == "(байгууллагагүй)":
+        q = q.filter((RegisteredDriver.company.is_(None)) | (RegisteredDriver.company == ""))
+    else:
+        q = q.filter(RegisteredDriver.company == company)
+    drv = {}
+    for d in q.all():
+        drv.setdefault(d.plate_number, []).append(d.site_id)
+    if not drv:
+        return []
+    now = datetime.utcnow()
+    sq = (db.query(ParkingSession)
+          .filter(ParkingSession.entry_time >= start, ParkingSession.entry_time < end,
+                  ParkingSession.plate_number.in_(list(drv)))
+          .order_by(ParkingSession.plate_number, ParkingSession.entry_time))
+    sq = _flt(sq, ParkingSession.site_id, sid)
+    site_names = {s.id: s.name for s in db.query(ParkingSite).all()}
+    rows = []
+    for s in sq.all():
+        sites_of_plate = drv[s.plate_number]
+        if not (None in sites_of_plate or s.site_id in sites_of_plate):
+            continue
+        mins = s.duration_minutes
+        if mins is None:
+            mins = ((s.exit_time or now) - s.entry_time).total_seconds() / 60
+        rows.append({"plate": s.plate_number, "site": site_names.get(s.site_id, "?"),
+                     "entry": (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
+                     "exit": (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
+                     "minutes": round(float(mins)), "status": s.status})
+    return rows
+
+
+@router.get("/by-company/sessions")
+def by_company_sessions(company: str, date_from: str | None = None, date_to: str | None = None,
+                        site_id: str | None = None,
+                        db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Нэг байгууллагын дэлгэрэнгүй — тухайн байгууллагад илгээж тооцоо нийлэх жагсаалт."""
+    start, end = _range(date_from, date_to)
+    sid = _scope(user, site_id)
+    rows = _company_sessions(db, user, company, start, end, sid)
+    return {"company": company, "rows": rows,
+            "total_sessions": len(rows), "total_minutes": sum(r["minutes"] for r in rows),
+            "cars": len({r["plate"] for r in rows})}
+
+
+@router.get("/by-company/sessions/excel")
+def by_company_sessions_excel(company: str, date_from: str | None = None, date_to: str | None = None,
+                              site_id: str | None = None,
+                              db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Байгууллагад илгээх тооцооны Excel — мөр бүр нэг орц/гарц."""
+    start, end = _range(date_from, date_to)
+    sid = _scope(user, site_id)
+    rows = _company_sessions(db, user, company, start, end, sid)
+
+    def _h(m):
+        return f"{m // 60}ц {m % 60:02d}м"
+
+    data = [[i + 1, r["plate"], r["site"], r["entry"], r["exit"] or "—", _h(r["minutes"])]
+            for i, r in enumerate(rows)]
+    total_min = sum(r["minutes"] for r in rows)
+    import re as _re
+    # Content-Disposition header latin-1 шаарддаг тул файлын нэрэнд зөвхөн ASCII
+    safe = _re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_")[:24] or "company"
+    return _excel._xlsx(
+        f"tootsoo_{safe}",
+        f"{company} — гэрээт машины тооцоо {(start + TZ):%Y-%m-%d} — {(end + TZ - timedelta(days=1)):%Y-%m-%d}",
+        ["№", "Улсын дугаар", "Зогсоол", "Орсон", "Гарсан", "Зогссон хугацаа"],
+        data, widths=[6, 14, 22, 18, 18, 16],
+        total_row=["НИЙТ", f"{len({r['plate'] for r in rows})} машин", "", f"{len(rows)} удаа", "", _h(total_min)])
+
+
 @router.get("/by-company/excel")
 def by_company_excel(date_from: str | None = None, date_to: str | None = None,
                      site_id: str | None = None,
