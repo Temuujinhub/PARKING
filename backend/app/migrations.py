@@ -164,6 +164,10 @@ MIGRATIONS = [
 
     # v2.8 — байгууллага бүрийн төлбөрийн горим (урьдчилгаа/сарын эцэст/нэхэмжлэхгүй)
     "ALTER TABLE company_contacts ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(10) NOT NULL DEFAULT 'POSTPAID'",
+
+    # v2.9 — «Бүх зогсоол» эрх түрээслэгчээр хязгаарлагдана (дамнан нэвтрэхгүй)
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
+    "CREATE INDEX IF NOT EXISTS ix_registered_drivers_tenant_id ON registered_drivers (tenant_id)",
 ]
 
 

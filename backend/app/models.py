@@ -176,7 +176,10 @@ class RegisteredDriver(Base):
     full_name = Column(String(120), default="")
     phone = Column(String(20), default="")
     contract_type = Column(String(20), nullable=False, default="MONTHLY")  # MONTHLY, CONTRACT, VIP, STAFF
-    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # null = бүх зогсоол
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # null = түрээслэгчийн бүх зогсоол
+    # site_id NULL үед АЛЬ түрээслэгчийн бүх зогсоолд эрхтэйг заана — түрээслэгч
+    # ДАМНАН үнэгүй нэвтрэхийг хориглоно (2026-08-01). NULL/NULL = хуучин суулгац.
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
     # Аль байгууллагын машин (Excel импортод хуудас/компани тус бүрээр бүлэглэнэ)
     company = Column(String(160), default="", index=True)
     note = Column(Text, default="")          # албан тушаал г.м. нэмэлт тэмдэглэл

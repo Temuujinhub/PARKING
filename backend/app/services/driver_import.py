@@ -12,6 +12,16 @@
 import io
 import re
 
+
+def _site_tenant_id(db, site_id):
+    """Зогсоолын түрээслэгч — импортоор үүссэн бүртгэл зогсоолынхоо
+    түрээслэгчид харьяалагдана (түрээслэгч дамнахгүй)."""
+    if not site_id:
+        return None
+    from ..models import ParkingSite
+    return db.query(ParkingSite.tenant_id).filter(ParkingSite.id == site_id).scalar()
+
+
 # Гарчгийн нүдийг таних түлхүүр үгс (жижиг үсгээр харьцуулна)
 PLATE_HEADERS = ("улсын дугаар", "улсын дугаар ", "дугаар", "plate")
 NAME_HEADERS = ("эзэмшигч", "нэр", "owner")
@@ -153,6 +163,7 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
             db.add(RegisteredDriver(
                 plate_number=r["plate"], full_name=r["full_name"], company=r["company"],
                 note=r["note"], contract_type=contract_type, site_id=site_id,
+                tenant_id=_site_tenant_id(db, site_id),
                 monthly_fee=monthly_fee, valid_from=now, valid_to=valid_to, is_active=True))
             created += 1
 

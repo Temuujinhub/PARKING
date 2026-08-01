@@ -700,13 +700,21 @@ def list_drivers(q: str | None = None, company: str | None = None,
         query = query.filter(RegisteredDriver.company == company)
     allowed = operator_sites(user)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолын машинууд
     if site_id == "global":
-        # Зөвхөн «Бүх зогсоол»-ын эрхтэй (site_id NULL) машинууд — ажилтан/албаны
+        # Зөвхөн «Бүх зогсоол»-ын эрхтэй (site_id NULL) машинууд — түрээслэгчийн
+        # хэрэглэгчид зөвхөн өөрийн түрээслэгчийнхийг харна
         query = query.filter(RegisteredDriver.site_id.is_(None))
+        if allowed is not None:
+            query = query.filter(RegisteredDriver.tenant_id == user.tenant_id)
     elif site_id:
         enforce_site(user, site_id)
         query = query.filter(RegisteredDriver.site_id == site_id)
     elif allowed:
-        query = query.filter(RegisteredDriver.site_id.in_(allowed))
+        cond = RegisteredDriver.site_id.in_(allowed)
+        if user.tenant_id:
+            # Түрээслэгчийн «бүх зогсоолын» машид мөн харагдана
+            cond = cond | ((RegisteredDriver.site_id.is_(None))
+                           & (RegisteredDriver.tenant_id == user.tenant_id))
+        query = query.filter(cond)
     return [to_dict(d, extra={"site_name": d.site.name if d.site else "Бүх зогсоол"})
             for d in query.limit(2000).all()]
 
@@ -733,19 +741,32 @@ def _parse_dt(value: str, field: str) -> datetime:
 
 
 @router.post("/drivers")
+def _site_tenant(db, site_id: str | None):
+    """Зогсоолын түрээслэгч (site байхгүй/NULL бол None)."""
+    if not site_id:
+        return None
+    return db.query(ParkingSite.tenant_id).filter(ParkingSite.id == site_id).scalar()
+
+
 def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     body = payload.dump()
-    # Tenant хэрэглэгч зөвхөн өөрийн зогсоолд бүртгэнэ — site_id=null («Бүх зогсоол»)
-    # бол бусад зогсоолд ч хүчинтэй болох тул хориглоно
+    # Tenant хэрэглэгч зөвхөн өөрийн зогсоолд бүртгэнэ. site_id=null («Бүх зогсоол»)
+    # нь одоо ТҮРЭЭСЛЭГЧИЙН бүх зогсоол гэсэн утгатай тул tenant хэрэглэгчид аюулгүй;
+    # tenant-гүй хэрэглэгч (SUPER) NULL сонговол системийн түвшний (хуучин) бүртгэл болно.
     allowed = operator_sites(user)
-    if allowed is not None and body.get("site_id") not in allowed:
-        raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд машин бүртгэх эрхтэй.")
+    site_id = body.get("site_id")
+    if allowed is not None:
+        if site_id and site_id not in allowed:
+            raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд машин бүртгэх эрхтэй.")
+        if not site_id and not user.tenant_id:
+            raise HTTPException(403, "«Бүх зогсоол» бүртгэлийг түрээслэгчийн хэрэглэгч л хийнэ — зогсоолоо сонгоно уу.")
     d = RegisteredDriver(
         plate_number=body["plate_number"].upper().replace(" ", ""),
         full_name=body.get("full_name", ""), phone=body.get("phone", ""),
         company=body.get("company", ""), note=body.get("note", ""),
         contract_type=body.get("contract_type", "MONTHLY"),
-        site_id=body.get("site_id"), monthly_fee=body.get("monthly_fee", 0),
+        tenant_id=_site_tenant(db, site_id) if site_id else user.tenant_id,
+        site_id=site_id, monthly_fee=body.get("monthly_fee", 0),
         valid_from=_parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow(),
         valid_to=_parse_dt(body["valid_to"], "valid_to"),
     )
@@ -774,6 +795,10 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
               "is_active", "company", "note"):
         if k in body:
             setattr(d, k, body[k])
+    if "site_id" in body:
+        # Түрээслэгчийн харьяалал зогсоолыг нь дагана; NULL («бүх зогсоол») болгоход
+        # засварлагчийн түрээслэгч (эсвэл хуучин утга) хэвээр
+        d.tenant_id = _site_tenant(db, body["site_id"]) if body["site_id"] else (user.tenant_id or d.tenant_id)
     if body.get("plate_number"):
         d.plate_number = body["plate_number"].upper().replace(" ", "")
     for k in ("valid_from", "valid_to"):

@@ -56,6 +56,10 @@ def is_valid_plate(plate: str) -> bool:
 
 
 def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:
+    """Гэрээт машин мөн эсэх. site_id NULL («бүх зогсоол») бүртгэл нь зөвхөн
+    ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН зогсоолуудад үйлчилнэ — түрээслэгч ДАМНАН үнэгүй
+    нэвтрэхийг хориглоно (NULL/NULL тохирол нь tenant-гүй хуучин суулгацад
+    хуучин зан төлөвөө хадгална)."""
     now = datetime.utcnow()
     q = (
         db.query(RegisteredDriver)
@@ -66,7 +70,12 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
             RegisteredDriver.valid_to >= now,
         )
     )
-    return q.filter((RegisteredDriver.site_id == site_id) | (RegisteredDriver.site_id.is_(None))).first()
+    site_tenant = (db.query(ParkingSite.tenant_id)
+                   .filter(ParkingSite.id == site_id).scalar()) if site_id else None
+    all_sites_cond = (RegisteredDriver.site_id.is_(None)) & (
+        (RegisteredDriver.tenant_id == site_tenant) if site_tenant
+        else RegisteredDriver.tenant_id.is_(None))
+    return q.filter((RegisteredDriver.site_id == site_id) | all_sites_cond).first()
 
 
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:

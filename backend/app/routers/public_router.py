@@ -52,6 +52,13 @@ def find_site(db: Session, site_ref: str, active_only: bool = False) -> ParkingS
     except ValueError:
         site = q.filter(func.upper(ParkingSite.site_code) == ref.upper()).first()
 
+    if not site and ref:
+        # Сүүлчийн боломж: зогсоол устгагдаж ДАХИН үүссэн бол хэвлэгдсэн QR-ийн UUID
+        # шинэ id-тай таарахгүй. Гэхдээ тухайн зогсоолын qr_url талбарт хэвлэгдсэн
+        # линк хадгалагддаг тул түүгээр нь олно (Спортын QR ийм байдлаар эвдэрснийг
+        # 2026-08-01-нд илрүүлсэн).
+        site = q.filter(ParkingSite.qr_url.ilike(f"%{ref}%")).first()
+
     if not site:
         log.warning("QR: бүртгэлгүй зогсоолын заагч уншигдлаа: %r", ref)
         raise HTTPException(404, "Зогсоол олдсонгүй")

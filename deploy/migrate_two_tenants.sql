@@ -12,6 +12,8 @@
 --      БҮХ зогсоолыг (ирээдүйн +3-ыг ч) автоматаар хардаг болгоно.
 --      ОПЕРАТОР-уудын үндсэн зогсоол (ээлж нээхэд хэрэгтэй) хэвээр үлдэнэ.
 --   4. Үлдсэн бүх хэрэглэгчийг (SUPER_ADMIN-аас бусад) ИйзиПаркингд ононо
+--   5. Гэрээт машидыг түрээслэгчид нь ононо: зогсоолтой нь зогсоолоороо,
+--      «бүх зогсоол» (NULL) нь ИйзиПаркинд — түрээслэгч дамнан үнэгүй нэвтрэхгүй
 --
 -- Ажиллуулах: sudo -u postgres psql -d parking -f /root/PARKING/deploy/migrate_two_tenants.sql
 -- ӨМНӨ НЬ update.sh ажиллуулж tenants хүснэгт үүссэн байх ёстой.
@@ -69,6 +71,14 @@ BEGIN
   -- Үлдсэн бүгд → ИйзиПаркинг
   UPDATE users SET tenant_id = ep_id
    WHERE role <> 'SUPER_ADMIN' AND tenant_id IS NULL;
+
+  -- Гэрээт машид: зогсоолтой нь зогсоолынхоо түрээслэгчид,
+  -- «бүх зогсоол» (site NULL) нь ИйзиПаркинд — түрээслэгч ДАМНАН нэвтрэхгүй
+  UPDATE registered_drivers rd SET tenant_id = s.tenant_id
+    FROM parking_sites s
+   WHERE rd.site_id = s.id AND rd.tenant_id IS DISTINCT FROM s.tenant_id;
+  UPDATE registered_drivers SET tenant_id = ep_id
+   WHERE site_id IS NULL AND tenant_id IS NULL;
 END $$;
 
 COMMIT;

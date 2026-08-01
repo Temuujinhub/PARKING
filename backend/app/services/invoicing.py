@@ -33,8 +33,18 @@ def prev_period(now_utc: datetime | None = None) -> str:
     return prev.strftime("%Y-%m")
 
 
+def _tenant_sites(db) -> dict:
+    """tenant_id → тухайн түрээслэгчийн зогсоолын id-ууд (NULL-site машидын хүрээ)."""
+    from ..models import ParkingSite
+    out: dict = {}
+    for sid, tid in db.query(ParkingSite.id, ParkingSite.tenant_id).all():
+        out.setdefault(tid, set()).add(sid)
+    return out
+
+
 def _usage(db, plates: set[str], site_ids: set, start, end) -> dict:
-    """Тухайн байгууллагын машидын тухайн сарын ашиглалт (by_company-тэй ижил дүрэм)."""
+    """Тухайн байгууллагын машидын тухайн сарын ашиглалт (by_company-тэй ижил дүрэм).
+    site_ids-д None байвал дуудагч түрээслэгчийн зогсоолуудаар аль хэдийн орлуулсан байх ёстой."""
     if not plates:
         return {"sessions": 0, "minutes": 0, "visited": 0}
     q = (db.query(ParkingSession)
@@ -69,7 +79,9 @@ def company_scope(db, user) -> set[str] | None:
     comps = set()
     for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
         comp = (d.company or "").strip()
-        if comp and d.site_id in aset:
+        if comp and (d.site_id in aset
+                     or (d.site_id is None and d.tenant_id
+                         and d.tenant_id == getattr(user, "tenant_id", None))):
             comps.add(comp)
     return comps
 
@@ -109,8 +121,15 @@ def generate_invoices(db, period: str, created_by: str = "system",
         cars = [{"plate": d.plate_number, "fee": float(d.monthly_fee or 0),
                  "name": d.full_name or ""} for d in drivers]
         amount = sum(c["fee"] for c in cars)
-        usage = _usage(db, {c["plate"] for c in cars},
-                       {d.site_id for d in drivers}, start, end)
+        # «Бүх зогсоол» машиныг түрээслэгчийнх нь зогсоолуудаар орлуулна (дамнахгүй)
+        tsites = _tenant_sites(db)
+        dsites: set = set()
+        for d in drivers:
+            if d.site_id:
+                dsites.add(d.site_id)
+            else:
+                dsites |= tsites.get(d.tenant_id, set()) if d.tenant_id else {None}
+        usage = _usage(db, {c["plate"] for c in cars}, dsites, start, end)
         seq += 1
         inv = CompanyInvoice(
             invoice_no=f"INV-{period.replace('-', '')}-{seq:03d}",

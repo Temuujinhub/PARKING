@@ -485,13 +485,16 @@ def by_company(date_from: str | None = None, date_to: str | None = None, site_id
     sid = _scope(user, site_id)
     now = datetime.utcnow()
 
-    # plate → [(site_id|None, company)] — нэг дугаар олон бүртгэлтэй байж болно
+    # plate → [(site_id|None, tenant_id, company)] — нэг дугаар олон бүртгэлтэй байж болно.
+    # «Бүх зогсоол» (site NULL) бүртгэл нь зөвхөн ӨӨРИЙН түрээслэгчийн зогсоолд тоологдоно.
+    site_tenant = {st.id: st.tenant_id for st in db.query(ParkingSite).all()}
     drv: dict[str, list] = {}
     reg_count: dict[str, set] = {}   # company → бүртгэлтэй машины олонлог (одоогийн жагсаалтаар)
     for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
         comp = (d.company or "").strip() or "(байгууллагагүй)"
-        drv.setdefault(d.plate_number, []).append((d.site_id, comp))
-        if sid is None or d.site_id in (None, sid):
+        drv.setdefault(d.plate_number, []).append((d.site_id, d.tenant_id, comp))
+        if sid is None or d.site_id == sid or (
+                d.site_id is None and d.tenant_id and d.tenant_id == site_tenant.get(sid)):
             reg_count.setdefault(comp, set()).add(d.plate_number)
 
     sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
@@ -503,9 +506,12 @@ def by_company(date_from: str | None = None, date_to: str | None = None, site_id
         matches = drv.get(s.plate_number)
         if not matches:
             continue
-        # Тухайн зогсоолд яг таарсан бүртгэл тэргүүлнэ, үгүй бол бүх-зогсоолын (None)
-        comp = next((c for st, c in matches if st == s.site_id),
-                    next((c for st, c in matches if st is None), None))
+        # Тухайн зогсоолд яг таарсан бүртгэл тэргүүлнэ; «бүх зогсоол» (None) бүртгэл
+        # зөвхөн session-ий зогсоолын ТҮРЭЭСЛЭГЧТЭЙ таарвал (дамнахгүй)
+        _stn = site_tenant.get(s.site_id)
+        comp = next((c for st, tn, c in matches if st == s.site_id),
+                    next((c for st, tn, c in matches
+                          if st is None and (tn == _stn if tn or _stn else True)), None))
         if comp is None:
             continue   # өөр зогсоолд л эрхтэй машин — энд гэрээтэд тооцохгүй
         mins = s.duration_minutes
