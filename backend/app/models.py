@@ -441,6 +441,10 @@ class CompanyContact(Base):
     company = Column(String(160), nullable=False, unique=True)
     email = Column(String(120), default="")
     register = Column(String(20), default="")   # ТТД (e-Barimt-д хэрэглэж болно)
+    # Төлбөрийн горим: POSTPAID=сарын эцэст (өмнөх сарын нэхэмжлэл 1-нд),
+    # PREPAID=урьдчилгаа (тухайн сарын нэхэмжлэл 1-нд), NONE=нэхэмжлэхгүй
+    # (зөвхөн бүртгэл — ж: Monnis оффисын түрээслэгчдээс төлбөр авдаггүй тохиолдол)
+    billing_mode = Column(String(10), nullable=False, default="POSTPAID")
     phone = Column(String(20), default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

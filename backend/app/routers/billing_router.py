@@ -11,7 +11,7 @@ from ..database import get_db
 from ..models import AuditLog, CompanyContact, CompanyInvoice, User
 from ..serializers import to_dict
 from ..services import mailer
-from ..services.invoicing import generate_invoices, prev_period
+from ..services.invoicing import company_scope, generate_invoices, prev_period
 from . import reports_excel as _excel
 
 log = logging.getLogger("parking.billing")
@@ -33,10 +33,14 @@ def list_invoices(period: str | None = None, db: Session = Depends(get_db),
     q = db.query(CompanyInvoice).order_by(CompanyInvoice.period.desc(), CompanyInvoice.company)
     if period:
         q = q.filter(CompanyInvoice.period == period)
-    rows = q.limit(500).all()
-    # Байгууллагын хадгалсан и-мэйлүүд (илгээх модалд урьдчилж бөглөнө)
-    emails = {c.company: c.email for c in db.query(CompanyContact).all()}
-    return [to_dict(r, extra={"company_email": emails.get(r.company, "")}) for r in rows]
+    scope = company_scope(db, user)  # түрээслэгч зөвхөн өөрийн байгууллагуудыг харна
+    rows = [r for r in q.limit(1000).all() if scope is None or r.company in scope][:500]
+    # Байгууллагын хадгалсан и-мэйл/горим (илгээх модал + горимын тэмдэг)
+    contacts = {c.company: c for c in db.query(CompanyContact).all()}
+    return [to_dict(r, extra={
+        "company_email": getattr(contacts.get(r.company), "email", ""),
+        "billing_mode": getattr(contacts.get(r.company), "billing_mode", "POSTPAID"),
+    }) for r in rows]
 
 
 @router.get("/periods")
@@ -51,7 +55,8 @@ def generate(body: dict, db: Session = Depends(get_db), user: User = Depends(req
     period = (body.get("period") or prev_period()).strip()
     if len(period) != 7 or period[4] != "-":
         raise HTTPException(400, "period нь YYYY-MM хэлбэртэй байна")
-    created = generate_invoices(db, period, created_by=user.username)
+    created = generate_invoices(db, period, created_by=user.username,
+                                companies=company_scope(db, user))
     _audit(db, user, "INVOICE_GENERATE", period, {"created": len(created)})
     db.commit()
     return {"period": period, "created": len(created)}
@@ -72,13 +77,46 @@ def _invoice_excel(inv: CompanyInvoice):
         total_row=["НИЙТ", f"{inv.car_count} машин", "", f"{float(inv.amount):,.0f}"])
 
 
-@router.get("/{invoice_id}/excel")
-def invoice_excel(invoice_id: str, db: Session = Depends(get_db),
-                  user: User = Depends(require("reports"))):
+def _get_scoped(db, user, invoice_id: str) -> CompanyInvoice:
     inv = db.get(CompanyInvoice, invoice_id)
     if not inv:
         raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
-    return _invoice_excel(inv)
+    scope = company_scope(db, user)
+    if scope is not None and inv.company not in scope:
+        raise HTTPException(403, "Энэ нэхэмжлэл таны байгууллагынх биш байна")
+    return inv
+
+
+@router.post("/contacts")
+def set_contact(body: dict, db: Session = Depends(get_db),
+                user: User = Depends(require("reports"))):
+    """Байгууллагын и-мэйл/төлбөрийн горим тохируулах (Нэхэмжлэл хуудасны Тохиргоо)."""
+    company = (body.get("company") or "").strip()
+    if not company:
+        raise HTTPException(400, "company заавал")
+    scope = company_scope(db, user)
+    if scope is not None and company not in scope:
+        raise HTTPException(403, "Энэ байгууллага таных биш байна")
+    mode = (body.get("billing_mode") or "POSTPAID").upper()
+    if mode not in ("POSTPAID", "PREPAID", "NONE"):
+        raise HTTPException(400, "billing_mode: POSTPAID/PREPAID/NONE")
+    c = db.query(CompanyContact).filter(CompanyContact.company == company).first()
+    if not c:
+        c = CompanyContact(company=company)
+        db.add(c)
+    c.email = (body.get("email") or c.email or "").strip()
+    c.billing_mode = mode
+    if body.get("register") is not None:
+        c.register = str(body["register"]).strip()
+    _audit(db, user, "COMPANY_CONTACT", company, {"mode": mode, "email": c.email})
+    db.commit()
+    return {"company": company, "email": c.email, "billing_mode": c.billing_mode}
+
+
+@router.get("/{invoice_id}/excel")
+def invoice_excel(invoice_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(require("reports"))):
+    return _invoice_excel(_get_scoped(db, user, invoice_id))
 
 
 @router.post("/{invoice_id}/send")
@@ -86,9 +124,7 @@ async def send_invoice(invoice_id: str, body: dict, db: Session = Depends(get_db
                        user: User = Depends(require("reports"))):
     """Нэхэмжлэлийг Excel хавсралттай и-мэйлээр илгээж, байгууллагын и-мэйлийг
     цаашид санана (дараагийн сард автоматаар бөглөгдөнө)."""
-    inv = db.get(CompanyInvoice, invoice_id)
-    if not inv:
-        raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
+    inv = _get_scoped(db, user, invoice_id)
     if inv.status == "CANCELLED":
         raise HTTPException(400, "Цуцлагдсан нэхэмжлэлийг илгээхгүй")
     email = (body.get("email") or "").strip()
@@ -132,9 +168,7 @@ async def send_invoice(invoice_id: str, body: dict, db: Session = Depends(get_db
 @router.post("/{invoice_id}/paid")
 def mark_paid(invoice_id: str, body: dict, db: Session = Depends(get_db),
               user: User = Depends(require("reports"))):
-    inv = db.get(CompanyInvoice, invoice_id)
-    if not inv:
-        raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
+    inv = _get_scoped(db, user, invoice_id)
     inv.status = "PAID"
     inv.paid_at = datetime.utcnow()
     if body.get("note"):
@@ -147,9 +181,7 @@ def mark_paid(invoice_id: str, body: dict, db: Session = Depends(get_db),
 @router.post("/{invoice_id}/cancel")
 def cancel_invoice(invoice_id: str, body: dict, db: Session = Depends(get_db),
                    user: User = Depends(require("reports"))):
-    inv = db.get(CompanyInvoice, invoice_id)
-    if not inv:
-        raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
+    inv = _get_scoped(db, user, invoice_id)
     if inv.status == "PAID":
         raise HTTPException(400, "Төлөгдсөн нэхэмжлэлийг цуцлахгүй")
     inv.status = "CANCELLED"

@@ -161,6 +161,9 @@ MIGRATIONS = [
         CONSTRAINT uq_invoice_period_company UNIQUE (period, company))""",
     "CREATE INDEX IF NOT EXISTS ix_company_invoices_period ON company_invoices (period)",
     "CREATE INDEX IF NOT EXISTS ix_company_invoices_status ON company_invoices (status)",
+
+    # v2.8 — байгууллага бүрийн төлбөрийн горим (урьдчилгаа/сарын эцэст/нэхэмжлэхгүй)
+    "ALTER TABLE company_contacts ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(10) NOT NULL DEFAULT 'POSTPAID'",
 ]
 
 

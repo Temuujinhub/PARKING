@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 from ..config import settings
 from ..database import SessionLocal
-from ..models import CompanyInvoice, ParkingSession, RegisteredDriver
+from ..models import CompanyContact, CompanyInvoice, ParkingSession, RegisteredDriver
 
 log = logging.getLogger("parking.invoicing")
 
@@ -55,12 +55,41 @@ def _usage(db, plates: set[str], site_ids: set, start, end) -> dict:
     return {"sessions": sessions, "minutes": round(minutes), "visited": len(visited)}
 
 
-def generate_invoices(db, period: str, created_by: str = "system") -> list[CompanyInvoice]:
+def company_scope(db, user) -> set[str] | None:
+    """Хэрэглэгчийн харж болох байгууллагууд (нэхэмжлэлийн tenant салгалт).
+    Байгууллага нь идэвхтэй машидынхаа бүртгэлтэй зогсоолоор тодорхойлогдоно:
+    түрээслэгчийн хэрэглэгч зөвхөн ӨӨРИЙН зогсоолуудад машинтай байгууллагыг
+    харна («Бүх зогсоол» эрхтэй машид операторын түвшнийх тул орохгүй).
+    None = хязгааргүй (EasyParking-ийн компанийн түвшний хэрэглэгч)."""
+    from ..auth import operator_sites
+    allowed = operator_sites(user)
+    if allowed is None:
+        return None
+    aset = set(allowed)
+    comps = set()
+    for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
+        comp = (d.company or "").strip()
+        if comp and d.site_id in aset:
+            comps.add(comp)
+    return comps
+
+
+def billing_modes(db) -> dict[str, str]:
+    """company → billing_mode (тохиргоогүй бол POSTPAID)."""
+    return {c.company: (c.billing_mode or "POSTPAID")
+            for c in db.query(CompanyContact).all()}
+
+
+def generate_invoices(db, period: str, created_by: str = "system",
+                      companies: set[str] | None = None) -> list[CompanyInvoice]:
     """Тухайн сард (period=YYYY-MM) байгууллага бүрд DRAFT нэхэмжлэл үүсгэнэ.
-    Аль хэдийн байгаа (period, company) хосыг алгасна — дахин дуудахад аюулгүй."""
+    Аль хэдийн байгаа (period, company) хосыг алгасна — дахин дуудахад аюулгүй.
+    companies өгвөл зөвхөн тэдгээрт (tenant scope); NONE горимтой байгууллагыг
+    (нэхэмжлэхгүй, зөвхөн бүртгэл) ямагт алгасна."""
     start, end = month_range_utc(period)
     existing = {c for (c,) in db.query(CompanyInvoice.company)
                 .filter(CompanyInvoice.period == period).all()}
+    modes = billing_modes(db)
     # Байгууллага бүрийн идэвхтэй машид
     by_company: dict[str, list[RegisteredDriver]] = {}
     for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
@@ -73,6 +102,10 @@ def generate_invoices(db, period: str, created_by: str = "system") -> list[Compa
     for comp, drivers in sorted(by_company.items()):
         if comp in existing:
             continue
+        if companies is not None and comp not in companies:
+            continue
+        if modes.get(comp, "POSTPAID") == "NONE":
+            continue  # нэхэмжлэхгүй — зөвхөн бүртгэл/тайлангийн зорилготой
         cars = [{"plate": d.plate_number, "fee": float(d.monthly_fee or 0),
                  "name": d.full_name or ""} for d in drivers]
         amount = sum(c["fee"] for c in cars)
@@ -104,7 +137,18 @@ async def supervisor():
             if local.day == 1:
                 db = SessionLocal()
                 try:
-                    generate_invoices(db, prev_period(), created_by="auto")
+                    modes = billing_modes(db)
+                    post = {c for c, m in modes.items() if m == "POSTPAID"}
+                    pre = {c for c, m in modes.items() if m == "PREPAID"}
+                    # Тохиргоогүй байгууллага = POSTPAID (өмнөх сарынх)
+                    all_comps = {(d.company or "").strip() for d in
+                                 db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all()}
+                    all_comps.discard("")
+                    post |= all_comps - pre - {c for c, m in modes.items() if m == "NONE"}
+                    # Сарын эцэст авдаг: ӨМНӨХ сарын нэхэмжлэл (бодит ашиглалттай)
+                    generate_invoices(db, prev_period(), created_by="auto", companies=post)
+                    # Урьдчилгаа: ТУХАЙН сарын нэхэмжлэл
+                    generate_invoices(db, local.strftime("%Y-%m"), created_by="auto", companies=pre)
                 finally:
                     db.close()
         except Exception as e:  # noqa: BLE001

@@ -1,7 +1,7 @@
 // Байгууллагын сарын нэхэмжлэл — авто/гар үүсгэлт, Excel, и-мэйл илгээлт, төлөлт хөтлөлт.
 // Урсгал: сар бүрийн 1-нд өмнөх сарынх автоматаар DRAFT үүснэ (эсвэл «Үүсгэх» товч)
 // → Excel-ээ хянаад «Илгээх» (и-мэйл хавсралттай) → төлөгдмөгц «Төлөгдсөн» тэмдэглэнэ.
-import { Download, FileText, Mail, RefreshCw } from 'lucide-react'
+import { Download, FileText, Mail, RefreshCw, Settings2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import { Field, Modal, Table, useToast } from '../components/ui'
@@ -14,9 +14,50 @@ const STATUS = {
   CANCELLED: ['Цуцалсан', 'bg-red-500/15 text-red-400'],
 }
 const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
+const MODES = { POSTPAID: 'Сарын эцэст', PREPAID: 'Урьдчилгаа', NONE: 'Нэхэмжлэхгүй' }
 const prevMonth = () => {
   const d = new Date(); d.setDate(1); d.setDate(0)
   return d.toISOString().slice(0, 7)
+}
+
+function ContactModal({ inv, onClose, onDone }) {
+  const toast = useToast()
+  const [f, setF] = useState({ email: '', billing_mode: 'POSTPAID' })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (inv) setF({ email: inv.company_email || '', billing_mode: inv.billing_mode || 'POSTPAID' })
+  }, [inv])
+  if (!inv) return null
+  const save = async (e) => {
+    e.preventDefault(); setBusy(true)
+    try {
+      await api('/api/invoices/contacts', { method: 'POST',
+        body: { company: inv.company, email: f.email, billing_mode: f.billing_mode } })
+      toast('Хадгалагдлаа'); onClose(); onDone()
+    } catch (err) { toast(err.message, 'error') } finally { setBusy(false) }
+  }
+  return (
+    <Modal open title={`${inv.company} — төлбөрийн тохиргоо`} onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        <Field label="Төлбөрийн горим">
+          <select className="input" value={f.billing_mode}
+            onChange={(e) => setF({ ...f, billing_mode: e.target.value })}>
+            <option value="POSTPAID">Сарын эцэст — өмнөх сарын нэхэмжлэл 1-нд авто үүснэ</option>
+            <option value="PREPAID">Урьдчилгаа — тухайн сарын нэхэмжлэл 1-нд авто үүснэ</option>
+            <option value="NONE">Нэхэмжлэхгүй — зөвхөн бүртгэл (нэхэмжлэл огт үүсгэхгүй)</option>
+          </select>
+        </Field>
+        <Field label="И-мэйл">
+          <input className="input" type="email" value={f.email}
+            onChange={(e) => setF({ ...f, email: e.target.value })} placeholder="finance@company.mn" />
+        </Field>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Болих</button>
+          <button className="btn-primary" disabled={busy}>Хадгалах</button>
+        </div>
+      </form>
+    </Modal>
+  )
 }
 
 function SendModal({ inv, onClose, onDone }) {
@@ -61,6 +102,7 @@ export default function Invoices() {
   const [period, setPeriod] = useState(prevMonth())
   const [rows, setRows] = useState([])
   const [sending, setSending] = useState(null)
+  const [editing, setEditing] = useState(null)
   const [busy, setBusy] = useState(false)
   const load = () => api(`/api/invoices?period=${period}`).then(setRows).catch((e) => toast(e.message, 'error'))
   useEffect(() => { load() }, [period])
@@ -114,7 +156,10 @@ export default function Invoices() {
             return (
               <tr key={r.id} className="hover:bg-surface-muted/40 transition-colors">
                 <td className="td font-mono text-xs">{r.invoice_no}</td>
-                <td className="td font-medium">{r.company}</td>
+                <td className="td font-medium">
+                  {r.company}
+                  <div className="text-[10px] text-slate-500">{MODES[r.billing_mode] || r.billing_mode}</div>
+                </td>
                 <td className="td font-mono">{r.car_count}</td>
                 <td className="td font-mono text-accent font-semibold">{fmt(r.amount)}</td>
                 <td className="td font-mono text-xs">{r.sessions} удаа · {hm(r.minutes)}</td>
@@ -125,6 +170,8 @@ export default function Invoices() {
                     <button className="btn-secondary text-xs py-1 flex items-center gap-1" title="Excel татах"
                       onClick={() => download(`/api/invoices/${r.id}/excel`, `${r.invoice_no}.xlsx`)}>
                       <Download size={13} /></button>
+                    <button className="btn-secondary text-xs py-1" title="Горим/и-мэйл тохируулах"
+                      onClick={() => setEditing(r)}><Settings2 size={13} /></button>
                     {r.status !== 'CANCELLED' && (
                       <button className="btn-secondary text-xs py-1 flex items-center gap-1"
                         onClick={() => setSending(r)}><Mail size={13} /> Илгээх</button>
@@ -144,6 +191,7 @@ export default function Invoices() {
         </Table>
       </div>
       <SendModal inv={sending} onClose={() => setSending(null)} onDone={load} />
+      <ContactModal inv={editing} onClose={() => setEditing(null)} onDone={load} />
     </div>
   )
 }
