@@ -431,3 +431,39 @@ class AuditLog(Base):
         Index("ix_audit_username", "username"),
         Index("ix_audit_action", "action"),
     )
+
+
+class CompanyContact(Base):
+    """Гэрээт байгууллагын харилцах мэдээлэл — нэхэмжлэл илгээх и-мэйл, ТТД.
+    (registered_drivers.company нь энгийн текст тул харилцахыг эндээс хөтөлнө.)"""
+    __tablename__ = "company_contacts"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    company = Column(String(160), nullable=False, unique=True)
+    email = Column(String(120), default="")
+    register = Column(String(20), default="")   # ТТД (e-Barimt-д хэрэглэж болно)
+    phone = Column(String(20), default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CompanyInvoice(Base):
+    """Гэрээт байгууллагын САРЫН нэхэмжлэл — сар бүр автоматаар/гараар үүсгэж
+    и-мэйлээр илгээж, төлөлтийг хөтөлнө (тооцоо нийлэх урсгалын автоматжуулалт).
+    detail JSON: {"cars": [{"plate","fee"}], "usage": {"sessions","minutes","visited"}}."""
+    __tablename__ = "company_invoices"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    invoice_no = Column(String(40), unique=True, nullable=False)   # INV-202608-003
+    period = Column(String(7), nullable=False, index=True)         # "2026-08"
+    company = Column(String(160), nullable=False)
+    car_count = Column(Integer, nullable=False, default=0)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)     # сарын хураамжийн нийлбэр
+    sessions = Column(Integer, nullable=False, default=0)          # тухайн сарын орсон удаа
+    minutes = Column(Integer, nullable=False, default=0)           # тухайн сарын нийт зогссон мин
+    detail = Column(JSON, nullable=False, default=dict)
+    status = Column(String(20), nullable=False, default="DRAFT", index=True)  # DRAFT, SENT, PAID, CANCELLED
+    sent_to = Column(String(120), default="")
+    sent_at = Column(DateTime, nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("period", "company", name="uq_invoice_period_company"),)

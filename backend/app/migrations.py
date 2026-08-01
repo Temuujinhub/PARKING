@@ -133,6 +133,34 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_parking_sites_tenant_id ON parking_sites (tenant_id)",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
     "CREATE INDEX IF NOT EXISTS ix_users_tenant_id ON users (tenant_id)",
+
+    # v2.7 — Гэрээт байгууллагын сарын нэхэмжлэл + харилцах мэдээлэл
+    """CREATE TABLE IF NOT EXISTS company_contacts (
+        id UUID PRIMARY KEY,
+        company VARCHAR(160) NOT NULL UNIQUE,
+        email VARCHAR(120) DEFAULT '',
+        register VARCHAR(20) DEFAULT '',
+        phone VARCHAR(20) DEFAULT '',
+        created_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'))""",
+    """CREATE TABLE IF NOT EXISTS company_invoices (
+        id UUID PRIMARY KEY,
+        invoice_no VARCHAR(40) NOT NULL UNIQUE,
+        period VARCHAR(7) NOT NULL,
+        company VARCHAR(160) NOT NULL,
+        car_count INTEGER NOT NULL DEFAULT 0,
+        amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+        sessions INTEGER NOT NULL DEFAULT 0,
+        minutes INTEGER NOT NULL DEFAULT 0,
+        detail JSON NOT NULL DEFAULT '{}',
+        status VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+        sent_to VARCHAR(120) DEFAULT '',
+        sent_at TIMESTAMP,
+        paid_at TIMESTAMP,
+        note TEXT DEFAULT '',
+        created_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+        CONSTRAINT uq_invoice_period_company UNIQUE (period, company))""",
+    "CREATE INDEX IF NOT EXISTS ix_company_invoices_period ON company_invoices (period)",
+    "CREATE INDEX IF NOT EXISTS ix_company_invoices_status ON company_invoices (status)",
 ]
 
 

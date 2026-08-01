@@ -25,6 +25,7 @@ const NAV = [
   {
     group: 'Санхүү', icon: Wallet, children: [
       { to: '/settlement', label: 'Мөнгөн тооцоо', icon: Wallet, module: 'reports' },
+      { to: '/invoices', label: 'Нэхэмжлэл', icon: FileText, module: 'reports' },
       { to: '/reports', label: 'Тайлан', icon: FileText, module: 'reports' },
       { to: '/discounts', label: 'Хөнгөлөлт', icon: Percent, module: 'discounts' },
       { to: '/tariffs', label: 'Тарифын загвар', icon: Tag, module: 'discounts' },

@@ -18,6 +18,7 @@ import Pay from './pages/Pay'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import Settlement from './pages/Settlement'
+import Invoices from './pages/Invoices'
 import Tariffs from './pages/Tariffs'
 import Users from './pages/Users'
 import Vat from './pages/Vat'
@@ -67,6 +68,7 @@ export default function App() {
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />
             <Route path="tariffs" element={<Protected module="discounts"><Tariffs /></Protected>} />
             <Route path="settlement" element={<Protected module="reports"><Settlement /></Protected>} />
+            <Route path="invoices" element={<Protected module="reports"><Invoices /></Protected>} />
             <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
             <Route path="health" element={<Protected module="health"><Health /></Protected>} />

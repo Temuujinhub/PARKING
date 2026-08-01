@@ -234,6 +234,18 @@ class Settings(BaseSettings):
     # илүүц "Manual Snapshot" бичлэг үүсгэхгүй. 0 = хүлээхгүй (хуучин зан төлөв).
     # WS зураг өгдөггүй камерт огт нөлөөгүй (puller_delivers=False → шууд fallback).
     snapshot_wait_event_sec: float = 8.0
+
+    # ── И-мэйл (SMTP) — байгууллагын сарын нэхэмжлэл илгээхэд ──
+    # Жишээ (Gmail): HOST=smtp.gmail.com PORT=587 TLS=true USER=таны@gmail.com
+    # PASSWORD=app-password (Google App Password). Хоосон бол илгээх товч идэвхгүй.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""          # хоосон бол smtp_user
+    smtp_tls: bool = True
+    # Сар бүрийн 1-нд өмнөх сарын нэхэмжлэлийг автоматаар DRAFT үүсгэх
+    invoice_auto_generate: bool = True
     # Камерын цаг серверийн UTC-ээс хэдэн цагаар түрүүлж явдаг вэ (УБ=+8) —
     # нөхөн таталтын хайлтын мужид хэрэглэнэ. Камерын цаг эргэлзээтэй байвал
     # нөхөн таталт бүсийн зөрүүг БОЛОН 0-г хоёуланг оролдоно (тохиргоо буруу байсан ч олдоно).

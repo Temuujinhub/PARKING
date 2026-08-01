@@ -28,7 +28,7 @@ if not settings.debug:
 from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     dr_router, health_router, integration_router, legacy_router, lpr_router, payments_router,
-    public_router, reports_router, sessions_router,
+    public_router, reports_router, sessions_router, billing_router,
 )
 from .ws import manager
 
@@ -69,7 +69,7 @@ app.add_middleware(
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
-          health_router, integration_router, legacy_router, dr_router):
+          health_router, integration_router, legacy_router, dr_router, billing_router):
     app.include_router(r.router)
 
 
@@ -210,6 +210,10 @@ async def start_vat_auto_send():
     # Гацсан session-ийн авто цэвэрлэгээ (site.auto_close_hours / default 72ц)
     from .services.auto_close import supervisor as auto_close_supervisor
     _bg_task(auto_close_supervisor(), "auto-close")
+
+    # Сар бүрийн 1-нд өмнөх сарын байгууллагын нэхэмжлэлийг авто үүсгэнэ
+    from .services.invoicing import supervisor as invoicing_supervisor
+    _bg_task(invoicing_supervisor(), "invoicing")
 
     # Камерт МАНАЙХААС ӨӨР IP холбогдсоныг илрүүлэх (Тохиргоо → Төхөөрөмжид харуулна)
     from .services.camera_sessions import supervisor as camera_who_supervisor
