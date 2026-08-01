@@ -64,8 +64,10 @@ export default function Layout() {
     ? { ...n, children: n.children.filter((c) => can(c.module)) }
     : n).filter((n) => n.group ? n.children.length > 0 : can(n.module))
   const linkClass = ({ isActive }) =>
-    `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer
-     ${isActive ? 'bg-accent/10 text-accent font-medium' : 'text-slate-300 hover:bg-surface-muted'}`
+    `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-200 cursor-pointer
+     border-l-2 ${isActive
+      ? 'border-accent bg-accent/10 text-accent font-medium'
+      : 'border-transparent text-slate-300 hover:bg-surface-muted hover:border-accent/50 hover:translate-x-0.5'}`
 
   const changePassword = async (e) => {
     e.preventDefault()

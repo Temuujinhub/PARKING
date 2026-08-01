@@ -54,14 +54,18 @@ export function Badge({ value }) {
   )
 }
 
-export function StatCard({ icon: Icon, label, value, sub, color = 'text-accent' }) {
+export function StatCard({ icon: Icon, label, value, sub, suffix, color = 'text-accent' }) {
   return (
-    <div className="card flex items-start gap-4">
+    <div className="card card-hover flex items-start gap-4">
       <div className={`p-2.5 rounded-lg bg-surface-muted ${color}`}><Icon size={22} /></div>
       <div className="min-w-0">
         <div className="text-xs text-slate-400">{label}</div>
-        <div className="text-2xl font-bold font-mono tabular-nums">{value}</div>
-        {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
+        <div className="text-2xl font-bold font-mono tabular-nums">
+          {value}
+          {/* ₮ гэх мэт тэмдэгт mono фонтод эвдэрч харагддаг тул үндсэн фонтоор */}
+          {suffix && <span className="font-sans text-xl font-semibold ml-0.5">{suffix}</span>}
+        </div>
+        {sub && <div className="text-xs text-slate-400 mt-0.5">{sub}</div>}
       </div>
     </div>
   )

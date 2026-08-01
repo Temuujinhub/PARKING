@@ -1,5 +1,5 @@
 import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { StatCard } from '../components/ui'
 
@@ -16,7 +16,10 @@ const EVENT_LABELS = {
 export default function Dashboard() {
   const [stats, setStats] = useState(null)
   const [events, setEvents] = useState([])
-  const load = () => api('/api/reports/dashboard').then(setStats).catch(() => {})
+  const [revDays, setRevDays] = useState(7)
+  const revRef = useRef(7)   // interval/WS-ийн callback-ууд хамгийн сүүлийн сонголтыг уншина
+  revRef.current = revDays
+  const load = () => api(`/api/reports/dashboard?rev_days=${revRef.current}`).then(setStats).catch(() => {})
 
   useEffect(() => {
     load()
@@ -27,6 +30,7 @@ export default function Dashboard() {
     })
     return () => { clearInterval(t); close() }
   }, [])
+  useEffect(() => { load() }, [revDays])
 
   if (!stats) return <div className="text-slate-500">Ачаалж байна…</div>
 
@@ -51,17 +55,24 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Хяналтын самбар</h1>
-      {/* Техникийн анхааруулгууд ЭНД ГАРАХГҮЙ — энэ хуудас албан газрын хананд
-          томоор гардаг бизнесийн самбар. Алдаа/гүйцэтгэл: Системийн эрүүл мэнд. */}
+      {/* Ганц онцгой тохиолдолд техникийн зурвас гарна: камер офлайн бол машин
+          бүртгэгдэхгүй тул оператор ШУУД мэдэх ёстой. Бусад алдаа: Эрүүл мэнд. */}
+      {(stats.device_status || []).some((d) => d.device_type === 'camera' && !d.online) && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-sm">
+          <Camera size={16} className="shrink-0" />
+          <span>Камер офлайн: {(stats.device_status || []).filter((d) => d.device_type === 'camera' && !d.online)
+            .map((d) => `${d.site_name} — ${d.name}`).join(', ')}</span>
+        </div>
+      )}
 
       {/* Үндсэн үзүүлэлт — нэг эгнээ: 4 KPI + систем/төхөөрөмжийн нэгтгэсэн карт */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard icon={CarFront} label="Одоо зогсож буй" value={stats.open_sessions}
-          sub={`Багтаамж: ${stats.total_capacity}`} />
+          color="text-slate-200" sub={`Багтаамж: ${stats.total_capacity}`} />
         <StatCard icon={Clock} label="Төлбөр хүлээж буй" value={stats.awaiting_payment} color="text-amber-400" />
         <StatCard icon={LogIn} label="Өнөөдөр орсон" value={stats.today_entries} color="text-blue-400"
           sub={`Гарсан: ${stats.today_exits}`} />
-        <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={`${fmt(stats.today_revenue)}₮`} />
+        <StatCard icon={Banknote} label="Өнөөдрийн орлого" value={fmt(stats.today_revenue)} suffix="₮" />
         {/* Систем — зогсоол/камер/холболт (хаалт нь камертай хамт тул тусад нь харуулахгүй) */}
         <div className="card py-3 col-span-2 lg:col-span-1">
           <div className="text-xs text-slate-400 mb-2">Систем / төхөөрөмж</div>
@@ -81,33 +92,53 @@ export default function Dashboard() {
         <div className="space-y-6 min-w-0">{/* ── Үндсэн багана ── */}
 
       <div className="grid lg:grid-cols-2 gap-6">
-        {/* 7 хоногийн орлого — bar график (max-д нормчилсон) */}
-        <div className="card">
-          <h2 className="font-semibold mb-4">7 хоногийн орлого</h2>
-          <div className="flex items-end gap-2 h-48 border-b border-surface-border/60 pb-0" role="img"
-            aria-label={`Сүүлийн 7 хоногийн орлого: ${stats.week_revenue.map((d) => `${d.date} ${fmt(d.revenue)}₮`).join(', ')}`}>
+        {/* Орлогын bar график — хугацаа сонгогчтой, хамгийн өндөр өдөр нь тод */}
+        <div className="card card-hover">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-semibold">Орлого (өдрөөр)</h2>
+            <select className="input w-auto py-1 text-xs" value={revDays}
+              onChange={(e) => setRevDays(+e.target.value)} aria-label="Хугацаа сонгох">
+              <option value={7}>7 хоног</option>
+              <option value={14}>14 хоног</option>
+              <option value={30}>30 хоног</option>
+            </select>
+          </div>
+          <div className="flex items-end gap-[3px] h-48 border-b border-surface-border/60 pb-0" role="img"
+            aria-label={`Сүүлийн ${revDays} хоногийн орлого: ${stats.week_revenue.map((d) => `${d.date} ${fmt(d.revenue)}₮`).join(', ')}`}>
             {stats.week_revenue.map((d) => (
-              <div key={d.date} className="flex-1 flex flex-col items-center justify-end gap-1 h-full">
-                <div className="text-[10px] text-slate-300 font-mono whitespace-nowrap">
-                  {d.revenue > 0 ? fmt(d.revenue) : ''}
-                </div>
+              <div key={d.date} className="flex-1 flex flex-col items-center justify-end gap-1 h-full group relative">
+                {revDays === 7 && (
+                  <div className="text-[10px] text-slate-300 font-mono whitespace-nowrap">
+                    {d.revenue > 0 ? fmt(d.revenue) : ''}
+                  </div>
+                )}
                 <div className="w-full flex items-end justify-center" style={{ height: '100%' }}>
-                  <div className="w-full max-w-[46px] bg-gradient-to-t from-accent to-accent/60 rounded-t-md transition-all hover:from-accent hover:to-accent"
-                    style={{ height: `${d.revenue > 0 ? Math.max(4, (d.revenue / maxRev) * 100) : 0}%` }}
-                    title={`${d.date}: ${fmt(d.revenue)}₮`} />
+                  {/* Хамгийн өндөр орлоготой өдөр бүрэн тод, бусад нь бүдэгдүү */}
+                  <div className={`w-full max-w-[46px] rounded-t-md transition-all duration-200
+                      ${d.revenue >= maxRev ? 'bg-gradient-to-t from-accent to-accent' : 'bg-gradient-to-t from-accent/70 to-accent/35 group-hover:from-accent group-hover:to-accent/80'}`}
+                    style={{ height: `${d.revenue > 0 ? Math.max(4, (d.revenue / maxRev) * 100) : 0}%` }} />
+                </div>
+                {/* Hover tooltip — тухайн өдрийн нарийн дүн */}
+                <div className="absolute -top-7 hidden group-hover:block bg-surface-muted text-[11px] px-2 py-1 rounded-md whitespace-nowrap z-10 border border-surface-border shadow-lg">
+                  {d.date}: <span className="font-mono font-semibold text-accent">{fmt(d.revenue)}₮</span>
                 </div>
               </div>
             ))}
           </div>
-          <div className="flex gap-2 mt-1.5">
-            {stats.week_revenue.map((d) => (
-              <div key={d.date} className="flex-1 text-center text-[10px] text-slate-500 font-mono">{d.date}</div>
-            ))}
+          <div className="flex gap-[3px] mt-1.5">
+            {stats.week_revenue.map((d, i) => {
+              const step = Math.ceil(stats.week_revenue.length / 7)
+              return (
+                <div key={d.date} className="flex-1 text-center text-[10px] text-slate-400 font-mono whitespace-nowrap overflow-visible">
+                  {i % step === 0 ? d.date : ''}
+                </div>
+              )
+            })}
           </div>
         </div>
 
         {/* Цагийн ачаалал — орц/гарц (0–23 цаг) */}
-        <div className="card">
+        <div className="card card-hover">
           <h2 className="font-semibold mb-4">Өнөөдрийн цагийн ачаалал</h2>
           <div className="flex items-end gap-[3px] h-48 border-b border-surface-border/60" role="img"
             aria-label={`Цагийн ачаалал: ${hourly.filter((h) => h.entries || h.exits).map((h) => `${h.hour}ц орц ${h.entries} гарц ${h.exits}`).join(', ') || 'өнөөдөр хөдөлгөөнгүй'}`}>
@@ -123,7 +154,7 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
-          <div className="flex justify-between mt-1.5 text-[10px] text-slate-500 font-mono">
+          <div className="flex justify-between mt-1.5 text-[10px] text-slate-400 font-mono">
             <span>0ц</span><span>6ц</span><span>12ц</span><span>18ц</span><span>23ц</span>
           </div>
           <div className="flex gap-4 mt-2 text-xs text-slate-400">
@@ -135,7 +166,7 @@ export default function Dashboard() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Топ орлоготой зогсоол */}
-        <div className="card">
+        <div className="card card-hover">
           <h2 className="font-semibold mb-4 flex items-center gap-2">
             <TrendingUp size={16} className="text-accent" /> Хамгийн их орлоготой зогсоол (өнөөдөр)
           </h2>
@@ -161,7 +192,7 @@ export default function Dashboard() {
         </div>
 
         {/* Зогсоолын ачаалал (багтаамж) */}
-        <div className="card">
+        <div className="card card-hover">
           <h2 className="font-semibold mb-4">Зогсоолын ачаалал</h2>
           <div className="space-y-3">
             {stats.sites.map((s) => {

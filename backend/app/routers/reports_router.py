@@ -105,9 +105,12 @@ def _daily_rows(db, start, end, site_id):
 
 
 @router.get("/dashboard")
-def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
+def dashboard_stats(rev_days: int = 7,
+                    db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
     """Нүүр хуудасны статистик. Хариуцах зогсоолтой хэрэглэгчид зөвхөн өөрийн
-    зогсоолуудын тоо баримт харагдана (tenant салгалт)."""
+    зогсоолуудын тоо баримт харагдана (tenant салгалт).
+    rev_days — орлогын графикийн хоногийн тоо (7/14/30, UI-ийн сонголт)."""
+    rev_days = max(1, min(31, rev_days))
     scope = _scope(user)
     today = _local_midnight_utc(datetime.utcnow())
     open_count = _flt(db.query(ParkingSession).filter(
@@ -147,17 +150,17 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(require(
                       "free": max(0, s.capacity - occupied) if s.capacity else None,
                       "today_revenue": rev_by_site.get(s.id, 0.0)})
 
-    # Сүүлийн 7 хоногийн орлого (график) — өдөр бүр query биш, 1 бүлэглэсэн query
+    # Сүүлийн rev_days хоногийн орлого (график) — өдөр бүр query биш, 1 бүлэглэсэн query
     wk_day = func.date(Payment.paid_at + TZ)
     wk_q = (db.query(wk_day, func.coalesce(func.sum(Payment.amount), 0))
-            .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=6),
+            .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=rev_days - 1),
                     Payment.paid_at < today + timedelta(days=1)))
     if scope is not None:
         wk_q = _flt(wk_q.join(ParkingSession, Payment.session_id == ParkingSession.id),
                     ParkingSession.site_id, scope)
     wk = {str(d): float(a) for d, a in wk_q.group_by(wk_day).all()}
     week = []
-    for i in range(6, -1, -1):
+    for i in range(rev_days - 1, -1, -1):
         day = today - timedelta(days=i)
         week.append({"date": (day + TZ).strftime("%m-%d"),
                      "revenue": wk.get((day + TZ).strftime("%Y-%m-%d"), 0.0)})
