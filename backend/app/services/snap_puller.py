@@ -36,6 +36,21 @@ log = logging.getLogger("parking.snap_puller")
 
 _tasks: dict[str, asyncio.Task] = {}
 
+# ip → сүүлд WS-ээр БОДИТ ЗУРАГ ирсэн цаг (time.monotonic). snapshot.py үүгээр
+# «энэ камер event зургаа WS-ээр өгдөг тул хүлээх үү, шууд snapshot.cgi руу орох
+# уу» гэдгээ шийднэ. Зориуд frame/subscribe биш ЗУРГААР хэмждэг: одоогийн ITC
+# firmware subscribe-ийг зөвшөөрөөд зураг огт өгдөггүй (2026-07-25) — түүн дээр
+# энэ хэзээ ч true болохгүй тул одоо ажиллаж буй snapshot.cgi зам огт өөрчлөгдөхгүй.
+_last_pic: dict[str, float] = {}
+
+
+def puller_delivers(ip: str, max_age_sec: float = 1800.0) -> bool:
+    """Тухайн камер сүүлийн max_age_sec (30 мин)-д WS-ээр зураг өгсөн эсэх."""
+    if not settings.snap_pull or not ip:
+        return False
+    ts = _last_pic.get(ip)
+    return ts is not None and (time.monotonic() - ts) <= max_age_sec
+
 _PLATE_JSON_RE = re.compile(r'"PlateNumber"\s*:\s*"([^"]+)"')
 
 # Firmware бүр filter-ийн өөр хэлбэр хүлээдэг — амжилттай болтол дарааллаар оролдоно.
@@ -282,6 +297,7 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
                 asyncio.create_task(_attach_to_session(device_id, plate, lane_dir, data))
 
     async def on_picture(plate: str, data: bytes):
+        _last_pic[ip] = time.monotonic()  # энэ камер зургаа WS-ээр өгдөг нь батлагдлаа
         ts, old = best.get(plate, (0.0, b""))
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()

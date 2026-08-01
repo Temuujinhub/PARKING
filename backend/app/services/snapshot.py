@@ -131,12 +131,48 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
         return None
 
 
+async def _snapshot_written(session_id: str, lane_dir: str) -> bool:
+    """snap_puller энэ session-д зургаа аль хэдийн холбосон эсэх (DB-ээс)."""
+    from ..models import ParkingSession
+    db = SessionLocal()
+    try:
+        s = db.get(ParkingSession, session_id)
+        return bool(s and (s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot))
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        db.close()
+
+
+async def _wait_event_snapshot(session_id: str, lane_dir: str) -> bool:
+    """WS event зургийг хүлээнэ (snapshot_wait_event_sec). Ирвэл True — snapshot.cgi
+    хэрэггүй (камер дээр илүүц Manual Snapshot бичлэг үүсэхгүй)."""
+    import time as _time
+    deadline = _time.monotonic() + settings.snapshot_wait_event_sec
+    while _time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        if await _snapshot_written(session_id, lane_dir):
+            return True
+    return False
+
+
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                              lane_dir: str, raw: dict,
                              creds: tuple[str, str] | None = None):
     data = _payload_picture(raw)
     source = "payload"
     if data is None and camera_ip:
+        # Энэ камер event зургаа WS-ээр өгдөг нь батлагдсан бол эхлээд түүнийг
+        # хүлээнэ — snapshot.cgi нь камер дээр "Manual Snapshot" бичлэг үүсгэж,
+        # ANPR зурагтай давхардуулдаг. WS зураг өгдөггүй камерт puller_delivers
+        # ямагт False тул одоогийн найдвартай зам (шууд snapshot.cgi) хэвээр.
+        from .snap_puller import puller_delivers
+        if settings.snapshot_wait_event_sec > 0 and puller_delivers(camera_ip):
+            if await _wait_event_snapshot(session_id, lane_dir):
+                log.info(f"{plate} {lane_dir}: WS event зураг ирлээ — snapshot.cgi алгасав")
+                return
+            log.info(f"{plate} {lane_dir}: WS зураг {settings.snapshot_wait_event_sec:.0f}с-д "
+                     f"ирсэнгүй — snapshot.cgi fallback")
         data = await _fetch_from_camera(camera_ip, creds)
         source = "snapshot.cgi"
     if data is None:
