@@ -97,8 +97,14 @@ export default function SiteEditModal({ editing, setEditing, templates, onSubmit
                 жишээ текст (placeholder) бөглөсөн мэт харагдаж, ерөнхий данс
                 руу төлөгдөж байгааг анзаараагүй тохиолдол гарсан. */}
             <div className="my-2 space-y-1.5">
-              {[['global', 'Түрээслэгчийн / системийн данс (автомат)', 'Түрээслэгчид данс тохируулсан бол түүгээр, үгүй бол системийн ерөнхий данс'],
-                ['own', 'Энэ зогсоолын ТУСГАЙ данс (онцгой тохиолдолд)', 'Түрээслэгчийн QPay гэрээ — төлбөр ТЭДЭНД, e-Barimt ТЭДНИЙ ТТД-ээр']]
+              {[['global',
+                 editing.tenant_qpay_set
+                   ? `Түрээслэгчийн данс: ${editing.tenant_name} (автомат)`
+                   : 'Системийн ерөнхий данс (EasyParking)',
+                 editing.tenant_qpay_set
+                   ? 'Энэ зогсоол түрээслэгчийнхээ QPay дансаар ажиллана — тусад нь юу ч оруулах шаардлагагүй'
+                   : 'Түрээслэгчид данс тохируулаагүй тул системийн ерөнхий данс. Түрээслэгчийн данс тавихдаа Тохиргоо → Түрээслэгч.'],
+                ['own', 'Зөвхөн энэ зогсоолын ТУСГАЙ данс (ховор)', 'Нэг зогсоол л өөр дансаар ажиллах ёстой онцгой тохиолдолд гараас оруулна']]
                 .map(([v, label, hint]) => (
                 <label key={v} className={`flex items-start gap-2.5 px-3 py-2 rounded-lg border cursor-pointer transition-colors
                   ${editing.qpay_mode === v ? 'border-accent/50 bg-accent/5' : 'border-surface-border hover:border-slate-600'}`}>
