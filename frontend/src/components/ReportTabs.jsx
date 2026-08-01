@@ -269,6 +269,46 @@ export function ShiftsTab({ from, to, siteId }) {
 }
 
 // ── Төлбөрийн төрлөөр ──
+// ── Байгууллагаар (гэрээт машины нэгдсэн тайлан) ──
+export function CompanyTab({ from, to, siteId }) {
+  const download = useDownload()
+  const { data } = useFetch(`/api/reports/by-company?date_from=${from}&date_to=${to}${siteQ(siteId)}`, { initial: null })
+  if (!data) return null
+  const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold">Байгууллагаар — гэрээт машины ашиглалт</h2>
+        <button className="btn-secondary text-sm flex items-center gap-1.5"
+          onClick={() => download(`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`)}>
+          <Download size={15} /> Excel татах
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-6 text-sm mb-3 text-slate-400">
+        <span>Нийт орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
+        <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
+      </div>
+      <Table headers={['Байгууллага', 'Бүртгэлтэй машин', 'Ирсэн машин', 'Орсон удаа', 'Нийт зогссон', 'Дундаж/удаа']}
+        empty={data.rows.length === 0}>
+        {data.rows.map((r) => (
+          <tr key={r.company}>
+            <td className="td font-medium">{r.company}</td>
+            <td className="td font-mono">{r.registered_cars}</td>
+            <td className="td font-mono">{r.visited_cars}</td>
+            <td className="td font-mono">{r.sessions}</td>
+            <td className="td font-mono text-accent">{hm(r.total_minutes)}</td>
+            <td className="td font-mono">{hm(r.avg_minutes)}</td>
+          </tr>
+        ))}
+      </Table>
+      <p className="text-xs text-slate-500 mt-2">
+        Session-ийг бүртгэлтэй машины дугаартай тулгаж тоолов — тухайн зогсоолд эсвэл
+        «Бүх зогсоол» эрхтэй бүртгэл хамаарна. Хугацаанд ирээгүй байгууллага 0-тэй мөрөөр харагдана.
+      </p>
+    </div>
+  )
+}
+
 export function ByPaymentTab({ from, to, siteId }) {
   const { data: byPay } = useFetch(`/api/reports/by-payment?date_from=${from}&date_to=${to}${siteQ(siteId)}`, { initial: null })
   if (!byPay) return null

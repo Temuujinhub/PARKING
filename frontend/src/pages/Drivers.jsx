@@ -158,8 +158,10 @@ export default function Drivers() {
           value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
         <button className="btn-secondary" onClick={load}><Search size={15} /></button>
         <select className="input w-auto min-w-44" value={siteFilter}
+          aria-label="Зогсоолоор шүүх"
           onChange={(e) => setSiteFilter(e.target.value)}>
-          <option value="">Бүх зогсоол</option>
+          <option value="">Бүх зогсоол (шүүлтгүй)</option>
+          <option value="global">Бүх зогсоолын эрхтэй (ажилтан/албаны)</option>
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
         <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>

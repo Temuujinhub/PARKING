@@ -470,6 +470,88 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
             "total": total, "free_count": free_q.count()}
 
 
+@router.get("/by-company")
+def by_company(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
+               db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Байгууллагаар (гэрээт машин) — тухайн хугацаанд байгууллага бүрийн хэдэн машин
+    хэдэн удаа орж, нийт хэдэн цаг зогссоныг нэгтгэнэ. Session-ийг бүртгэлтэй
+    машины жагсаалттай ДУГААРААР нь тулгана (тухайн зогсоолд эсвэл бүх зогсоолд
+    эрхтэй бүртгэл тоологдоно); байгууллагагүй бүртгэлийг «(байгууллагагүй)» гэж бүлэглэнэ."""
+    from ..models import RegisteredDriver
+    start, end = _range(date_from, date_to)
+    sid = _scope(user, site_id)
+    now = datetime.utcnow()
+
+    # plate → [(site_id|None, company)] — нэг дугаар олон бүртгэлтэй байж болно
+    drv: dict[str, list] = {}
+    reg_count: dict[str, set] = {}   # company → бүртгэлтэй машины олонлог (одоогийн жагсаалтаар)
+    for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
+        comp = (d.company or "").strip() or "(байгууллагагүй)"
+        drv.setdefault(d.plate_number, []).append((d.site_id, comp))
+        if sid is None or d.site_id in (None, sid):
+            reg_count.setdefault(comp, set()).add(d.plate_number)
+
+    sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
+                                         ParkingSession.entry_time < end)
+    sq = _flt(sq, ParkingSession.site_id, sid)
+
+    agg: dict[str, dict] = {}
+    for s in sq.all():
+        matches = drv.get(s.plate_number)
+        if not matches:
+            continue
+        # Тухайн зогсоолд яг таарсан бүртгэл тэргүүлнэ, үгүй бол бүх-зогсоолын (None)
+        comp = next((c for st, c in matches if st == s.site_id),
+                    next((c for st, c in matches if st is None), None))
+        if comp is None:
+            continue   # өөр зогсоолд л эрхтэй машин — энд гэрээтэд тооцохгүй
+        mins = s.duration_minutes
+        if mins is None:
+            mins = ((s.exit_time or now) - s.entry_time).total_seconds() / 60
+        a = agg.setdefault(comp, {"company": comp, "plates": set(), "sessions": 0, "minutes": 0.0})
+        a["plates"].add(s.plate_number)
+        a["sessions"] += 1
+        a["minutes"] += float(mins)
+
+    rows = [{"company": c,
+             "registered_cars": len(reg_count.get(c, set())),
+             "visited_cars": len(a["plates"]),
+             "sessions": a["sessions"],
+             "total_minutes": round(a["minutes"]),
+             "avg_minutes": round(a["minutes"] / a["sessions"]) if a["sessions"] else 0}
+            for c, a in agg.items()]
+    # Тухайн хугацаанд огт ирээгүй ч бүртгэлтэй байгууллагуудыг 0-тэйгээр үзүүлнэ
+    for c, plates in reg_count.items():
+        if c not in agg:
+            rows.append({"company": c, "registered_cars": len(plates), "visited_cars": 0,
+                         "sessions": 0, "total_minutes": 0, "avg_minutes": 0})
+    rows.sort(key=lambda r: -r["total_minutes"])
+    return {"rows": rows,
+            "total_sessions": sum(r["sessions"] for r in rows),
+            "total_minutes": sum(r["total_minutes"] for r in rows)}
+
+
+@router.get("/by-company/excel")
+def by_company_excel(date_from: str | None = None, date_to: str | None = None,
+                     site_id: str | None = None,
+                     db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Байгууллагаар тайлангийн Excel."""
+    data = by_company(date_from, date_to, site_id, db, user)
+    start, end = _range(date_from, date_to)
+
+    def _h(m):
+        return f"{m // 60}ц {m % 60:02.0f}м" if m else "0м"
+
+    rows = [[r["company"], r["registered_cars"], r["visited_cars"], r["sessions"],
+             _h(r["total_minutes"]), _h(r["avg_minutes"])] for r in data["rows"]]
+    return _excel._xlsx(
+        "companies",
+        f"Байгууллагаар (гэрээт) {(start + TZ):%Y-%m-%d} — {(end + TZ - timedelta(days=1)):%Y-%m-%d}",
+        ["Байгууллага", "Бүртгэлтэй машин", "Ирсэн машин", "Орсон удаа", "Нийт зогссон", "Дундаж"],
+        rows, widths=[32, 16, 14, 12, 16, 12],
+        total_row=["НИЙТ", "", "", data["total_sessions"], _h(data["total_minutes"]), ""])
+
+
 def _shift_rows(db, start, end, site_id):
     """Ээлжийн өдөрөөр (өдрийг shift_change_hour-аар тасалж) төлбөрийг задлана.
     Ээлжийн өдөр D = [D + Hц, D+1 + Hц). Өдөрөөртэй ижил бүтэц, зөвхөн зааг цаг өөр."""

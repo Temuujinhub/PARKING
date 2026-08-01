@@ -607,7 +607,10 @@ def list_drivers(q: str | None = None, company: str | None = None,
     if company:
         query = query.filter(RegisteredDriver.company == company)
     allowed = operator_sites(user)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолын машинууд
-    if site_id:
+    if site_id == "global":
+        # Зөвхөн «Бүх зогсоол»-ын эрхтэй (site_id NULL) машинууд — ажилтан/албаны
+        query = query.filter(RegisteredDriver.site_id.is_(None))
+    elif site_id:
         enforce_site(user, site_id)
         query = query.filter(RegisteredDriver.site_id == site_id)
     elif allowed:

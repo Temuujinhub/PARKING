@@ -3,13 +3,14 @@
 import { Download } from 'lucide-react'
 import { useState } from 'react'
 import {
-  ByPaymentTab, DailyTab, MonthlyTab, RevenueTab, ShiftsTab, TransactionsTab, siteQ,
+  ByPaymentTab, CompanyTab, DailyTab, MonthlyTab, RevenueTab, ShiftsTab, TransactionsTab, siteQ,
 } from '../components/ReportTabs'
 import { useFetch } from '../hooks/useFetch'
 import { useDownload } from '../hooks/useDownload'
 
 const TABS = [['revenue', 'Зогсоолоор'], ['monthly', 'Сараар'], ['daily', 'Өдрөөр'],
-  ['shifts', 'Ээлжээр'], ['bypayment', 'Төлбөрийн төрлөөр'], ['transactions', 'Бичилт']]
+  ['shifts', 'Ээлжээр'], ['bypayment', 'Төлбөрийн төрлөөр'], ['company', 'Байгууллагаар'],
+  ['transactions', 'Бичилт']]
 
 export default function Reports() {
   const dl = useDownload()
@@ -28,6 +29,7 @@ export default function Reports() {
     monthly: [`/api/reports/monthly/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `saraar_${from}_${to}.xlsx`],
     shifts: [`/api/reports/shifts/excel?date_from=${from}&date_to=${to}`, `eeljeer_${from}_${to}.xlsx`],
     bypayment: [`/api/reports/by-payment/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `tolboriin_torol_${from}_${to}.xlsx`],
+    company: [`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`, `baiguullagaar_${from}_${to}.xlsx`],
   }
   const ex = headerExcel[tab]
 
@@ -69,6 +71,7 @@ export default function Reports() {
       {tab === 'monthly' && <MonthlyTab from={from} to={to} siteId={siteId} />}
       {tab === 'shifts' && <ShiftsTab from={from} to={to} siteId={siteId} />}
       {tab === 'bypayment' && <ByPaymentTab from={from} to={to} siteId={siteId} />}
+      {tab === 'company' && <CompanyTab from={from} to={to} siteId={siteId} />}
       {tab === 'transactions' && <TransactionsTab from={from} to={to} sites={sites} />}
     </div>
   )
