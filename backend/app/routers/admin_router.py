@@ -927,6 +927,38 @@ def list_blacklist(db: Session = Depends(get_db), user: User = Depends(require("
             db.query(BlacklistEntry).order_by(BlacklistEntry.created_at.desc()).limit(500).all()]
 
 
+@router.post("/blacklist/clear")
+def clear_blacklist(body: dict, db: Session = Depends(get_db),
+                    user: User = Depends(require("blacklist"))):
+    """Хар жагсаалтыг нэг дор цэвэрлэх (идэвхтэй бичлэгүүдийг идэвхгүй болгоно).
+    body: {auto_only: bool (default true — зөвхөн автомат хоригийг),
+           cancel_debts: bool (default false — доорх phantom өрийг ч цуцлах — эс бол
+           дараа дахин хар жагсаалтад орж болзошгүй)}.
+    Оператор эрхийн хүрээ (tenant) хамаарахгүй — хар жагсаалт зогсоол дамнасан."""
+    auto_only = body.get("auto_only", True)
+    q = db.query(BlacklistEntry).filter(BlacklistEntry.is_active.is_(True))
+    if auto_only:
+        q = q.filter(BlacklistEntry.reason.ilike("%автомат хориг%"))
+    entries = q.all()
+    plates = {e.plate_number for e in entries}
+    for e in entries:
+        e.is_active = False
+    canceled = 0
+    if body.get("cancel_debts") and plates:
+        # Автомат хоригийг үүсгэсэн PENDING нөхөн төлбөрийг цуцалж, дахин
+        # хар жагсаалтад орохоос сэргийлнэ (phantom/тест өр цэвэрлэх)
+        comps = (db.query(Compensation)
+                 .filter(Compensation.plate_number.in_(list(plates)),
+                         Compensation.status == "PENDING").all())
+        for c in comps:
+            c.status = "CANCELLED"
+            canceled += 1
+    _audit(db, user, "BLACKLIST_CLEAR", "blacklist", "-",
+           {"deactivated": len(entries), "canceled_debts": canceled, "auto_only": auto_only})
+    db.commit()
+    return {"deactivated": len(entries), "canceled_debts": canceled}
+
+
 @router.post("/blacklist")
 def add_blacklist(body: dict, db: Session = Depends(get_db), user: User = Depends(require("blacklist"))):
     b = BlacklistEntry(plate_number=body["plate_number"].upper().replace(" ", ""),

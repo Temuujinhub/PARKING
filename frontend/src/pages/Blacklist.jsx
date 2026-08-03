@@ -1,4 +1,4 @@
-import { Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
@@ -18,6 +18,17 @@ export default function Blacklist() {
     } catch (err) { toast(err.message, 'error') }
   }
 
+  const clearAuto = async () => {
+    const cancelDebts = confirm(
+      'Автомат хоригийг цэвэрлэх үү?\n\n«OK» — хориг + доорх төлөгдөөгүй өрийг цуцлах (дахин хар жагсаалтад орохгүй, phantom/тест өрд тохиромжтой).\n«Cancel» — зөвхөн хоригийг авах (өр хэвээр).\n\nБолих бол дараагийн цонхонд Escape дарна.')
+    try {
+      const r = await api('/api/admin/blacklist/clear', { method: 'POST',
+        body: { auto_only: true, cancel_debts: cancelDebts } })
+      toast(`${r.deactivated} хориг цэвэрлэв${r.canceled_debts ? `, ${r.canceled_debts} өр цуцлав` : ''}`)
+      load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const toggle = async (b) => {
     try {
       await api(`/api/admin/blacklist/${b.id}`, { method: 'PUT', body: { is_active: !b.is_active } })
@@ -27,11 +38,18 @@ export default function Blacklist() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-2xl font-bold">Хар жагсаалт</h1>
-        <button className="btn-primary" onClick={() => setEditing({ plate_number: '', reason: '' })}>
-          <Plus size={16} /> Нэмэх
-        </button>
+        <div className="flex gap-2">
+          {rows.some((b) => b.is_active && /автомат хориг/.test(b.reason || '')) && (
+            <button className="btn-secondary flex items-center gap-1.5" onClick={clearAuto}>
+              <Trash2 size={15} /> Автомат хоригийг цэвэрлэх
+            </button>
+          )}
+          <button className="btn-primary" onClick={() => setEditing({ plate_number: '', reason: '' })}>
+            <Plus size={16} /> Нэмэх
+          </button>
+        </div>
       </div>
       <div className="card py-3 text-sm text-slate-400">
         Хар жагсаалтад орсон дугаартай машин орох үед хаалт <b className="text-red-400">автоматаар нээгдэхгүй</b>,
