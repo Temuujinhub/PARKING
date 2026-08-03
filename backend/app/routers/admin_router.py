@@ -797,7 +797,6 @@ def _parse_dt(value: str, field: str) -> datetime:
         raise HTTPException(400, f"{field}: огнооны формат буруу (ISO байх ёстой): {value!r}")
 
 
-@router.post("/drivers")
 def _site_tenant(db, site_id: str | None):
     """Зогсоолын түрээслэгч (site байхгүй/NULL бол None)."""
     if not site_id:
@@ -805,6 +804,7 @@ def _site_tenant(db, site_id: str | None):
     return db.query(ParkingSite.tenant_id).filter(ParkingSite.id == site_id).scalar()
 
 
+@router.post("/drivers")
 def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     body = payload.dump()
     # Tenant хэрэглэгч зөвхөн өөрийн зогсоолд бүртгэнэ. site_id=null («Бүх зогсоол»)

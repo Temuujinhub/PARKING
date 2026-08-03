@@ -33,8 +33,24 @@ export async function api(path, { method = 'GET', body, form, formData, blob } =
     return res.blob()
   }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.detail || 'Алдаа гарлаа')
+  if (!res.ok) throw new Error(errMessage(data.detail))
   return data
+}
+
+// Backend-ийн алдааг ойлгомжтой мессеж болгоно. FastAPI validation (422)-ийн
+// detail нь [{loc, msg, type}, ...] массив тул урьд нь «[object Object]» болдог
+// байсан — талбар бүрийн ойлгомжтой мессежийг гаргана.
+function errMessage(detail) {
+  if (!detail) return 'Алдаа гарлаа'
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map((e) => {
+      if (typeof e === 'string') return e
+      const field = Array.isArray(e.loc) ? e.loc[e.loc.length - 1] : ''
+      return field ? `${field}: ${e.msg}` : e.msg
+    }).filter(Boolean).join('; ') || 'Талбар буруу бөглөгдсөн'
+  }
+  return detail.msg || JSON.stringify(detail)
 }
 
 export function wsConnect(siteId = 'all', onMessage) {
