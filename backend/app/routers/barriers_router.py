@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/barriers", tags=["barriers"])
 
 @router.post("/{device_id}/open")
 async def manual_open(device_id: str, body: dict | None = None, db: Session = Depends(get_db),
-                      user: User = Depends(require("barriers", "cashier"))):
+                      user: User = Depends(require("barriers", "free_exit"))):
     """Гараар нээх. body: {session_id?, force?} — force=true үед forceBreaking
     (албадан онгойлгоод барих, гацсан үед)."""
     from ..services.barrier import open_barrier
@@ -36,7 +36,7 @@ async def manual_open(device_id: str, body: dict | None = None, db: Session = De
 
 @router.post("/{device_id}/close")
 async def manual_close(device_id: str, body: dict | None = None, db: Session = Depends(get_db),
-                       user: User = Depends(require("barriers", "cashier"))):
+                       user: User = Depends(require("barriers", "free_exit"))):
     """Гараар хаах (closeStrobe). Албадан нээснийг буцаах, туршилтын дараа хаах гэх мэт."""
     from ..services.barrier import close_barrier
     device = db.get(Device, device_id)
@@ -57,7 +57,7 @@ async def manual_close(device_id: str, body: dict | None = None, db: Session = D
 
 @router.post("/{device_id}/display")
 async def screen_display(device_id: str, body: dict, db: Session = Depends(get_db),
-                         user: User = Depends(require("barriers", "cashier"))):
+                         user: User = Depends(require("barriers", "free_exit"))):
     """LED дэлгэц тест — камерын дэлгэцэнд текст харуулна.
     body: {text, voice?} — voice=true үед дуут зарлал давхар явуулна.
     Камер эсвэл хаалт төхөөрөмжийн аль алиныг зааж болно (IP-г ижил дүрмээр олно)."""

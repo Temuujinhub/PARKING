@@ -22,6 +22,7 @@ const MODULE_GROUPS = [
   ['Үйл ажиллагаа', [
     ['dashboard', 'Хянах самбар'], ['cashier', 'Касс'], ['check', 'Шалгах'],
     ['history', 'Түүх'], ['compensations', 'Ээлж хаах / Нөхөн төлбөр'],
+    ['free_exit', '⚠ Гараар/төлбөргүй гаргах + хаалт удирдах'],
   ]],
   ['Санхүү', [
     ['reports', 'Тайлан + Мөнгөн тооцоо'], ['discounts', 'Хөнгөлөлт + Тариф'],
@@ -36,7 +37,7 @@ const MODULE_GROUPS = [
 // Role бүрийн default эрх — backend auth.ROLE_PERMISSIONS-той ижил
 const ROLE_DEFAULTS = {
   ADMIN: ['dashboard', 'cashier', 'check', 'history', 'discounts', 'settings', 'reports',
-    'drivers', 'vat', 'barriers', 'blacklist', 'logs', 'devices', 'compensations', 'users', 'health'],
+    'drivers', 'vat', 'barriers', 'blacklist', 'logs', 'devices', 'compensations', 'users', 'health', 'free_exit'],
   FINANCE: ['dashboard', 'history', 'reports', 'vat', 'payments', 'logs',
     'compensations', 'discounts', 'blacklist'],
   HR: ['users'],

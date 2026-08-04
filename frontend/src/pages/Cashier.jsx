@@ -15,7 +15,7 @@ import TodayExitsTable from './cashier/TodayExitsTable'
 
 export default function Cashier() {
   const toast = useToast()
-  const { testMode, user } = useAuth()
+  const { testMode, user, can } = useAuth()
   const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [exits, setExits] = useState([])
@@ -164,6 +164,7 @@ export default function Cashier() {
   const fee = selected?.fee
   // Зөвхөн OPERATOR (болон SUPER_ADMIN) касс дээр үйлдэл хийнэ; бусад нь харна
   const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
+  const canFreeExit = can('free_exit')  // гараар/төлбөргүй гаргах эрх (санхүүгийн хамгаалалт)
 
   const saveNote = async () => {
     if (!selected) return
@@ -215,7 +216,7 @@ export default function Cashier() {
 
         {/* Төлбөрийн дэлгэрэнгүй */}
         <PaymentPanel
-          selected={selected} setSelected={setSelected} fee={fee} canAct={canAct} busy={busy}
+          selected={selected} setSelected={setSelected} fee={fee} canAct={canAct} canFreeExit={canFreeExit} busy={busy}
           discounts={discounts} searchPlate={searchPlate} searchResults={searchResults}
           onSearchChange={onSearchChange} onSearch={search}
           onPickResult={(s) => { setSelected(s); setSearchResults(null); setSearchPlate('') }}

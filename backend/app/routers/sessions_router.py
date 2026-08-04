@@ -489,8 +489,10 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
 
 @router.post("/{session_id}/manual-exit")
 async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db),
-                      user: User = Depends(require("cashier"))):
+                      user: User = Depends(require("free_exit"))):
     """Оператор гараар гаргах (төлбөргүйгээр эсвэл асуудал шийдсэний дараа).
+    ЭРХ: зөвхөн free_exit эрхтэй хэрэглэгч (default-оор ADMIN; итгэмжит операторт
+    админ гараар олгоно) — энгийн оператор танилаа үнэгүй гаргахаас сэргийлнэ.
     body: {open_barrier: bool, device_id?: str, reason: str, create_compensation?: bool}
     create_compensation=true бол төлөгдөөгүй дүнгээр нөхөн төлбөрийн нэхэмжлэл үүснэ."""
     s = db.get(ParkingSession, session_id)

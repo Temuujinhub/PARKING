@@ -5,7 +5,7 @@ import { SnapshotImg } from '../../components/Snapshot'
 import { Badge, Field, useToast } from '../../components/ui'
 
 export default function PaymentPanel({
-  selected, setSelected, fee, canAct, busy, discounts,
+  selected, setSelected, fee, canAct, canFreeExit, busy, discounts,
   searchPlate, searchResults, onSearchChange, onSearch, onPickResult,
   onPay, onApplyDiscount, onManualExit, onSaveNote, siteId, loadExits,
 }) {
@@ -101,7 +101,7 @@ export default function PaymentPanel({
               Төлбөргүй: {fee.reason || 'Үнэгүй хугацаанд байна'}
             </div>
           )}
-          {canAct && (
+          {canAct && canFreeExit && (
             <button onClick={onManualExit} className="btn-secondary w-full justify-center text-xs">
               <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
             </button>

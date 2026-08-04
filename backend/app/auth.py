@@ -19,6 +19,7 @@ ROLE_PERMISSIONS = {
         "dashboard", "cashier", "check", "history", "discounts", "settings",
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
         "compensations", "users", "health",  # health — системийн эрүүл мэнд мониторинг
+        "free_exit",  # гараар/төлбөргүй гаргах + хаалт гараар удирдах (санхүүгийн эрсдэлтэй)
     },
     # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
     "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",
@@ -26,6 +27,9 @@ ROLE_PERMISSIONS = {
     # HR (Хүний нөөц) — зөвхөн ажилтан нэмж/хасах, ажилласан өдрийн тайлан
     "HR": {"users"},
     # OPERATOR: Касс, Шалгах, Түүх, Нөхөн төлбөр (өөрийн зогсоолын өрийг касс дээр цуглуулна)
+    # ЧУХАЛ: OPERATOR-д free_exit ОРООГҮЙ — оператор танилаа үнэгүй гаргах,
+    # хаалт дур мэдэн нээх санхүүгийн эрсдэлээс сэргийлнэ. Итгэмжит операторт
+    # админ эрхийн матрицаас free_exit-ийг гараар нэмнэ.
     "OPERATOR": {"cashier", "check", "history", "compensations"},
 }
 
