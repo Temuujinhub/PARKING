@@ -76,6 +76,23 @@ def show_session(db, s: ParkingSession):
             mark = "" if e.plate_number == s.plate_number else "  ⚠ дугаар өөр уншсан"
             print(f"     {L(e.created_at)}  {e.lane_dir:5}  «{e.plate_number}»"
                   f"  conf={int(e.confidence or 0)}{mark}{flag}")
+    # ХУУРМАГ ШАЛГАЛТ: session-ий дугаараар уншилт ОГТ олдоогүй бол (phantom
+    # эсэх), орох камер тэр агшинд ЮУ уншсаныг харуул — жинхэнэ (буруу уншигдсан)
+    # машиныг илрүүлнэ. entry_time ±3 мин цонхонд бүх дугаарыг харуулна.
+    has_own = any(e.plate_number == s.plate_number for e in evs)
+    if not has_own and s.entry_device_id:
+        near = (db.query(LprEvent)
+                .filter(LprEvent.device_id == s.entry_device_id,
+                        LprEvent.created_at >= s.entry_time - timedelta(minutes=3),
+                        LprEvent.created_at <= s.entry_time + timedelta(minutes=3))
+                .order_by(LprEvent.created_at).all())
+        print("   ⚠ ЭНЭ ДУГААРААР УНШИЛТ АЛГА (phantom магадлалтай). Орох камер "
+              f"{L(s.entry_time)}-ийн орчимд уншсан нь:")
+        if near:
+            for e in near:
+                print(f"     {L(e.created_at)}  {e.lane_dir:5}  «{e.plate_number}»  conf={int(e.confidence or 0)}")
+        else:
+            print("     (тэр камер тэр агшинд юу ч уншаагүй — гараар/симуляц/автозасвараар үүссэн байж болзошгүй)")
 
     # 2) OCR тохирлын аудит (гарах камер өөр уншаад session-д тохсон эсэх)
     audits = (db.query(AuditLog).filter(AuditLog.entity_id == s.id,
