@@ -8,6 +8,8 @@
     venv/bin/python tools/exit_diag.py 4132            # тухайн дугаараар (хэсэгчилсэн ч болно)
     venv/bin/python tools/exit_diag.py --site NIC      # тухайн зогсоолын сүүлийн 20 гаралт
     venv/bin/python tools/exit_diag.py --recent 30     # бүх зогсоолын сүүлийн 30 гаралт
+    venv/bin/python tools/exit_diag.py --ghosts        # уншилтгүй ХИЙМЭЛ session-ууд (бүх зогсоол)
+    venv/bin/python tools/exit_diag.py --ghosts SITE10 # зөвхөн NIC-ийн хиймэл session
 """
 import os
 import sys
@@ -139,6 +141,36 @@ def main():
         rows = (db.query(ParkingSession).filter(ParkingSession.site_id == site.id,
                                                 ParkingSession.exit_time.isnot(None))
                 .order_by(ParkingSession.exit_time.desc()).limit(20).all())
+    elif args[0] == "--ghosts":
+        # ХИЙМЭЛ (phantom) session олох: одоо зогсоолд байгаа ч тэр дугаараар
+        # камерын уншилт ОГТ байхгүй — өөр машиныг буруу уншсан магадлалтай.
+        # Зогсоолын «зогсож байгаа» тоог хөөрөгддөг тул цэвэрлэх нэр дэвшигчид.
+        site_f = args[1].upper() if len(args) > 1 else None
+        q = db.query(ParkingSession).filter(
+            ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"]))
+        if site_f:
+            site = db.query(ParkingSite).filter(ParkingSite.site_code == site_f).first()
+            if site:
+                q = q.filter(ParkingSession.site_id == site.id)
+        opens = q.order_by(ParkingSession.entry_time).all()
+        ghosts = []
+        for s in opens:
+            has_read = db.query(LprEvent).filter(
+                LprEvent.site_id == s.site_id,
+                LprEvent.plate_number == s.plate_number,
+                LprEvent.created_at >= s.entry_time - timedelta(minutes=5),
+                LprEvent.created_at <= s.entry_time + timedelta(minutes=5)).first()
+            if not has_read:
+                ghosts.append(s)
+        print(f"══ ХИЙМЭЛ (уншилтгүй) session: {len(ghosts)}/{len(opens)} зогсож буй ══")
+        for s in ghosts:
+            site = db.get(ParkingSite, s.site_id)
+            print(f"  🔵 {s.plate_number}  ·  {site.name if site else '?'}  ·  орсон {L(s.entry_time)}"
+                  f"  ·  session {s.id[:8]}")
+        if ghosts:
+            print("\nЭдгээр нь тэр дугаараар камерын уншилтгүй — Шалгах хуудаснаас "
+                  "гараар устгах эсвэл camera event log-оор баталгаажуулна уу.")
+        return
     elif args[0] == "--recent":
         n = int(args[1]) if len(args) > 1 else 30
         rows = (db.query(ParkingSession).filter(ParkingSession.exit_time.isnot(None))
