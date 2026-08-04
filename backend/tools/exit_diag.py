@@ -153,23 +153,40 @@ def main():
             if site:
                 q = q.filter(ParkingSession.site_id == site.id)
         opens = q.order_by(ParkingSession.entry_time).all()
-        ghosts = []
+        ghosts, manual = [], []
         for s in opens:
             has_read = db.query(LprEvent).filter(
                 LprEvent.site_id == s.site_id,
                 LprEvent.plate_number == s.plate_number,
                 LprEvent.created_at >= s.entry_time - timedelta(minutes=5),
                 LprEvent.created_at <= s.entry_time + timedelta(minutes=5)).first()
-            if not has_read:
-                ghosts.append(s)
-        print(f"══ ХИЙМЭЛ (уншилтгүй) session: {len(ghosts)}/{len(opens)} зогсож буй ══")
-        for s in ghosts:
-            site = db.get(ParkingSite, s.site_id)
-            print(f"  🔵 {s.plate_number}  ·  {site.name if site else '?'}  ·  орсон {L(s.entry_time)}"
-                  f"  ·  session {s.id[:8]}")
+            if has_read:
+                continue
+            # ГАР БҮРТГЭЛ нь ХУУЛЬ ЁСНЫ — камер алдсан машиныг оператор нэмсэн.
+            # Үүнийг phantom гэж үзэхгүй (уншилтгүй ч бодит машин). JSON detail-ийг
+            # мөр болгож дугаараар хайна (JSON/JSONB аль алинд ажиллана).
+            from sqlalchemy import String as _S
+            me = (db.query(AuditLog)
+                  .filter(AuditLog.action == "MANUAL_ENTRY",
+                          AuditLog.detail.cast(_S).ilike(f"%{s.plate_number}%"))
+                  .order_by(AuditLog.created_at.desc()).first())
+            (manual if me else ghosts).append((s, me))
+        print(f"══ Уншилтгүй session: {len(ghosts)} жинхэнэ ХИЙМЭЛ + "
+              f"{len(manual)} ГАР БҮРТГЭЛ (хууль ёсны) / {len(opens)} зогсож буй ══")
+        if manual:
+            print("\n── Гар бүртгэл (оператор нэмсэн — цэвэрлэх ХЭРЭГГҮЙ) ──")
+            for s, me in manual:
+                site = db.get(ParkingSite, s.site_id)
+                who = me.username if me else "?"
+                print(f"  ✍ {s.plate_number}  ·  {site.name if site else '?'}  ·  орсон {L(s.entry_time)}"
+                      f"  ·  {who} гараар нэмсэн")
         if ghosts:
-            print("\nЭдгээр нь тэр дугаараар камерын уншилтгүй — Шалгах хуудаснаас "
-                  "гараар устгах эсвэл camera event log-оор баталгаажуулна уу.")
+            print("\n── Жинхэнэ ХИЙМЭЛ (уншилт ч, гар бүртгэл ч байхгүй) ──")
+            for s, _ in ghosts:
+                site = db.get(ParkingSite, s.site_id)
+                print(f"  🔵 {s.plate_number}  ·  {site.name if site else '?'}  ·  орсон {L(s.entry_time)}"
+                      f"  ·  session {s.id[:8]}")
+            print("\n  Зөвхөн эдгээрийг л цэвэрлэх нэр дэвшигч (гар бүртгэлийг БҮҮ хөнд).")
         return
     elif args[0] == "--recent":
         n = int(args[1]) if len(args) > 1 else 30
