@@ -1,0 +1,74 @@
+# Production (site.easy-parking.mn) руу автомат deploy.
+#
+# Хэрхэн ажилладаг: main руу push хиймэгц (backend/frontend/deploy өөрчлөгдсөн бол)
+# GitHub-ийн runner кодоо git bundle болгож серверт scp-ээр хуулаад
+# deploy/update.sh-г bundle горимоор ажиллуулна. Ингэснээр сервер өөрөө
+# GitHub руу хандах шаардлагагүй (байгууллагын firewall GitHub-ыг хаадаг асуудлыг тойрно).
+#
+# Шаардлагатай Secrets (Settings → Secrets and variables → Actions):
+#   DEPLOY_SSH_KEY   — серверийн root-д нэвтрэх SSH private key (САНАЛ БОЛГОХ), ЭСВЭЛ
+#   DEPLOY_PASSWORD  — root нууц үг (sshd дээр PasswordAuthentication yes байх ёстой)
+# Хоёулаа байвал SSH key-г ашиглана.
+#
+# АНХААР: энэ repo НЭЭЛТТЭЙ — нууц үг/түлхүүрийг ФАЙЛД хэзээ ч бүү бич,
+# зөвхөн Actions Secrets-д хадгална (fork-ийн PR-д secrets дамждаггүй).
+
+name: Deploy production
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy-production.yml'
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # эхэлсэн deploy-г таслахгүй (хагас deploy аюултай)
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DEPLOY_HOST: 202.21.117.179
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # bundle бүрэн түүхтэй байх ёстой (git fetch хийхэд шаардлагатай)
+
+      - name: SSH тохиргоо
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          if [ -n "$DEPLOY_SSH_KEY" ]; then
+            printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+            chmod 600 ~/.ssh/id_deploy
+            echo "SSH_CMD=ssh -i $HOME/.ssh/id_deploy" >> "$GITHUB_ENV"
+            echo "SCP_CMD=scp -i $HOME/.ssh/id_deploy" >> "$GITHUB_ENV"
+          elif [ -n "$DEPLOY_PASSWORD" ]; then
+            sudo apt-get install -y -qq sshpass >/dev/null
+            echo "SSH_CMD=sshpass -e ssh" >> "$GITHUB_ENV"
+            echo "SCP_CMD=sshpass -e scp" >> "$GITHUB_ENV"
+            echo "SSHPASS=$DEPLOY_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "::error::DEPLOY_SSH_KEY эсвэл DEPLOY_PASSWORD secret тохируулаагүй байна"
+            exit 1
+          fi
+
+      - name: Bundle үүсгэж серверт хуулах
+        run: |
+          # update.sh bundle-аас refs/heads/main-ийг татдаг тул main нэртэй ref-ээр багцална
+          git branch -f main "$GITHUB_SHA"
+          git bundle create /tmp/upd.bundle main
+          git bundle verify /tmp/upd.bundle
+          $SCP_CMD /tmp/upd.bundle "root@$DEPLOY_HOST:/root/upd.bundle"
+
+      - name: update.sh ажиллуулах (backup → код → build → restart → шалгалт)
+        run: $SSH_CMD "root@$DEPLOY_HOST" "sudo bash /root/PARKING/deploy/update.sh /root/upd.bundle"
