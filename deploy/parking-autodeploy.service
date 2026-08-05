@@ -1,0 +1,10 @@
+[Unit]
+Description=PARKING autodeploy — origin/main шинэчлэгдсэн бол update.sh ажиллуулна
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /root/PARKING/deploy/autodeploy.sh
+# update.sh дотор npm build (2-4 мин) + restart байдаг тул хангалттай хугацаа өгнө
+TimeoutStartSec=15min

@@ -1,0 +1,10 @@
+[Unit]
+Description=PARKING autodeploy — 2 минут тутам origin/main шалгана
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target
