@@ -6,9 +6,11 @@
 # GitHub руу хандах шаардлагагүй (байгууллагын firewall GitHub-ыг хаадаг асуудлыг тойрно).
 #
 # Шаардлагатай Secrets (Settings → Secrets and variables → Actions):
-#   DEPLOY_SSH_KEY   — серверийн root-д нэвтрэх SSH private key (САНАЛ БОЛГОХ), ЭСВЭЛ
-#   DEPLOY_PASSWORD  — root нууц үг (sshd дээр PasswordAuthentication yes байх ёстой)
-# Хоёулаа байвал SSH key-г ашиглана.
+#   DEPLOY_SSH_KEY   — сервер лүү нэвтрэх SSH private key (САНАЛ БОЛГОХ), ЭСВЭЛ
+#   DEPLOY_PASSWORD  — нэвтрэх нууц үг (sshd дээр PasswordAuthentication yes байх ёстой)
+#   DEPLOY_USER      — нэвтрэх хэрэглэгч (заавал биш, default: root; root биш бол
+#                      sudo эрхтэй байх ёстой — нууц үгийг нь sudo -S-д дамжуулна)
+# Түлхүүр/нууц үг хоёулаа байвал SSH key-г ашиглана.
 #
 # АНХААР: энэ repo НЭЭЛТТЭЙ — нууц үг/түлхүүрийг ФАЙЛД хэзээ ч бүү бич,
 # зөвхөн Actions Secrets-д хадгална (fork-ийн PR-д secrets дамждаггүй).
@@ -35,6 +37,7 @@ jobs:
     environment: production
     env:
       DEPLOY_HOST: 202.21.117.179
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,7 +71,13 @@ jobs:
           git branch -f main "$GITHUB_SHA"
           git bundle create /tmp/upd.bundle main
           git bundle verify /tmp/upd.bundle
-          $SCP_CMD /tmp/upd.bundle "root@$DEPLOY_HOST:/root/upd.bundle"
+          # /tmp — root биш хэрэглэгч ч бичиж чадна
+          $SCP_CMD /tmp/upd.bundle "$DEPLOY_USER@$DEPLOY_HOST:/tmp/upd.bundle"
 
       - name: update.sh ажиллуулах (backup → код → build → restart → шалгалт)
-        run: $SSH_CMD "root@$DEPLOY_HOST" "sudo bash /root/PARKING/deploy/update.sh /root/upd.bundle"
+        run: |
+          # root биш хэрэглэгчийн sudo нууц үг асуувал stdin-ээр өгнө (sudo -S);
+          # root эсвэл NOPASSWD үед stdin-ийн илүүдэл мөр хор нөлөөгүй
+          printf '%s\n' "${SSHPASS:-}" | \
+            $SSH_CMD "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo -S -p '' bash /root/PARKING/deploy/update.sh /tmp/upd.bundle"
