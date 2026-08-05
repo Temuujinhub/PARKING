@@ -2,7 +2,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.auth import operator_sites
+from app.auth import grant_site, operator_sites
 from app.models import User
 from app.routers.reports_router import _scope
 
@@ -42,3 +42,34 @@ def test_scope_defaults_to_all_own_sites():
     assert _scope(_user("OPERATOR", site_ids=["a", "b"])) == ["a", "b"]
     assert _scope(_user("OPERATOR", site_ids=["a"])) == "a"
     assert _scope(_user("SUPER_ADMIN")) is None
+
+
+# --- grant_site: зогсоол үүсгэгч шинэ зогсоолоо удирдаж чадах ёстой ---
+
+def test_grant_site_extends_scoped_admin():
+    """Хариуцах зогсоолтой админ шинэ зогсоол үүсгэвэл хүрээ нь өргөжнө —
+    эс бол wizard-ын 2-р алхам (төхөөрөмж холбох) enforce_site 403 өгдөг байв."""
+    u = _user("ADMIN", site_ids=["nic", "sport"])
+    grant_site(u, "new")
+    assert operator_sites(u) == ["nic", "sport", "new"]
+
+
+def test_grant_site_from_primary_site():
+    u = _user("ADMIN", site_id="nic")
+    grant_site(u, "new")
+    assert operator_sites(u) == ["nic", "new"]
+
+
+def test_grant_site_noop_for_unscoped_and_super():
+    u = _user("ADMIN")  # компанийн түвшний админ — бүх зогсоол хардаг
+    grant_site(u, "new")
+    assert u.site_ids is None
+    s = _user("SUPER_ADMIN", site_ids=["x"])
+    grant_site(s, "new")
+    assert s.site_ids == ["x"]
+
+
+def test_grant_site_idempotent():
+    u = _user("ADMIN", site_ids=["nic"])
+    grant_site(u, "nic")
+    assert u.site_ids == ["nic"]

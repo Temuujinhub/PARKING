@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from ..auth import (ALL_MODULES, enforce_site, get_current_user, hash_password,
+from ..auth import (ALL_MODULES, enforce_site, get_current_user, grant_site, hash_password,
                     operator_sites, require, require_role)
 from ..database import get_db
 from ..models import (
@@ -298,10 +298,16 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
         site.screen_config = _check_screen_config(body["screen_config"])
     if "tenant_id" in body and user.role == "SUPER_ADMIN":
         site.tenant_id = body["tenant_id"] or None
+    elif user.role != "SUPER_ADMIN" and user.tenant_id:
+        # Түрээслэгчийн админы үүсгэсэн зогсоол өөрийнх нь түрээслэгчид харьяалагдана —
+        # эс бол operator_sites-д орохгүй тул дараагийн алхамд (төхөөрөмж холбох)
+        # enforce_site 403 өгч, зогсоол нь жагсаалтад нь ч харагдахгүй
+        site.tenant_id = user.tenant_id
     site.qpay_password = encrypt_secret(site.qpay_password)  # DB-д ил бичихгүй
     _check_district(site.qpay_district_code)
     db.add(site)
     db.flush()
+    grant_site(user, site.id)  # үүсгэгчийн хамрах хүрээнд шинэ зогсоолыг нэмнэ
     _audit(db, user, "CREATE", "site", site.id, body)
     db.commit()
     return to_dict(site, extra={"pay_url": site_pay_url(site)})

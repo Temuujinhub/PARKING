@@ -185,6 +185,21 @@ def scoped_site(user: User, site_id: str | None) -> tuple[str | None, list[str] 
     return None, allowed
 
 
+def grant_site(user: User, site_id: str):
+    """Шинээр үүсгэсэн зогсоолыг үүсгэгчийнх нь хамрах хүрээнд нэмнэ.
+    "Хариуцах зогсоолууд" зааж хязгаарласан админ зогсоол үүсгэвэл шинэ зогсоол
+    нь жагсаалтад нь ороогүйгээс дараагийн алхамд (төхөөрөмж холбох) enforce_site
+    403 өгч, өөрийн үүсгэсэн зогсоолоо удирдаж чадахгүй болдог — үүнээс сэргийлнэ.
+    Tenant-аар хамардаг хэрэглэгчид (site_ids хоосон) өөрчлөлт хэрэггүй."""
+    if user.role == "SUPER_ADMIN":
+        return
+    ids = [s for s in (user.site_ids or []) if s]
+    if not ids and user.site_id:
+        ids = [user.site_id]
+    if ids and site_id not in ids:
+        user.site_ids = ids + [site_id]
+
+
 def enforce_site(user: User, site_id: str | None):
     """Оператор өөрийн зогсоолуудаас ӨӨР зогсоолын өгөгдлийг өөрчлөхийг хориглоно.
     Мутаци хийдэг endpoint бүр (хаалт нээх, session засах, төлбөр авах) дуудна —
