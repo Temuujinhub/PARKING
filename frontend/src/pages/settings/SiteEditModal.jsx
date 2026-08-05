@@ -1,7 +1,7 @@
 // Зогсоол засах modal — үндсэн мэдээлэл + QPay дансны тохиргоо
 import { Field, Modal } from '../../components/ui'
 
-export default function SiteEditModal({ editing, setEditing, templates, onSubmit, onTest }) {
+export default function SiteEditModal({ editing, setEditing, templates, tenants, onSubmit, onTest }) {
   return (
     <Modal open={!!editing} onClose={() => setEditing(null)} title="Зогсоол засах">
       {editing && (
@@ -49,6 +49,18 @@ export default function SiteEditModal({ editing, setEditing, templates, onSubmit
             <input className="input" value={editing.address || ''}
               onChange={(e) => setEditing({ ...editing, address: e.target.value })} />
           </Field>
+          {/* Зогсоолыг түрээслэгчид оноох — зөвхөн SUPER_ADMIN (tenants prop ирсэн үед).
+              Оноогоогүй зогсоол tenant-аар хамардаг хэрэглэгчдийн жагсаалтад харагдахгүй
+              тул "өнчин" үлдэхээс сэргийлж эндээс засна. */}
+          {tenants && (
+            <Field label="Түрээслэгч">
+              <select className="input" value={editing.tenant_id || ''}
+                onChange={(e) => setEditing({ ...editing, tenant_id: e.target.value || null })}>
+                <option value="">— Оноогоогүй (хэний ч жагсаалтад харагдахгүй!) —</option>
+                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.code})</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="Хэвлэгдсэн самбарын QR линк">
             <input className="input font-mono text-xs" value={editing.qr_url || ''}
               placeholder="Хоосон бол автоматаар /pay?site=КОД"

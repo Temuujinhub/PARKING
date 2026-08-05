@@ -2,6 +2,7 @@
 import { Plus, QrCode, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useAuth } from '../../auth'
 import { Table, useToast } from '../../components/ui'
 import QpayTestModal from './QpayTestModal'
 import { genDevices } from './shared'
@@ -11,14 +12,21 @@ import SiteWizardModal from './SiteWizardModal'
 
 export default function SitesSection() {
   const toast = useToast()
+  const { user } = useAuth()
+  const isSuper = user?.role === 'SUPER_ADMIN'
   const [rows, setRows] = useState([])
   const [templates, setTemplates] = useState([])
+  const [tenants, setTenants] = useState([])
   const [editing, setEditing] = useState(null)
   const [qrSite, setQrSite] = useState(null)
   const [qpayTest, setQpayTest] = useState(null)
   const [wizard, setWizard] = useState(null)
   const load = () => api('/api/admin/sites').then(setRows)
-  useEffect(() => { load(); api('/api/admin/tariff-templates').then(setTemplates) }, [])
+  useEffect(() => {
+    load()
+    api('/api/admin/tariff-templates').then(setTemplates)
+    if (isSuper) api('/api/admin/tenants').then(setTenants)
+  }, [])
 
   const save = async (e) => {
     e.preventDefault()
@@ -87,12 +95,16 @@ export default function SitesSection() {
           <Plus size={16} /> Зогсоол нэмэх
         </button>
       </div>
-      <Table headers={['Нэр', 'Код', 'Бүс', 'Багтаамж', 'Зогсож буй', 'Сул', 'Тариф', 'QR', '']} empty={rows.length === 0}>
+      <Table headers={['Нэр', 'Код', 'Бүс', ...(isSuper ? ['Түрээслэгч'] : []), 'Багтаамж', 'Зогсож буй', 'Сул', 'Тариф', 'QR', '']} empty={rows.length === 0}>
         {rows.map((s) => (
           <tr key={s.id}>
             <td className="td font-medium">{s.name}</td>
             <td className="td font-mono">{s.site_code}</td>
             <td className="td">{s.zone_code}</td>
+            {/* Оноогоогүй (өнчин) зогсоол хэний ч жагсаалтад харагдахгүй тул илт анхааруулна */}
+            {isSuper && <td className="td text-xs">
+              {s.tenant_name || <span className="text-red-400">Оноогоогүй!</span>}
+            </td>}
             <td className="td font-mono">{s.capacity ? s.capacity : <span className="text-slate-500">Хязгааргүй</span>}</td>
             <td className="td font-mono">{s.occupied}</td>
             <td className="td font-mono text-accent">{s.free_spaces ?? '—'}</td>
@@ -119,6 +131,7 @@ export default function SitesSection() {
       <SiteWizardModal wizard={wizard} setWizard={setWizard} templates={templates} reload={load} />
 
       <SiteEditModal editing={editing} setEditing={setEditing} templates={templates}
+        tenants={isSuper ? tenants : null}
         onSubmit={save} onTest={() => setQpayTest({ site: editing, amount: 10 })} />
 
       <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
