@@ -78,7 +78,7 @@ function MonthDays({ month, siteId, onClose }) {
           <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={onClose}>Хаах</button>
         </div>
       </div>
-      <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)']} empty={rows.length === 0}>
+      <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт (₮)']} empty={rows.length === 0}>
         {rows.map((r) => (
           <tr key={r.date} onClick={() => setDay(r.date)} className="cursor-pointer hover:bg-surface-muted/40">
             <td className="td font-mono text-accent underline decoration-dotted">{r.date}</td>
@@ -87,6 +87,7 @@ function MonthDays({ month, siteId, onClose }) {
             <td className="td font-mono">{fmt(r.cash_amount)}</td>
             <td className="td font-mono">{fmt(r.qpay_amount)}</td>
             <td className="td font-mono">{fmt(r.pos_amount)}</td>
+            <td className="td font-mono">{fmt(r.transfer_amount)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
           </tr>
         ))}
@@ -113,7 +114,7 @@ export function RevenueTab({ from, to }) {
   return (
     <>
       <div className="text-xs text-slate-400">Зогсоол дээр дарж тухайн зогсоолын сар бүрийн дүнг харна.</div>
-      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Төлөгдөөгүй (₮)', 'Нийт (₮)', 'Үйлдэл']}
+      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Төлөгдөөгүй (₮)', 'Нийт (₮)', 'Үйлдэл']}
         empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.site_id}>
@@ -125,6 +126,7 @@ export function RevenueTab({ from, to }) {
             <td className="td font-mono">{fmt(r.cash_amount)}</td>
             <td className="td font-mono">{fmt(r.qpay_amount)}</td>
             <td className="td font-mono">{fmt(r.pos_amount)}</td>
+            <td className="td font-mono">{fmt(r.transfer_amount)}</td>
             <td className="td font-mono text-amber-400">{fmt(r.unpaid_amount)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
             <td className="td">
@@ -142,6 +144,7 @@ export function RevenueTab({ from, to }) {
         <span>Бэлэн: <b className="font-mono">{fmt(t.cash_amount)}₮</b></span>
         <span>QPay: <b className="font-mono">{fmt(t.qpay_amount)}₮</b></span>
         <span>Карт: <b className="font-mono">{fmt(t.pos_amount)}₮</b></span>
+        <span>Дансаар: <b className="font-mono">{fmt(t.transfer_amount)}₮</b></span>
         <span>Төлөгдөөгүй: <b className="font-mono text-amber-400">{fmt(t.unpaid_amount)}₮</b></span>
         <span>Нийт орлого: <b className="font-mono text-accent">{fmt(t.paid_amount)}₮</b></span>
       </div>
@@ -151,7 +154,7 @@ export function RevenueTab({ from, to }) {
             <h3 className="font-semibold text-accent">{siteMonths.name} — сар бүрийн дүн</h3>
             <button className="text-xs text-slate-400 hover:text-slate-200 underline" onClick={() => setSiteMonths(null)}>Хаах</button>
           </div>
-          <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт (₮)', '']} empty={siteMonths.rows.length === 0}>
+          <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт (₮)', '']} empty={siteMonths.rows.length === 0}>
             {siteMonths.rows.map((r) => (
               <tr key={r.month}>
                 <td className="td font-mono text-accent underline decoration-dotted cursor-pointer" onClick={() => setMonth(r.month)}>{r.month}</td>
@@ -159,6 +162,7 @@ export function RevenueTab({ from, to }) {
                 <td className="td font-mono">{fmt(r.cash)}</td>
                 <td className="td font-mono">{fmt(r.qpay)}</td>
                 <td className="td font-mono">{fmt(r.pos)}</td>
+                <td className="td font-mono">{fmt(r.transfer)}</td>
                 <td className="td font-mono text-accent font-semibold">{fmt(r.total)}</td>
                 <td className="td text-right">
                   <button className="btn-secondary py-1 px-2 text-xs"
@@ -184,7 +188,7 @@ export function DailyTab({ from, to, siteId }) {
   return (
     <>
       <div className="text-xs text-slate-400">Өдөр дээр дарж тухайн өдрийн бүх гүйлгээг цаг:минутаар харна.</div>
-      <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']} empty={data.rows.length === 0}>
+      <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт орлого (₮)']} empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.date} onClick={() => setDay(r.date)} className="cursor-pointer hover:bg-surface-muted/40">
             <td className="td font-mono font-medium text-accent underline decoration-dotted">{r.date}</td>
@@ -193,6 +197,7 @@ export function DailyTab({ from, to, siteId }) {
             <td className="td font-mono">{fmt(r.cash_amount)}</td>
             <td className="td font-mono">{fmt(r.qpay_amount)}</td>
             <td className="td font-mono">{fmt(r.pos_amount)}</td>
+            <td className="td font-mono">{fmt(r.transfer_amount)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
           </tr>
         ))}
@@ -215,7 +220,7 @@ export function MonthlyTab({ from, to, siteId }) {
   return (
     <>
       <div className="text-xs text-slate-400">Сар дээр дарж тухайн сарын өдрүүдийг, дараа нь өдөр дээр дарж гүйлгээг харна.</div>
-      <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Нийт орлого (₮)']} empty={data.rows.length === 0}>
+      <Table headers={['Сар', 'Гүйлгээ', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт орлого (₮)']} empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.month} onClick={() => setMonth(r.month)} className="cursor-pointer hover:bg-surface-muted/40">
             <td className="td font-mono font-medium text-accent underline decoration-dotted">{r.month}</td>
@@ -223,6 +228,7 @@ export function MonthlyTab({ from, to, siteId }) {
             <td className="td font-mono">{fmt(r.cash)}</td>
             <td className="td font-mono">{fmt(r.qpay)}</td>
             <td className="td font-mono">{fmt(r.pos)}</td>
+            <td className="td font-mono">{fmt(r.transfer)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.total)}</td>
           </tr>
         ))}
@@ -231,6 +237,7 @@ export function MonthlyTab({ from, to, siteId }) {
         <span>Бэлэн: <b className="font-mono">{fmt(data.totals.cash)}₮</b></span>
         <span>QPay: <b className="font-mono">{fmt(data.totals.qpay)}₮</b></span>
         <span>Карт: <b className="font-mono">{fmt(data.totals.pos)}₮</b></span>
+        <span>Дансаар: <b className="font-mono">{fmt(data.totals.transfer)}₮</b></span>
         <span>Нийт: <b className="font-mono text-accent">{fmt(data.totals.total)}₮</b></span>
       </div>
       {month && <MonthDays month={month} siteId={siteId} onClose={() => setMonth(null)} />}
@@ -247,7 +254,7 @@ export function ShiftsTab({ from, to, siteId }) {
         Жинхэнэ ажилласан ээлж бүр (кассчин POS/системд нэвтэрснээр эхэлж, дараагийн хүн нэвтрэхэд/хаахад дуусна).
         Дүн нь тухайн ээлжид тэр кассчны авсан бэлэн/картын гүйлгээ.
       </div>
-      <Table headers={['Кассчин', 'Зогсоол', 'Эхэлсэн', 'Дууссан', 'Үргэлжилсэн', 'Гүйлгээ', 'Бэлэн (₮)', 'Карт (₮)', 'Нийт (₮)', 'Төлөв']}
+      <Table headers={['Кассчин', 'Зогсоол', 'Эхэлсэн', 'Дууссан', 'Үргэлжилсэн', 'Гүйлгээ', 'Бэлэн (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт (₮)', 'Төлөв']}
         empty={shifts.length === 0}>
         {shifts.map((s) => (
           <tr key={s.id}>
@@ -259,6 +266,7 @@ export function ShiftsTab({ from, to, siteId }) {
             <td className="td font-mono">{s.count}</td>
             <td className="td font-mono">{fmt(s.by_provider?.CASH?.amount || 0)}</td>
             <td className="td font-mono">{fmt(s.by_provider?.POS?.amount || 0)}</td>
+            <td className="td font-mono">{fmt(s.by_provider?.TRANSFER?.amount || 0)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(s.total)}</td>
             <td className="td"><Badge value={s.status === 'OPEN' ? 'active' : 'CLOSED'} /></td>
           </tr>
@@ -436,6 +444,7 @@ export function TransactionsTab({ from, to, sites }) {
           <option value="CASH">Бэлэн</option>
           <option value="QPAY">QPay</option>
           <option value="POS">Банкны карт</option>
+          <option value="TRANSFER">Дансаар (шилжүүлэг)</option>
         </select>
         <select className="input w-auto" value={f.car_type} onChange={(e) => setF({ ...f, car_type: e.target.value })} aria-label="Машины төрөл">
           <option value="">Бүх төрөл</option>

@@ -86,6 +86,9 @@ class ParkingSite(Base):
     # Зөвхөн ОРОХ камерт уншигдсан (гарах уншилтгүй) OPEN session-ийг энэ цагийн
     # дараа ӨРГҮЙГЭЭР үнэгүй хаах босго. NULL → глобал default (72ц), 0 = унтраах.
     entry_only_free_hours = Column(Integer, nullable=True)
+    # Хаалттай зогсоол: true үед зөвхөн бүртгэлтэй (гэрээт) машинд орох хаалт
+    # нээгдэнэ — бүртгэлгүй машинд нээгдэхгүй (ажилчдын зогсоол г.м).
+    registered_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
     # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
     qr_url = Column(Text, nullable=True)
@@ -105,6 +108,12 @@ class ParkingSite(Base):
     qpay_branch_code = Column(String(40), nullable=True)
     # НӨАТ-ын дүүрэг+хороо (4 орон, ж: 2318 = Хан-Уул 18-р хороо)
     qpay_district_code = Column(String(10), nullable=True)
+    # ─── Дансаар (шилжүүлгээр) төлбөр хүлээн авах данс ───
+    # Online operator кассын «Дансаар» товчны хажууд харагдаж, жолоочид хэлж
+    # өгнө. Хоосон бол «Дансаар» сонголт данс мэдээлэлгүй харагдана.
+    bank_name = Column(String(60), nullable=True)          # ж: Хаан банк
+    bank_account = Column(String(40), nullable=True)       # дансны дугаар
+    bank_account_name = Column(String(120), nullable=True) # данс эзэмшигчийн нэр
     tariff_template_id = Column(UUID(as_uuid=False), ForeignKey("tariff_templates.id"), nullable=True)
     # Аль түрээслэгчийнх вэ (NULL = EasyParking-ийн өөрийн/хуваарилагдаагүй)
     tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
@@ -421,6 +430,9 @@ class DailySettlement(Base):
     confirmed_card = Column(Numeric(12, 2), nullable=False, default=0)
     confirmed_qpay = Column(Numeric(12, 2), nullable=False, default=0)
     confirmed_cash = Column(Numeric(12, 2), nullable=False, default=0)
+    # Дансаар (шилжүүлгээр) авсан төлбөр — бэлэнтэй адил дансны хуулгаас тулгана
+    confirmed_transfer = Column(Numeric(12, 2), nullable=False, default=0,
+                                server_default=text("0"))
     note = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="OPEN")  # OPEN, CLOSED
     closed_by = Column(String(60), nullable=True)

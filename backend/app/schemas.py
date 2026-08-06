@@ -28,12 +28,16 @@ class SiteCreate(_In):
     tariff_template_id: str | None = None
     auto_close_hours: int | None = None
     entry_only_free_hours: int | None = None
+    registered_only: bool | None = None
     qr_url: str | None = None
     qpay_username: str | None = None
     qpay_password: str | None = None
     qpay_invoice_code: str | None = None
     qpay_branch_code: str | None = None
     qpay_district_code: str | None = None
+    bank_name: str | None = None
+    bank_account: str | None = None
+    bank_account_name: str | None = None
     screen_config: dict | None = None
     tenant_id: str | None = None
 

@@ -73,7 +73,8 @@ def _daily_rows(db, start, end, site_id):
     """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
     daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов.
     Өдөр бүр 2-3 query биш — бүх хугацааг ЛОКАЛ өдрөөр бүлэглэсэн 2 query."""
-    keys = ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")
+    keys = ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount",
+            "transfer_amount", "paid_amount")
     days = _day_list(start, end)
     if not days:
         return [], {k: 0 for k in keys}
@@ -96,10 +97,12 @@ def _daily_rows(db, start, end, site_id):
         ds = (day + TZ).strftime("%Y-%m-%d")
         entered, exited = counts.get(ds, (0, 0))
         prov = pays.get(ds, {})
-        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        cash, qpay_amt, pos, transfer = (float(prov.get(k, 0))
+                                         for k in ("CASH", "QPAY", "POS", "TRANSFER"))
         out.append({"date": ds, "entered": entered, "exited": exited,
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
-                    "paid_amount": cash + qpay_amt + pos})
+                    "transfer_amount": transfer,
+                    "paid_amount": cash + qpay_amt + pos + transfer})
     totals = {k: sum(r[k] for r in out) for k in keys}
     return out, totals
 
@@ -249,14 +252,16 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
                     .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
                             Payment.paid_at >= start, Payment.paid_at < end)
                     .group_by(Payment.provider).all())
-        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        paid = cash + qpay_amt + pos
+        cash, qpay_amt, pos, transfer = (float(prov.get(k, 0))
+                                         for k in ("CASH", "QPAY", "POS", "TRANSFER"))
+        paid = cash + qpay_amt + pos + transfer
         unpaid = float(db.query(func.coalesce(func.sum(ParkingSession.total_fee), 0)).filter(
             ParkingSession.site_id == s.id, ParkingSession.status == "AWAITING_PAYMENT",
             ParkingSession.entry_time >= start, ParkingSession.entry_time < end).scalar())
         out.append({"site_id": s.id, "site_name": s.name, "entered": entered, "exited": exited,
                     "total_minutes": int(minutes or 0),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
+                    "transfer_amount": transfer,
                     "paid_amount": paid, "unpaid_amount": unpaid})
     totals = {
         "entered": sum(r["entered"] for r in out), "exited": sum(r["exited"] for r in out),
@@ -264,6 +269,7 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
         "cash_amount": sum(r["cash_amount"] for r in out),
         "qpay_amount": sum(r["qpay_amount"] for r in out),
         "pos_amount": sum(r["pos_amount"] for r in out),
+        "transfer_amount": sum(r["transfer_amount"] for r in out),
         "paid_amount": sum(r["paid_amount"] for r in out),
         "unpaid_amount": sum(r["unpaid_amount"] for r in out),
     }
@@ -304,8 +310,9 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
     q = _flt(q, ParkingSession.site_id, _scope(user, site_id))
     months = {}
     for ym, prov, amt, cnt in q.group_by("ym", Payment.provider).all():
-        m = months.setdefault(int(ym), {"cash": 0.0, "qpay": 0.0, "pos": 0.0, "count": 0})
-        key = {"CASH": "cash", "QPAY": "qpay", "POS": "pos"}.get(prov)
+        m = months.setdefault(int(ym), {"cash": 0.0, "qpay": 0.0, "pos": 0.0,
+                                        "transfer": 0.0, "count": 0})
+        key = {"CASH": "cash", "QPAY": "qpay", "POS": "pos", "TRANSFER": "transfer"}.get(prov)
         if key:
             m[key] += float(amt)
         m["count"] += int(cnt)
@@ -313,12 +320,13 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
     for ym in sorted(months, reverse=True):
         m = months[ym]
         out.append({"month": f"{ym // 100}-{ym % 100:02d}", **m,
-                    "total": m["cash"] + m["qpay"] + m["pos"]})
-    totals = {k: sum(r[k] for r in out) for k in ("cash", "qpay", "pos", "total", "count")}
+                    "total": m["cash"] + m["qpay"] + m["pos"] + m["transfer"]})
+    totals = {k: sum(r[k] for r in out) for k in ("cash", "qpay", "pos", "transfer",
+                                                  "total", "count")}
     return {"rows": out, "totals": totals}
 
 
-PROVIDER_MN = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт"}
+PROVIDER_MN = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт", "TRANSFER": "Дансаар"}
 STATUS_MN2 = {"PAID": "Төлсөн", "FREE": "Үнэгүй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
               "OPEN": "Нээлттэй", "CLOSED": "Хаагдсан"}
 
@@ -544,7 +552,8 @@ _STATUS_MN = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр �
               "PAID": "Төлсөн (дотор)", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
               "MANUAL_CLOSED": "Гараар хаасан"}
 
-_CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP", "STAFF": "Ажилтан"}
+_CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP", "STAFF": "Ажилтан",
+                "SPECIAL": "Тусгай", "TRANSIT": "Дамжин"}
 
 
 def _company_sessions(db, user, company: str, start, end, sid):
@@ -686,13 +695,15 @@ def _shift_rows(db, start, end, site_id):
         sq = _flt(sq, ParkingSession.site_id, site_id)
         pq = _flt(pq, ParkingSession.site_id, site_id)
         prov = dict(pq.group_by(Payment.provider).all())
-        cash, qpay_amt, pos = (float(prov.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
+        cash, qpay_amt, pos, transfer = (float(prov.get(k, 0))
+                                         for k in ("CASH", "QPAY", "POS", "TRANSFER"))
         out.append({"date": (day + TZ).strftime("%Y-%m-%d"),
                     "window": f"{h:02d}:00–{h:02d}:00",
                     "entered": sq.count(),
                     "exited": sq.filter(ParkingSession.exit_time.isnot(None)).count(),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
-                    "paid_amount": cash + qpay_amt + pos})
+                    "transfer_amount": transfer,
+                    "paid_amount": cash + qpay_amt + pos + transfer})
         day = nxt
     return out
 
@@ -707,7 +718,8 @@ def by_shift_report(date_from: str | None = None, date_to: str | None = None,
     start, end = _range(date_from, date_to)
     out = _shift_rows(db, start, end, _scope(user, site_id))
     totals = {k: sum(r[k] for r in out) for k in
-              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount", "paid_amount")}
+              ("entered", "exited", "cash_amount", "qpay_amount", "pos_amount",
+               "transfer_amount", "paid_amount")}
     return {"rows": out, "shift_hour": settings.shift_change_hour, "totals": totals}
 
 
@@ -751,7 +763,7 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
     for day in days:
         ds = (day + TZ).strftime("%Y-%m-%d")
         # Төлбөрийг provider+source-оор
-        card = pos_qpay = qr_qpay = cash = 0.0
+        card = pos_qpay = qr_qpay = cash = transfer = 0.0
         for prov, src, amt in pay_map.get(ds, ()):
             amt = float(amt)
             if prov == "POS":
@@ -763,7 +775,9 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
                     qr_qpay += amt
             elif prov == "CASH":
                 cash += amt
-        st_total = card + pos_qpay + qr_qpay + cash
+            elif prov == "TRANSFER":
+                transfer += amt
+        st_total = card + pos_qpay + qr_qpay + cash + transfer
         # Тухайн өдөр үүссэн өр (нөхөн төлбөр)
         debt = debt_map.get(ds, 0.0)
         # Ажилласан ажилтнууд (тухайн өдөр ээлж нээсэн)
@@ -772,10 +786,14 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
         if st_total <= 0 and debt <= 0 and not st:
             continue
         confirmed_cash = float(st.confirmed_cash) if st else 0.0
-        # Карт/QPay электрон баталгаажсан = систем; зөвхөн бэлэн санхүү баталгаажуулна
-        confirmed_total = card + pos_qpay + qr_qpay + confirmed_cash
+        confirmed_transfer = float(getattr(st, "confirmed_transfer", 0) or 0) if st else 0.0
+        # Карт/QPay электрон баталгаажсан = систем; бэлэн + дансаар (шилжүүлэг)-ийг
+        # санхүү дансны хуулгаас баталгаажуулна
+        confirmed_total = card + pos_qpay + qr_qpay + confirmed_cash + confirmed_transfer
         out.append({"date": ds, "card": card, "pos_qpay": pos_qpay, "qr_qpay": qr_qpay,
-                    "cash": cash, "system_total": st_total, "confirmed_cash": confirmed_cash,
+                    "cash": cash, "transfer": transfer,
+                    "system_total": st_total, "confirmed_cash": confirmed_cash,
+                    "confirmed_transfer": confirmed_transfer,
                     "confirmed_total": confirmed_total, "difference": st_total - confirmed_total,
                     "debt": debt, "workers": workers,
                     "status": st.status if st else "OPEN", "note": (st.note if st else "") or "",
@@ -798,7 +816,7 @@ def settlement_upsert(body: dict, db: Session = Depends(get_db), user: User = De
     if not st:
         st = DailySettlement(site_id=body["site_id"], date=body["date"])
         db.add(st)
-    for k in ("confirmed_card", "confirmed_qpay", "confirmed_cash"):
+    for k in ("confirmed_card", "confirmed_qpay", "confirmed_cash", "confirmed_transfer"):
         if k in body:
             setattr(st, k, body[k] or 0)
     if "note" in body:

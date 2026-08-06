@@ -120,7 +120,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         else:
             receipt_raw = await ebarimt.create_receipt(
                 sess_amount, sess_vat,
-                "CASH" if payment.payment_method == "CASH" else "CARD",
+                # eBarimt 3.0-д зөвхөн CASH/PAYMENT_CARD код бий — дансаар (TRANSFER)
+                # шилжүүлсэн төлбөрийг CASH кодоор бүртгэнэ (API мөнгөн урсгал шалгадаггүй)
+                "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
                 customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
             )
     except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
@@ -473,6 +475,44 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     await _finalize_paid(db, payment)
     db.add(AuditLog(username=user.username, action="CASH_PAYMENT", entity="payment",
                     entity_id=payment.id, detail={"amount": float(payment.amount)}))
+    db.commit()
+    return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
+
+
+# ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
+@router.post("/transfer")
+async def transfer_payment(body: dict, db: Session = Depends(get_db),
+                           user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+    """Дансаар (банкны шилжүүлгээр) төлбөр авах — online operator-ын урсгал.
+
+    Оператор жолоочид зогсоолын дансыг хэлж, шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас
+    хараад энэ endpoint-оор баталгаажуулна → хаалт нээгдэж, e-Barimt үүснэ
+    (eBarimt 3.0-д шилжүүлгийн тусдаа код байхгүй тул CASH кодоор бүртгэгдэнэ).
+    body: {session_id, customer_tin?} — ТТД өгвөл байгууллагын B2B баримт."""
+    from ..auth import has_permission
+    if not has_permission(user, "pay_transfer"):
+        raise HTTPException(403, "Танд «Дансаар» төлбөр авах эрх байхгүй — "
+                                 "админ эрхийн матрицаас pay_transfer олгоно")
+    session = db.get(ParkingSession, body.get("session_id", ""))
+    if not session:
+        raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
+    if session.status not in ("OPEN", "AWAITING_PAYMENT"):
+        raise HTTPException(400, f"Session төлөв буруу: {session.status}")
+    payment = _create_payment(db, session, "TRANSFER", "TRANSFER", cashier=user)
+    if body.get("customer_tin"):
+        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
+        payment.ebarimt_receiver_type = "COMPANY"
+    else:
+        payment.ebarimt_receiver_type = "CITIZEN"
+    await _finalize_paid(db, payment)
+    site = session.site
+    db.add(AuditLog(username=user.username, action="TRANSFER_PAYMENT", entity="payment",
+                    entity_id=payment.id,
+                    detail={"amount": float(payment.amount),
+                            # аль данс руу орсны бүртгэл (сайтын тухайн үеийн данс)
+                            "bank": getattr(site, "bank_name", None),
+                            "account": getattr(site, "bank_account", None)}))
     db.commit()
     return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
 

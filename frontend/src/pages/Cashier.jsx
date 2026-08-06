@@ -80,11 +80,22 @@ export default function Cashier() {
 
   const pay = async (method) => {
     if (!selected) return
+    // Дансаар: оператор шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасныг баталгаажуулна
+    if (method === 'TRANSFER') {
+      const site = sites.find((s) => s.id === siteId)
+      const acc = site?.bank_account
+        ? `${site.bank_name || ''} ${site.bank_account} (${site.bank_account_name || ''})` : 'зогсоолын данс'
+      if (!confirm(`${selected.plate_number} — ${fmt(selected.fee?.total_fee)}₮\n\n${acc} руу шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасан уу?\n\nOK = төлбөр баталгаажуулж хаалт нээнэ`)) return
+    }
     setBusy(true)
     try {
       if (method === 'CASH') {
         await api('/api/payments/cash', { method: 'POST', body: { session_id: selected.id } })
         toast('Бэлэн мөнгөөр төлөгдлөө. Хаалт нээгдэж байна.')
+        setSelected(null)
+      } else if (method === 'TRANSFER') {
+        await api('/api/payments/transfer', { method: 'POST', body: { session_id: selected.id } })
+        toast('Дансаар төлөгдлөө. Хаалт нээгдэж байна.')
         setSelected(null)
       } else if (method === 'QPAY') {
         const inv = await api('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: selected.id, source: 'POS' } })
@@ -165,6 +176,11 @@ export default function Cashier() {
   // Зөвхөн OPERATOR (болон SUPER_ADMIN) касс дээр үйлдэл хийнэ; бусад нь харна
   const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
   const canFreeExit = can('free_exit')  // гараар/төлбөргүй гаргах эрх (санхүүгийн хамгаалалт)
+  // Online operator: «Бэлнээр»-ийн оронд «Дансаар» (шилжүүлэг) товч харагдана.
+  // SUPER_ADMIN бүх эрхтэй тул АЛЬ АЛИНЫГ нь харна (турших/яаралтай үед).
+  const canTransfer = can('pay_transfer')
+  const showCash = !canTransfer || user?.role === 'SUPER_ADMIN'
+  const site = sites.find((s) => s.id === siteId)
 
   const saveNote = async () => {
     if (!selected) return
@@ -217,6 +233,7 @@ export default function Cashier() {
         {/* Төлбөрийн дэлгэрэнгүй */}
         <PaymentPanel
           selected={selected} setSelected={setSelected} fee={fee} canAct={canAct} canFreeExit={canFreeExit} busy={busy}
+          canTransfer={canTransfer} showCash={showCash} site={site}
           discounts={discounts} searchPlate={searchPlate} searchResults={searchResults}
           onSearchChange={onSearchChange} onSearch={search}
           onPickResult={(s) => { setSelected(s); setSearchResults(null); setSearchPlate('') }}

@@ -108,8 +108,8 @@ export default function Compensations() {
             </div>
           </div>
           {/* Орлого төлбөрийн хэрэгслээр — системд бүртгэгдсэнээр */}
-          <div className="grid grid-cols-3 gap-3">
-            {[['Бэлэн', 'CASH'], ['QPay', 'QPAY'], ['Банкны карт', 'POS']].map(([label, k]) => (
+          <div className="grid grid-cols-4 gap-3">
+            {[['Бэлэн', 'CASH'], ['QPay', 'QPAY'], ['Банкны карт', 'POS'], ['Дансаар', 'TRANSFER']].map(([label, k]) => (
               <div key={k} className="bg-surface-muted/30 rounded-lg p-3 text-center">
                 <div className="font-mono font-bold">{fmt(shift.by_provider?.[k]?.amount || 0)}₮</div>
                 <div className="text-[11px] text-slate-500">{label} · {shift.by_provider?.[k]?.count || 0}</div>

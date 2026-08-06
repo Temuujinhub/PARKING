@@ -392,6 +392,12 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     site_id = device.site_id
     now = datetime.utcnow()
 
+    # Хаалттай зогсоол: зөвхөн бүртгэлтэй машинд хаалт нээнэ (ажилчдын зогсоол
+    # г.м). Dedup/burst замууд ч мөн адил шалгана — эс бол эхний татгалзсан
+    # уншилтын дараах давтан уншилт хаалтыг нээчихнэ.
+    _site = db.get(ParkingSite, site_id)
+    restricted = bool(_site and _site.registered_only)
+
     # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Орох камер нэг
     # машиныг хэдэн секундын зайтай 2 удаа өөр дугаараар (Х/К, О/0 г.м. андуурч)
     # уншихад 2 тусдаа session үүсдэг байсныг (ж: 5155УХК + 5155УКК) зогсооно.
@@ -405,7 +411,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
         # Давхар уншилт — шинэ session үүсгэхгүй, ГЭХДЭЭ хаалтыг заавал нээнэ:
         # машин хаалганы өмнө зогсож байгаа тул уншилт давтагдсан байж болно.
-        opened = await ensure_entry_barrier(db, device, plate) if allow_open else False
+        _can_open = allow_open and (not restricted or find_registered(db, plate, site_id))
+        opened = await ensure_entry_barrier(db, device, plate) if _can_open else False
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
@@ -438,15 +445,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                 notify(site_id, "PLATE_EDITED", {
                     "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
                     "by": "system:autocorrect"})
-                opened = (await ensure_entry_barrier(db, device, plate, prev_session.id,
-                                                     find_registered(db, plate, site_id))
-                          if allow_open else False)
+                _reg = find_registered(db, plate, site_id)
+                opened = (await ensure_entry_barrier(db, device, plate, prev_session.id, _reg)
+                          if allow_open and (not restricted or _reg) else False)
                 db.commit()
                 return {"action": "plate_autocorrect", "session_id": prev_session.id,
                         "old": old_plate, "new": plate, "barrier_opened": opened}
-        opened = (await ensure_entry_barrier(db, device, plate,
-                                             registered=find_registered(db, plate, site_id))
-                  if allow_open else False)
+        _reg = find_registered(db, plate, site_id)
+        opened = (await ensure_entry_barrier(db, device, plate, registered=_reg)
+                  if allow_open and (not restricted or _reg) else False)
         db.commit()
         return {"action": "burst_dedup", "plate": plate, "barrier_opened": opened}
 
@@ -503,9 +510,13 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
     # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-    _entry_lines = None if black else _site_screen_lines(db, site_id, "entry")
+    denied = restricted and registered is None and not black
+    _entry_lines = None if (black or denied) else _site_screen_lines(db, site_id, "entry")
     if black:
         _welcome = ""
+    elif denied:  # хаалттай зогсоол — татгалзсан шалтгааныг дэлгэцэнд харуулна
+        _welcome = render_screen_text("{plate}\nBurtgelgui mashin", plate=plate,
+                                      time_str=_local_hm)
     elif _entry_lines:  # Тохиргоо → LED дэлгэц: зогсоолын өөрийн мөрүүд
         _welcome = _screen_text_from_lines(_entry_lines, plate=plate, time_str=_local_hm)
     else:
@@ -517,6 +528,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         notify(site_id, "BLACKLIST_ALERT", {
             "plate": plate, "reason": black.reason, "lane": "entry",
         })
+    elif denied:
+        # Зөвхөн бүртгэлтэй машины зогсоол — хаалт нээхгүй, операторт мэдэгдэнэ
+        notify(site_id, "UNREGISTERED_DENIED", {"plate": plate, "lane": "entry"})
     elif device.auto_open and allow_open:
         barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered,
                                                     screen_text=_welcome)
@@ -524,7 +538,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     notify(site_id, "ENTRY_EVENT", {
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
         "registered": registered is not None, "blacklisted": black is not None,
-        "barrier_opened": barrier_opened,
+        "denied": denied, "barrier_opened": barrier_opened,
     })
     # Орох LED дэлгэцэнд орсон цаг + дугаар + мэндчилгээ (Managed горимд камер өөрөө
     # харуулахгүй тул сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг
@@ -774,7 +788,7 @@ def _screen_text_from_lines(lines: list, *, plate: str = "", time_str: str = "",
 
 
 # Payment.payment_method → LED дээр харуулах нэр
-_PAYMENT_LABELS = {"QR": "QPay", "CARD": "Карт", "CASH": "Бэлэн"}
+_PAYMENT_LABELS = {"QR": "QPay", "CARD": "Карт", "CASH": "Бэлэн", "TRANSFER": "Данс"}
 
 
 def _payment_label(db: Session, session: ParkingSession) -> str:

@@ -20,6 +20,9 @@ ROLE_PERMISSIONS = {
         "reports", "drivers", "vat", "barriers", "blacklist", "logs", "devices",
         "compensations", "users", "health",  # health — системийн эрүүл мэнд мониторинг
         "free_exit",  # гараар/төлбөргүй гаргах + хаалт гараар удирдах (санхүүгийн эрсдэлтэй)
+        # pay_transfer — кассын «Бэлнээр»-ийн оронд «Дансаар» (шилжүүлэг) сонголт.
+        # Online operator-т эрхийн матрицаас гараар олгоно; энгийн операторт байхгүй.
+        "pay_transfer",
     },
     # FINANCE — тайлан/төлбөр/НӨАТ + хөнгөлөлт, хар жагсаалт удирдана, лог харна
     "FINANCE": {"dashboard", "history", "reports", "vat", "payments", "logs",

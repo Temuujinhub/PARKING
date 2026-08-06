@@ -9,6 +9,7 @@ const EVENT_LABELS = {
   EXIT_COMPLETED: { label: 'Гарлаа', color: 'text-slate-300', icon: ExitIcon },
   PAYMENT_COMPLETED: { label: 'Төлбөр төлөгдлөө', color: 'text-accent', icon: Banknote },
   BLACKLIST_ALERT: { label: '⚠ Хар жагсаалт!', color: 'text-red-400', icon: Car },
+  UNREGISTERED_DENIED: { label: '⚠ Бүртгэлгүй машин — хаалт нээгээгүй', color: 'text-amber-400', icon: Car },
   EXIT_NO_SESSION: { label: 'Бүртгэлгүй гарах оролдлого', color: 'text-red-400', icon: Car },
   BARRIER_MANUAL_OPEN: { label: 'Хаалт гараар нээв', color: 'text-purple-400', icon: Activity },
 }

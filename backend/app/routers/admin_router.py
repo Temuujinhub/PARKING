@@ -290,9 +290,11 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
         raise HTTPException(400, "site_code давхардаж байна")
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
-                           "tariff_template_id", "auto_close_hours", "entry_only_free_hours", "qr_url",
+                           "tariff_template_id", "auto_close_hours", "entry_only_free_hours",
+                           "registered_only", "qr_url",
                            "qpay_username", "qpay_password", "qpay_invoice_code",
-                           "qpay_branch_code", "qpay_district_code")
+                           "qpay_branch_code", "qpay_district_code",
+                           "bank_name", "bank_account", "bank_account_name")
                           if k in body})
     if "screen_config" in body:
         site.screen_config = _check_screen_config(body["screen_config"])
@@ -322,9 +324,10 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "entry_only_free_hours", "is_active", "qr_url",
+              "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
-              "qpay_branch_code", "qpay_district_code"):
+              "qpay_branch_code", "qpay_district_code",
+              "bank_name", "bank_account", "bank_account_name"):
         if k in body:
             val = body[k]
             # Мөр талбарууд: хоосон → NULL (глобал .env тохиргоо руу уналт хийнэ)

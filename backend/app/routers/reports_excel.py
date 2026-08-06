@@ -47,15 +47,17 @@ def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
 def revenue_excel(data):
     """Орлогын тайлан (зогсоолоор)."""
     rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"], r["cash_amount"],
-             r["qpay_amount"], r["pos_amount"], r["paid_amount"], r["unpaid_amount"]]
+             r["qpay_amount"], r["pos_amount"], r["transfer_amount"],
+             r["paid_amount"], r["unpaid_amount"]]
             for r in data["rows"]]
     t = data["totals"]
     total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"], t["cash_amount"],
-                 t["qpay_amount"], t["pos_amount"], t["paid_amount"], t["unpaid_amount"]]
+                 t["qpay_amount"], t["pos_amount"], t["transfer_amount"],
+                 t["paid_amount"], t["unpaid_amount"]]
     return _xlsx("revenue", "Орлогын тайлан",
                  ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
-                  "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"],
-                 rows, widths=(30, 10, 10, 12, 14, 14, 14, 18, 16), total_row=total_row)
+                  "Дансаар (₮)", "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"],
+                 rows, widths=(30, 10, 10, 12, 14, 14, 14, 14, 18, 16), total_row=total_row)
 
 
 def transactions_excel(rows):
@@ -77,34 +79,40 @@ def transactions_excel(rows):
 
 def settlement_excel(rows):
     """Санхүүгийн тооцооны Excel (rows = settlement-ийн гаралт)."""
-    xrows = [[r["date"], r["card"], r["pos_qpay"], r["qr_qpay"], r["cash"], r["system_total"],
-              r["confirmed_cash"], r["confirmed_total"], r["difference"], r["debt"],
+    xrows = [[r["date"], r["card"], r["pos_qpay"], r["qr_qpay"], r["cash"], r["transfer"],
+              r["system_total"],
+              r["confirmed_cash"], r["confirmed_transfer"], r["confirmed_total"],
+              r["difference"], r["debt"],
               ", ".join(r["workers"]), "Хаагдсан" if r["status"] == "CLOSED" else "Нээлттэй",
               r["closed_by"] or ""] for r in rows]
     return _xlsx("monggon_tootsoo", "Мөнгөн тооцоо",
-                 ["Огноо", "pos-Карт", "pos-QPay", "QR-QPay", "Бэлэн", "Систем нийт",
-                  "Баталгаа бэлэн", "Баталгаа нийт", "Зөрүү", "Өр (үүссэн)", "Ажилтан", "Төлөв", "Хаасан"],
-                 xrows, widths=(12, 11, 11, 11, 11, 12, 13, 13, 12, 12, 20, 11, 14))
+                 ["Огноо", "pos-Карт", "pos-QPay", "QR-QPay", "Бэлэн", "Дансаар", "Систем нийт",
+                  "Баталгаа бэлэн", "Баталгаа данс", "Баталгаа нийт", "Зөрүү", "Өр (үүссэн)",
+                  "Ажилтан", "Төлөв", "Хаасан"],
+                 xrows, widths=(12, 11, 11, 11, 11, 11, 12, 13, 13, 13, 12, 12, 20, 11, 14))
 
 
 def daily_excel(out, tot):
     """Өдөр өдрөөр задарсан тайлангийн Excel (out/tot = _daily_rows-ийн гаралт)."""
     rows = [[r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
-             r["pos_amount"], r["paid_amount"]] for r in out]
+             r["pos_amount"], r["transfer_amount"], r["paid_amount"]] for r in out]
     total_row = ["НИЙТ", tot["entered"], tot["exited"], tot["cash_amount"], tot["qpay_amount"],
-                 tot["pos_amount"], tot["paid_amount"]]
+                 tot["pos_amount"], tot["transfer_amount"], tot["paid_amount"]]
     return _xlsx("daily", "Өдрийн тайлан",
-                 ["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"],
-                 rows, widths=(14, 10, 10, 14, 14, 14, 16), total_row=total_row)
+                 ["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
+                  "Дансаар (₮)", "Нийт орлого (₮)"],
+                 rows, widths=(14, 10, 10, 14, 14, 14, 14, 16), total_row=total_row)
 
 
 def by_shift_excel(rows):
     """Ээлжээр тайлангийн Excel (rows = _shift_rows-ийн гаралт)."""
     xrows = [[r["date"], r["window"], r["entered"], r["exited"],
-              r["cash_amount"], r["qpay_amount"], r["pos_amount"], r["paid_amount"]] for r in rows]
+              r["cash_amount"], r["qpay_amount"], r["pos_amount"], r["transfer_amount"],
+              r["paid_amount"]] for r in rows]
     return _xlsx("eeljeer", "Ээлжээр",
-                 ["Ээлжийн өдөр", "Зааг", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт (₮)"],
-                 xrows, widths=(14, 14, 9, 9, 13, 13, 13, 14))
+                 ["Ээлжийн өдөр", "Зааг", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
+                  "Дансаар (₮)", "Нийт (₮)"],
+                 xrows, widths=(14, 14, 9, 9, 13, 13, 13, 13, 14))
 
 
 def monthly_excel(data, daily_rows):
@@ -115,26 +123,27 @@ def monthly_excel(data, daily_rows):
     # Sheet 1 — сарын нэгтгэл
     ws = wb.active
     ws.title = "Сарын нэгтгэл"
-    ws.append(["Сар", "Гүйлгээ", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+    ws.append(["Сар", "Гүйлгээ", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Дансаар (₮)", "Нийт орлого (₮)"])
     for c in ws[1]:
         c.font = Font(bold=True)
     for r in data["rows"]:
-        ws.append([r["month"], r["count"], r["cash"], r["qpay"], r["pos"], r["total"]])
+        ws.append([r["month"], r["count"], r["cash"], r["qpay"], r["pos"], r["transfer"], r["total"]])
     t = data["totals"]
-    ws.append(["НИЙТ", t["count"], t["cash"], t["qpay"], t["pos"], t["total"]])
+    ws.append(["НИЙТ", t["count"], t["cash"], t["qpay"], t["pos"], t["transfer"], t["total"]])
     for c in ws[ws.max_row]:
         c.font = Font(bold=True)
-    for col, w in zip("ABCDEF", (12, 10, 14, 14, 14, 16)):
+    for col, w in zip("ABCDEFG", (12, 10, 14, 14, 14, 14, 16)):
         ws.column_dimensions[col].width = w
     # Sheet 2 — доторх өдрийн задаргаа (нэгтгэлийн дэлгэрэнгүй)
     ws2 = wb.create_sheet("Өдрөөр задаргаа")
-    ws2.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+    ws2.append(["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
+                "Дансаар (₮)", "Нийт орлого (₮)"])
     for c in ws2[1]:
         c.font = Font(bold=True)
     for r in daily_rows:
         ws2.append([r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
-                    r["pos_amount"], r["paid_amount"]])
-    for col, w in zip("ABCDEFG", (12, 10, 10, 14, 14, 14, 16)):
+                    r["pos_amount"], r["transfer_amount"], r["paid_amount"]])
+    for col, w in zip("ABCDEFGH", (12, 10, 10, 14, 14, 14, 14, 16)):
         ws2.column_dimensions[col].width = w
     return _excel_response(wb, "sariin_negtgel")
 
@@ -196,7 +205,8 @@ def shifts_excel(db, shifts):
     ws = wb.active
     ws.title = "Касс хаалтын тайлан"
     ws.append(["Кассчин", "Төлөв", "Нээсэн цаг", "Хаасан цаг", "Эхэлсэн дүн (₮)",
-               "Гүйлгээний тоо", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Нийт орлого (₮)"])
+               "Гүйлгээний тоо", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)", "Дансаар (₮)",
+               "Нийт орлого (₮)"])
     for c in ws[1]:
         c.font = Font(bold=True)
     grand = 0.0
@@ -205,17 +215,18 @@ def shifts_excel(db, shifts):
                       .filter(Payment.shift_id == s.id, Payment.status == "PAID")
                       .group_by(Payment.provider).all())
         count = db.query(Payment).filter(Payment.shift_id == s.id, Payment.status == "PAID").count()
-        cash, qpay_amt, pos = (float(totals.get(k, 0)) for k in ("CASH", "QPAY", "POS"))
-        total = cash + qpay_amt + pos
+        cash, qpay_amt, pos, transfer = (float(totals.get(k, 0))
+                                         for k in ("CASH", "QPAY", "POS", "TRANSFER"))
+        total = cash + qpay_amt + pos + transfer
         grand += total
         ws.append([s.user.username if s.user else "", "Нээлттэй" if s.status == "OPEN" else "Хаагдсан",
                    (s.opened_at + TZ).strftime("%Y-%m-%d %H:%M"),
                    (s.closed_at + TZ).strftime("%Y-%m-%d %H:%M") if s.closed_at else "",
-                   float(s.opening_amount or 0), count, cash, qpay_amt, pos, total])
-    ws.append(["НИЙТ", "", "", "", "", "", "", "", "", grand])
+                   float(s.opening_amount or 0), count, cash, qpay_amt, pos, transfer, total])
+    ws.append(["НИЙТ", "", "", "", "", "", "", "", "", "", grand])
     ws[f"A{ws.max_row}"].font = Font(bold=True)
-    ws[f"J{ws.max_row}"].font = Font(bold=True)
-    for col, w in zip("ABCDEFGHIJ", (14, 10, 18, 18, 14, 14, 12, 12, 12, 16)):
+    ws[f"K{ws.max_row}"].font = Font(bold=True)
+    for col, w in zip("ABCDEFGHIJK", (14, 10, 18, 18, 14, 14, 12, 12, 12, 12, 16)):
         ws.column_dimensions[col].width = w
     return _excel_response(wb, "cashier_shifts")
 

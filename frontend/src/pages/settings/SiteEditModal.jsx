@@ -96,6 +96,50 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
               энэ цагийн дараа ӨР ҮҮСГЭЛГҮЙ үнэгүй хасна. Хоосон = 72ц, 0 = унтраах.
             </div>
           </Field>
+          {/* Хаалттай зогсоол (Monnis ажилчдын зогсоол г.м): бүртгэлгүй машинд
+              орох хаалт автоматаар нээгдэхгүй, самбарт мэдэгдэл гарна. */}
+          <Field label="Хаалттай зогсоол">
+            <label className="flex items-center gap-2 cursor-pointer select-none py-2">
+              <input type="checkbox" className="w-4 h-4 accent-accent"
+                checked={!!editing.registered_only}
+                onChange={(e) => setEditing({ ...editing, registered_only: e.target.checked })} />
+              <span className="text-sm">Зөвхөн бүртгэлтэй машин нэвтэрнэ</span>
+            </label>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Идэвхжүүлбэл «Бүртгэлтэй машин» жагсаалтад байгаа машинд л орох хаалт
+              нээгдэнэ. Бусад машинд хаалт нээгдэхгүй, дэлгэцэнд «Бүртгэлгүй машин»
+              гэж гарна.
+            </div>
+          </Field>
+
+          {/* Дансаар (шилжүүлгээр) төлбөр хүлээн авах данс — online operator-ын
+              кассын «Дансаар» товчны хажууд харагдаж, жолоочид хэлж өгнө. */}
+          <details className="rounded-lg border border-slate-700 px-3 py-2">
+            <summary className="cursor-pointer text-sm font-medium py-1">
+              Шилжүүлэг хүлээн авах данс (Дансаар төлбөр)
+              {editing.bank_account
+                ? <span className="ml-2 text-xs text-accent">· {editing.bank_name} {editing.bank_account}</span>
+                : <span className="ml-2 text-xs text-slate-500">· тохируулаагүй</span>}
+            </summary>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <Field label="Банк">
+                <input className="input" value={editing.bank_name || ''} placeholder="жишээ: Хаан банк"
+                  onChange={(e) => setEditing({ ...editing, bank_name: e.target.value })} />
+              </Field>
+              <Field label="Дансны дугаар">
+                <input className="input font-mono" value={editing.bank_account || ''} placeholder="жишээ: 5123456789"
+                  onChange={(e) => setEditing({ ...editing, bank_account: e.target.value })} />
+              </Field>
+              <Field label="Данс эзэмшигч">
+                <input className="input" value={editing.bank_account_name || ''} placeholder="жишээ: Моннис Пропертис ХХК"
+                  onChange={(e) => setEditing({ ...editing, bank_account_name: e.target.value })} />
+              </Field>
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1.5">
+              «Дансаар» эрхтэй (pay_transfer) оператор кассаас энэ дансыг жолоочид хэлж,
+              шилжүүлэг орж ирснийг хуулгаас шалгаад төлбөрийг баталгаажуулна.
+            </div>
+          </details>
 
           <details className="rounded-lg border border-slate-700 px-3 py-2" open>
             <summary className="cursor-pointer text-sm font-medium py-1">

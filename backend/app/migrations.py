@@ -197,19 +197,28 @@ MIGRATIONS = [
          AND coalesce(s.qpay_username,'') <> ''
          AND s.qpay_username = t.qpay_username""",
 
-    # v3.1 — Давхардсан ХААЛТ цэвэрлэх: нэг зогсоол+чиглэлд нэг идэвхтэй хаалт
-    # үлдээж (хамгийн эртнийх), илүүчийг deleted болгоно. Камер+хаалт+LED цогц
-    # төхөөрөмж тул чиглэл бүрд нэг хаалт хангалттай (2026-08-02 засвар).
-    """UPDATE devices SET status = 'deleted'
-       WHERE device_type = 'barrier' AND status = 'active'
-         AND id NOT IN (
-           SELECT DISTINCT ON (site_id, lane_dir) id FROM devices
-           WHERE device_type = 'barrier' AND status = 'active'
-           ORDER BY site_id, lane_dir, created_at ASC)""",
+    # v3.1 — (ХАСАГДСАН 2026-08-06) Давхардсан хаалт цэвэрлэгч: нэг зогсоол+чиглэлд
+    # нэг идэвхтэй хаалт үлдээж илүүчийг deleted болгодог байв (2026-08-02 засвар).
+    # Startup БҮРТ ажилладаг байсан тул ОЛОН орц/гарцтай зогсоолын 2 дахь эгнээний
+    # хаалтыг чимээгүй унтраадаг — нэг удаагийн цэвэрлэгээ хэдийн хийгдсэн тул хассан.
+    # Олон эгнээ: хаалт бүр өөрийн lane_no-той байж камертайгаа lane_no-оор холбогдоно.
 
     # v3.2 — Камерын машины өнгө/төрөл (дугаар буруу уншсан үед таних тусламж)
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS vehicle_color VARCHAR(30)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(30)",
+
+    # v3.3 — Хаалттай зогсоол: зөвхөн бүртгэлтэй (гэрээт) машин нэвтэрнэ
+    # (Monnis ажилчдын зогсоол г.м). true үед бүртгэлгүй машинд орох хаалт
+    # автоматаар нээгдэхгүй.
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS registered_only BOOLEAN NOT NULL DEFAULT false",
+
+    # v3.4 — Дансаар (шилжүүлгээр) төлбөр авах: online operator кассын «Дансаар»
+    # товчоор авч хаалт нээнэ. Зогсоол бүр хүлээн авах данстай; мөнгөн тооцоонд
+    # шилжүүлгийг санхүү дансны хуулгаас (бэлэнтэй адил) баталгаажуулна.
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS bank_name VARCHAR(60)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS bank_account VARCHAR(40)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(120)",
+    "ALTER TABLE daily_settlements ADD COLUMN IF NOT EXISTS confirmed_transfer NUMERIC(12,2) NOT NULL DEFAULT 0",
 ]
 
 

@@ -104,7 +104,10 @@ def generate_invoices(db, period: str, created_by: str = "system",
     modes = billing_modes(db)
     # Байгууллага бүрийн идэвхтэй машид
     by_company: dict[str, list[RegisteredDriver]] = {}
-    for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
+    # TRANSIT (дамжин — доторх зогсоолын машин) сарын нэхэмжлэлд орохгүй
+    for d in (db.query(RegisteredDriver)
+              .filter(RegisteredDriver.is_active.is_(True),
+                      RegisteredDriver.contract_type != "TRANSIT").all()):
         comp = (d.company or "").strip()
         if comp:
             by_company.setdefault(comp, []).append(d)

@@ -7,6 +7,9 @@ import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 const CONTRACT_TYPES = {
   MONTHLY: 'Сарын эрх', CONTRACT: 'Гэрээт', VIP: 'VIP', STAFF: 'Ажилтан',
   SPECIAL: 'Тусгай хэрэгцээт (түргэн, онцгой байдал г.м)',
+  // Том зогсоол доторх жижиг зогсоолын машин — гадна зогсоолоор ТӨЛБӨРГҮЙ
+  // дамжин өнгөрч, тайланд «Дамжин» гэж ялгарна.
+  TRANSIT: 'Дамжин (доторх зогсоолын машин)',
 }
 
 // Excel импортын цонх — эхлээд УРЬДЧИЛАН ХАРНА (dry-run), дараа нь баталгаажуулж оруулна.
@@ -15,11 +18,12 @@ function ImportModal({ open, onClose, sites, onDone }) {
   const toast = useToast()
   const [file, setFile] = useState(null)
   const [siteId, setSiteId] = useState('')
+  const [contractType, setContractType] = useState('CONTRACT')
   const [replace, setReplace] = useState(false)
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => { setFile(null); setPreview(null); setReplace(false) }, [open])
+  useEffect(() => { setFile(null); setPreview(null); setReplace(false); setContractType('CONTRACT') }, [open])
 
   const send = async (dryRun) => {
     if (!file) { toast('Excel файлаа сонгоно уу', 'error'); return }
@@ -28,6 +32,7 @@ function ImportModal({ open, onClose, sites, onDone }) {
       const fd = new FormData()
       fd.append('file', file)
       fd.append('site_id', siteId)
+      fd.append('contract_type', contractType)
       fd.append('replace', replace ? 'true' : 'false')
       fd.append('dry_run', dryRun ? 'true' : 'false')
       const data = await api('/api/admin/drivers/import', { method: 'POST', formData: fd })
@@ -55,6 +60,13 @@ function ImportModal({ open, onClose, sites, onDone }) {
           <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
             <option value="">Бүх зогсоол</option>
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        {/* Доторх жижиг зогсоолын жагсаалтыг том зогсоолд «Дамжин» төрлөөр
+            оруулбал тэдгээр машин гадна зогсоолоор төлбөргүй нэвтэрнэ. */}
+        <Field label="Бүртгэлийн төрөл">
+          <select className="input" value={contractType} onChange={(e) => setContractType(e.target.value)}>
+            {Object.entries(CONTRACT_TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
         </Field>
         <label className="flex items-start gap-2 text-xs cursor-pointer">

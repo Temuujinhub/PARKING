@@ -12,7 +12,7 @@ export default function Settlement() {
   const [siteId, setSiteId] = useState('')
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
-  const [edit, setEdit] = useState({}) // {date: confirmed_cash}
+  const [edit, setEdit] = useState({}) // {date: {cash, transfer}} — баталгаажуулах дүнгүүд
 
   const { data: sites } = useFetch('/api/admin/sites', { initial: [], silent: true })
   useEffect(() => { if (sites.length && !siteId) setSiteId(sites[0].id) }, [sites]) // анхны зогсоол сонгох
@@ -22,13 +22,15 @@ export default function Settlement() {
   const rows = settlement?.rows || []
   useEffect(() => { setEdit({}) }, [settlement]) // шинэ өгөгдөл ирэхэд гараар засварыг цэвэрлэнэ
 
-  const cashVal = (r) => (edit[r.date] ?? r.confirmed_cash)
+  const cashVal = (r) => (edit[r.date]?.cash ?? r.confirmed_cash)
+  const trVal = (r) => (edit[r.date]?.transfer ?? r.confirmed_transfer)
 
   const save = async (r, status) => {
     try {
       await api('/api/reports/settlement', {
         method: 'PUT',
-        body: { site_id: siteId, date: r.date, status, confirmed_cash: +cashVal(r) || 0 },
+        body: { site_id: siteId, date: r.date, status,
+                confirmed_cash: +cashVal(r) || 0, confirmed_transfer: +trVal(r) || 0 },
       })
       toast(status === 'CLOSED' ? 'Тооцоо хаагдлаа' : 'Хадгалагдлаа'); load()
     } catch (e) { toast(e.message, 'error') }
@@ -63,15 +65,16 @@ export default function Settlement() {
 
       <div className="text-xs text-slate-400">
         <b className="text-accent">pos-Карт · pos-QPay · QR-QPay</b> нь банкаар электрон баталгаажсан тул засахгүй. {' '}
-        <b className="text-amber-400">Бэлэн</b>-г санхүү дансны хуулгаас (ATM-ээр орсон дүн) баталгаажуулж, зөрүү 0 болмогц тооцоог хаана.
+        <b className="text-amber-400">Бэлэн</b> ба <b className="text-amber-400">Дансаар (шилжүүлэг)</b>-ийг санхүү
+        дансны хуулгаас баталгаажуулж, зөрүү 0 болмогц тооцоог хаана.
       </div>
 
       <div className="overflow-x-auto">
-        <Table headers={['Огноо', 'pos-Карт', 'pos-QPay', 'QR-QPay', 'Систем бэлэн', 'Баталгаа бэлэн', 'Зөрүү', 'Өр (үүссэн)', 'Ажилтан', 'Төлөв', 'Үйлдэл']}
+        <Table headers={['Огноо', 'pos-Карт', 'pos-QPay', 'QR-QPay', 'Систем бэлэн', 'Баталгаа бэлэн', 'Систем данс', 'Баталгаа данс', 'Зөрүү', 'Өр (үүссэн)', 'Ажилтан', 'Төлөв', 'Үйлдэл']}
           empty={rows.length === 0}>
           {rows.map((r) => {
             const closed = r.status === 'CLOSED'
-            const diff = r.cash - (+cashVal(r) || 0)
+            const diff = (r.cash - (+cashVal(r) || 0)) + (r.transfer - (+trVal(r) || 0))
             return (
               <tr key={r.date}>
                 <td className="td font-mono font-medium">{r.date}</td>
@@ -82,7 +85,13 @@ export default function Settlement() {
                 <td className="td">
                   <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
                     value={cashVal(r)} placeholder={fmt(r.cash)}
-                    onChange={(e) => setEdit((x) => ({ ...x, [r.date]: e.target.value }))} />
+                    onChange={(e) => setEdit((x) => ({ ...x, [r.date]: { ...x[r.date], cash: e.target.value } }))} />
+                </td>
+                <td className="td font-mono">{fmt(r.transfer)}₮</td>
+                <td className="td">
+                  <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
+                    value={trVal(r)} placeholder={fmt(r.transfer)}
+                    onChange={(e) => setEdit((x) => ({ ...x, [r.date]: { ...x[r.date], transfer: e.target.value } }))} />
                 </td>
                 <td className={`td font-mono font-semibold ${diff === 0 ? 'text-accent' : 'text-red-400'}`}>
                   {diff > 0 ? '+' : ''}{fmt(diff)}₮

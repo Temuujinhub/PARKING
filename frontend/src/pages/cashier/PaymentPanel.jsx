@@ -1,11 +1,12 @@
 // Төлбөрийн дэлгэрэнгүй — дугаар хайх, сонгосон машины тооцоо, төлбөр авах
-import { Banknote, DoorOpen, QrCode, Search } from 'lucide-react'
+import { Banknote, DoorOpen, Landmark, QrCode, Search } from 'lucide-react'
 import { api, fmt, fmtDate, fmtDur } from '../../api'
 import { SnapshotImg } from '../../components/Snapshot'
 import { Badge, Field, useToast } from '../../components/ui'
 
 export default function PaymentPanel({
   selected, setSelected, fee, canAct, canFreeExit, busy, discounts,
+  canTransfer, showCash, site,
   searchPlate, searchResults, onSearchChange, onSearch, onPickResult,
   onPay, onApplyDiscount, onManualExit, onSaveNote, siteId, loadExits,
 }) {
@@ -86,11 +87,30 @@ export default function PaymentPanel({
               <button type="button" onClick={onSaveNote} className="btn-secondary py-1 text-xs mt-1">Тэмдэглэл хадгалах</button>
             )}
           </Field>
+          {/* Дансаар (шилжүүлэг) хүлээн авах данс — жолоочид хэлж өгнө */}
+          {canAct && canTransfer && (
+            <div className="text-xs bg-surface-muted/40 border border-surface-border/60 rounded-lg px-3 py-2">
+              <span className="text-slate-400">Хүлээн авах данс: </span>
+              {site?.bank_account
+                ? <b className="font-mono">{site.bank_name} {site.bank_account}
+                    {site.bank_account_name ? ` · ${site.bank_account_name}` : ''}</b>
+                : <span className="text-amber-400">данс тохируулаагүй — Тохиргоо → Зогсоол → Засах</span>}
+            </div>
+          )}
           {canAct && (
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={() => onPay('CASH')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
-                <Banknote size={16} /> Бэлнээр
-              </button>
+            <div className={`grid gap-2 ${canTransfer && showCash ? 'grid-cols-3' : 'grid-cols-2'}`}>
+              {/* Online operator: Бэлнээрийн ОРОНД Дансаар (шилжүүлэг) товч */}
+              {canTransfer && (
+                <button onClick={() => onPay('TRANSFER')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
+                  <Landmark size={16} /> Дансаар
+                </button>
+              )}
+              {showCash && (
+                <button onClick={() => onPay('CASH')} disabled={busy || fee?.is_free}
+                  className={`${canTransfer ? 'btn-secondary' : 'btn-primary'} justify-center`}>
+                  <Banknote size={16} /> Бэлнээр
+                </button>
+              )}
               <button onClick={() => onPay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
                 <QrCode size={16} /> QPay
               </button>

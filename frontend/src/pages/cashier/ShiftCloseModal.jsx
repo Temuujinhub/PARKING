@@ -14,6 +14,8 @@ export default function ShiftCloseModal({ closeModal, setCloseModal, shift, busy
               <span className="font-mono">{fmt(shift.by_provider?.QPAY?.amount || 0)}₮</span></div>
             <div className="flex justify-between"><span className="text-slate-400">Банкны карт (POS)</span>
               <span className="font-mono">{fmt(shift.by_provider?.POS?.amount || 0)}₮</span></div>
+            <div className="flex justify-between"><span className="text-slate-400">Дансаар (шилжүүлэг)</span>
+              <span className="font-mono">{fmt(shift.by_provider?.TRANSFER?.amount || 0)}₮</span></div>
             <div className="flex justify-between"><span className="text-slate-400">Бэлэн</span>
               <span className="font-mono">{fmt(shift.by_provider?.CASH?.amount || 0)}₮</span></div>
             <div className="flex justify-between border-t border-surface-border/50 pt-1.5 font-semibold">
