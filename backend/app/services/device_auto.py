@@ -76,6 +76,12 @@ def ensure_lane_barriers(db: Session) -> dict:
                       lane_no=c.lane_no, lane_dir=c.lane_dir, auto_open=False,
                       nested_inner=bool(c.nested_inner),
                       device_key=f"barrier-{secrets.token_hex(8)}"))
+        # ЗААВАЛ flush: SessionLocal нь autoflush=False тул flush хийхгүй бол
+        # дөнгөж нэмсэн хаалт ДАРААГИЙН давталтын query-д ХАРАГДАХГҮЙ бөгөөд
+        # нэг чиглэлд хэдэн камер байна, төдөн хаалт үүснэ. Рашбулаг ЭТТ-д
+        # 1/entry эгнээнд 3 камер байсан тул 3 «Орох хаалт (авто)» үүсч байв
+        # (2026-08-07 туршилтаар баригдсан).
+        db.flush()
         created += 1
     if restored or created:
         db.commit()
