@@ -823,6 +823,13 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
                 val = encrypt_secret(val)  # DB-д ил бичихгүй
             setattr(device, k, val)
     _audit(db, user, "UPDATE", "device", device_id, body)
+    # Камерыг ӨӨР ЗОГСООЛ руу зөөх / чиглэлийг нь солих үед тэр зогсоолд хаалт
+    # байхгүй байж болно. Өмнө нь энэ баталгаажуулалт зөвхөн ШИНЭЭР үүсгэхэд
+    # ажилладаг байсан тул дамжин зогсоол тохируулахаар камераа зөөвөл шинэ
+    # зогсоол хаалтгүй үлдэж, дугаар уншсан ч юу ч нээгддэггүй байв.
+    if device.device_type == "camera" and device.status == "active":
+        from ..services.device_auto import ensure_lane_barriers
+        ensure_lane_barriers(db)
     db.commit()
     return to_dict(device)
 
