@@ -229,6 +229,10 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_sites_parent ON parking_sites (parent_site_id)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paused_minutes INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paused_since TIMESTAMP",
+
+    # v3.6 — Давхар зогсоолын ДОТООД хаалт НЭГ зогсоол дотор. Доторх камерууд
+    # session нээхгүй/хаахгүй, зөвхөн төлбөрийн тоолуурыг зогсоож/үргэлжлүүлнэ.
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS nested_inner BOOLEAN NOT NULL DEFAULT false",
 ]
 
 

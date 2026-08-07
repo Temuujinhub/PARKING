@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import Device, LprEvent
-from ..session_logic import handle_entry, handle_exit, normalize_plate, strip_images
+from ..session_logic import (handle_entry, handle_exit, handle_inner_pass,
+                             normalize_plate, strip_images)
 
 log = logging.getLogger("parking.lpr")
 
@@ -159,7 +160,11 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         # Дугаар танигдмагц хаалт нээх хүртэлх БҮТЭН хугацааг хэмжинэ — «удаан
         # нээгдэж байна» гомдлыг лог дээрээс тоогоор шалгах боломжтой болно
         _t0 = _time.monotonic()
-        if device.lane_dir == "exit":
+        if device.nested_inner:
+            # Давхар зогсоолын ДОТООД хаалт — session нээхгүй/хаахгүй, зөвхөн
+            # төлбөрийн тоолуурыг зогсоож/үргэлжлүүлээд хаалтаа нээнэ
+            res = await handle_inner_pass(db, device, plate, conf, event)
+        elif device.lane_dir == "exit":
             res = await handle_exit(db, device, plate, conf, event)
         else:
             res = await handle_entry(db, device, plate, conf, event)
@@ -210,7 +215,9 @@ async def simulate_lpr(body: dict, db: Session = Depends(get_db)):
     # Бодит callback-той ижил хугацааны хэмжилт — оношилгоонд simulate-аар
     # хэмжсэн үзүүлэлт бодитыг төлөөлнө
     _t0 = _time.monotonic()
-    if device.lane_dir == "exit":
+    if device.nested_inner:
+        res = await handle_inner_pass(db, device, plate, conf, raw)
+    elif device.lane_dir == "exit":
         res = await handle_exit(db, device, plate, conf, raw)
     else:
         res = await handle_entry(db, device, plate, conf, raw)

@@ -48,25 +48,33 @@ def ensure_lane_barriers(db: Session) -> dict:
         # таарахгүйгээс давхар хаалт үүсгэхээ больсон (2026-08-02: TESTZOGSOOL-д
         # орох/гарах бүрд 2 хаалт үүсчихсэн байсан). Ихэнх зогсоол нэг чиглэлд
         # нэг хаалттай (камер+хаалт+LED цогц төхөөрөмж).
-        active_bar = db.query(Device).filter(
-            Device.site_id == c.site_id, Device.device_type == "barrier",
-            Device.lane_dir == c.lane_dir, Device.status == "active").first()
+        #
+        # ГАДНАХ: ДОТООД (давхар зогсоолын) камерт энэ дүрэм ҮЙЛЧЛЭХГҮЙ — доторх
+        # хаалт нь гаднахаас БИЕ ДААСАН физик хаалт тул өөрийн эгнээнд өөрийн
+        # хаалттай байх ёстой. Тиймээс ижил nested_inner + ижил эгнээгээр хайна.
+        _match = [Device.site_id == c.site_id, Device.device_type == "barrier",
+                  Device.lane_dir == c.lane_dir,
+                  Device.nested_inner.is_(bool(c.nested_inner))]
+        if c.nested_inner:
+            _match.append(Device.lane_no == c.lane_no)
+        active_bar = db.query(Device).filter(*_match, Device.status == "active").first()
         if active_bar:
             continue
         # 1) Устгагдсан хос байвал сэргээнэ (device_key, тохиргоо хэвээр)
-        deleted_bar = (db.query(Device).filter(
-            Device.site_id == c.site_id, Device.device_type == "barrier",
-            Device.lane_dir == c.lane_dir, Device.status == "deleted")
-            .order_by(Device.created_at.desc()).first())
+        deleted_bar = (db.query(Device).filter(*_match, Device.status == "deleted")
+                       .order_by(Device.created_at.desc()).first())
         if deleted_bar:
             deleted_bar.status = "active"
             restored += 1
             continue
         # 2) Огт байхгүй бол камерынхаа эгнээнд шинээр үүсгэнэ
         name = "Орох хаалт" if c.lane_dir == "entry" else "Гарах хаалт"
+        if c.nested_inner:
+            name = "Дотор " + name.lower()
         db.add(Device(site_id=c.site_id, name=f"{name} (авто)", device_type="barrier",
                       vendor="Dahua", model="DZBL-A / DZE-BL", ip_address="",
                       lane_no=c.lane_no, lane_dir=c.lane_dir, auto_open=False,
+                      nested_inner=bool(c.nested_inner),
                       device_key=f"barrier-{secrets.token_hex(8)}"))
         created += 1
     if restored or created:

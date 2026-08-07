@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .billing import calculate_fee
@@ -390,6 +391,18 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     return cmd.status == "SUCCESS"
 
 
+def _inner_lane_devices(site_id: str):
+    """Зогсоолын ДОТООД (давхар зогсоолын) хаалтны төхөөрөмжүүдийн id-ийн subquery.
+
+    Давхар уншилтын (dedup) шалгалтад хэрэглэнэ: доторх хаалтны уншилт нь ГАДНА
+    орох/гарах уншилтыг «давхар» болгож залгих ёсгүй. Эс бол машин доторх
+    зогсоолоос гараад шууд гадна гарцад ирэхэд гарах уншилт нь доторхтойгоо
+    давхцаж, session хаагдалгүй машин гацна (2026-08-07).
+    """
+    return select(Device.id).where(Device.site_id == site_id,
+                                   Device.nested_inner.is_(True))
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict,
                        allow_open: bool = True) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол).
@@ -411,6 +424,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     recent_plates = [
         rp for (rp,) in db.query(LprEvent.plate_number).filter(
             LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+            LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
         ).all()
@@ -430,6 +444,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # хамгийн зөв) уншилтаар засна: 1101ЭН → 1310ХЭН → 7370ХЭН гэж нийлдэг.
     burst_prev = (db.query(LprEvent)
                   .filter(LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+                          LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
                           LprEvent.accepted.is_(True),
                           LprEvent.created_at >= now - timedelta(seconds=settings.entry_burst_seconds))
                   .order_by(LprEvent.created_at.desc()).first())
@@ -564,6 +579,60 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
 
 
+async def handle_inner_pass(db: Session, device: Device, plate: str, confidence: float,
+                            raw: dict, allow_open: bool = True) -> dict:
+    """ДОТООД (давхар) хаалтны event — НЭГ зогсоол доторх жижиг зогсоол.
+
+    Ийм камер (device.nested_inner=True) session НЭЭХГҮЙ, ХААХГҮЙ. Зөвхөн:
+      • lane_dir=entry → доторх зогсоолд орлоо   → төлбөрийн тоолуур ЗОГСОНО
+      • lane_dir=exit  → доторх зогсоолоос гарлаа → тоолуур ҮРГЭЛЖИЛНЭ
+    Дараа нь өөрийнхөө эгнээний хаалтыг нээнэ.
+
+    Гадна орох уншилт алдагдсан (идэвхтэй session алга) машиныг ЗААВАЛ
+    нэвтрүүлнэ — хасах хугацаа байхгүй болохоос доторх хаалт нь машиныг
+    гацаах ёсгүй. Тэр машин гарцдаа энгийнээр төлбөр төлнө.
+    """
+    from .services.nested import cap_minutes, pause_session, resume_session, same_site_session
+
+    now = datetime.utcnow()
+    site = db.get(ParkingSite, device.site_id)
+    session = same_site_session(db, device.site_id, plate)
+    entering = device.lane_dir != "exit"
+
+    if entering:
+        changed = pause_session(session, now)
+        action = "inner_entry"
+    else:
+        changed = bool(resume_session(session, now, cap_minutes(site)))
+        action = "inner_exit"
+
+    db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
+                    lane_dir=device.lane_dir, confidence=confidence, accepted=True,
+                    raw=strip_images(raw)))
+    db.commit()
+
+    if session is None:
+        log.info("[nested] %s: дотоод %s хаалт — зогсоолд идэвхтэй бүртгэл алга, "
+                 "тоолуур хөндөхгүй нэвтрүүлэв", plate, "орох" if entering else "гарах")
+
+    barrier_opened = False
+    if allow_open and device.auto_open:
+        barrier = _find_barrier(db, device.site_id, device)
+        if barrier:
+            cmd = await open_barrier(db, barrier, session.id if session else None,
+                                     action, plate=plate)
+            barrier_opened = cmd.status == "SUCCESS"
+
+    notify(device.site_id, "INNER_PASS", {
+        "session_id": session.id if session else None, "plate": plate,
+        "lane_dir": device.lane_dir, "paused": bool(session and session.paused_since),
+        "paused_minutes": int(session.paused_minutes or 0) if session else 0,
+        "barrier_opened": barrier_opened,
+    })
+    return {"action": action, "session_id": session.id if session else None,
+            "counter_changed": changed, "barrier_opened": barrier_opened}
+
+
 async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict,
                       allow_open: bool = True) -> dict:
     """Гарах камерын event:
@@ -583,6 +652,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     recent_plates = [
         rp for (rp,) in db.query(LprEvent.plate_number).filter(
             LprEvent.site_id == site_id, LprEvent.lane_dir == "exit",
+            LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
         ).all()
@@ -904,6 +974,10 @@ def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | No
     q = db.query(Device).filter(
         Device.site_id == site_id, Device.device_type == "barrier", Device.status == "active",
     )
+    # ДОТООД (давхар зогсоолын) хаалт нь гаднахаас БИЕ ДААСАН — хооронд нь солиж
+    # болохгүй. Доторх камерын команд гадна хаалтыг нээвэл машин зогсоолоос
+    # шууд гарч, төлбөр төлөхгүй өнгөрнө.
+    q = q.filter(Device.nested_inner.is_(bool(near_device.nested_inner)))
     barrier = q.filter(Device.lane_no == near_device.lane_no,
                        Device.lane_dir == near_device.lane_dir).first()
     return barrier or q.first()

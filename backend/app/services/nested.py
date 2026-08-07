@@ -144,6 +144,30 @@ def close_open_pause(db: Session, s: ParkingSession, at: datetime) -> int:
     return mins
 
 
+def same_site_session(db: Session, site_id: str, plate: str) -> ParkingSession | None:
+    """НЭГ зогсоол доторх давхар зогсоолд хэрэглэнэ — тухайн зогсоолын идэвхтэй session."""
+    return (db.query(ParkingSession)
+            .filter(ParkingSession.site_id == site_id,
+                    ParkingSession.plate_number == plate,
+                    ParkingSession.status.in_(_ACTIVE))
+            .order_by(ParkingSession.entry_time.desc()).first())
+
+
+def pause_session(s: ParkingSession | None, at: datetime) -> bool:
+    """Тоолуурыг зогсооно. Давхар уншилтад найдвартай (зогссоныг дахин эхлүүлэхгүй)."""
+    if s is None or s.paused_since:
+        return False
+    s.paused_since = at
+    return True
+
+
+def resume_session(s: ParkingSession | None, at: datetime, cap: int) -> int:
+    """Тоолуурыг үргэлжлүүлж, зогссон минутыг хуримтлуулна."""
+    if s is None or not s.paused_since:
+        return 0
+    return settle_pause(s, at, cap)
+
+
 def inside_nested_count(db: Session, site_id: str) -> int:
     """Тухайн ГАДНА зогсоолын машинуудаас хэд нь ОДОО доторх зогсоолд байгаа вэ."""
     return (db.query(ParkingSession)

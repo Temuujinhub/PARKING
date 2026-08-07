@@ -95,6 +95,13 @@ export default function DevicesSection() {
                         <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
                           title={d.ip_conflict}>⚠ давхцал</span>
                       )}
+                      {/* Дотоод хаалт нь зогсолт эхлүүлдэггүй — жагсаалтаас шууд ялгаж харагдана */}
+                      {d.nested_inner && (
+                        <span className="ml-1.5 text-[10px] text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                          title="Дотоод (давхар) зогсоолын хаалт. Зогсолт эхлүүлэхгүй/дуусгахгүй — зөвхөн төлбөрийн тоолуурыг зогсоож/үргэлжлүүлнэ.">
+                          дотоод
+                        </span>
+                      )}
                     </td>
                     <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
                     <td className="td text-xs">{d.model}</td>
@@ -206,6 +213,29 @@ export default function DevicesSection() {
                   onChange={(e) => setEditing({ ...editing, auto_open: e.target.checked })} />
                 Дугаар уншмагц хаалтыг автоматаар нээх
               </label>
+            )}
+            {/* Давхар зогсоол НЭГ зогсоол дотор: доторх талбайн орох/гарах камер.
+                Session нээхгүй/хаахгүй — зөвхөн төлбөрийн тоолуурыг зогсоож/
+                үргэлжлүүлнэ. Зогсоолыг хоёр болгож салгах шаардлагагүй. */}
+            {editing.device_type === 'camera' && (
+              <div className="rounded-lg border border-slate-700 px-3 py-2">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={!!editing.nested_inner}
+                    onChange={(e) => setEditing({ ...editing, nested_inner: e.target.checked })} />
+                  Дотоод (давхар) зогсоолын камер
+                </label>
+                <div className="text-[11px] text-slate-500 mt-1.5">
+                  Нэг талбай дотор жижиг зогсоол байвал (гадна талбай → доторх зогсоол)
+                  доторх хаалтны камеруудад үүнийг тэмдэглэнэ. Ийм камер зогсолт
+                  {' '}<b>эхлүүлэхгүй, дуусгахгүй</b> — зөвхөн:
+                  <br />• <b>Орох</b> чиглэл → машин дотогш оров, төлбөрийн тоолуур <b>зогсоно</b>
+                  <br />• <b>Гарах</b> чиглэл → машин гадагш гарав, тоолуур <b>үргэлжилнэ</b>
+                  <br />Хаалт нь хэвийн нээгдэнэ. Доторх хаалт өөрийн эгнээний дугаартай
+                  байх ёстой (гаднахтай давхцуулахгүй) — доторх хаалт автоматаар үүснэ.
+                  <br />Тоолуур зогсох дээд хугацааг Тохиргоо → Зогсоол → Засах дээрээс
+                  тохируулна (хоосон = 4 цаг).
+                </div>
+              </div>
             )}
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>

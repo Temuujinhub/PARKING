@@ -773,7 +773,7 @@ def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), 
                       body.get("lane_no"), body.get("lane_dir"))
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
-                        "lane_no", "lane_dir", "auto_open", "username", "password")
+                        "lane_no", "lane_dir", "auto_open", "nested_inner", "username", "password")
                        if k in body})
     device.password = encrypt_secret(device.password)  # DB-д ил бичихгүй
     device.device_key = f"{body.get('device_type','dev')}-{secrets.token_hex(8)}"
@@ -813,7 +813,7 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
                       body.get("lane_no", device.lane_no),
                       body.get("lane_dir", device.lane_dir), exclude_id=device_id)
     for k in ("name", "device_type", "vendor", "model", "ip_address", "lane_no",
-              "lane_dir", "auto_open", "status", "site_id", "username", "password"):
+              "lane_dir", "auto_open", "nested_inner", "status", "site_id", "username", "password"):
         if k in body:
             val = body[k]
             # Нэвтрэх мэдээллийг хоосноор илгээвэл цэвэрлэнэ (глобал .env руу уналт)

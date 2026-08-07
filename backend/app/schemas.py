@@ -118,6 +118,7 @@ class DeviceCreate(_In):
     lane_no: int = 1
     lane_dir: str = "entry"
     auto_open: bool = True
+    nested_inner: bool | None = None
     username: str | None = None
     password: str | None = None
 
@@ -131,6 +132,7 @@ class DeviceUpdate(_In):
     lane_no: int | None = None
     lane_dir: str | None = None
     auto_open: bool | None = None
+    nested_inner: bool | None = None
     status: str | None = None
     site_id: str | None = None
     username: str | None = None

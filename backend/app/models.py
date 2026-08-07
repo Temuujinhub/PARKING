@@ -147,6 +147,12 @@ class Device(Base):
     lane_no = Column(Integer, default=1)
     lane_dir = Column(String(10), default="entry")  # entry, exit, both
     auto_open = Column(Boolean, nullable=False, default=True)  # entry lane: дугаар уншмагц автоматаар нээх
+    # Давхар (nested) зогсоолын ДОТООД хаалт — НЭГ зогсоол доторх жижиг зогсоол.
+    # Ийм камер session НЭЭХГҮЙ, ХААХГҮЙ: зөвхөн төлбөрийн тоолуурыг зогсоож/
+    # үргэлжлүүлээд хаалтаа нээнэ (lane_dir=entry → зогсооно, exit → үргэлжилнэ).
+    # Доторх зогсоолыг ТУСДАА зогсоол болгохыг хүсэхгүй үед (нэг талбай, нэг QR,
+    # нэг тайлан) үүнийг ашиглана — өөр хувилбар нь site.parent_site_id.
+    nested_inner = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     status = Column(String(30), nullable=False, default="active")
     # Төхөөрөмжийн ӨӨРИЙН нэвтрэх мэдээлэл (заавал биш). Хоосон бол .env-ийн
     # глобал camera_username/password руу уналт хийнэ — зогсоол бүр өөр нууц
