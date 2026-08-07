@@ -164,11 +164,24 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
         .group_by(ParkingSession.site_id).all())
     tmap = {t.id: t for t in db.query(Tenant).all()}
+    # Ижил нэртэй зогсоол — БҮХ зогсоолоор (шүүлтээс үл хамааран). Кодыг нь давхардуулах
+    # боломжгүй (unique) ч нэр давхардвал оператор/тайлан дээр андуурч, буруу зогсоолын
+    # төхөөрөмж тохируулах эрсдэлтэй. Хадгалахыг зогсоохгүй — production дээр аль хэдийн
+    # ийм хос байдаг (жишээ нь «Хангарьд» ×2) — зөвхөн анхааруулна.
+    name_counts: dict[str, int] = {}
+    for (nm,) in db.query(ParkingSite.name).all():
+        key = (nm or "").strip().lower()
+        name_counts[key] = name_counts.get(key, 0) + 1
     out = []
     for s in sites:
         occupied = occupied_by_site.get(s.id, 0)
         _t = tmap.get(s.tenant_id)
+        _dup_name = name_counts.get((s.name or "").strip().lower(), 0) > 1
         out.append(to_dict(s, extra={
+            "name_conflict": (f"«{s.name}» гэсэн нэртэй зогсоол {name_counts[(s.name or '').strip().lower()]} "
+                              f"ширхэг байна — код нь ялгаатай ({s.site_code}) ч жагсаалт, "
+                              f"тайлан, төхөөрөмжийн тохиргоо дээр андуурахад амархан. "
+                              f"Нэрийг ялгах эсвэл илүүдлийг нэгтгэнэ үү.") if _dup_name else None,
             "tenant_name": getattr(_t, "name", None),
             "tenant_qpay_set": bool(_t and (getattr(_t, "qpay_username", None) or "").strip()),
             "occupied": occupied,
@@ -323,6 +336,13 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
+    # site_code нь QR URL-д ордог тул давхардвал төлбөр өөр зогсоол руу очно.
+    # DB-д unique боловч энд шалгахгүй бол IntegrityError 500 болж хэрэглэгчид
+    # ойлгомжгүй алдаа гарна (create_site дээр аль хэдийн ийм шалгуур бий).
+    if body.get("site_code") and body["site_code"] != site.site_code:
+        if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"],
+                                        ParkingSite.id != site_id).first():
+            raise HTTPException(400, f"«{body['site_code']}» код өөр зогсоолд бүртгэлтэй байна")
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
               "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
@@ -562,6 +582,48 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         db.query(LprEvent.device_id, func.max(LprEvent.created_at))
         .filter(LprEvent.device_id.in_(cam_ids), LprEvent.accepted.is_(True))
         .group_by(LprEvent.device_id).all()) if cam_ids else {}
+    # Ижил IP-тэй хоёр камерын бүртгэл — ХАМАГ зогсоолоор (шүүлтээс үл хамааран),
+    # учир нь эрсдэл нь яг зогсоол ХООРОНДЫН давхардалд байдаг: нэг зогсоолын
+    # буруу нууц үг камерыг түгжээд нөгөөгийн хаалтыг зогсооно.
+    dup_by_ip: dict[str, list[Device]] = {}
+    for c in db.query(Device).filter(Device.device_type == "camera",
+                                     Device.status != "deleted",
+                                     Device.ip_address.isnot(None),
+                                     Device.ip_address != "").all():
+        dup_by_ip.setdefault(c.ip_address, []).append(c)
+
+    # Нэг зогсоол+эгнээ+чиглэлд хэдэн ижил төрлийн төхөөрөмж байна
+    dup_by_lane: dict[tuple, list[Device]] = {}
+    for c in db.query(Device).filter(Device.device_type.in_(("camera", "barrier")),
+                                     Device.status != "deleted").all():
+        dup_by_lane.setdefault((c.site_id, c.device_type, c.lane_no, c.lane_dir), []).append(c)
+
+    def _conflict_note(d: Device) -> str | None:
+        notes = []
+        ip_others = ([c for c in dup_by_ip.get(d.ip_address or "", []) if c.id != d.id]
+                     if d.device_type == "camera" else [])
+        if ip_others:
+            parts = []
+            for c in ip_others:
+                name = (c.site.name if c.site else None) or c.site_id
+                # Эрхгүй зогсоолын нэрийг задлахгүй — давхардсан гэдгийг л мэдэгдэнэ
+                parts.append(f"«{name}» → {c.name}" if not allowed or c.site_id in allowed
+                             else "өөр зогсоол")
+            notes.append(
+                f"IP {d.ip_address} нь {', '.join(parts)}-тэй давхцаж байна. Нэг камер хоёр "
+                f"мөрөнд бүртгэлтэй бол нэвтрэх нууц үг зөрж, камер түгжигдэн хаалт "
+                f"нээгдэхгүй болох эрсдэлтэй — илүүдэл бүртгэлийг устгана уу.")
+        lane_others = [c for c in dup_by_lane.get(
+            (d.site_id, d.device_type, d.lane_no, d.lane_dir), []) if c.id != d.id]
+        if lane_others:
+            what = "камер" if d.device_type == "camera" else "хаалт"
+            notes.append(
+                f"{d.lane_no}-р эгнээний ижил чиглэлд өөр {what} бас байна "
+                f"({', '.join(c.name for c in lane_others)}). Хаалт аль камер руу команд "
+                f"явуулахаа мэдэхгүй болж, санамсаргүйгээр нэг удаа ажиллаад дараагийнд "
+                f"нь унана — эгнээ/чиглэлийг ялгана уу.")
+        return "\n\n".join(notes) or None
+
     from ..services.camera_sessions import foreign_info
     out = []
     for d in devices:
@@ -573,16 +635,93 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         who = foreign_info(d.id) if d.device_type == "camera" else None
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
+                                     "ip_conflict": _conflict_note(d),
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
                                      "foreign_sessions": (who or {}).get("sessions") or [],
                                      "foreign_checked_at": (who or {}).get("checked_at")}))
     return out
 
 
+def _conflicting_camera(db: Session, ip: str | None, device_type: str | None,
+                        exclude_id: str | None = None) -> Device | None:
+    """Ижил IP-тэй ӨӨР камерын бүртгэл байвал буцаана (устгагдсаныг тооцохгүй).
+
+    Нэг физик камер хоёр мөрөнд бүртгэгдвэл нэвтрэх нэр/нууц үг нь зөрж болно.
+    Production дээр (2026-08-07) 10.0.111.12/.13 хос камер «Туушин» болон
+    «Номадс» гэсэн ХОЁР зогсоолд өөр өөр нэвтрэлтээр бүртгэгдсэн байв: буруу
+    нууц үгтэй зогсоолын урсгал камерын remainLoginTimes-ыг шавхаж, камер
+    өөрийгөө 300 секунд түгжсэн — тэр хугацаанд нөгөө зогсоолын ХААЛТ ч
+    нээгдэхээ больсон. Тиймээс шинэ давхардлыг хадгалахгүй.
+
+    Зөвхөн камер хооронд шалгана: all-in-one ITC-д хаалт нь камерынхаа релеэр
+    ажилладаг тул хаалтын мөр камерынхаа IP-г зориуд хуваалцаж болно.
+    """
+    ip = (ip or "").strip()
+    if not ip or device_type != "camera":
+        return None
+    q = db.query(Device).filter(Device.device_type == "camera",
+                                Device.ip_address == ip,
+                                Device.status != "deleted")
+    if exclude_id:
+        q = q.filter(Device.id != exclude_id)
+    return q.first()
+
+
+def _conflicting_lane(db: Session, site_id: str | None, device_type: str | None,
+                      lane_no, lane_dir: str | None,
+                      exclude_id: str | None = None) -> Device | None:
+    """Нэг зогсоолын нэг эгнээ+чиглэлд хоёр дахь ижил төрлийн төхөөрөмж байвал буцаана.
+
+    `_resolve_device` нь хаалтыг «ижил эгнээний камер»-аар олдог тул нэг эгнээнд
+    хоёр камер бүртгэлтэй бол аль нь сонгогдох нь тодорхойгүй болно — нэг удаа
+    ажиллаад дараагийнд нь өөр камер руу очиж унана (2026-08-07 Туушин/Рашбулаг).
+    """
+    if device_type not in ("camera", "barrier") or lane_no is None or not lane_dir:
+        return None
+    q = db.query(Device).filter(Device.site_id == site_id,
+                                Device.device_type == device_type,
+                                Device.lane_no == lane_no,
+                                Device.lane_dir == lane_dir,
+                                Device.status != "deleted")
+    if exclude_id:
+        q = q.filter(Device.id != exclude_id)
+    return q.first()
+
+
+def _assert_lane_free(db: Session, site_id: str | None, device_type: str | None,
+                      lane_no, lane_dir: str | None, exclude_id: str | None = None):
+    other = _conflicting_lane(db, site_id, device_type, lane_no, lane_dir, exclude_id)
+    if other is None:
+        return
+    what = "камер" if device_type == "camera" else "хаалт"
+    dir_ru = "орох" if lane_dir == "entry" else "гарах" if lane_dir == "exit" else lane_dir
+    raise HTTPException(409, (
+        f"Энэ зогсоолын {lane_no}-р эгнээний «{dir_ru}» чиглэлд «{other.name}» гэсэн {what} "
+        f"аль хэдийн бүртгэлтэй байна. Нэг эгнээнд хоёр {what} байвал хаалт аль руу нь "
+        f"команд явуулахаа мэдэхгүй болж, санамсаргүй байдлаар нэг удаа ажиллаад "
+        f"дараагийнд нь унана. Эгнээний дугаар эсвэл чиглэлийг өөр болгоно уу."))
+
+
+def _assert_ip_free(db: Session, ip: str | None, device_type: str | None,
+                    exclude_id: str | None = None):
+    other = _conflicting_camera(db, ip, device_type, exclude_id)
+    if other is None:
+        return
+    site = (other.site.name if other.site else None) or other.site_id
+    raise HTTPException(409, (
+        f"{(ip or '').strip()} — энэ IP «{site}» зогсоолын «{other.name}» камерт аль хэдийн "
+        f"бүртгэлтэй байна. Нэг камерыг хоёр мөрөнд бүртгэвэл нэвтрэх нууц үг зөрж, "
+        f"камер өөрийгөө түгжиж хаалт нээгдэхээ болих эрсдэлтэй. Хуучин бүртгэлийг "
+        f"устгасны дараа эсвэл өөр IP-тэйгээр хадгална уу."))
+
+
 @router.post("/devices")
 def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     body = payload.dump()
     enforce_site(user, body.get("site_id"))
+    _assert_ip_free(db, body.get("ip_address"), body.get("device_type"))
+    _assert_lane_free(db, body.get("site_id"), body.get("device_type"),
+                      body.get("lane_no"), body.get("lane_dir"))
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
                         "lane_no", "lane_dir", "auto_open", "username", "password")
@@ -614,6 +753,16 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
     enforce_site(user, device.site_id)
     if body.get("site_id"):
         enforce_site(user, body["site_id"])
+    # Хадгалахаас ӨМНӨ шалгана — өөрчлөлт хийсний дараа шалгавал autoflush нь
+    # шинэ IP-г DB рүү бичээд өөрийгөө «давхардал» болгож харагдуулна.
+    _assert_ip_free(db, body.get("ip_address", device.ip_address),
+                    body.get("device_type", device.device_type), exclude_id=device_id)
+    # Устгагдсаныг сэргээж байгаа бол ч шалгана — сэргээсэн хаалт/камер эгнээндээ
+    # хоёр дахь нь болж орж ирвэл дахин тодорхойгүй байдал үүснэ.
+    _assert_lane_free(db, body.get("site_id", device.site_id),
+                      body.get("device_type", device.device_type),
+                      body.get("lane_no", device.lane_no),
+                      body.get("lane_dir", device.lane_dir), exclude_id=device_id)
     for k in ("name", "device_type", "vendor", "model", "ip_address", "lane_no",
               "lane_dir", "auto_open", "status", "site_id", "username", "password"):
         if k in body:

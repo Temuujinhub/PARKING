@@ -12,7 +12,11 @@ export default function Barriers() {
   // Эхний зогсоолыг автоматаар сонгоно (оператор 1 зогсоолтой тул шууд өөрийнх нь гарна)
   useEffect(() => { if (!siteId && sites.length) setSiteId(sites[0].id) }, [sites])
   const { data: devices, reload: reloadDevices } = useFetch('/api/admin/devices', { initial: [] })
-  const { data: commands, reload: reloadCommands } = useFetch('/api/barriers/commands?limit=50', { initial: [] })
+  // ЗААВАЛ site_id-тай: зогсоол бүрт «Орох хаалт (авто)» гэсэн ИЖИЛ нэртэй хаалт
+  // байдаг тул шүүлтгүй лог нь өөр зогсоолын командыг энэ зогсоолынх мэт харуулж,
+  // «нэг нь ажиллаж нөгөө нь ажиллахгүй байна» гэсэн худал дүр зураг үүсгэдэг байв.
+  const { data: commands, reload: reloadCommands } = useFetch(
+    siteId ? `/api/barriers/commands?limit=50&site_id=${siteId}` : null, { initial: [] })
   const load = () => { reloadDevices(); reloadCommands() }
 
   const command = async (id, action, body = {}, okMsg = 'Амжилттай') => {

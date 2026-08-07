@@ -98,7 +98,14 @@ export default function SitesSection() {
       <Table headers={['Нэр', 'Код', 'Бүс', ...(isSuper ? ['Түрээслэгч'] : []), 'Багтаамж', 'Зогсож буй', 'Сул', 'Тариф', 'QR', '']} empty={rows.length === 0}>
         {rows.map((s) => (
           <tr key={s.id}>
-            <td className="td font-medium">{s.name}</td>
+            <td className="td font-medium">
+              {s.name}
+              {/* Ижил нэртэй өөр зогсоол байна — төхөөрөмж тохируулахад андуурахад амархан */}
+              {s.name_conflict && (
+                <span className="ml-1.5 text-[10px] text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                  title={s.name_conflict}>⚠ ижил нэр</span>
+              )}
+            </td>
             <td className="td font-mono">{s.site_code}</td>
             <td className="td">{s.zone_code}</td>
             {/* Оноогоогүй (өнчин) зогсоол хэний ч жагсаалтад харагдахгүй тул илт анхааруулна */}

@@ -89,6 +89,12 @@ export default function DevicesSection() {
                     <td className="td font-medium">
                       {d.name}
                       {d.status === 'deleted' && <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded">устгагдсан</span>}
+                      {/* IP эсвэл эгнээ давхардсан — хаалт аль камер руу явахаа
+                          мэдэхгүй болох, камер түгжигдэх эрсдэлтэй */}
+                      {d.ip_conflict && (
+                        <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                          title={d.ip_conflict}>⚠ давхцал</span>
+                      )}
                     </td>
                     <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
                     <td className="td text-xs">{d.model}</td>

@@ -242,14 +242,28 @@ def _resolve_device(db: Session, device: Device) -> tuple[str | None, Device | N
     авахын тулд (камер бүр өөр нууц үгтэй байж болно)."""
     if device.ip_address:
         return device.ip_address, device
+    # УСТГАСАН камерыг ХЭЗЭЭ Ч сонгохгүй: устгал нь зөөлөн (status='deleted') тул
+    # шүүхгүй бол админ UI-аас устгасан хуучин бүртгэл хаалтыг чимээгүй барьсаар
+    # байдаг (2026-08-07 Туушин: устгасан 10.0.111.10 хэвээр сонгогдож байв).
     cams = db.query(Device).filter(
         Device.site_id == device.site_id, Device.device_type == "camera",
+        Device.status != "deleted",
         Device.ip_address.isnot(None), Device.ip_address != "",
-    ).all()
-    # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв
+    ).order_by(Device.created_at, Device.id).all()   # тодорхой эрэмбэ — доор үзнэ үү
+    # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв. Нэг эгнээнд олон камер
+    # бүртгэлтэй байвал ЧИГЛЭЛ (lane_dir) таарсныг нь эхэлж авна: өмнө нь эрэмбэгүй
+    # `same_lane[0]` байсан тул дуудалт бүрд ӨӨР камер сонгогдож, нэг удаа
+    # ажиллаад дараагийнд нь унадаг «санамсаргүй» хэв маяг үүсгэж байв.
     same_lane = [c for c in cams if c.lane_no == device.lane_no]
     if same_lane:
-        return same_lane[0].ip_address, same_lane[0]
+        best = next((c for c in same_lane if c.lane_dir == device.lane_dir), same_lane[0])
+        if len(same_lane) > 1:
+            log.warning("%s (%s, эгнээ %s/%s): ижил эгнээнд %d камер бүртгэлтэй — «%s» (%s)-г "
+                        "сонголоо. Тохиргоо → Төхөөрөмж дээр эгнээ/чиглэлийг ялгана уу: %s",
+                        device.name, device.id, device.lane_no, device.lane_dir, len(same_lane),
+                        best.name, best.ip_address,
+                        ", ".join(f"{c.name}({c.ip_address},{c.lane_dir})" for c in same_lane))
+        return best.ip_address, best
     # 2) Зогсоолд ЯГ НЭГ камертай (нэг all-in-one төхөөрөмж орох/гарах хоёуланд) бол түүнийг
     if len(cams) == 1:
         return cams[0].ip_address, cams[0]
@@ -411,6 +425,17 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                       if cmd.status == "SUCCESS":
                           break   # хаалт нээгдчихсэн — дараагийн алдаа түүнийг үгүйсгэхгүй
                       last_err = f"{type(e).__name__}: {str(e)[:300]}"
+                      # ЭРХИЙН алдаанд ДАХИН ОРОЛДОХГҮЙ. Буруу нэвтрэлт дахин
+                      # илгээх нь хэзээ ч амжилтад хүргэхгүй, зөвхөн камерын
+                      # remainLoginTimes-ыг бууруулж ТҮГЖЭЭГ УРТАСГАНА — тэр
+                      # хугацаанд хаалт огт нээгдэхгүй. 2026-08-07 production:
+                      # Туушины камер түгжигдсэн байхад гараар дарах болгонд
+                      # 4 оролдлого явж, түгжээ 17:38:09 → 17:38:18 болж сунгав.
+                      # (Сүлжээний timeout-д дахин оролдох нь хэвээр — тэнд
+                      # дахин оролдлого үнэхээр тусалдаг.)
+                      if _is_auth_error(e):
+                          cmd.response_text = f"{last_err} (эрхийн алдаа — дахин оролдсонгүй)"
+                          break
                       cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
                                            if attempt + 1 < attempts
                                            else f"{last_err} ({attempts} удаа оролдсон)")
