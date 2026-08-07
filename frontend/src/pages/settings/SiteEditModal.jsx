@@ -1,7 +1,13 @@
 // Зогсоол засах modal — үндсэн мэдээлэл + QPay дансны тохиргоо
 import { Field, Modal } from '../../components/ui'
 
-export default function SiteEditModal({ editing, setEditing, templates, tenants, onSubmit, onTest }) {
+export default function SiteEditModal({ editing, setEditing, templates, tenants, sites = [], onSubmit, onTest }) {
+  // Эцэг болж болох зогсоолууд: өөрөө биш, өөрөө дотор зогсоол биш (хоёр давхар
+  // үүрлэлт дэмжигдэхгүй), мөн энэ зогсоол дотроо зогсоол агуулж байвал огт үгүй.
+  const isParentItself = (editing?.child_site_count || 0) > 0
+  const parentOptions = isParentItself ? [] : sites.filter(
+    (s) => s.id !== editing?.id && !s.parent_site_id)
+  const parentName = sites.find((s) => s.id === editing?.parent_site_id)?.name
   return (
     <Modal open={!!editing} onClose={() => setEditing(null)} title="Зогсоол засах">
       {editing && (
@@ -109,6 +115,70 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
               Идэвхжүүлбэл «Бүртгэлтэй машин» жагсаалтад байгаа машинд л орох хаалт
               нээгдэнэ. Бусад машинд хаалт нээгдэхгүй, дэлгэцэнд «Бүртгэлгүй машин»
               гэж гарна.
+            </div>
+          </Field>
+
+          {/* Nested (дамжин) зогсоол: том зогсоолын ДОТОР байрлах жижиг зогсоол.
+              Машин дотор байх хугацаанд ГАДНА зогсоолын төлбөрийн тоолуур зогсоно. */}
+          <details className="rounded-lg border border-slate-700 px-3 py-2"
+            open={!!editing.parent_site_id}>
+            <summary className="cursor-pointer text-sm font-medium py-1">
+              Дамжин зогсоол (энэ зогсоол өөр зогсоолын дотор байна)
+              {editing.parent_site_id
+                ? <span className="ml-2 text-xs text-accent">· {parentName || 'холбогдсон'}</span>
+                : <span className="ml-2 text-xs text-slate-500">· тохируулаагүй</span>}
+            </summary>
+            <div className="mt-2 space-y-3">
+              <Field label="Гадна (эцэг) зогсоол">
+                <select className="input" value={editing.parent_site_id || ''} disabled={isParentItself}
+                  onChange={(e) => setEditing({ ...editing, parent_site_id: e.target.value || null })}>
+                  <option value="">— Энгийн бие даасан зогсоол —</option>
+                  {parentOptions.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>
+                  ))}
+                </select>
+                {isParentItself ? (
+                  <div className="text-[11px] text-amber-400 mt-1">
+                    Энэ зогсоол дотроо {editing.child_site_count} зогсоол агуулж байна —
+                    өөрөө өөр зогсоолын дотор орох боломжгүй (хоёр давхар үүрлэлт).
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Сонгосон үед: машин ЭНЭ зогсоолд байх хугацаанд гадна зогсоолын
+                    төлбөр гүйхгүй. Гадна зогсоолоор дамжиж ороогүй машины төлбөр
+                    энгийнээр бодогдоно. Жагсаалтад аль хэдийн өөр зогсоолын дотор
+                    байгаа зогсоол харагдахгүй.
+                  </div>
+                )}
+              </Field>
+              {editing.parent_site_id && (
+                <Field label="Дамжин зогсох дээд хугацаа (цаг)">
+                  <input className="input" type="number" min="0" placeholder="4 (default)"
+                    value={editing.transit_max_hours ?? ''}
+                    onChange={(e) => setEditing({ ...editing, transit_max_hours: e.target.value })} />
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Энэ зогсоолын ГАРАХ камерт уншигдалгүй үлдвэл гадна талын тоолуур
+                    мөнхөд зогсож машин 0₮-өөр гарах эрсдэлтэй. Тиймээс тоолуур зогсох
+                    хугацааг таслана — түүнээс хэтэрсэн хугацаа гадна талд төлбөртэй.
+                    Хоосон = 4 цаг, 0 = хязгааргүй (болгоомжтой).
+                  </div>
+                </Field>
+              )}
+            </div>
+          </details>
+
+          {/* Дотоод/ажилчдын зогсоол — цаг тооцохгүй. Дамжин зогсоолд ихэвчлэн
+              хамт асаана: доторх зогсоол өөрөө төлбөр авахгүй. */}
+          <Field label="Төлбөр авахгүй зогсоол">
+            <label className="flex items-center gap-2 cursor-pointer select-none py-2">
+              <input type="checkbox" className="w-4 h-4 accent-accent"
+                checked={!!editing.no_charge}
+                onChange={(e) => setEditing({ ...editing, no_charge: e.target.checked })} />
+              <span className="text-sm">Энэ зогсоол цаг тооцохгүй, төлбөр авахгүй</span>
+            </label>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Ажилчдын/дотоод зогсоолд. Бүх машин 0₮-өөр гарна (тариф хамаарахгүй),
+              зогсолт нь тайланд бүртгэгдсэн хэвээр.
             </div>
           </Field>
 

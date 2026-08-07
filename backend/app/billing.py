@@ -1,7 +1,10 @@
 """Төлбөр тооцооллын цөм.
 
 Дүрэм:
+  0. Зогсоол «төлбөр авахгүй» (no_charge) бол — 0₮.
   1. Бүртгэлтэй (гэрээт) жолооч хүчинтэй бол — 0₮.
+  1.5 Доторх (nested) зогсоолд өнгөрүүлсэн хугацаа нийт хугацаанаас ХАСАГДАНА —
+     дараагийн бүх дүрэм үлдсэн хугацаан дээр ажиллана.
   2. free_minutes дотор гарвал — 0₮.
   3. Шатлалын хүснэгтээс (кумулятив) үнэ авна: жишээ 60мин→1000₮, 120мин→2000₮, 180мин→5000₮.
   4. Сүүлийн шатлалаас хэтэрвэл эхэлсэн цаг тутамд extra_hour_price нэмнэ.
@@ -49,14 +52,28 @@ def calculate_fee(
     exit_time: datetime | None = None,
     discount: Discount | None = None,
     is_registered: bool = False,
+    paused_minutes: int = 0,
+    no_charge: bool = False,
 ) -> dict:
-    """Session-ийн төлбөрийг тооцоолно. Бүх дүн ₮ (бүхэл)."""
+    """Session-ийн төлбөрийг тооцоолно. Бүх дүн ₮ (бүхэл).
+
+    paused_minutes — доторх (nested) зогсоолд өнгөрүүлсэн хугацаа. Гадна
+    зогсоолын төлбөрөөс хасагдана: машин доторх зогсоолд байх хугацаанд гадна
+    талын тоолуур зогсох ёстой. `duration_minutes` нь БОДИТ хугацаа хэвээр
+    үлдэнэ (тайлан/жагсаалтад бодит зогсолтыг харуулна), зөвхөн төлбөр
+    тооцогдох хугацаа багасна.
+
+    no_charge — энэ зогсоол огт төлбөр авдаггүй (ажилчдын/дотоод зогсоол).
+    """
     exit_time = exit_time or datetime.utcnow()
     total_minutes = max(0, int((exit_time - entry_time).total_seconds() // 60))
+    paused = max(0, min(int(paused_minutes or 0), total_minutes))
+    billable = total_minutes - paused
 
     result = {
         "duration_minutes": total_minutes,
-        "chargeable_minutes": total_minutes,
+        "paused_minutes": paused,
+        "chargeable_minutes": billable,
         "base_fee": 0.0,
         "discount_amount": 0.0,
         "vat_amount": 0.0,
@@ -65,6 +82,9 @@ def calculate_fee(
         "reason": "",
     }
 
+    if no_charge:
+        result["reason"] = "Төлбөргүй зогсоол"
+        return result
     if is_registered:
         result["reason"] = "Бүртгэлтэй жолооч"
         return result
@@ -72,10 +92,12 @@ def calculate_fee(
         result["reason"] = "Тариф тохируулаагүй"
         return result
 
-    chargeable = total_minutes
-    # Үнэгүй эхний минут
-    if template.free_minutes and total_minutes <= template.free_minutes:
-        result["reason"] = f"Эхний {template.free_minutes} минут үнэгүй"
+    chargeable = billable
+    # Үнэгүй эхний минут — ДАМЖИН хугацааг хассаны ДАРАА шалгана. Тиймээс
+    # доторх зогсоолд удаан байсан машин гадна талдаа үнэгүй хугацаандаа багтана.
+    if template.free_minutes and billable <= template.free_minutes:
+        result["reason"] = (f"Эхний {template.free_minutes} минут үнэгүй"
+                            + (f" (дамжин {paused} мин хасагдсан)" if paused else ""))
         return result
 
     # FREE_MINUTES төрлийн хөнгөлөлт хугацаанаас хасагдана

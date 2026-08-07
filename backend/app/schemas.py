@@ -29,6 +29,10 @@ class SiteCreate(_In):
     auto_close_hours: int | None = None
     entry_only_free_hours: int | None = None
     registered_only: bool | None = None
+    # Nested (дамжин) зогсоол — энэ зогсоол аль зогсоолын ДОТОР байна
+    parent_site_id: str | None = None
+    transit_max_hours: int | None = None
+    no_charge: bool | None = None
     qr_url: str | None = None
     qpay_username: str | None = None
     qpay_password: str | None = None

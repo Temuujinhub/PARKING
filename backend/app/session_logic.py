@@ -217,9 +217,16 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
             # ч тооцоолол зөв хэвээр).
             s.is_registered = True
 
+    # Доторх (nested) зогсоолд өнгөрүүлсэн хугацааг хасна. Session-ийг өөрчлөхгүй
+    # уншина — энэ функц жагсаалт/урьдчилсан тооцоонд ч дуудагддаг.
+    from .services.nested import effective_paused_minutes
+    paused = (effective_paused_minutes(db, s, at) if db is not None
+              else int(getattr(s, "paused_minutes", 0) or 0))
+
     return calculate_fee(
         template, s.entry_time, at,
         discount=s.discount, is_registered=registered,
+        paused_minutes=paused, no_charge=bool(site and getattr(site, "no_charge", False)),
     )
 
 
@@ -498,6 +505,13 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         )
         db.add(session)
         db.flush()
+
+    # Nested: энэ зогсоол өөр зогсоолын ДОТОР бол гадна session-ий төлбөрийн
+    # тоолуурыг зогсооно. Давхар уншилтад найдвартай (аль хэдийн зогссоныг
+    # дахин эхлүүлэхгүй) тул `existing` замд ч дуудаж болно.
+    if _site and _site.parent_site_id:
+        from .services.nested import on_inner_entry
+        on_inner_entry(db, _site, plate, session.entry_time)
 
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
@@ -838,6 +852,18 @@ def _bye_screen_text(db: Session, session: ParkingSession, fee: dict) -> str:
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
                           now: datetime, fee: dict, source: str,
                           allow_open: bool = True) -> dict:
+    # ─── Nested (дамжин) зогсоол ───────────────────────────────────────────
+    from .services.nested import close_open_pause, on_inner_exit
+    _site = session.site
+    if _site and _site.parent_site_id:
+        # ДОТОРХ зогсоолоос гарлаа — ГАДНА зогсоолын тоолуур үргэлжилнэ
+        on_inner_exit(db, _site, session.plate_number, now)
+    else:
+        # ГАДНА зогсоолоос гарлаа — доторх гарах уншилт алдагдсан ч зогсолт
+        # энд хаагдана (эс бол тоолуур мөнхөд зогсож 0₮ болно). ЧУХАЛ: fee нь
+        # дуудагч талд аль хэдийн тооцоологдсон бөгөөд ижил хязгаарыг хэрэглэдэг
+        # тул дүн өөрчлөгдөхгүй — энд зөвхөн session дээр БАРИМТЖУУЛНА.
+        close_open_pause(db, session, now)
     session.exit_time = now
     session.duration_minutes = fee["duration_minutes"]
     if session.total_fee is None:

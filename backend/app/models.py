@@ -89,6 +89,18 @@ class ParkingSite(Base):
     # Хаалттай зогсоол: true үед зөвхөн бүртгэлтэй (гэрээт) машинд орох хаалт
     # нээгдэнэ — бүртгэлгүй машинд нээгдэхгүй (ажилчдын зогсоол г.м).
     registered_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # ─── Nested (дамжин) зогсоол ───────────────────────────────────────────
+    # Энэ зогсоол ӨӨР зогсоолын ДОТОР байрлана: гадна зогсоолоор дамжиж л
+    # ороход хүрдэг (жишээ: Рашбулаг ЭТТ-ийн гадна талбай дотор ажилчдын
+    # зогсоол). Утга оноосон үед машин энд байх ХУГАЦААНД гадна зогсоолын
+    # төлбөрийн тоолуур ЗОГСОНО. NULL = энгийн бие даасан зогсоол.
+    parent_site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True, index=True)
+    # Гадна зогсоолын тоолуурыг зогсоох ДЭЭД хугацаа (цаг). Доторх гарах уншилт
+    # алдагдвал (дугаар буруу уншигдах) тоолуур мөнхөд зогсож машин 0₮-өөр
+    # гарахаас сэргийлнэ. NULL → глобал default (settings.transit_max_hours).
+    transit_max_hours = Column(Integer, nullable=True)
+    # Энэ зогсоол өөрөө төлбөр АВАХГҮЙ (цаг тооцохгүй). Ажилчдын/дотоод зогсоолд.
+    no_charge = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр
     # үүснэ (хэвлэгдсэнтэй яг таарна); хоосон бол /pay?site=<код> хэлбэрээр.
     qr_url = Column(Text, nullable=True)
@@ -249,6 +261,12 @@ class ParkingSession(Base):
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
+    # ─── Дамжин зогсолт (nested) ──────────────────────────────────────────
+    # Машин доторх зогсоолд байх хугацаанд энэ (гадна) session-ий төлбөрийн
+    # тоолуур зогсоно. paused_minutes = хуримтлагдсан минут (машин дотогш олон
+    # удаа орж болно), paused_since = ОДОО дотор байгаа бол орсон цаг.
+    paused_minutes = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    paused_since = Column(DateTime, nullable=True)
     entry_snapshot = Column(String(255), nullable=True)  # орох камерын зураг (snapshot_dir доторх зам)
     exit_snapshot = Column(String(255), nullable=True)   # гарах камерын зураг
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

@@ -105,6 +105,28 @@ export default function SitesSection() {
                 <span className="ml-1.5 text-[10px] text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
                   title={s.name_conflict}>⚠ ижил нэр</span>
               )}
+              {/* Дамжин зогсоолын бүтэц нүдэнд шууд харагдана — буруу холбосон
+                  эсэхийг тохиргоо нээхгүйгээр илрүүлнэ */}
+              {s.parent_site_name && (
+                <span className="ml-1.5 text-[10px] text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                  title={`«${s.parent_site_name}» зогсоолын ДОТОР. Машин энд байх хугацаанд `
+                    + `тэр зогсоолын төлбөр гүйхгүй.`
+                    + (s.no_charge ? ' Энэ зогсоол өөрөө төлбөр авахгүй.' : '')}>
+                  ↳ {s.parent_site_name} дотор
+                </span>
+              )}
+              {s.child_site_count > 0 && (
+                <span className="ml-1.5 text-[10px] text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                  title={`Дотроо ${s.child_site_count} зогсоол агуулна. Тэдгээрт байх хугацаанд `
+                    + `энэ зогсоолын төлбөрийн тоолуур зогсоно.`}>
+                  дотроо {s.child_site_count} зогсоол
+                </span>
+              )}
+              {s.no_charge && !s.parent_site_name && (
+                <span className="ml-1.5 text-[10px] text-slate-400 bg-slate-500/10 px-1.5 py-0.5 rounded whitespace-nowrap">
+                  төлбөргүй
+                </span>
+              )}
             </td>
             <td className="td font-mono">{s.site_code}</td>
             <td className="td">{s.zone_code}</td>
@@ -113,7 +135,18 @@ export default function SitesSection() {
               {s.tenant_name || <span className="text-red-400">Оноогоогүй!</span>}
             </td>}
             <td className="td font-mono">{s.capacity ? s.capacity : <span className="text-slate-500">Хязгааргүй</span>}</td>
-            <td className="td font-mono">{s.occupied}</td>
+            {/* Доторх зогсоолд байгаа машиныг «Зогсож буй»-д ДАВХАР тоолохгүй
+                (гадна талын зайг эзлээгүй) — гэхдээ нуухгүй, хажууд нь харуулна */}
+            <td className="td font-mono">
+              {s.occupied}
+              {s.inside_nested > 0 && (
+                <span className="ml-1.5 text-[10px] text-sky-400 cursor-help font-sans"
+                  title={`Нэмээд ${s.inside_nested} машин доторх зогсоолд байна. Гадна талын `
+                    + `зайг эзлээгүй тул «Зогсож буй»-д тоологдоогүй, төлбөрийн тоолуур нь зогссон.`}>
+                  +{s.inside_nested} дотор
+                </span>
+              )}
+            </td>
             <td className="td font-mono text-accent">{s.free_spaces ?? '—'}</td>
             <td className="td text-xs">{s.tariff_template_name || '-'}</td>
             <td className="td">
@@ -138,7 +171,7 @@ export default function SitesSection() {
       <SiteWizardModal wizard={wizard} setWizard={setWizard} templates={templates} reload={load} />
 
       <SiteEditModal editing={editing} setEditing={setEditing} templates={templates}
-        tenants={isSuper ? tenants : null}
+        tenants={isSuper ? tenants : null} sites={rows}
         onSubmit={save} onTest={() => setQpayTest({ site: editing, amount: 10 })} />
 
       <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />

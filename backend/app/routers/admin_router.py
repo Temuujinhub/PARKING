@@ -163,6 +163,19 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         db.query(ParkingSession.site_id, func.count())
         .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
         .group_by(ParkingSession.site_id).all())
+    # Доторх (nested) зогсоолд ОДОО байгаа машинууд — гадна зогсоолын талбайг
+    # ФИЗИКЭЭР эзлээгүй тул «эзэлсэн»-ээс хасна (эс бол нэг машин хоёр удаа
+    # тоологдож сул зай худал багасна). Тоог нуухгүй, тусад нь харуулна.
+    inside_by_site = dict(
+        db.query(ParkingSession.site_id, func.count())
+        .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
+                ParkingSession.paused_since.isnot(None))
+        .group_by(ParkingSession.site_id).all())
+    child_counts = dict(
+        db.query(ParkingSite.parent_site_id, func.count())
+        .filter(ParkingSite.parent_site_id.isnot(None))
+        .group_by(ParkingSite.parent_site_id).all())
+    smap = {s.id: s.name for s in db.query(ParkingSite).all()}
     tmap = {t.id: t for t in db.query(Tenant).all()}
     # Ижил нэртэй зогсоол — БҮХ зогсоолоор (шүүлтээс үл хамааран). Кодыг нь давхардуулах
     # боломжгүй (unique) ч нэр давхардвал оператор/тайлан дээр андуурч, буруу зогсоолын
@@ -174,10 +187,15 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         name_counts[key] = name_counts.get(key, 0) + 1
     out = []
     for s in sites:
-        occupied = occupied_by_site.get(s.id, 0)
+        inside = int(inside_by_site.get(s.id, 0))
+        occupied = max(0, occupied_by_site.get(s.id, 0) - inside)
         _t = tmap.get(s.tenant_id)
         _dup_name = name_counts.get((s.name or "").strip().lower(), 0) > 1
         out.append(to_dict(s, extra={
+            "parent_site_name": smap.get(s.parent_site_id),
+            "child_site_count": int(child_counts.get(s.id, 0)),
+            # Доторх зогсоолд байгаа тул гадна талын «эзэлсэн»-д ОРООГҮЙ машинууд
+            "inside_nested": inside,
             "name_conflict": (f"«{s.name}» гэсэн нэртэй зогсоол {name_counts[(s.name or '').strip().lower()]} "
                               f"ширхэг байна — код нь ялгаатай ({s.site_code}) ч жагсаалт, "
                               f"тайлан, төхөөрөмжийн тохиргоо дээр андуурахад амархан. "
@@ -296,15 +314,43 @@ def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = D
     return to_dict(t)
 
 
+def _assert_parent_ok(db: Session, parent_id: str | None, self_id: str | None = None):
+    """«Доторх зогсоол» холбоос зөв эсэх. Зөвхөн НЭГ давхар үүр зөвшөөрнө.
+
+    Хоёр давхар (A дотор B, B дотор C) болвол тоолуур зогсоох логик хоёр
+    түвшинд давхарлаж, аль session-ий тоолуур зогсохыг тодорхойлох боломжгүй
+    болно. Мөн цикл (A→B→A) үүсвэл тооцоолол мөнхийн давталтад орно.
+    """
+    if not parent_id:
+        return
+    if self_id and parent_id == self_id:
+        raise HTTPException(400, "Зогсоол өөрийгөө агуулж болохгүй")
+    parent = db.get(ParkingSite, parent_id)
+    if parent is None:
+        raise HTTPException(400, "Эцэг зогсоол олдсонгүй")
+    if parent.parent_site_id:
+        raise HTTPException(400, (
+            f"«{parent.name}» өөрөө өөр зогсоолын дотор байна. Хоёр давхар үүрлэсэн "
+            f"зогсоол дэмжигдэхгүй — гадна талын зогсоолыг сонгоно уу."))
+    if self_id:
+        kids = db.query(ParkingSite).filter(ParkingSite.parent_site_id == self_id).count()
+        if kids:
+            raise HTTPException(400, (
+                f"Энэ зогсоол дотроо {kids} зогсоол агуулж байна — өөрөө өөр зогсоолын "
+                f"дотор орох боломжгүй (хоёр давхар үүрлэлт)."))
+
+
 @router.post("/sites")
 def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     body = payload.dump()
     if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"]).first():
         raise HTTPException(400, "site_code давхардаж байна")
+    _assert_parent_ok(db, body.get("parent_site_id"))
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
                            "tariff_template_id", "auto_close_hours", "entry_only_free_hours",
-                           "registered_only", "qr_url",
+                           "registered_only", "parent_site_id", "transit_max_hours",
+                           "no_charge", "qr_url",
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code",
                            "bank_name", "bank_account", "bank_account_name")
@@ -343,8 +389,11 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
         if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"],
                                         ParkingSite.id != site_id).first():
             raise HTTPException(400, f"«{body['site_code']}» код өөр зогсоолд бүртгэлтэй байна")
+    if "parent_site_id" in body:
+        _assert_parent_ok(db, body["parent_site_id"], self_id=site_id)
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active", "qr_url",
+              "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active",
+              "parent_site_id", "transit_max_hours", "no_charge", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
               "qpay_branch_code", "qpay_district_code",
               "bank_name", "bank_account", "bank_account_name"):

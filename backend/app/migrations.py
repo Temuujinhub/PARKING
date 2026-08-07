@@ -219,6 +219,16 @@ MIGRATIONS = [
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS bank_account VARCHAR(40)",
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(120)",
     "ALTER TABLE daily_settlements ADD COLUMN IF NOT EXISTS confirmed_transfer NUMERIC(12,2) NOT NULL DEFAULT 0",
+
+    # v3.5 — Nested (дамжин) зогсоол 2-р үе шат: доторх зогсоолд байх хугацаанд
+    # ГАДНА зогсоолын төлбөрийн тоолуур зогсоно. Жагсаалт (TRANSIT гэрээ) дээр
+    # биш, доторх камерын БОДИТ орох/гарах уншилт дээр ажиллана.
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS parent_site_id UUID REFERENCES parking_sites(id)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS transit_max_hours INTEGER",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS no_charge BOOLEAN NOT NULL DEFAULT false",
+    "CREATE INDEX IF NOT EXISTS ix_sites_parent ON parking_sites (parent_site_id)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paused_minutes INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paused_since TIMESTAMP",
 ]
 
 
