@@ -39,8 +39,8 @@ def fetch_camera_model(ip: str, device=None) -> str | None:
 
 def ensure_lane_barriers(db: Session) -> dict:
     """Идэвхтэй камер бүрд ижил зогсоол+эгнээний идэвхтэй barrier байлгана.
-    Буцаана: {"restored": n, "created": n} — лог/мэдээлэлд."""
-    restored = created = 0
+    Буцаана: {"restored": n, "created": n, "moved": n} — лог/мэдээлэлд."""
+    restored = created = moved = 0
     cams = db.query(Device).filter(Device.device_type == "camera",
                                    Device.status == "active").all()
     for c in cams:
@@ -60,6 +60,30 @@ def ensure_lane_barriers(db: Session) -> dict:
         active_bar = db.query(Device).filter(*_match, Device.status == "active").first()
         if active_bar:
             continue
+        # 0) ДОТООД камерын ЭГНЭЭГ СОЛИХОД хаалт нь ард нь дагаж явна.
+        # Өмнө нь эгнээгээр таардаггүй болмогц ШИНЭ хаалт үүсгэдэг байсан тул
+        # хуучин эгнээнд өнчин «Дотор орох хаалт (авто)» үлдэж, админ гараар
+        # устгах шаардлагатай болдог байв (2026-08-07 Рашбулаг ЭТТ: эгнээ 2
+        # болон 3 дээр хоёр ширхэг үүссэн). Тухайн чиглэлд ИДЭВХТЭЙ ДОТООД
+        # камергүй үлдсэн дотоод хаалтыг ШИНЭЭР үүсгэхийн оронд зөөнө.
+        if c.nested_inner:
+            orphan = next(
+                (b for b in db.query(Device).filter(
+                    Device.site_id == c.site_id, Device.device_type == "barrier",
+                    Device.lane_dir == c.lane_dir, Device.nested_inner.is_(True),
+                    Device.status == "active").all()
+                 if not db.query(Device).filter(
+                     Device.site_id == c.site_id, Device.device_type == "camera",
+                     Device.nested_inner.is_(True), Device.status == "active",
+                     Device.lane_dir == b.lane_dir, Device.lane_no == b.lane_no).first()),
+                None)
+            if orphan is not None:
+                log.info("хаалт «%s» эгнээ %s → %s руу зөөв (камер шилжсэн)",
+                         orphan.name, orphan.lane_no, c.lane_no)
+                orphan.lane_no = c.lane_no
+                db.flush()
+                moved += 1
+                continue
         # 1) Устгагдсан хос байвал сэргээнэ (device_key, тохиргоо хэвээр)
         deleted_bar = (db.query(Device).filter(*_match, Device.status == "deleted")
                        .order_by(Device.created_at.desc()).first())
@@ -83,7 +107,8 @@ def ensure_lane_barriers(db: Session) -> dict:
         # (2026-08-07 туршилтаар баригдсан).
         db.flush()
         created += 1
-    if restored or created:
+    if restored or created or moved:
         db.commit()
-        log.info(f"хаалт баталгаажуулалт: {restored} сэргээв, {created} шинээр үүсгэв")
-    return {"restored": restored, "created": created}
+        log.info(f"хаалт баталгаажуулалт: {restored} сэргээв, {created} шинээр үүсгэв, "
+                 f"{moved} зөөв")
+    return {"restored": restored, "created": created, "moved": moved}
