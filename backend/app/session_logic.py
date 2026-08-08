@@ -980,7 +980,26 @@ def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | No
     q = q.filter(Device.nested_inner.is_(bool(near_device.nested_inner)))
     barrier = q.filter(Device.lane_no == near_device.lane_no,
                        Device.lane_dir == near_device.lane_dir).first()
-    return barrier or q.first()
+    if barrier:
+        return barrier
+    # Эгнээгээр таарсангүй — ЧИГЛЭЛ нь ЗӨРЧИХГҮЙ хаалтаар л нөхнө. Өмнө нь дурын
+    # эхний хаалтыг (`q.first()`) буцаадаг байсан тул ГАРАХ уншилтын команд
+    # ОРОХ хаалт руу явж, жолоочийн өмнөх хаалт хөдөлдөггүй байв — «уншигдсан
+    # хэрнээ нээгдэхгүй» гэдгийн чимээгүй эх үүсвэр.
+    # «Хоёулаа» (both) хаалтыг зөвшөөрнө — нэг хаалт орох/гарахыг хоёуланг нь
+    # барьдаг зогсоолууд байгаа тул түүнийг таслах нь машиныг гацаана.
+    barrier = q.filter(Device.lane_dir.in_([near_device.lane_dir, "both"])).first()
+    if barrier:
+        log.warning("%s (эгнээ %s/%s): яг тэр эгнээнд хаалт алга — «%s» (эгнээ %s)-г "
+                    "ашиглалаа. Тохиргоо → Төхөөрөмж дээр эгнээг тааруулна уу.",
+                    near_device.name, near_device.lane_no, near_device.lane_dir,
+                    barrier.name, barrier.lane_no)
+        return barrier
+    log.error("%s (эгнээ %s/%s, дотоод=%s): нээх хаалт ОЛДСОНГҮЙ — машин гацна. "
+              "Тохиргоо → Төхөөрөмж дээр энэ чиглэлд хаалт бүртгэнэ үү.",
+              near_device.name, near_device.lane_no, near_device.lane_dir,
+              bool(near_device.nested_inner))
+    return None
 
 
 async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes: int | None = None) -> None:

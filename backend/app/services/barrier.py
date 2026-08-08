@@ -245,9 +245,14 @@ def _resolve_device(db: Session, device: Device) -> tuple[str | None, Device | N
     # УСТГАСАН камерыг ХЭЗЭЭ Ч сонгохгүй: устгал нь зөөлөн (status='deleted') тул
     # шүүхгүй бол админ UI-аас устгасан хуучин бүртгэл хаалтыг чимээгүй барьсаар
     # байдаг (2026-08-07 Туушин: устгасан 10.0.111.10 хэвээр сонгогдож байв).
+    # ДОТООД (давхар зогсоолын) хаалт нь ГАДНАХААС бие даасан: команд нь заавал
+    # ижил төрлийн камерын реле рүү очно. Эс бол эгнээний дугаар давхцахад
+    # дотоод гарах командыг ГАДНА гарах камер гүйцэтгэж, машин төлбөр төлөлгүй
+    # зогсоолоос шууд гарах эрсдэлтэй.
     cams = db.query(Device).filter(
         Device.site_id == device.site_id, Device.device_type == "camera",
         Device.status != "deleted",
+        Device.nested_inner.is_(bool(device.nested_inner)),
         Device.ip_address.isnot(None), Device.ip_address != "",
     ).order_by(Device.created_at, Device.id).all()   # тодорхой эрэмбэ — доор үзнэ үү
     # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв. Нэг эгнээнд олон камер

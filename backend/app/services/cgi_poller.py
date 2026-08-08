@@ -19,7 +19,7 @@ from ..config import settings
 from .device_auth import camera_credentials
 from ..database import SessionLocal
 from ..models import Device, LprEvent
-from ..session_logic import handle_entry, handle_exit, normalize_plate
+from ..session_logic import handle_entry, handle_exit, handle_inner_pass, normalize_plate
 
 log = logging.getLogger("parking.cgi_poller")
 
@@ -194,7 +194,19 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
         # «гарах уншилт яагаад хаалт нээгээгүй вэ» гэдгийг лог дээрээс мөшгих
         # аргагүй байв (2026-07-28 Monnis-ийн оношилгооны цоорхой).
         _t0 = time.monotonic()
-        if device.lane_dir == "exit":
+        if device.nested_inner:
+            # Давхар зогсоолын ДОТООД хаалт — session НЭЭХГҮЙ/ХААХГҮЙ, зөвхөн
+            # төлбөрийн тоолуурыг зогсоож/үргэлжлүүлээд хаалтаа нээнэ.
+            #
+            # Энэ салаа push горимын lpr_router-т байсан ч ЭНД байгаагүй тул CGI
+            # горимоор ажилладаг зогсоолд «дотоод» тэмдэглэгээ огт үйлчлэхгүй
+            # байв: дотоод орох камер ШИНЭ session нээж, дотоод гарах камер
+            # түүнийг FREE болгож хаадаг байсан. Үр дүнд нь машин /check
+            # жагсаалтаас алга болж, дотоод гарцад «бүртгэл олдсонгүй» болж
+            # хаалт нээгддэггүй байв (2026-08-08 Рашбулаг ЭТТ туршилт).
+            res = await handle_inner_pass(db, device, plate, conf, data,
+                                          allow_open=allow_open)
+        elif device.lane_dir == "exit":
             res = await handle_exit(db, device, plate, conf, data, allow_open=allow_open)
         else:
             res = await handle_entry(db, device, plate, conf, data, allow_open=allow_open)
