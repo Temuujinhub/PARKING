@@ -41,17 +41,24 @@ def cap_minutes(site: ParkingSite | None) -> int:
     return max(0, int(hours)) * 60
 
 
-def parent_cap_minutes(db: Session, parent_site_id: str) -> int:
-    """Гадна зогсоолын талаас нь хязгаар олох — доторх зогсоол(ууд)-ын тохиргоо.
+def pause_cap_minutes(db: Session, site_id: str) -> int:
+    """Гадна session дээрх зогсолтод хэрэглэх дээд хязгаар (минут). 0 = хязгааргүй.
 
     Гадна session дээр зогсолт үлдсэн (paused_since) байхад ямар хязгаар
     хэрэглэхээ мэдэх хэрэгтэй, гэвч аль доторх зогсоолд орсныг session өөрөө
-    хадгалдаггүй. Хэд хэдэн доторх зогсоолтой бол ХАМГИЙН БАГА хязгаарыг авна
-    (аюулгүй тал руу).
+    хадгалдаггүй.
+
+      • ТУСДАА site-тай (parent/child) загвар: хүүхэд зогсоол(ууд)-ын тохиргоо.
+        Хэд хэдэн доторх зогсоолтой бол ХАМГИЙН БАГА хязгаарыг авна (аюулгүй тал).
+      • НЭГ site доторх (`nested_inner` камер) загвар: хүүхэд зогсоол байхгүй тул
+        тухайн зогсоолын ӨӨРИЙН `transit_max_hours`. Өмнө нь энэ тохиолдолд
+        глобал default руу шууд унадаг байсан — үр дүнд нь доторх ГАРАХ уншилт
+        алдагдсан машин зогсоолын тохиргоог тойрч, ЗӨВ уншсанаас ИЛҮҮ хугацаа
+        үнэгүй авдаг байв (жагсаалт дээрх дүн ба гарц дээрх дүн ч зөрдөг).
     """
-    kids = db.query(ParkingSite).filter(ParkingSite.parent_site_id == parent_site_id).all()
+    kids = db.query(ParkingSite).filter(ParkingSite.parent_site_id == site_id).all()
     if not kids:
-        return max(0, int(settings.transit_max_hours)) * 60
+        return cap_minutes(db.get(ParkingSite, site_id))
     caps = [cap_minutes(k) for k in kids]
     return 0 if 0 in caps else min(caps)
 
@@ -93,7 +100,7 @@ def effective_paused_minutes(db: Session, s: ParkingSession, at: datetime) -> in
     total = int(getattr(s, "paused_minutes", 0) or 0)
     since = getattr(s, "paused_since", None)
     if since:
-        cap = parent_cap_minutes(db, s.site_id)
+        cap = pause_cap_minutes(db, s.site_id)
         mins = max(0, int((at - since).total_seconds() // 60))
         total += min(mins, cap) if cap else mins
     return total
@@ -135,10 +142,13 @@ def close_open_pause(db: Session, s: ParkingSession, at: datetime) -> int:
 
     Машин гадна гарцад уншигдсан гэдэг нь доторх зогсоолоос гарсан гэсэн үг —
     доторх ГАРАХ уншилт алдагдсан ч гэсэн. Хязгаараар таслагдана.
+
+    Талбарыг getattr-аар уншина: `close_session_forced` нь тестүүдэд хиймэл
+    (ORM бус) session обьекттой ч дуудагддаг — `effective_paused_minutes`-тэй ижил.
     """
-    if not s.paused_since:
+    if not getattr(s, "paused_since", None):
         return 0
-    mins = settle_pause(s, at, parent_cap_minutes(db, s.site_id))
+    mins = settle_pause(s, at, pause_cap_minutes(db, s.site_id))
     log.info("[nested] %s: гадна гарцад уншигдлаа — доторх гарах уншилтгүй үлдсэн "
              "зогсолтыг %d минутаар хаав", s.plate_number, mins)
     return mins

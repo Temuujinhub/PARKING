@@ -266,6 +266,12 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         at = now
     fee = session_fee_info(db, s, at=at)
     due = amount_due(db, s, fee)
+    # Доторх (nested) зогсоолд байхад нь хаагдаж байгаа бол явж буй зогсолтыг
+    # ЭНД барагдуулна. Төлбөр нь `fee` дотор аль хэдийн зөв хасагдсан (ижил
+    # хязгаараар) — гэхдээ барагдуулахгүй бол хаагдсан мөрөнд paused_minutes=0
+    # хэвээр үлдэж, тайлан дээр «хасалт хийгээгүй мөртөө хямд» гэж харагдана.
+    from .services.nested import close_open_pause
+    close_open_pause(db, s, at)
     s.exit_time = at
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
@@ -388,6 +394,42 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
                              "exit_retry", plate=plate)
     if cmd.status != "SUCCESS":
         log.warning("[exit] давхар уншилт дээр хаалт дахин нээх оролдлого амжилтгүй: %s", plate)
+    return cmd.status == "SUCCESS"
+
+
+async def ensure_inner_barrier(db: Session, device: Device, session_id: str | None,
+                               plate: str, source: str) -> bool:
+    """ДОТООД (давхар зогсоолын) хаалтыг нээх — гадна талтай ижил хамгаалалттай.
+
+    Уншилт бүрд ДАХИН нээхийг зөвшөөрнө: жолооч ухраад дахин ойртоход хаалт
+    гарцаагүй хөдлөх ёстой (гадна талд энэ dedup-ийн улмаас машин гацдаг байсныг
+    аль хэдийн зассан). Гэхдээ хамгаалалтгүй бол нэг машины 2-3 дараалсан уншилт
+    камерын ховор RPC сесс рүү тэр бүрд шинэ команд илгээж, өөрсдөө хоорондоо
+    өрсөлдөж удаашруулна (production дээр яг ийм хэв маяг бүртгэгдсэн):
+      • open_in_flight — ЯГ ОДОО явж буй командыг давхардуулахгүй
+      • cooldown       — саяхан амжилттай нээсэн бол дахин ачаалахгүй
+    Амжилтгүй болсон командыг cooldown БАРИХГҮЙ тул дараагийн уншилт дахин оролдоно.
+    """
+    barrier = _find_barrier(db, device.site_id, device)
+    if not barrier:
+        return False
+    from .services.barrier import open_in_flight
+    if open_in_flight(barrier.id):
+        return True
+    cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    recent_ok = (db.query(BarrierCommand)
+                 .filter(BarrierCommand.device_id == barrier.id,
+                         BarrierCommand.command == "open",
+                         BarrierCommand.status == "SUCCESS",
+                         BarrierCommand.created_at >= cooldown)
+                 .first())
+    if recent_ok:
+        return True
+    cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
+    if cmd.status != "SUCCESS":
+        log.warning("[nested] %s: дотоод %s хаалт НЭЭГДСЭНГҮЙ — %s", plate,
+                    "орох" if source == "inner_entry" else "гарах",
+                    (cmd.response_text or "")[:160])
     return cmd.status == "SUCCESS"
 
 
@@ -617,11 +659,15 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
 
     barrier_opened = False
     if allow_open and device.auto_open:
-        barrier = _find_barrier(db, device.site_id, device)
-        if barrier:
-            cmd = await open_barrier(db, barrier, session.id if session else None,
-                                     action, plate=plate)
-            barrier_opened = cmd.status == "SUCCESS"
+        barrier_opened = await ensure_inner_barrier(
+            db, device, session.id if session else None, plate, action)
+    elif allow_open and not device.auto_open:
+        # Чимээгүй бүү өнгөр: «дотоод хаалт нээгдэхгүй байна» гэдгийн хамгийн
+        # түгээмэл шалтгаан нь энэ чагт унтарсан байх явдал бөгөөд лог дээр ямар
+        # ч ул мөр үлдэхгүй тул оношлоход хэцүү байв (2026-08-08 Рашбулаг ЭТТ).
+        log.warning("[nested] %s: «%s» камерын «Автомат нээх» унтраалттай тул дотоод "
+                    "хаалт нээгээгүй. Тохиргоо → Төхөөрөмж дээр асаана уу.",
+                    plate, device.name)
 
     notify(device.site_id, "INNER_PASS", {
         "session_id": session.id if session else None, "plate": plate,

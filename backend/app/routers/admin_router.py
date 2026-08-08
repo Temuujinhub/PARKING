@@ -188,14 +188,22 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
     out = []
     for s in sites:
         inside = int(inside_by_site.get(s.id, 0))
-        occupied = max(0, occupied_by_site.get(s.id, 0) - inside)
+        # «Эзэлсэн»-ээс хасах нь ЗӨВХӨН тусдаа site-тай (parent/child) загварт зөв:
+        # тэнд машин хоёр session-тэй (гадна + дотор) тул хасахгүй бол давхар
+        # тоологдоно. НЭГ site доторх (`nested_inner` камер) загварт session нь
+        # ГАНЦ бөгөөд машин тэр зогсоолын талбайд л байгаа — хасвал хаана ч
+        # тоологдохгүй болж, сул зай худал ӨСНӨ.
+        deduct = inside if child_counts.get(s.id) else 0
+        occupied = max(0, occupied_by_site.get(s.id, 0) - deduct)
         _t = tmap.get(s.tenant_id)
         _dup_name = name_counts.get((s.name or "").strip().lower(), 0) > 1
         out.append(to_dict(s, extra={
             "parent_site_name": smap.get(s.parent_site_id),
             "child_site_count": int(child_counts.get(s.id, 0)),
-            # Доторх зогсоолд байгаа тул гадна талын «эзэлсэн»-д ОРООГҮЙ машинууд
+            # Доторх (давхар) зогсоолд ОДОО байгаа машины тоо
             "inside_nested": inside,
+            # Тэдгээр нь «эзэлсэн»-ээс хасагдсан эсэх (тусдаа site-тай загварт л хасагдана)
+            "inside_nested_excluded": bool(deduct),
             "name_conflict": (f"«{s.name}» гэсэн нэртэй зогсоол {name_counts[(s.name or '').strip().lower()]} "
                               f"ширхэг байна — код нь ялгаатай ({s.site_code}) ч жагсаалт, "
                               f"тайлан, төхөөрөмжийн тохиргоо дээр андуурахад амархан. "

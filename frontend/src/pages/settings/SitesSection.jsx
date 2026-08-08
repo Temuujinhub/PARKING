@@ -141,9 +141,12 @@ export default function SitesSection() {
               {s.occupied}
               {s.inside_nested > 0 && (
                 <span className="ml-1.5 text-[10px] text-sky-400 cursor-help font-sans"
-                  title={`Нэмээд ${s.inside_nested} машин доторх зогсоолд байна. Гадна талын `
-                    + `зайг эзлээгүй тул «Зогсож буй»-д тоологдоогүй, төлбөрийн тоолуур нь зогссон.`}>
-                  +{s.inside_nested} дотор
+                  title={s.inside_nested_excluded
+                    ? `Нэмээд ${s.inside_nested} машин доторх зогсоолд байна. Гадна талын `
+                      + `зайг эзлээгүй тул «Зогсож буй»-д тоологдоогүй, төлбөрийн тоолуур нь зогссон.`
+                    : `${s.inside_nested} машин доторх (давхар) зогсоолд байна. Энэ зогсоолын `
+                      + `талбайд байгаа тул «Зогсож буй»-д тоологдсон, зөвхөн төлбөрийн тоолуур нь зогссон.`}>
+                  {s.inside_nested_excluded ? '+' : ''}{s.inside_nested} дотор
                 </span>
               )}
             </td>

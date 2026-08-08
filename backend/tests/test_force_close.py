@@ -47,6 +47,8 @@ class FakeQ:
     def count(self): return 0
     def first(self): return None
     def all(self): return []
+    # find_registered нь зогсоолын `registered_only`-г scalar()-аар уншдаг
+    def scalar(self): return None
 
 
 class FakeDB:
