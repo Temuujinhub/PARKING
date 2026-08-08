@@ -4,12 +4,25 @@ import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, Table, useToast } from '../../components/ui'
 
+// Эгнээний DEFAULT дугаар чиглэлээр: орох=1, гарах=2. Ихэнх зогсоол нэг орох,
+// нэг гарах эгнээтэй бөгөөд эгнээ бүрд өөр дугаар өгөх ЁСТОЙ (нэг зогсоолын нэг
+// эгнээнд нэг л камер байхыг backend _assert_lane_free шалгадаг). Өмнө нь хоёулаа
+// 1-ээр гардаг тул гарах камер нэмэхэд алдаа өгч, хэрэглэгч гараар 2 болгодог байв.
+// Зогсоолын визард аль хэдийн ийм дугаарлалт үүсгэдэг — гараар нэмэхэд ч ижил.
+const LANE_DEFAULT = { entry: 1, exit: 2, both: 1 }
+
 export default function DevicesSection() {
   const toast = useToast()
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [editing, setEditing] = useState(null)
   const [showDeleted, setShowDeleted] = useState(false)
+  // Хаалтыг backend (ensure_lane_barriers) камер бүрд АВТОМАТААР үүсгэж/сэргээж/
+  // зөөж байдаг тул энэ жагсаалтад тусдаа мөр болж харагдах шаардлагагүй — зөвхөн
+  // жагсаалтыг хоёр дахин уртасгаж, «яагаад хоосон IP-тэй вэ» гэсэн эргэлзээ
+  // төрүүлдэг. Хаалтыг Хаалтны удирдлага хуудаснаас нээж/хаана. Оношилгоонд
+  // (өнчин/давхар хаалт) хэрэгтэй үед доорх сэлгүүрээр гаргана.
+  const [showBarriers, setShowBarriers] = useState(false)
   const load = (withDeleted = showDeleted) =>
     api(`/api/admin/devices${withDeleted ? '?include_deleted=true' : ''}`).then(setRows)
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
@@ -49,15 +62,22 @@ export default function DevicesSection() {
 
   return (
     <>
-      <div className="flex justify-between items-center">
-        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-          <input type="checkbox" className="cursor-pointer" checked={showDeleted}
-            onChange={(e) => setShowDeleted(e.target.checked)} />
-          Устгагдсан төхөөрөмж харуулах (сэргээх боломжтой)
-        </label>
+      <div className="flex justify-between items-center gap-3 flex-wrap">
+        <div className="flex flex-col gap-1.5">
+          <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+            <input type="checkbox" className="cursor-pointer" checked={showDeleted}
+              onChange={(e) => setShowDeleted(e.target.checked)} />
+            Устгагдсан төхөөрөмж харуулах (сэргээх боломжтой)
+          </label>
+          <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+            <input type="checkbox" className="cursor-pointer" checked={showBarriers}
+              onChange={(e) => setShowBarriers(e.target.checked)} />
+            Авто үүссэн хаалтыг харуулах (оношилгоонд)
+          </label>
+        </div>
         <button className="btn-primary" onClick={() => setEditing({
           site_id: sites[0]?.id || '', name: '', device_type: 'camera', vendor: 'Dahua',
-          model: '', ip_address: '', lane_no: 1, lane_dir: 'entry', auto_open: true,
+          model: '', ip_address: '', lane_no: LANE_DEFAULT.entry, lane_dir: 'entry', auto_open: true,
         })}><Plus size={16} /> Төхөөрөмж нэмэх</button>
       </div>
       {/* Зогсоол тус бүрээр бүлэглэн харуулна */}
@@ -72,18 +92,23 @@ export default function DevicesSection() {
         const order = sites.map((s) => s.name).filter((n) => bySite[n])
           .concat(Object.keys(bySite).filter((n) => !sites.some((s) => s.name === n)))
         return order.map((siteName) => {
-          const list = bySite[siteName]
-          const cams = list.filter((d) => d.device_type === 'camera').length
-          const bars = list.filter((d) => d.device_type === 'barrier').length
+          const all = bySite[siteName]
+          const cams = all.filter((d) => d.device_type === 'camera').length
+          const bars = all.filter((d) => d.device_type === 'barrier').length
+          // Хаалтыг нуусан ч ТООГ нь харуулна — «хаалт бүртгэгдсэн үү» гэдгийг
+          // жагсаалтыг сунгалгүйгээр батална.
+          const list = showBarriers ? all : all.filter((d) => d.device_type !== 'barrier')
           return (
             <div key={siteName} className="space-y-2">
               <div className="flex items-center gap-2 mt-3">
                 <h3 className="font-semibold text-accent">{siteName}</h3>
                 <span className="text-xs text-slate-500">
-                  {list.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}{bars ? ` · ${bars} хаалт` : ''}
+                  {all.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}
+                  {bars ? ` · ${bars} хаалт${showBarriers ? '' : ' (авто, нуусан)'}` : ''}
                 </span>
               </div>
-              <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', 'Гадны хандалт', '']} empty={false}>
+              <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', 'Гадны хандалт', '']}
+                empty={list.length === 0}>
                 {list.map((d) => (
                   <tr key={d.id} className={d.status === 'deleted' ? 'opacity-50' : ''}>
                     <td className="td font-medium">
@@ -179,10 +204,23 @@ export default function DevicesSection() {
               <Field label="Эгнээ (lane)">
                 <input className="input" type="number" min="1" value={editing.lane_no}
                   onChange={(e) => setEditing({ ...editing, lane_no: e.target.value })} />
+                {!editing.id && +editing.lane_no === LANE_DEFAULT[editing.lane_dir] && (
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Чиглэлээр автоматаар (орох=1, гарах=2) — өөрчилж болно.
+                  </div>
+                )}
               </Field>
               <Field label="Чиглэл">
                 <select className="input" value={editing.lane_dir}
-                  onChange={(e) => setEditing({ ...editing, lane_dir: e.target.value })}>
+                  onChange={(e) => {
+                    const dir = e.target.value
+                    // Хэрэглэгч эгнээг ГАРААР өөрчилсөн бол хүндэтгэнэ: зөвхөн өмнөх
+                    // чиглэлийн default утга хэвээр байвал шинэ default руу сэлгэнэ.
+                    // Засварлаж буй төхөөрөмжийн эгнээг хэзээ ч дуугүй өөрчлөхгүй —
+                    // тэр нь хаалтыг нь ард нь зөөх сүлжээ үйлдэл болно.
+                    const auto = !editing.id && +editing.lane_no === LANE_DEFAULT[editing.lane_dir]
+                    setEditing({ ...editing, lane_dir: dir, ...(auto ? { lane_no: LANE_DEFAULT[dir] } : {}) })
+                  }}>
                   <option value="entry">Орох</option>
                   <option value="exit">Гарах</option>
                   <option value="both">Хоёулаа</option>
