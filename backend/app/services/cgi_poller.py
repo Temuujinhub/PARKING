@@ -38,6 +38,28 @@ def _touch(device_id: str):
         db.close()
 
 
+_KEEP = object()   # «DB уншигдсангүй — хуучин утгаараа үргэлжил» гэсэн тэмдэг
+
+
+def _live_camera(device_id: str):
+    """Камерын ОДООГИЙН нэвтрэлт + IP-г DB-ээс шинээр уншина. Буцаана:
+      ((user, pwd), ip) — хэвийн
+      (None, None)      — төхөөрөмж идэвхгүй/устсан → сонсохоо болино
+      (_KEEP, None)     — DB түр уншигдсангүй → хуучин утгаараа үргэлжилнэ
+    """
+    db = SessionLocal()
+    try:
+        d = db.get(Device, device_id)
+        if not d or d.status != "active":
+            return None, None
+        return camera_credentials(d), (d.ip_address or "")
+    except Exception as e:  # noqa: BLE001 — DB түр унасан ч стрим үхэхгүй
+        log.debug("нэвтрэлт уншиж чадсангүй (%s) — хуучнаар үргэлжилнэ", type(e).__name__)
+        return _KEEP, None
+    finally:
+        db.close()
+
+
 def _plate_from(data: dict) -> tuple[str, float]:
     """Dahua event data-аас дугаар + итгэлцүүр (олон боломжит байрлал)."""
     for c in (data.get("Plate"), data.get("TrafficCar"),
@@ -221,8 +243,29 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
     variants = _urls(codes_list)
     vi = _codes_ok.get(device_id, 0)
     cycle_start = vi
-    auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
+    creds = creds or camera_credentials(None)
     while True:
+        # Нэвтрэлт/IP-г ДАВТАЛТ БҮРТ DB-ээс шинэчилнэ. Өмнө нь auth нь энэ
+        # давталтын ГАДНА нэг л удаа тооцогддог байсан: task нь хэзээ ч дуусдаггүй
+        # (while True) бөгөөд supervisor нь зөвхөн done() task-ыг л дахин
+        # эхлүүлдэг тул UI-д нууц үгийг ЗАССАН ч энэ стрим хуучин нууц үгээрээ
+        # мөнхөд 401 иддэг байв — backend restart хийх хүртэл. Хаалт нээх/
+        # camera_who зэрэг нь креденшлээ дуудалт бүрт уншдаг тул тэдгээр нь
+        # ажиллаад, зөвхөн event стрим унтарсан хэвээр үлддэг (2026-08-08
+        # Соёлын төв: хаалт SUCCESS атал cgi_poller 401 давтсаар).
+        fresh, cur_ip = _live_camera(device_id)
+        if fresh is None:
+            log.info("%s: төхөөрөмж идэвхгүй/устсан — сонсохоо болилоо", ip)
+            return
+        if fresh is not _KEEP:
+            if cur_ip and cur_ip != ip:
+                log.info("%s: IP → %s болж өөрчлөгдлөө — шинэ хаягаар дахин эхэлнэ", ip, cur_ip)
+                return   # supervisor 60с дотор шинэ IP-ээр task-ыг дахин үүсгэнэ
+            if fresh != creds:
+                log.info("%s: нэвтрэлт шинэчлэгдлээ (хэрэглэгч «%s») — дахин холбогдож байна",
+                         ip, fresh[0])
+                creds = fresh
+        auth = httpx.DigestAuth(*creds)
         url = variants[vi % len(variants)]
         codes = url.split("codes=")[1].split("&")[0]
         buffer = ""
@@ -276,7 +319,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             why = ("нууц үг буруу" if resp.status_code == 401 else
                                    "камер энэ IP-г ТҮР ХОРИГЛОСОН (олон удаа буруу "
                                    "нэвтрэлт эсвэл холболтын хязгаар дүүрсэн)")
-                            log.error(f"{ip}: HTTP {resp.status_code} — {why}. "
+                            # ЯМАР хэрэглэгчээр оролдсоныг ЗААВАЛ бичнэ. Event стрим нь
+                            # camera_credentials (.env PARKING_CAMERA_*) ашигладаг бол
+                            # хаалт нь barrier_credentials (.env PARKING_BARRIER_*)
+                            # ашигладаг тул төхөөрөмжид ӨӨРИЙН нэвтрэлт бичээгүй үед
+                            # «хаалт нээгддэг мөртлөө стрим 401 иддэг» гэсэн будлиан
+                            # үүсдэг. Хэрэглэгчийн нэр логонд байвал шууд илэрнэ.
+                            log.error(f"{ip}: HTTP {resp.status_code} — {why} "
+                                      f"(хэрэглэгч «{creds[0]}»). Төхөөрөмжид ӨӨРИЙН "
+                                      f"нэвтрэх нэр/нууц үгийг Тохиргоо → Төхөөрөмж "
+                                      f"дээрээс бичвэл шууд мөрдөнө (restart шаардлагагүй). "
                                       f"Түгжээг уртасгахгүйн тулд "
                                       f"{settings.camera_auth_retry_sec}с хүлээнэ.")
                             await asyncio.sleep(settings.camera_auth_retry_sec)
@@ -336,9 +388,11 @@ async def supervisor():
                 active.add(c.id)
                 if c.id not in _tasks or _tasks[c.id].done():
                     # creds-ийг session амьд байхад мөр болгож шийднэ
-                    _tasks[c.id] = asyncio.create_task(
-                        _poll_one(c.id, c.ip_address, camera_credentials(c)))
-                    log.info(f"{c.name} ({c.ip_address}) сонсож эхэллээ")
+                    _creds = camera_credentials(c)
+                    _tasks[c.id] = asyncio.create_task(_poll_one(c.id, c.ip_address, _creds))
+                    # Хэрэглэгчийн нэрийг логлоно — хаалт (barrier_credentials) ба
+                    # стрим (camera_credentials) өөр аккаунт ашиглаж байвал энд харагдана
+                    log.info(f"{c.name} ({c.ip_address}) сонсож эхэллээ — хэрэглэгч «{_creds[0]}»")
             for did in list(_tasks):
                 if did not in active:
                     _tasks[did].cancel()

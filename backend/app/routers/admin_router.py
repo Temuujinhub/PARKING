@@ -682,10 +682,16 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         # Камерт манайхаас ӨӨР IP холбогдсон бол UI-д харуулна (өөр систем зэрэг
         # ашиглаж буйн баримт — camera_sessions сервис 5 мин тутам шинэчилдэг)
         who = foreign_info(d.id) if d.device_type == "camera" else None
+        # probe_ok_at — сервер камерт RPC-ээр УСПЕШНО нэвтэрсэн сүүлийн цаг.
+        # camera_sessions нь нэвтрэлт+лог татах хоёул амжилттай болсны ДАРАА л
+        # checked_at бичдэг тул энэ нь «сервер→камер ажиллаж байна»-гийн баримт.
+        # online (камер→сервер) худал байхад энэ үнэн бол асуудал нь стрим/push
+        # тохиргоонд гэдгийг UI шууд ялгаж харуулна.
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
                                      "ip_conflict": _conflict_note(d),
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
+                                     "probe_ok_at": (who or {}).get("checked_at"),
                                      "foreign_sessions": (who or {}).get("sessions") or [],
                                      "foreign_checked_at": (who or {}).get("checked_at")}))
     return out

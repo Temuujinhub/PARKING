@@ -5,6 +5,34 @@ import { api, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
+const AGE = (t) => (t ? Date.now() - new Date(t + 'Z') : Infinity)
+
+// Камерын төлөв 3 ЗЭРЭГТЭЙ. «Онлайн» нь зөвхөн камер→сервер урсгалыг хэмждэг тул
+// сервер→камер (хаалт нээх, Шалгах) ажиллаж байхад ч «Офлайн» гэж гардаг байв —
+// хэрэглэгч үүнийг эвдрэл гэж ойлгодог. Тиймээс дундын төлөвийг тусад нь харуулна.
+function camState(c) {
+  if (c.online) {
+    return { cls: 'bg-accent/15 text-accent', dot: 'bg-accent', label: 'Онлайн',
+      title: 'Камер серверт дата/heartbeat илгээж байна. Дугаар уншмагц хаалт автоматаар нээгдэнэ.' }
+  }
+  // Сервер камерт RPC-ээр нэвтэрч чадаж байна (сүүлийн 15 мин) — сүлжээ/нууц үг
+  // ЗӨВ. Дутуу зүйл нь зөвхөн event урсгал (eventManager attach эсвэл камерын
+  // HTTP push тохиргоо).
+  if (AGE(c.probe_ok_at) < 15 * 60e3) {
+    return { cls: 'bg-amber-500/15 text-amber-400', dot: 'bg-amber-400', label: 'Стрим алга',
+      title: 'Сервер камерт хүрч, нэвтэрч ЧАДАЖ байна (тиймээс «Шалгах» болон хаалт '
+        + 'гараар нээх ажиллана), гэвч камер дугаар таних event илгээхгүй байна.\n\n'
+        + 'Үр дагавар: машин ирэхэд хаалт АВТОМАТААР нээгдэхгүй.\n'
+        + 'Шалтгаан: eventManager стрим холбогдоогүй (PARKING_CGI_POLL унтарсан, '
+        + 'камер CGI attach-ыг татгалзаж байна, эсвэл холболтын хязгаар дүүрсэн) '
+        + 'эсвэл камер дээр HTTP push (Alarm Server) хаяг тохируулаагүй.' }
+  }
+  return { cls: 'bg-red-500/15 text-red-400', dot: 'bg-red-400',
+    label: c.last_seen ? 'Офлайн' : 'Дата ирээгүй',
+    title: c.last_seen ? 'Камер серверт удаан хугацаанд дата илгээгээгүй.'
+      : 'Энэ камер серверт ХЭЗЭЭ Ч дата илгээж байгаагүй — event урсгал огт тохируулагдаагүй байна.' }
+}
+
 export default function Barriers() {
   const toast = useToast()
   const { data: sites } = useFetch('/api/admin/sites', { initial: [] })
@@ -114,6 +142,10 @@ export default function Barriers() {
         <div className="text-xs text-slate-500 mb-2">
           <b>Онлайн</b> = камер серверт дата/heartbeat илгээж байна (камер→сервер).
           <b>Холболт шалгах</b> = сервер камер руу хүрч байгаа эсэх (сервер→камер, хаалт нээхэд хэрэгтэй).
+          <br />Энэ ХОЁР нь өөр чиглэл: <span className="text-amber-400 font-semibold">Стрим алга</span> гэж
+          гарвал сервер камерт хүрч байгаа (Шалгах ✓, хаалт гараар нээгдэнэ) ч камер
+          event илгээхгүй байна — машин ирэхэд хаалт <b>автоматаар нээгдэхгүй</b>.
+          Төлөв дээр хулганаа аваачвал дэлгэрэнгүй тайлбар гарна.
         </div>
         <Table headers={['Нэр', 'Чиглэл', 'IP', 'Сүүлд холбогдсон', 'Сүүлд дугаар уншсан', 'Онлайн', 'Сервер→камер']} empty={cameras.length === 0}>
           {cameras.map((c) => (
@@ -127,11 +159,16 @@ export default function Barriers() {
                 {fmtDate(c.last_plate_at)}
               </td>
               <td className="td">
-                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium
-                  ${c.online ? 'bg-accent/15 text-accent' : 'bg-red-500/15 text-red-400'}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${c.online ? 'bg-accent' : 'bg-red-400'}`} />
-                  {c.online ? 'Онлайн' : 'Офлайн'}
-                </span>
+                {(() => {
+                  const st = camState(c)
+                  return (
+                    <span title={st.title}
+                      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium cursor-help ${st.cls}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
+                      {st.label}
+                    </span>
+                  )
+                })()}
               </td>
               <td className="td">
                 <button className="btn-secondary py-1 text-xs" onClick={() => testConn(c.id)} disabled={!c.ip_address}>
