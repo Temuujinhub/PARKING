@@ -328,6 +328,14 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
         attempts = max(1, settings.barrier_retries + 1)
         last_err = ""
         _t0 = time.monotonic()
+        # ХААЛТ өөрөө нээгдтэл хэдэн мс болсныг ТУСАД нь хэмжинэ. Нийт duration_ms
+        # нь дэлгэц бичихийг Ч агуулдаг бөгөөд дэлгэц нь хаалт нээгдсэний ДАРАА
+        # ижил сессээр явдаг. Тиймээс «хаалт 1982мс» гэсэн тоо жолооч 2 секунд
+        # хүлээсэн мэт харагдуулж байсан ч бодит байдалд хаалт аль хэдийн
+        # нээгдчихсэн, үлдсэн хугацаа нь LED текст байв (2026-08-08 STO/NOMADS/
+        # TUUSHIN/KH дээр бүгд 1.8-2.0с). Хоёрыг нь салгаж бичихгүй бол «хаалт
+        # удаан» гэсэн худал дохио өгсөөр байна.
+        _gate_ms: int | None = None
         # НИЙТ хугацааны таслалт. ЧУХАЛ: httpx-ийн timeout нь ХҮСЭЛТ БҮРД үйлчилдэг,
         # харин нэг хаалт нээхэд 5 хүсэлт явдаг (login×2 + factory.instance + strobe +
         # logout). Тиймээс timeout=12 гэдэг нь нэг оролдлого 60 секунд хүртэл үргэлжилж
@@ -365,6 +373,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
 
                       Хуваалцсан клиент: шинэ TCP холболт нээхгүй, камерын холболтын
                       санг шавхахгүй (дээрх camera_client-ийн тайлбарыг үзнэ үү)."""
+                      nonlocal _gate_ms
                       if True:
                           client = camera_client(ip)
                           if command == "open" and settings.barrier_open_path:
@@ -374,6 +383,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                               body = (resp.text or "").strip()
                               if resp.status_code == 200 and "error" not in body.lower():
                                   cmd.status = "SUCCESS"
+                                  _gate_ms = int((time.monotonic() - _t0) * 1000)
                               cmd.response_text = f"CGI {resp.status_code}: {body[:200]}"
                           else:
                               rpc = DahuaRpc(client, ip, username, password)
@@ -382,6 +392,8 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                                   res = await rpc.strobe(RPC_METHODS[command],
                                                          settings.barrier_channel, plate)
                                   cmd.status = "SUCCESS"
+                                  # ЯГ ЭНД хаалт нээгдлээ — жолоочийн хүлээлт дуусах цэг
+                                  _gate_ms = int((time.monotonic() - _t0) * 1000)
                                   cmd.response_text = (f"RPC2 {RPC_METHODS[command]} → {res.get('result')}"
                                                        + (f" ({attempt + 1}-р оролдлого)" if attempt else ""))
                                   # ── Дэлгэцийг ЯГ ЭНЭ СЕССЭЭР бичнэ ──
@@ -471,12 +483,18 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
         except Exception:  # noqa: BLE001
             _site = ""
         _where = f"{ip}{_site}"
-        if _ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
-            log.warning("хаалт %s: %s — %dмс [%s] (%s, %d оролдлого) %s",
-                        command, cmd.status, _ms, _where, source, attempts,
+        # Задаргаа: «хаалт Xмс + LED Yмс». Удаашралын анхааруулгыг ХААЛТНЫ хугацаанд
+        # тулгуурлана — LED нь хаалт нээгдсэний дараа явдаг тул жолоочийг хүлээлгэдэггүй.
+        _brk = ""
+        if _gate_ms is not None and _ms - _gate_ms >= 100:
+            _brk = f" (хаалт {_gate_ms}мс + LED {_ms - _gate_ms}мс)"
+        _driver_ms = _gate_ms if _gate_ms is not None else _ms
+        if _driver_ms >= settings.barrier_slow_warn_ms or cmd.status != "SUCCESS":
+            log.warning("хаалт %s: %s — %dмс%s [%s] (%s, дээд %d оролдлого) %s",
+                        command, cmd.status, _ms, _brk, _where, source, attempts,
                         (cmd.response_text or "")[:120])
         else:
-            log.info("хаалт %s: SUCCESS — %dмс [%s] (%s)", command, _ms, _where, source)
+            log.info("хаалт %s: SUCCESS — %dмс%s [%s] (%s)", command, _ms, _brk, _where, source)
         if cmd.status != "SUCCESS" and "хугацаа хэтэрлээ" in (cmd.response_text or ""):
             # Бүх оролдлого timeout — холболтын сан хуучирсан байж болзошгүй тул
             # шинэчилнэ; дараагийн команд (давхар уншилтын retry) шинэ TCP-ээр явна.
