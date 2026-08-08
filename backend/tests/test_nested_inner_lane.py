@@ -151,6 +151,26 @@ try:
     check("session үүсээгүй", r4["session_id"] is None, r4)
     check("тоолуур хөндөөгүй", r4["counter_changed"] is False, r4)
 
+    print("\n4б. «Автомат нээх» унтраалттай — ГАРАХ талыг гацаахгүй")
+    # `auto_open` нь зөвхөн ОРОХ чиглэлд утгатай бөгөөд UI-д ч зөвхөн орох
+    # камерт харагддаг. Дотоод ГАРАХ камерыг үүгээр хаавал админ асаах ч
+    # аргагүй чагтын улмаас машин доторх зогсоолд гацна (production дээр
+    # яг ийм зүйл болсон: Рашбулаг ЭТТ «Гарах 2», 2026-08-08).
+    in_ex.auto_open = False
+    in_in.auto_open = False
+    db.commit()
+    r4b = asyncio.run(handle_inner_pass(db, in_ex, "9999ХОО", 0.9,
+                                        {"Picture": {"Plate": {"PlateNumber": "9999ХОО"}}}))
+    check("дотоод ГАРАХ хаалт auto_open-оос үл хамааран нээгдэнэ",
+          r4b["barrier_opened"] is True, r4b)
+    r4c = asyncio.run(handle_inner_pass(db, in_in, "9999ХОО", 0.9,
+                                        {"Picture": {"Plate": {"PlateNumber": "9999ХОО"}}}))
+    check("дотоод ОРОХ хаалт auto_open унтарсан үед нээгдэхгүй",
+          r4c["barrier_opened"] is False, r4c)
+    in_ex.auto_open = True
+    in_in.auto_open = True
+    db.commit()
+
     print("\n5. Давхар уншилт — тоолуурыг дахин эхлүүлэхгүй")
     s2.paused_since = None
     db.commit()

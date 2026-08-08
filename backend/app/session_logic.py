@@ -657,16 +657,21 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
         log.info("[nested] %s: дотоод %s хаалт — зогсоолд идэвхтэй бүртгэл алга, "
                  "тоолуур хөндөхгүй нэвтрүүлэв", plate, "орох" if entering else "гарах")
 
+    # `auto_open` нь ЗӨВХӨН ОРОХ чиглэлд утгатай. Гарах хаалт нь эрхээр
+    # (төлсөн/үнэгүй/гэрээт) шийдэгддэг болохоос энэ чагтаар биш — тийм учраас
+    # UI-д ч зөвхөн орох камерт харагддаг. Дотоод ГАРАХ камерыг үүгээр хаавал
+    # админ асаах ч аргагүй чагтын улмаас машин доторх зогсоолд гацна
+    # (2026-08-08 Рашбулаг ЭТТ: «Гарах 2» дээр яг ийм зүйл болсон).
     barrier_opened = False
-    if allow_open and device.auto_open:
+    if allow_open and (device.auto_open or not entering):
         barrier_opened = await ensure_inner_barrier(
             db, device, session.id if session else None, plate, action)
-    elif allow_open and not device.auto_open:
+    elif allow_open:
         # Чимээгүй бүү өнгөр: «дотоод хаалт нээгдэхгүй байна» гэдгийн хамгийн
         # түгээмэл шалтгаан нь энэ чагт унтарсан байх явдал бөгөөд лог дээр ямар
-        # ч ул мөр үлдэхгүй тул оношлоход хэцүү байв (2026-08-08 Рашбулаг ЭТТ).
+        # ч ул мөр үлдэхгүй тул оношлоход хэцүү байв.
         log.warning("[nested] %s: «%s» камерын «Автомат нээх» унтраалттай тул дотоод "
-                    "хаалт нээгээгүй. Тохиргоо → Төхөөрөмж дээр асаана уу.",
+                    "орох хаалт нээгээгүй. Тохиргоо → Төхөөрөмж дээр асаана уу.",
                     plate, device.name)
 
     notify(device.site_id, "INNER_PASS", {
