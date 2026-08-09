@@ -1,12 +1,15 @@
 // Бүртгэлтэй машин — гэрээт/сарын эрхтэй машинууд
-import { Plus, Search, Upload } from 'lucide-react'
+import { Plus, Search, Trash2, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
+import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
 const CONTRACT_TYPES = {
   MONTHLY: 'Сарын эрх', CONTRACT: 'Гэрээт', VIP: 'VIP', STAFF: 'Ажилтан',
-  SPECIAL: 'Тусгай хэрэгцээт (түргэн, онцгой байдал г.м)',
+  // ХБИ (хөгжлийн бэрхшээлтэй иргэн), түргэн, онцгой байдал — «Бүх зогсоол»
+  // сонговол СИСТЕМ ДАЯАР (бүх түрээслэгчийн бүх зогсоолд) үнэгүй нэвтэрнэ.
+  SPECIAL: 'Тусгай хэрэгцээт (ХБИ, түргэн г.м — бүх зогсоолд үнэгүй)',
   // Том зогсоол доторх жижиг зогсоолын машин — гадна зогсоолоор ТӨЛБӨРГҮЙ
   // дамжин өнгөрч, тайланд «Дамжин» гэж ялгарна.
   TRANSIT: 'Дамжин (доторх зогсоолын машин)',
@@ -117,11 +120,14 @@ function ImportModal({ open, onClose, sites, onDone }) {
 
 export default function Drivers() {
   const toast = useToast()
+  const { user } = useAuth()
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(user?.role)
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [q, setQ] = useState('')
   const [company, setCompany] = useState('')
   const [siteFilter, setSiteFilter] = useState('')
+  const [typeFilter, setTypeFilter] = useState('')
   const [companies, setCompanies] = useState([])
   const [editing, setEditing] = useState(null)
   const [importing, setImporting] = useState(false)
@@ -131,11 +137,21 @@ export default function Drivers() {
     if (q) p.set('q', q)
     if (company) p.set('company', company)
     if (siteFilter) p.set('site_id', siteFilter)
+    if (typeFilter) p.set('contract_type', typeFilter)
     api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
-  useEffect(() => { load() }, [company, siteFilter])
+  useEffect(() => { load() }, [company, siteFilter, typeFilter])
+
+  const remove = async (d) => {
+    if (!window.confirm(`${d.plate_number} (${d.full_name || d.company || '-'}) бүртгэлийг БҮРМӨСӨН устгах уу?`)) return
+    try {
+      await api(`/api/admin/drivers/${d.id}`, { method: 'DELETE' })
+      toast(`${d.plate_number} устгагдлаа`)
+      load()
+    } catch (err) { toast(err.message, 'error') }
+  }
 
   const blank = {
     plate_number: '', full_name: '', phone: '', contract_type: 'MONTHLY',
@@ -176,6 +192,13 @@ export default function Drivers() {
           <option value="global">Бүх зогсоолын эрхтэй (ажилтан/албаны)</option>
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
+        <select className="input w-auto min-w-40" value={typeFilter} aria-label="Төрлөөр шүүх"
+          onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="">Бүх төрөл</option>
+          {Object.entries(CONTRACT_TYPES).map(([v, l]) => (
+            <option key={v} value={v}>{l.split(' (')[0]}</option>
+          ))}
+        </select>
         <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>
           <option value="">Бүх байгууллага ({companies.reduce((a, c) => a + c.count, 0)})</option>
           {companies.map((c) => (
@@ -192,15 +215,25 @@ export default function Drivers() {
             <td className="td">{d.full_name}</td>
             <td className="td text-xs">{d.company}</td>
             <td className="td text-xs text-slate-400">{d.note}</td>
-            <td className="td">{CONTRACT_TYPES[d.contract_type] || d.contract_type}</td>
+            <td className="td">
+              {d.contract_type === 'SPECIAL'
+                ? <span className="text-cyan-300">Тусгай хэрэгцээт</span>
+                : (CONTRACT_TYPES[d.contract_type]?.split(' (')[0] || d.contract_type)}
+            </td>
             <td className="td">{d.site_name}</td>
             <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
             <td className="td"><Badge value={d.is_active ? 'active' : 'FAILED'} /></td>
-            <td className="td text-right">
+            <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs"
                 onClick={() => setEditing({ ...d, valid_from: d.valid_from?.slice(0, 10), valid_to: d.valid_to?.slice(0, 10) })}>
                 Засах
               </button>
+              {isAdmin && (
+                <button className="btn-secondary py-1 text-xs text-red-400 ml-1" title="Бүрмөсөн устгах (зөвхөн админ)"
+                  onClick={() => remove(d)}>
+                  <Trash2 size={13} />
+                </button>
+              )}
             </td>
           </tr>
         ))}

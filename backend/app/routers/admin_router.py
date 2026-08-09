@@ -1157,10 +1157,14 @@ def update_discount(discount_id: str, body: dict, db: Session = Depends(get_db),
 # ─────────────────────────── Бүртгэлтэй жолооч ───────────────────────────
 @router.get("/drivers")
 def list_drivers(q: str | None = None, company: str | None = None,
-                 site_id: str | None = None, db: Session = Depends(get_db),
+                 site_id: str | None = None, contract_type: str | None = None,
+                 db: Session = Depends(get_db),
                  user: User = Depends(require("drivers"))):
     query = db.query(RegisteredDriver).order_by(RegisteredDriver.company,
                                                 RegisteredDriver.plate_number)
+    if contract_type:
+        # Төрлөөр шүүх — «Тусгай хэрэгцээт» (SPECIAL) г.м. тусдаа жагсаалт харах
+        query = query.filter(RegisteredDriver.contract_type == contract_type)
     if q:
         # Дугаар, эзэмшигч, байгууллагын аль нэгээр нь хайна (олон зуун мөртэй
         # жагсаалтад зөвхөн дугаараар хайх нь хангалтгүй)
@@ -1280,6 +1284,29 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
     _audit(db, user, "UPDATE", "driver", driver_id, body)
     db.commit()
     return to_dict(d)
+
+
+@router.delete("/drivers/{driver_id}")
+def delete_driver(driver_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(require("drivers"))):
+    """Бүртгэлтэй машиныг БҮРМӨСӨН устгана — зөвхөн ADMIN/SUPER_ADMIN.
+
+    (Идэвхгүй болгох нь «Засах» дотор байгаа; устгах нь давхардал цэвэрлэх,
+    буруу оруулсан бүртгэлд зориулагдсан.)"""
+    if user.role not in ("ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(403, "Бүртгэл устгах эрх зөвхөн админд бий.")
+    d = db.get(RegisteredDriver, driver_id)
+    if not d:
+        raise HTTPException(404, "Бүртгэл олдсонгүй")
+    allowed = operator_sites(user)
+    if allowed is not None and d.site_id not in allowed:
+        raise HTTPException(403, "Энэ бүртгэл таны хариуцах зогсоолынх биш байна.")
+    info = {"plate": d.plate_number, "name": d.full_name, "company": d.company,
+            "contract_type": d.contract_type, "site_id": d.site_id}
+    db.delete(d)
+    _audit(db, user, "DELETE", "driver", driver_id, info)
+    db.commit()
+    return {"ok": True, "deleted": info}
 
 
 @router.post("/drivers/import")
