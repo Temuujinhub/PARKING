@@ -10,6 +10,7 @@ HTTP холболт нээж, камерын дугаар таних event-ий�
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -227,17 +228,44 @@ _EVENT_DUMPS = 3
 _dumped: dict[str, int] = {}
 
 
+_PIC_HINT = re.compile(r"(pic|image|photo|snap|file|path|url|jpeg|jpg)", re.I)
+
+
+def _pic_refs(obj, prefix: str = "", out: list | None = None, depth: int = 0) -> list:
+    """Event дотроос ЗУРАГТАЙ холбоотой байж болох талбаруудыг бүхэлд нь түүнэ.
+
+    Бүтэн JSON нь 30КБ+ бөгөөд логт тайрагддаг тул чухал талбарууд (ихэвчлэн
+    `TrafficCar` дотор гүн байрладаг) харагддаггүй байв. Тиймээс нэр нь
+    pic/file/path/url... агуулсан талбаруудыг бүх түвшнээс шүүж, замтай нь хэвлэнэ.
+    """
+    out = [] if out is None else out
+    if depth > 6 or len(out) > 40:
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            path = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, (dict, list)):
+                _pic_refs(v, path, out, depth + 1)
+            elif _PIC_HINT.search(k) and v not in (None, "", 0):
+                out.append(f"{path}={str(v)[:120]}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:5]):
+            _pic_refs(v, f"{prefix}[{i}]", out, depth + 1)
+    return out
+
+
 def _dump_event(device: Device, data: dict) -> None:
     n = _dumped.get(device.id, 0)
     if n >= _EVENT_DUMPS:
         return
     _dumped[device.id] = n + 1
-    try:
-        from ..session_logic import strip_images
-        body = json.dumps(strip_images(data), ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        body = str(data)
-    log.info("%s (%s) RAW event #%d: %s", device.name, device.ip_address, n + 1, body[:2000])
+    keys = ",".join(sorted(data)) if isinstance(data, dict) else type(data).__name__
+    tc = data.get("TrafficCar") if isinstance(data, dict) else None
+    tc_keys = ",".join(sorted(tc)) if isinstance(tc, dict) else "-"
+    refs = _pic_refs(data)
+    log.info("%s (%s) event #%d code=%s\n  дээд түвшин: %s\n  TrafficCar: %s\n  ЗУРАГ-шинжтэй: %s",
+             device.name, device.ip_address, n + 1, data.get("Code", "?"),
+             keys[:600], tc_keys[:600], "; ".join(refs)[:900] or "ОЛДСОНГҮЙ")
 
 
 async def _process_event(device_id: str, data: dict, allow_open: bool = True):
