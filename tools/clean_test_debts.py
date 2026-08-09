@@ -46,6 +46,9 @@ def main():
                     help="Зогсоолын нэрийн хэсэг (олон удаа өгч болно). Өгөхгүй бол бүгд.")
     ap.add_argument("--before", default=None,
                     help="Зөвхөн энэ огнооноос ӨМНӨ үүссэн өр (YYYY-MM-DD)")
+    ap.add_argument("--after", default=None,
+                    help="Зөвхөн энэ огнооноос ХОЙШ үүссэн өр (YYYY-MM-DD). "
+                         "Хоёуланг өгөхгүй бол БҮХ хугацаа хамрагдана.")
     ap.add_argument("--hours", type=float, default=24.0,
                     help="Зогсолт энэ цагаас урт бол логикгүй (default 24)")
     ap.add_argument("--min-amount", type=float, default=0,
@@ -78,6 +81,8 @@ def main():
             q = q.filter(Compensation.site_id.in_(wanted))
         if args.before:
             q = q.filter(Compensation.created_at < datetime.fromisoformat(args.before))
+        if args.after:
+            q = q.filter(Compensation.created_at >= datetime.fromisoformat(args.after))
 
         reasons = set(SYSTEM_REASONS) | ({"unpaid_exit"} if args.include_unpaid_exit else set())
 
@@ -118,7 +123,11 @@ def main():
 
         plates = {c.plate_number for c, _, _ in picked}
         grand = sum(float(c.amount) for c, _, _ in picked)
-        print(f"\nНИЙТ: {len(picked)} өр · {grand:,.0f}₮ · {len(plates)} дугаар "
+        # Хамрагдсан ХУГАЦААГ бодит өгөгдлөөс харуулна — «7,8 сар багтсан уу»
+        # гэдгийг таамаглахгүй, нүдээр батална
+        dates = [c.created_at for c, _, _ in picked]
+        print(f"\nХамрагдсан хугацаа: {min(dates):%Y-%m-%d} → {max(dates):%Y-%m-%d}")
+        print(f"НИЙТ: {len(picked)} өр · {grand:,.0f}₮ · {len(plates)} дугаар "
               f"(хөндөхгүй үлдэх: {kept} өр)")
 
         # Автомат хориг — зөвхөн эдгээр дугаарынх, гараар нэмсэнийг хөндөхгүй
