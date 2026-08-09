@@ -34,9 +34,10 @@ from datetime import datetime, timedelta
 os.chdir("/root/PARKING/backend")
 sys.path.insert(0, "/root/PARKING/backend")
 
+from sqlalchemy import func  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import (AuditLog, Compensation, LprEvent,  # noqa: E402
-                        ParkingSession, ParkingSite)
+                        ParkingSession, ParkingSite, Payment)
 from app.session_logic import is_valid_plate  # noqa: E402
 
 # Камерын логоос нөхөж бүртгэсэн сешн — эдгээрт ГАРАХ уншилтын нотолгоо бий
@@ -155,14 +156,32 @@ def main():
             return
 
         stamp = datetime.utcnow().strftime("%Y-%m-%d")
+        # Сешн бүрд ХУРААГДСАН дүн — үүнээс доош тэглэж БОЛОХГҮЙ (эс бол
+        # хураасан нь үүссэнээс давж цуглуулалт 100%+ гардаг: Рашбулаг 107%)
+        sess_ids = [c.session_id for c, _s, _w in picked if c.session_id]
+        collected: dict[str, float] = defaultdict(float)
+        for chunk in [sess_ids[i:i + 900] for i in range(0, len(sess_ids), 900)]:
+            for sid, amt in (db.query(Payment.session_id, func.sum(Payment.amount))
+                             .filter(Payment.session_id.in_(chunk),
+                                     Payment.status == "PAID")
+                             .group_by(Payment.session_id).all()):
+                collected[sid] += float(amt or 0)
+            for sid, amt in (db.query(Compensation.session_id, func.sum(Compensation.amount))
+                             .filter(Compensation.session_id.in_(chunk),
+                                     Compensation.status == "PAID")
+                             .group_by(Compensation.session_id).all()):
+                collected[sid] += float(amt or 0)
+
         zeroed = 0
         for c, s, why in picked:
             c.status = "CANCELLED"
-            # Сешний дүнг ч тэглэнэ — эс бол «үүссэн» хэвээр үлдэж тайлангийн
-            # тэнцэл дахин зөрнө (Үүссэн = Хураасан + Хүлээгдэж буй + Өр болсон)
-            if s is not None and float(s.total_fee or 0) > 0:
-                s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
-                if s.status in ("MANUAL_CLOSED", "CLOSED", "AWAITING_PAYMENT"):
+            # Сешний дүнг хураасан дүн хүртэл БУУЛГАНА (тэглэхгүй) — эс бол
+            # тайлангийн тэнцэл зөрнө (Үүссэн = Хураасан + Хүлээгдэж буй + Өр)
+            keep = collected.get(c.session_id, 0.0)
+            if s is not None and float(s.total_fee or 0) > keep:
+                vat = round(keep * 0.1 / 1.1)
+                s.total_fee, s.vat_amount, s.base_fee = keep, vat, keep - vat
+                if keep <= 0 and s.status in ("MANUAL_CLOSED", "CLOSED", "AWAITING_PAYMENT"):
                     s.status = "FREE"
                 mark = f"[{stamp}] өр цуцлав ({why}) — үндэслэлгүй тул үнэгүй болгов"
                 s.note = f"{s.note}\n{mark}" if s.note else mark

@@ -6,6 +6,7 @@
 """
 import asyncio
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -112,6 +113,57 @@ def _service_status(name: str) -> str:
         return out.stdout.strip() or "unknown"
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+def _restart_history(hours: int = 24) -> dict | None:
+    """Backend хэдэн удаа, ЯАГААД дахин эхэлснийг journald-аас гаргана.
+
+    2026-08-10: 48 цагт 100 удаа дахин эхэлсэн нь илэрсэн — тэр агшин бүрд
+    орж байсан машин бүртгэгдэлгүй алдагдсан. Тиймээс энэ нь зөвхөн
+    «сонирхолтой» мэдээлэл биш, ОРЛОГЫН алдагдлын шууд шалтгаан."""
+    if not shutil.which("journalctl"):
+        return None
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", "parking-backend", "--since", f"-{hours}h",
+             "-o", "short-iso", "--no-pager"],
+            capture_output=True, text=True, timeout=25).stdout
+    except Exception:  # noqa: BLE001
+        return None
+
+    starts, reasons = [], {}
+    # Шалтгааны хэв маяг → ойлгомжтой нэр. systemd нь зогсоохын өмнө/дараа
+    # шалтгааныг мөрөндөө бичдэг тул тэдгээрийг тоолно.
+    patterns = [
+        ("Санах ой дүүрсэн (OOM)", ("out of memory", "oom-kill", "oom_reaper")),
+        ("Watchdog албадан дахин эхлүүлэв", ("watchdog", "SIGKILL", "killed")),
+        ("Гараар/deploy-ээр дахин эхлүүлсэн", ("Stopped", "Deactivated successfully")),
+        ("Алдаагаар унасан", ("Failed with result", "core-dump", "Main process exited")),
+        ("Timeout — цэвэр зогсоогүй", ("timed out", "Killing process")),
+    ]
+    for ln in out.splitlines():
+        low = ln.lower()
+        if "started parking-backend" in low or "starting parking-backend" in low:
+            m = re.match(r"^(\S+)", ln)
+            if m:
+                starts.append(m.group(1))
+        for label, keys in patterns:
+            if any(k.lower() in low for k in keys):
+                reasons[label] = reasons.get(label, 0) + 1
+    # Давхардсан (Starting + Started) бичилтийг ойролцоо цагаар нь нэгтгэнэ
+    uniq = []
+    for ts in starts:
+        if not uniq or ts[:16] != uniq[-1][:16]:
+            uniq.append(ts)
+    top = sorted(reasons.items(), key=lambda kv: -kv[1])
+    return {
+        "hours": hours,
+        "restarts": len(uniq),
+        "last": uniq[-1] if uniq else None,
+        "reasons": [{"label": k, "count": v} for k, v in top[:5]],
+        # Хэвийн эсэх: өдөрт 3-аас олон бол анхаарал татна
+        "level": "ok" if len(uniq) <= 3 else ("warn" if len(uniq) <= 12 else "bad"),
+    }
 
 
 def _service_list() -> list[tuple[str, str]]:
@@ -300,6 +352,7 @@ def _blocking_probe() -> dict:
         "kernel": _kernel(),
         "reboot_required": _reboot_required(),
         "services": [{"name": n, "status": _service_status(s)} for n, s in _service_list()],
+        "restarts": _restart_history(),
         "version": _git_version(),
         "ssl": _ssl_expiry(),
         "snapshots": _snapshot_storage(),
@@ -361,6 +414,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         "kernel": probe["kernel"],
         "reboot_required": probe["reboot_required"],
         "services": probe["services"],
+        "restarts": probe.get("restarts"),
         "database": database,
         "integrations": {
             "cameras": cameras,

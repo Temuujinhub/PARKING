@@ -35,22 +35,50 @@ LIVE = {"OPEN", "PAID"}
 
 
 def _find_overcleaned(db, wanted, sites):
-    """Өр нь ТӨЛӨГДСӨН мөртлөө дүн нь тэглэгдсэн сешнүүд → [(session, төлсөн_дүн)].
+    """МӨНГӨ нь орсон мөртлөө дүн нь тэглэгдсэн сешнүүд → [(session, орсон_дүн)].
 
-    Ийм сешнд өөрийн Payment мөр байдаггүй (өр нь өөр сешний төлбөрт
-    нийлүүлэгдсэн) тул цэвэрлэгээ «хураагдаагүй» гэж андуурсан."""
-    paid_comp = (db.query(Compensation.session_id, func.sum(Compensation.amount))
-                 .filter(Compensation.status == "PAID",
-                         Compensation.session_id.isnot(None),
-                         Compensation.site_id.in_(wanted))
-                 .group_by(Compensation.session_id).all())
+    Хоёр эх сурвалж:
+      • ӨӨРИЙНХӨӨ өр хожим төлөгдсөн (өр нь өөр сешний төлбөрт нийлүүлэгдсэн
+        тул энэ сешнд Payment мөр байдаггүй), эсвэл
+      • ХЭСЭГЧЛЭН төлбөр төлсөн атлаа өр нь цуцлагдаж дүн нь тэглэгдсэн.
+
+    Аль ч тохиолдолд «үүссэн» нь хураасанаас бага болж, цуглуулалт 100%-иас
+    давдаг (Рашбулаг 107%). Үүссэн нь хамгийн багадаа хураасан дүнтэй тэнцүү
+    байх ёстой."""
+    money = defaultdict(float)
+    for sid, amt in (db.query(Compensation.session_id, func.sum(Compensation.amount))
+                     .filter(Compensation.status == "PAID",
+                             Compensation.session_id.isnot(None),
+                             Compensation.site_id.in_(wanted))
+                     .group_by(Compensation.session_id).all()):
+        money[sid] += float(amt or 0)
+    # Сешний өөрийн төлбөрөөс БУСДЫН өрийн нийлүүлсэн хэсгийг хасна
+    for sid, amt in (db.query(Payment.session_id, func.sum(Payment.amount))
+                     .select_from(Payment)
+                     .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                     .filter(Payment.status == "PAID",
+                             ParkingSession.site_id.in_(wanted))
+                     .group_by(Payment.session_id).all()):
+        money[sid] += float(amt or 0)
+    for sid, amt in (db.query(Payment.session_id, func.sum(Compensation.amount))
+                     .select_from(Payment)
+                     .join(Compensation, Compensation.payment_id == Payment.id)
+                     .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                     .filter(Payment.status == "PAID", Compensation.status == "PAID",
+                             Compensation.session_id != Payment.session_id,
+                             ParkingSession.site_id.in_(wanted))
+                     .group_by(Payment.session_id).all()):
+        money[sid] -= float(amt or 0)
+
     out = []
-    for sid, amt in paid_comp:
+    for sid, amt in money.items():
+        if amt <= 0.5:
+            continue
         s = db.get(ParkingSession, sid)
         if s is None:
             continue
-        if float(s.total_fee or 0) < float(amt or 0) - 0.5:
-            out.append((s, float(amt or 0)))
+        if float(s.total_fee or 0) < amt - 0.5:
+            out.append((s, amt))
     return out
 
 

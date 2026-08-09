@@ -208,6 +208,36 @@ export default function Health() {
               <span className="text-slate-400">Kernel</span>
               <span className="font-mono text-xs text-slate-300">{d.kernel}</span>
             </div>
+            {/* Дахин эхэлсэн тоо — олон бол тэр агшин бүрд машин алдагддаг тул
+                зөвхөн техникийн биш, ОРЛОГЫН асуудал */}
+            {d.restarts && (
+              <div className="pt-2 border-t border-surface-border/50 space-y-1">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="flex items-center gap-2">
+                    <Dot ok={d.restarts.level === 'ok' ? true : d.restarts.level === 'warn' ? null : false} />
+                    Дахин эхэлсэн ({d.restarts.hours}ц)
+                  </span>
+                  <span className={`font-mono text-xs ${d.restarts.level === 'ok' ? 'text-accent'
+                    : d.restarts.level === 'warn' ? 'text-amber-400' : 'text-red-400'}`}>
+                    {d.restarts.restarts} удаа
+                  </span>
+                </div>
+                {d.restarts.reasons?.length > 0 && (
+                  <div className="text-[11px] text-slate-400 space-y-0.5 pl-4">
+                    {d.restarts.reasons.map((r, i) => (
+                      <div key={i} className="flex justify-between gap-2">
+                        <span>{r.label}</span><span className="font-mono">{r.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {d.restarts.level !== 'ok' && (
+                  <div className="text-[11px] text-amber-300/90 pl-4">
+                    Дахин эхлэх бүрд тэр агшинд орж байсан машин бүртгэгдэхгүй өнгөрдөг.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
