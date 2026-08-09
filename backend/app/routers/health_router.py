@@ -131,30 +131,35 @@ def _restart_history(hours: int = 24) -> dict | None:
     except Exception:  # noqa: BLE001
         return None
 
-    starts, reasons = [], {}
-    # Шалтгааны хэв маяг → ойлгомжтой нэр. systemd нь зогсоохын өмнө/дараа
-    # шалтгааныг мөрөндөө бичдэг тул тэдгээрийг тоолно.
-    patterns = [
+    # Шалтгааныг RESTART ТУС БҮРД нь тогтооно. «Stopped»/«Deactivated» гэсэн
+    # мөрүүд зогсолт бүрд гардаг тул тэдгээрийг зүгээр тоолвол давхардаж
+    # хуурамч дүр зураг өгдөг (2026-08-10: 45 restart → «deploy 92» гэж гарсан).
+    # Тиймээс restart бүрийн ӨМНӨХ цонхыг хараад ганц шалтгаан оноодог.
+    lines = out.splitlines()
+    causes = [
         ("Санах ой дүүрсэн (OOM)", ("out of memory", "oom-kill", "oom_reaper")),
-        ("Watchdog албадан дахин эхлүүлэв", ("watchdog", "SIGKILL", "killed")),
-        ("Гараар/deploy-ээр дахин эхлүүлсэн", ("Stopped", "Deactivated successfully")),
-        ("Алдаагаар унасан", ("Failed with result", "core-dump", "Main process exited")),
-        ("Timeout — цэвэр зогсоогүй", ("timed out", "Killing process")),
+        ("Watchdog албадан дахин эхлүүлэв", ("watchdog", "sigkill", "killing process")),
+        ("Алдаагаар унасан", ("failed with result", "core-dump", "main process exited")),
+        ("Шинэчлэлт (autodeploy/update.sh)", ("[autodeploy", "update.sh")),
     ]
-    for ln in out.splitlines():
-        low = ln.lower()
-        if "started parking-backend" in low or "starting parking-backend" in low:
-            m = re.match(r"^(\S+)", ln)
-            if m:
-                starts.append(m.group(1))
-        for label, keys in patterns:
-            if any(k.lower() in low for k in keys):
-                reasons[label] = reasons.get(label, 0) + 1
-    # Давхардсан (Starting + Started) бичилтийг ойролцоо цагаар нь нэгтгэнэ
-    uniq = []
-    for ts in starts:
-        if not uniq or ts[:16] != uniq[-1][:16]:
-            uniq.append(ts)
+    starts, reasons = [], {}
+    for i, ln in enumerate(lines):
+        if "started parking-backend" not in ln.lower():
+            continue
+        ts = re.match(r"^(\S+)", ln)
+        ts = ts.group(1) if ts else ""
+        # Дараалсан Starting+Started-ыг нэг гэж үзнэ (минутын нарийвчлалаар)
+        if starts and ts[:16] == starts[-1][:16]:
+            continue
+        starts.append(ts)
+        window = "\n".join(lines[max(0, i - 40):i]).lower()
+        label = "Гараар дахин эхлүүлсэн"     # тодорхой шалтгаан олдоогүй бол
+        for name, keys in causes:
+            if any(k in window for k in keys):
+                label = name
+                break
+        reasons[label] = reasons.get(label, 0) + 1
+    uniq = starts
     top = sorted(reasons.items(), key=lambda kv: -kv[1])
     return {
         "hours": hours,
