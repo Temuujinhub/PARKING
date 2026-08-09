@@ -1,6 +1,7 @@
 // Касс — операторын гол дэлгэц: гарах машинууд real-time, төлбөр авах, хаалт нээх, ээлж
 // Дэд хэсгүүд нь cashier/ хавтаст — энд төлөв, API дуудлага, real-time урсгал төвлөрнө
-import { CarFront, FlaskConical } from 'lucide-react'
+import { AlertTriangle, CarFront, FlaskConical, X } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, wsConnect } from '../api'
 import { useAuth } from '../auth'
@@ -29,6 +30,7 @@ export default function Cashier() {
   const [busy, setBusy] = useState(false)
   const [qpayInfo, setQpayInfo] = useState(null)
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
+  const [blAlert, setBlAlert] = useState(null) // хар жагсаалтын машин орж ирсэн анхааруулга
 
   const loadExits = useCallback((sid) => {
     if (!sid) return
@@ -56,6 +58,11 @@ export default function Cashier() {
       loadExits(siteId)
       if (ev?.type === 'DEBT_ALERT') {
         toast(`⚠ ${ev.data?.plate} — ${fmt(ev.data?.debt_amount || 0)}₮ өртэй машин гарах хаалтанд ирлээ!`, 'error')
+      }
+      // Хар жагсаалтын машин ОРЖ ИРЛЭЭ — өрөө төлүүлэх ганц боломж энэ. Хаалт
+      // нээгдсэн эсэхээс үл хамааран самбар дээр наалдсан анхааруулга үлдээнэ.
+      if (ev?.type === 'BLACKLIST_ALERT' && ev.data?.lane === 'entry') {
+        setBlAlert({ ...ev.data, at: new Date().toISOString() })
       }
     })
     return close
@@ -192,6 +199,37 @@ export default function Cashier() {
 
   return (
     <div className="space-y-5">
+      {/* Хар жагсаалтын машин ОРЖ ИРЛЭЭ — өрийг нь авах цорын ганц боломж.
+          Оператор өөрөө хаах хүртэл байрандаа үлдэнэ (toast шиг алга болохгүй). */}
+      {blAlert && (
+        <div className="card border-red-500/60 bg-red-500/10 py-3 flex flex-wrap items-center gap-4">
+          <AlertTriangle size={22} className="text-red-400 shrink-0" />
+          <div className="flex-1 min-w-56">
+            <div className="font-bold text-red-300">
+              Хар жагсаалтын машин орлоо: <span className="font-mono text-lg">{blAlert.plate}</span>
+              {blAlert.blocked
+                ? <span className="ml-2 text-xs bg-red-500/30 px-1.5 py-0.5 rounded">хаалт нээгээгүй</span>
+                : <span className="ml-2 text-xs bg-amber-500/25 text-amber-200 px-1.5 py-0.5 rounded">зогсоолд оруулав</span>}
+            </div>
+            <div className="text-sm text-slate-300">
+              {blAlert.debt_amount > 0
+                ? <>Төлөгдөөгүй өр: <b className="font-mono text-red-300">{fmt(blAlert.debt_amount)}₮</b>
+                    {' '}({blAlert.debt_count} нэхэмжлэл) — гарахад нь заавал барагдуулна уу.</>
+                : <>Шалтгаан: {blAlert.reason || '—'}</>}
+            </div>
+          </div>
+          {blAlert.debt_amount > 0 && (
+            <Link className="btn-primary bg-red-600 hover:bg-red-500" to="/compensations"
+              onClick={() => setBlAlert(null)}>
+              Өр барагдуулах
+            </Link>
+          )}
+          <button className="btn-secondary py-1.5" onClick={() => setBlAlert(null)} aria-label="Анхааруулга хаах">
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Касс</h1>
         <div className="flex items-center gap-3">

@@ -583,10 +583,17 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Орох дэлгэцийн текстийг УРЬДЧИЛЖ бэлдэнэ — хаалт нээх командтай ХАМТ
     # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
     # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
+    # Хар жагсаалт: ХОРИГЛОХ уу, эсвэл нэвтрүүлээд операторт анхааруулах уу
+    # (Хар жагсаалт → Дүрэм). Default нь анхааруулга — машиныг гадаа орхивол
+    # өрөө хэзээ ч төлөхгүй, харин оруулаад гарахад нь оператор өрийг авна.
+    from .services.app_settings import get_blacklist_rules
+    _bl_rules = get_blacklist_rules(db)
+    black_blocks = bool(black) and _bl_rules["block_entry"]
+
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-    denied = restricted and registered is None and not black
-    _entry_lines = None if (black or denied) else _site_screen_lines(db, site_id, "entry")
-    if black:
+    denied = restricted and registered is None and not black_blocks
+    _entry_lines = None if (black_blocks or denied) else _site_screen_lines(db, site_id, "entry")
+    if black_blocks:
         _welcome = ""
     elif denied:  # хаалттай зогсоол — татгалзсан шалтгааныг дэлгэцэнд харуулна
         _welcome = render_screen_text("{plate}\nBurtgelgui mashin", plate=plate,
@@ -599,9 +606,20 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
 
     barrier_opened = False
     if black:
+        # Өрийн хэмжээг хамт илгээнэ — оператор шууд «хэдэн төгрөг нэхэхээ» мэдэж,
+        # Кассын анхааруулгаас нэг товчоор өрийг барагдуулна.
+        from .models import Compensation as _Comp
+        _bl_debts = (db.query(_Comp).filter(_Comp.plate_number == plate,
+                                            _Comp.status == "PENDING").all())
         notify(site_id, "BLACKLIST_ALERT", {
             "plate": plate, "reason": black.reason, "lane": "entry",
+            "session_id": session.id,
+            "blocked": black_blocks,
+            "debt_count": len(_bl_debts),
+            "debt_amount": float(sum(d.amount for d in _bl_debts)),
         })
+    if black_blocks:
+        pass  # хаалт нээхгүй — дүрмээр хориглосон
     elif denied:
         # Зөвхөн бүртгэлтэй машины зогсоол — хаалт нээхгүй, операторт мэдэгдэнэ
         notify(site_id, "UNREGISTERED_DENIED", {"plate": plate, "lane": "entry"})
@@ -812,10 +830,13 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     fee = session_fee_info(db, session, at=now)
 
-    # #7 3+ төлөгдөөгүй өртэй машин — автоматаар хаалт нээхгүй, оператор өрийг цуглуулна.
+    # Өртэй машин — гарах хаалтыг автоматаар нээхгүй, оператор өрийг цуглуулна.
+    # Босгыг Хар жагсаалт → Дүрэм хэсгээс тохируулна (0 = саатуулахгүй).
     # ГЭРЭЭТ машинд үйлчлэхгүй (төлбөр авдаггүй тул ямагт гарна; session_fee_info
     # дээр is_registered шинэчлэгдсэн байгаа).
-    if len(debts) >= 3 and not session.is_registered:
+    from .services.app_settings import get_blacklist_rules
+    _exit_block_at = get_blacklist_rules(db)["block_exit_debt_count"]
+    if _exit_block_at and len(debts) >= _exit_block_at and not session.is_registered:
         session.status = "AWAITING_PAYMENT"
         session.duration_minutes = fee["duration_minutes"]
         session.base_fee, session.vat_amount, session.total_fee = (

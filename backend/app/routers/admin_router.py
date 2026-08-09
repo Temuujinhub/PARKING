@@ -1364,6 +1364,24 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
 
 
 # ─────────────────────────── Хар жагсаалт ───────────────────────────
+@router.get("/blacklist/rules")
+def get_blacklist_rules_api(db: Session = Depends(get_db),
+                            user: User = Depends(require("blacklist", "cashier"))):
+    """Хар жагсаалтын дүрэм — авто-хоригийн босго, орох/гарах хаалтны зан төлөв."""
+    from ..services.app_settings import get_blacklist_rules
+    return get_blacklist_rules(db)
+
+
+@router.put("/blacklist/rules")
+def put_blacklist_rules(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require("blacklist"))):
+    from ..services.app_settings import set_blacklist_rules
+    rules = set_blacklist_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "blacklist_rules", "-", rules)
+    db.commit()
+    return rules
+
+
 @router.get("/blacklist")
 def list_blacklist(db: Session = Depends(get_db), user: User = Depends(require("blacklist", "cashier"))):
     return [to_dict(b) for b in

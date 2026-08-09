@@ -46,18 +46,25 @@ def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
 
 def revenue_excel(data):
     """Орлогын тайлан (зогсоолоор)."""
-    rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"], r["cash_amount"],
+    def _pct(r):
+        a = r.get("accrued_amount") or 0
+        return round(r["paid_amount"] / a * 100, 1) if a else 0
+    rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"],
+             r.get("accrued_amount", 0), r["cash_amount"],
              r["qpay_amount"], r["pos_amount"], r["transfer_amount"],
-             r["paid_amount"], r["unpaid_amount"]]
+             r["paid_amount"], _pct(r), r["unpaid_amount"]]
             for r in data["rows"]]
     t = data["totals"]
-    total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"], t["cash_amount"],
+    total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"],
+                 t.get("accrued_amount", 0), t["cash_amount"],
                  t["qpay_amount"], t["pos_amount"], t["transfer_amount"],
-                 t["paid_amount"], t["unpaid_amount"]]
+                 t["paid_amount"], _pct(t), t["unpaid_amount"]]
     return _xlsx("revenue", "Орлогын тайлан",
-                 ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
-                  "Дансаар (₮)", "Нийт төлөгдсөн (₮)", "Төлөгдөөгүй (₮)"],
-                 rows, widths=(30, 10, 10, 12, 14, 14, 14, 14, 18, 16), total_row=total_row)
+                 ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Үүссэн төлбөр (₮)",
+                  "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
+                  "Дансаар (₮)", "Нийт төлөгдсөн (₮)", "Цуглуулалт (%)", "Төлөгдөөгүй (₮)"],
+                 rows, widths=(30, 10, 10, 12, 18, 14, 14, 14, 14, 18, 14, 16),
+                 total_row=total_row)
 
 
 def transactions_excel(rows):

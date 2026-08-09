@@ -61,9 +61,20 @@ body {
   .td { @apply px-3 py-2.5 text-sm; }
 }
 
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: var(--surface); }
-::-webkit-scrollbar-thumb { background: var(--surface-border); border-radius: 4px; }
+/* Scrollbar — ХАРАГДАХУЙЦ байх ёстой. Хар дэвсгэр дээр анхдагч нимгэн саарал
+   зураас бараг үл ялгарч, урт жагсаалт гүйлгэх боломжтойг мэдэхгүй өнгөрдөг.
+   Тиймээс өргөн + тод өнгө + hover-т илүү тод болгов. */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--surface); border-radius: 6px; }
+::-webkit-scrollbar-thumb {
+  background: #64748b;                    /* slate-500 — дэвсгэрээс тодоор ялгарна */
+  border-radius: 6px;
+  border: 2px solid var(--surface);       /* дотогшоо зай — «бэлхүүстэй» харагдана */
+}
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+::-webkit-scrollbar-corner { background: var(--surface); }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: #64748b var(--surface); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

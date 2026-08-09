@@ -233,6 +233,20 @@ class RegisteredDriver(Base):
     site = relationship("ParkingSite", lazy="joined")
 
 
+class AppSetting(Base):
+    """Ажиллах явцад UI-аас өөрчлөгддөг систем тохиргоо (.env биш).
+
+    .env-ийн тохиргоо нь deploy шаарддаг тул оператор/админы өдөр тутам
+    тааруулах дүрмийг (ж: хар жагсаалтын босго) энд JSON-оор хадгална.
+    Түлхүүр бүр нэг бүлэг дүрэм — services/app_settings.py-д default-той."""
+    __tablename__ = "app_settings"
+    key = Column(String(60), primary_key=True)
+    value = Column(JSON, nullable=False, default=dict)
+    updated_by = Column(String(60), default="")
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+
 class BlacklistEntry(Base):
     __tablename__ = "blacklist"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)

@@ -4,13 +4,15 @@
   1. Үүсэх: (а) оператор төлбөргүй гаргахдаа "нөхөн төлбөр үүсгэх" сонгох,
             (б) шөнийн хаалт — бүх зогсож буй машиныг гаргаж нэхэмжлэл үүсгэх
   2. Төлөгдөх: касс дээр бэлнээр (дараагийн ирэлтэд)
-  3. Хориг: нэг дугаар 3+ ТӨЛӨГДӨӨГҮЙ нэхэмжлэлтэй бол автоматаар хар жагсаалтад орно
+  3. Хориг: тохируулсан босгод (өрийн тоо ЭСВЭЛ дүн — Хар жагсаалт → Дүрэм)
+            хүрсэн дугаар автоматаар хар жагсаалтад орно
   4. Касс/шалгах дэлгэцэд нөхөн төлбөртэй машин улаанаар тэмдэглэгдэнэ
 """
 import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..auth import operator_sites, require
@@ -31,14 +33,29 @@ def pending_count(db: Session, plate: str) -> int:
 
 
 def _auto_blacklist(db: Session, plate: str, username: str):
-    """3+ төлөгдөөгүй нөхөн төлбөртэй бол хар жагсаалтад автоматаар нэмнэ."""
-    if pending_count(db, plate) < 3:
+    """Тохируулсан босгод хүрсэн өртэй машиныг хар жагсаалтад автоматаар нэмнэ.
+
+    Босго нь Хар жагсаалт → Дүрэм хэсгээс өөрчлөгддөг (app_settings):
+    төлөгдөөгүй өрийн ТОО эсвэл нийт ДҮН — аль нэг нь хангагдвал орно."""
+    from ..services.app_settings import get_blacklist_rules
+    rules = get_blacklist_rules(db)
+    if not rules["auto_enabled"]:
+        return
+    cnt = pending_count(db, plate)
+    total = float(db.query(func.coalesce(func.sum(Compensation.amount), 0))
+                  .filter(Compensation.plate_number == plate,
+                          Compensation.status == "PENDING").scalar() or 0)
+    by_count = bool(rules["debt_count"]) and cnt >= rules["debt_count"]
+    by_amount = bool(rules["debt_amount"]) and total >= rules["debt_amount"]
+    if not (by_count or by_amount):
         return
     exists = db.query(BlacklistEntry).filter(BlacklistEntry.plate_number == plate,
                                              BlacklistEntry.is_active.is_(True)).first()
     if not exists:
+        why = (f"{cnt} удаагийн төлөгдөөгүй өр" if by_count
+               else f"төлөгдөөгүй өр {total:,.0f}₮")
         db.add(BlacklistEntry(plate_number=plate,
-                              reason="Нөхөн төлбөр 3+ удаа төлөгдөөгүй (автомат хориг)",
+                              reason=f"{why} (автомат хориг)",
                               created_by=f"систем ({username})"))
 
 

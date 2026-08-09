@@ -234,6 +234,15 @@ MIGRATIONS = [
     # v3.6 — Давхар зогсоолын ДОТООД хаалт НЭГ зогсоол дотор. Доторх камерууд
     # session нээхгүй/хаахгүй, зөвхөн төлбөрийн тоолуурыг зогсоож/үргэлжлүүлнэ.
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS nested_inner BOOLEAN NOT NULL DEFAULT false",
+
+    # v3.7 — UI-аас тохируулдаг систем дүрэм (хар жагсаалтын босго г.м).
+    # .env биш DB-д хадгална: deploy-гүйгээр админ өөрөө өөрчилнө.
+    """CREATE TABLE IF NOT EXISTS app_settings (
+        key VARCHAR(60) PRIMARY KEY,
+        value JSON NOT NULL DEFAULT '{}',
+        updated_by VARCHAR(60),
+        updated_at TIMESTAMP NOT NULL DEFAULT now()
+    )""",
 ]
 
 
