@@ -2,7 +2,7 @@
 // Дугаарын эхний тэмдэгтээр live шүүнэ, төлөв/зогсоолоор шүүнэ, real-time шинэчлэгдэнэ.
 // Админ "Аудит горим"-оор сэжигтэй (гарсан ч хаагдаагүй / буруу дугаар / удсан) бүртгэлийг
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
-import { Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { CarFront, Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { useAuth } from '../auth'
@@ -68,6 +68,7 @@ export default function Check() {
   const [data, setData] = useState({ total: 0, rows: [], suspect: 0 })
   const [sel, setSel] = useState([]) // админ: хасахаар сонгосон session id-ууд
   const [removing, setRemoving] = useState(null) // {ids, createComp, reason}
+  const [backfill, setBackfill] = useState(null) // {rows, debt} — камерын логоос нөхөж бүртгэх
   const debounceRef = useRef(null)
 
   const load = () => {
@@ -126,6 +127,23 @@ export default function Check() {
       })
       toast(`${r.removed} машин хасагдлаа${r.debt_total ? `, өр ${fmt(r.debt_total)}₮` : ''}${r.skipped ? ` (${r.skipped} алгассан)` : ''}`)
       setRemoving(null); setSel([]); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
+  const doBackfill = async (e) => {
+    e.preventDefault()
+    try {
+      const r = await api('/api/sessions/register-from-camera', {
+        method: 'POST',
+        body: {
+          site_id: siteId,
+          create_debt: backfill.debt,
+          cars: backfill.rows.map((u) => ({ plate: u.plate, at: u.at, exit_at: u.exit_at })),
+        },
+      })
+      toast(`${r.created} машин бүртгэгдлээ${r.debt_total ? `, өр ${fmt(r.debt_total)}₮` : ''}`
+        + `${r.skipped ? ` (${r.skipped} давхардсан/алгассан)` : ''}`)
+      setBackfill(null); load()
     } catch (err) { toast(err.message, 'error') }
   }
 
@@ -213,22 +231,43 @@ export default function Check() {
             {data.camera.error && <span className="text-red-400">{data.camera.error}</span>}
           </div>
           {data.camera.unmatched_total > 0 && (
-            <div>
-              <span className="text-amber-300">
-                Камераар орсон ч СИСТЕМД БҮРТГЭЛГҮЙ {data.camera.unmatched_total} машин
-              </span>
-              <span className="text-slate-500 text-xs"> (сервер унтарсан/event алдсан үеийнх байж магадгүй):</span>
-              <div className="flex flex-wrap gap-2 mt-1">
+            <div className="space-y-2">
+              <div>
+                <span className="text-amber-300">
+                  Камераар орсон ч СИСТЕМД БҮРТГЭЛГҮЙ {data.camera.unmatched_total} машин
+                </span>
+                <span className="text-slate-500 text-xs"> (сервер унтарсан/event алдсан үеийнх):</span>
+                {data.camera.unmatched_exited > 0 && (
+                  <span className="text-xs text-slate-400 ml-2">
+                    үүнээс <b className="text-slate-200">{data.camera.unmatched_exited}</b> нь
+                    гарах камерт ч уншигдсан (төлбөр нь бодогдоно)
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
                 {data.camera.unmatched.map((u, i) => (
-                  <span key={i} className="font-mono text-xs bg-surface-muted px-1.5 py-0.5 rounded"
-                    title={`${u.camera} · ${fmtDate(u.at)}`}>
-                    {u.plate} <span className="text-slate-500">{fmtDate(u.at)}</span>
+                  <span key={i}
+                    className={`font-mono text-xs px-1.5 py-0.5 rounded ${u.exit_at
+                      ? 'bg-amber-500/15 text-amber-200' : 'bg-surface-muted'}`}
+                    title={u.exit_at
+                      ? `${u.camera} · орсон ${fmtDate(u.at)} → гарсан ${fmtDate(u.exit_at)} (${u.hours}ц)`
+                      : `${u.camera} · орсон ${fmtDate(u.at)} — гарах камерт уншигдаагүй, зогсоолд байж магадгүй`}>
+                    {u.plate}
+                    <span className="text-slate-400 ml-1">
+                      {u.exit_at ? `${u.hours}ц` : 'дотор?'}
+                    </span>
                   </span>
                 ))}
                 {data.camera.unmatched_total > data.camera.unmatched.length && (
                   <span className="text-xs text-slate-500">…+{data.camera.unmatched_total - data.camera.unmatched.length}</span>
                 )}
               </div>
+              {isAdmin && (
+                <button className="btn-secondary py-1 text-xs text-amber-300 border-amber-500/40"
+                  onClick={() => setBackfill({ rows: data.camera.unmatched, debt: true })}>
+                  <CarFront size={14} /> Эдгээрийг нөхөж бүртгэх
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -300,6 +339,47 @@ export default function Check() {
           </tr>
         ))}
       </Table>
+
+      {/* Камерын логоос нөхөж бүртгэх — гарсан нь мэдэгдэж байгааг хааж өр үүсгэнэ */}
+      <Modal open={!!backfill} onClose={() => setBackfill(null)} title="Камерын логоос нөхөж бүртгэх">
+        {backfill && (() => {
+          const exited = backfill.rows.filter((r) => r.exit_at)
+          const inside = backfill.rows.filter((r) => !r.exit_at)
+          return (
+            <form onSubmit={doBackfill} className="space-y-3">
+              <div className="text-sm">
+                Камер уншсан ч системд бүртгэгдээгүй <b className="font-mono">{backfill.rows.length}</b> машиныг
+                камерын цагаар нөхөж бүртгэнэ.
+              </div>
+              <div className="rounded-lg bg-surface-muted/50 p-3 text-xs space-y-1.5">
+                <div>
+                  <b className="text-amber-300">{exited.length}</b> нь гарах камерт ч уншигдсан
+                  — орсон/гарсан цагаар нь <b>хаагдаж, төлбөр бодогдоно</b>
+                </div>
+                <div>
+                  <b className="text-slate-300">{inside.length}</b> нь гарах уншилтгүй
+                  — <b>зогсоолд байгаа</b> гэж нээлттэй бүртгэгдэнэ
+                </div>
+              </div>
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" className="mt-0.5" checked={backfill.debt}
+                  onChange={(e) => setBackfill({ ...backfill, debt: e.target.checked })} />
+                <span>Гарсан машины төлбөрөөр <b>өр (нөхөн төлбөр)</b> үүсгэх
+                  <span className="block text-slate-500">
+                    Дараа ирэхэд нь нэхэгдэнэ. Чагтыг авбал зүгээр л хаагдана.
+                  </span>
+                </span>
+              </label>
+              <div className="text-[11px] text-slate-500">
+                Тухайн цагийн ±1 цагийн дотор аль хэдийн бүртгэл байвал давхардуулахгүй алгасна.
+              </div>
+              <button className="btn-primary w-full justify-center">
+                <CarFront size={15} /> {backfill.rows.length} машиныг бүртгэх
+              </button>
+            </form>
+          )
+        })()}
+      </Modal>
 
       {/* Зогсоолоос хасах modal — өр үүсгэх эсэх + шалтгаан */}
       <Modal open={!!removing} onClose={() => setRemoving(null)} title="Зогсоолоос хасах">

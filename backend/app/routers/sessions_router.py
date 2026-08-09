@@ -263,12 +263,39 @@ def audit_sessions(site_id: str | None = None, camera: bool = False,
         known = {p for (p,) in db.query(ParkingSession.plate_number)
                  .filter(ParkingSession.site_id == site_id,
                          ParkingSession.entry_time >= wstart).all()}
-        unmatched = [ev for ev in cam_events
-                     if ev["plate"] and ev["lane_dir"] == "entry" and ev["plate"] not in known]
-        unmatched.sort(key=lambda e: e["time"], reverse=True)
-        cam_info["unmatched_total"] = len(unmatched)
-        cam_info["unmatched"] = [{"plate": ev["plate"], "at": ev["time"].isoformat(),
-                                  "camera": ev["camera"]} for ev in unmatched[:20]]
+        # Гарах камерын уншилтууд дугаараар — орсон машин ГАРСАН эсэхийг тулгана
+        exits_by_plate: dict[str, list] = {}
+        for ev in cam_events:
+            if ev["plate"] and ev["lane_dir"] == "exit":
+                exits_by_plate.setdefault(ev["plate"], []).append(ev["time"])
+        for lst in exits_by_plate.values():
+            lst.sort()
+
+        raw_unmatched = [ev for ev in cam_events
+                         if ev["plate"] and ev["lane_dir"] == "entry"
+                         and ev["plate"] not in known]
+        raw_unmatched.sort(key=lambda e: (e["plate"], e["time"]))
+        # Дараалсан давхар уншилтыг (burst) нэгтгэнэ — камер нэг машиныг
+        # хэдэн секундын зайтай 2-3 удаа уншдаг
+        unmatched = []
+        for ev in raw_unmatched:
+            if (unmatched and unmatched[-1]["plate"] == ev["plate"]
+                    and (ev["time"] - unmatched[-1]["time"]).total_seconds() < 600):
+                continue
+            unmatched.append(ev)
+
+        out_rows = []
+        for ev in unmatched:
+            ex = next((t for t in exits_by_plate.get(ev["plate"], []) if t > ev["time"]), None)
+            out_rows.append({
+                "plate": ev["plate"], "at": ev["time"].isoformat(), "camera": ev["camera"],
+                "exit_at": ex.isoformat() if ex else None,
+                "hours": round((ex - ev["time"]).total_seconds() / 3600, 1) if ex else None,
+            })
+        out_rows.sort(key=lambda r: r["at"], reverse=True)
+        cam_info["unmatched_total"] = len(out_rows)
+        cam_info["unmatched_exited"] = sum(1 for r in out_rows if r["exit_at"])
+        cam_info["unmatched"] = out_rows[:60]
 
     out = _attach_debt(db, out)
     resp = {"total": len(out), "suspect": sum(1 for d in out if d["audit"]["suspect"]),
@@ -413,6 +440,78 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
         "barrier_opened": False, "manual": True, "by": user.username,
     })
     return _session_out(db, s, with_fee=True)
+
+
+@router.post("/register-from-camera")
+def register_from_camera(body: dict, db: Session = Depends(get_db),
+                         user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Камерын логт байгаа ч системд бүртгэлгүй машиныг НӨХӨЖ бүртгэнэ.
+
+    Сервер унтарсан/event алдагдсан үед камер өөрөө уншсан ч session үүсээгүй
+    машинууд гарна (Аудит горим → «Камераар орсон ч бүртгэлгүй»). Эдгээрийг
+    камерын цагаар нөхөж бүртгээд төлбөрийг нь өр болгоно.
+
+    body: {site_id, cars: [{plate, at, exit_at?}], create_debt?: bool=true}
+      • exit_at байвал тэр үеийн дүнгээр хаана (машин гарсан нь мэдэгдэж байгаа)
+      • exit_at байхгүй бол зогсоолд БАЙГАА гэж үзэж OPEN үлдээнэ
+    """
+    site_id = body.get("site_id")
+    cars = body.get("cars") or []
+    if not site_id or not isinstance(cars, list) or not cars:
+        raise HTTPException(400, "site_id ба cars жагсаалт шаардлагатай")
+    enforce_site(user, site_id)
+    create_debt = bool(body.get("create_debt", True))
+
+    created, skipped, debt_total = [], 0, 0.0
+    for car in cars[:200]:
+        plate = normalize_plate(str(car.get("plate") or ""))
+        at = car.get("at")
+        if not plate or not at:
+            skipped += 1
+            continue
+        try:
+            entry_time = datetime.fromisoformat(str(at).replace("Z", ""))
+        except ValueError:
+            skipped += 1
+            continue
+        # Тухайн цагийн орчимд аль хэдийн бүртгэл байвал давхардуулахгүй
+        dup = (db.query(ParkingSession)
+               .filter(ParkingSession.site_id == site_id,
+                       ParkingSession.plate_number == plate,
+                       ParkingSession.entry_time >= entry_time - timedelta(hours=1),
+                       ParkingSession.entry_time <= entry_time + timedelta(hours=1))
+               .first())
+        if dup:
+            skipped += 1
+            continue
+
+        s = ParkingSession(site_id=site_id, plate_number=plate, entry_time=entry_time,
+                           status="OPEN",
+                           note=f"камерын логоос нөхөж бүртгэв ({user.username})")
+        exit_raw = car.get("exit_at")
+        if exit_raw:
+            try:
+                s.exit_time = datetime.fromisoformat(str(exit_raw).replace("Z", ""))
+                s.status = "AWAITING_PAYMENT"   # гарсан нь мэдэгдэж байгаа
+            except ValueError:
+                pass
+        db.add(s)
+        db.flush()
+        due = 0.0
+        if s.status == "AWAITING_PAYMENT":
+            # exit_time дээр төлбөрийг царцааж хаана; төлөгдөөгүй тул өр үүснэ
+            due = close_session_forced(db, s, "camera_backfill", user.username,
+                                       create_comp=create_debt)
+            debt_total += due
+        db.add(AuditLog(username=user.username, action="CAMERA_BACKFILL", entity="session",
+                        entity_id=s.id,
+                        detail={"plate": plate, "entry": entry_time.isoformat(),
+                                "exit": exit_raw, "debt": due}))
+        created.append({"plate": plate, "session_id": s.id, "debt": due,
+                        "status": s.status})
+    db.commit()
+    return {"created": len(created), "skipped": skipped,
+            "debt_total": debt_total, "rows": created}
 
 
 @router.post("/bulk-remove")
