@@ -234,6 +234,15 @@ class Settings(BaseSettings):
     # илүүц "Manual Snapshot" бичлэг үүсгэхгүй. 0 = хүлээхгүй (хуучин зан төлөв).
     # WS зураг өгдөггүй камерт огт нөлөөгүй (puller_delivers=False → шууд fallback).
     snapshot_wait_event_sec: float = 8.0
+    # CGI event стрим (eventManager.cgi?action=attach) нь `data={...}` JSON-ы
+    # хажуугаар тухайн event-ийн ЖИНХЭНЭ кадрыг binary JPEG-ээр илгээдэг. Түүнийг
+    # хэдэн секунд хүлээх вэ. Камер зураг өгдөг нь нэг удаа батлагдсаны ДАРАА л
+    # хүлээнэ — өгдөггүй камерт огт нөлөөгүй (шууд fallback). 0 = хүлээхгүй.
+    snapshot_stream_wait_sec: float = 3.0
+    # snapshot.cgi руу унах эсэх. Энэ нь камер дээр «Manual Snapshot» бичлэг
+    # үүсгэдэг бөгөөд АМЬД кадр авдаг тул машин өнгөрсний дараа зураг гардаг.
+    # Стримийн зураг тогтвортой ажилласны дараа false болгож бүрмөсөн унтраана.
+    snapshot_cgi_fallback: bool = True
 
     # ── И-мэйл (SMTP) — байгууллагын сарын нэхэмжлэл илгээхэд ──
     # Жишээ (Gmail): HOST=smtp.gmail.com PORT=587 TLS=true USER=таны@gmail.com

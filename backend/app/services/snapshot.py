@@ -131,6 +131,68 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
         return None
 
 
+# ─── CGI event стримээр ирсэн зураг ─────────────────────────────────────────
+# Dahua eventManager.cgi?action=attach нь multipart стрим: `data={...}` JSON-ы
+# ХАЖУУГААР тухайн event-ийн ЖИНХЭНЭ кадрыг binary JPEG хэсгээр илгээдэг. Өмнө нь
+# стримийг ТЕКСТЭЭР уншдаг байсан тул тэр зураг мөхөж, бид үргэлж snapshot.cgi
+# рүү унадаг байв. Үр дагавар нь хоёр талдаа муу:
+#   • snapshot.cgi нь камер дээр «Manual Snapshot» бичлэг үүсгэдэг — сүлжээний
+#     инженер «танай систем давхар manual event үүсгэж байна» гэж зөв хэлсэн;
+#   • тэр нь ОДООГИЙН кадр тул машин хаалганаас гарсны дараа авагдаж, зураг дээр
+#     машин байхгүй/сүүлээрээ харагддаг (2026-08-09).
+# Одоо cgi_poller стримээс JPEG-ийг таслан авч энд өгнө; capture нь эхлээд
+# үүнийг хүлээгээд, зөвхөн ирээгүй үед snapshot.cgi рүү унана.
+_stream_images: dict[str, tuple[float, bytes]] = {}   # ip → (monotonic, jpeg)
+_stream_seen: dict[str, float] = {}                   # ip → сүүлд зураг ирсэн үе
+
+# Камер зураг өгдөг гэдгээ нэг удаа баталсны дараа энэ хугацаанд «өгдөг» гэж
+# итгэнэ. Итгэхгүй бол хүлээхгүй → зан төлөв хуучнаараа (шууд snapshot.cgi).
+_STREAM_TRUST_SEC = 3600.0
+# Зураг нь JSON event-ээс ӨМНӨ ирж болно — event-ийн цагаас өмнөх энэ мужийг зөвшөөрнө
+_STREAM_PRE_SEC = 4.0
+
+
+def offer_stream_image(ip: str, data: bytes) -> None:
+    """cgi_poller стримээс таслан авсан event зургийг санал болгоно."""
+    import time as _time
+    if not ip or not data:
+        return
+    now = _time.monotonic()
+    _stream_images[ip] = (now, data)
+    if ip not in _stream_seen:
+        log.info("%s: event стримээс ЗУРАГ ирж эхэллээ (%dб) — snapshot.cgi-ийн "
+                 "оронд үүнийг ашиглана", ip, len(data))
+    _stream_seen[ip] = now
+
+
+def stream_delivers(ip: str) -> bool:
+    """Энэ камер event стримээрээ зураг өгдөг нь батлагдсан уу."""
+    import time as _time
+    return _time.monotonic() - _stream_seen.get(ip, -1e9) < _STREAM_TRUST_SEC
+
+
+async def _take_stream_image(ip: str, t0: float) -> bytes | None:
+    """Event стримийн зургийг хүлээж авна. Байхгүй/хугацаа хэтэрвэл None.
+
+    `t0` — event боловсруулагдсан агшин. Түүнээс ӨМНӨХ (_STREAM_PRE_SEC хүртэл)
+    зургийг ч зөвшөөрнө: камер ихэвчлэн зургаа JSON-оос өмнө илгээдэг. Хуучин
+    машины зургийг санамсаргүй авахаас сэргийлж цагаар нь шүүж, авсан зургаа
+    санамжаас ХАСНА (нэг зураг хоёр машинд очихгүй).
+    """
+    import time as _time
+    if settings.snapshot_stream_wait_sec <= 0 or not stream_delivers(ip):
+        return None
+    deadline = _time.monotonic() + settings.snapshot_stream_wait_sec
+    while True:
+        item = _stream_images.get(ip)
+        if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
+            _stream_images.pop(ip, None)
+            return item[1]
+        if _time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.15)
+
+
 async def _snapshot_written(session_id: str, lane_dir: str) -> bool:
     """snap_puller энэ session-д зургаа аль хэдийн холбосон эсэх (DB-ээс)."""
     from ..models import ParkingSession
@@ -159,13 +221,19 @@ async def _wait_event_snapshot(session_id: str, lane_dir: str) -> bool:
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                              lane_dir: str, raw: dict,
                              creds: tuple[str, str] | None = None):
+    import time as _time
+    t0 = _time.monotonic()
     data = _payload_picture(raw)
     source = "payload"
     if data is None and camera_ip:
-        # Энэ камер event зургаа WS-ээр өгдөг нь батлагдсан бол эхлээд түүнийг
-        # хүлээнэ — snapshot.cgi нь камер дээр "Manual Snapshot" бичлэг үүсгэж,
-        # ANPR зурагтай давхардуулдаг. WS зураг өгдөггүй камерт puller_delivers
-        # ямагт False тул одоогийн найдвартай зам (шууд snapshot.cgi) хэвээр.
+        # 1) CGI event стримээр камер өөрөө илгээсэн ЖИНХЭНЭ event кадр. Энэ нь
+        #    хамгийн зөв зураг: машин яг хаалганы өмнө байх агшны кадр бөгөөд
+        #    камер дээр ямар ч нэмэлт бичлэг үүсгэхгүй.
+        data = await _take_stream_image(camera_ip, t0)
+        if data is not None:
+            source = "event-stream"
+    if data is None and camera_ip:
+        # 2) Энэ камер event зургаа WS-ээр өгдөг нь батлагдсан бол түүнийг хүлээнэ.
         from .snap_puller import puller_delivers
         if settings.snapshot_wait_event_sec > 0 and puller_delivers(camera_ip):
             if await _wait_event_snapshot(session_id, lane_dir):
@@ -173,6 +241,14 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                 return
             log.info(f"{plate} {lane_dir}: WS зураг {settings.snapshot_wait_event_sec:.0f}с-д "
                      f"ирсэнгүй — snapshot.cgi fallback")
+        # 3) Эцсийн арга — snapshot.cgi. Энэ нь камер дээр «Manual Snapshot»
+        #    бичлэг үүсгэдэг БӨГӨӨД амьд кадр тул машин аль хэдийн өнгөрсөн байж
+        #    болно. Стримийн зураг ажиллаж эхэлсэн зогсоолд .env-ээс
+        #    PARKING_SNAPSHOT_CGI_FALLBACK=false гэж бүрмөсөн унтраана.
+        if not settings.snapshot_cgi_fallback:
+            log.info(f"{plate} {lane_dir}: event зураг ирсэнгүй, snapshot.cgi унтраалттай "
+                     f"— зураггүй үлдлээ (камер {camera_ip})")
+            return
         data = await _fetch_from_camera(camera_ip, creds)
         source = "snapshot.cgi"
     if data is None:

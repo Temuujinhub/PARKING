@@ -17,6 +17,7 @@ import httpx
 
 from ..config import settings
 from .device_auth import camera_credentials
+from .snapshot import offer_stream_image
 from ..database import SessionLocal
 from ..models import Device, LprEvent
 from ..session_logic import handle_entry, handle_exit, handle_inner_pass, normalize_plate
@@ -75,21 +76,74 @@ def _plate_from(data: dict) -> tuple[str, float]:
     return "", 0.0
 
 
-def _extract_json_blocks(buffer: str):
-    """buffer-ээс `data={...}` бүрэн JSON блокуудыг гаргаж, үлдэгдэл буфер буцаана."""
+_SOI = b"\xff\xd8\xff"   # JPEG эхлэл
+_EOI = b"\xff\xd9"       # JPEG төгсгөл
+# Бүрэн бус зураг хэр хүртэл хуримтлагдахыг зөвшөөрөх (эвдэрсэн стримд санах ой идэхгүй)
+_MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
+
+def _extract_images(buffer: bytes):
+    """buffer-ээс БҮРЭН JPEG-үүдийг таслан авна. Буцаана: (images, head, tail).
+
+    head — зурагнуудын ГАДНАХ байтууд (JSON-г ЗӨВХӨН эндээс хайна),
+    tail — бүрэн ирээгүй зургийн эхлэл (дараагийн chunk-тай залгана).
+
+    ЯАГААД ХУВААХ ЁСТОЙ ВЭ: JPEG-ийн шахагдсан өгөгдөл дотор `data={` гэсэн байтын
+    дараалал санамсаргүй таарч болно. Бүрэн бус зургийг JSON задлагчид үзүүлбэл
+    тэр нь зургийн дундаас «event» олж, зургийг хэрчиж хаядаг (тестээр баригдсан).
+
+    Dahua-гийн multipart стрим нь `data={...}` текст хэсгүүдийн ХООРОНД тухайн
+    event-ийн кадрыг binary JPEG-ээр илгээдэг. Урьд нь стримийг `aiter_text()`-ээр
+    уншдаг байсан тул эдгээр байтууд UTF-8 биш гэж мөхөж, зураг бүрэн АЛДАГДДАГ
+    байв — улмаас бид зураг бүрд snapshot.cgi (камер дээр «Manual Snapshot»
+    бичлэг + АМЬД кадр) рүү унадаг байлаа.
+
+    multipart-ийн толгойг задлахгүйгээр SOI/EOI-гоор шууд хайна: boundary-ийн
+    формат firmware бүрд өөр байдаг ч JPEG-ийн хүрээ ямагт ижил. Base64 текстэд
+    \\xff байт таарахгүй (ASCII) тул худал олдолт үүсэхгүй.
+    """
+    images: list[bytes] = []
+    head = b""
+    while True:
+        i = buffer.find(_SOI)
+        if i < 0:
+            return images, head + buffer, b""
+        j = buffer.find(_EOI, i + len(_SOI))
+        if j < 0:
+            # Зураг бүрэн ирээгүй — SOI-гоос хойшхыг tail болгож хүлээнэ.
+            # Хэт томорвол (эвдэрсэн стрим) хаяна.
+            if len(buffer) - i > _MAX_IMAGE_BYTES:
+                log.warning("бүрэн бус зураг %dб хүрлээ — хаялаа", len(buffer) - i)
+                return images, head + buffer[:i], b""
+            return images, head + buffer[:i], buffer[i:]
+        images.append(buffer[i:j + len(_EOI)])
+        head += buffer[:i]
+        buffer = buffer[j + len(_EOI):]
+
+
+def _extract_json_blocks(buffer: bytes):
+    """buffer-ээс `data={...}` бүрэн JSON блокуудыг гаргаж, үлдэгдэл буфер буцаана.
+
+    Байтаар ажиллана: `{`/`}` нь ASCII тул UTF-8-ийн үргэлжлэл байтуудтай
+    хэзээ ч андуурагдахгүй; блок бүрийг л мөр болгож задална.
+    """
     blocks = []
     while True:
-        i = buffer.find("data={")
+        i = buffer.find(b"data={")
         if i < 0:
-            # Буфер хэт томрохоос сэргийлж таслах
-            return blocks, buffer[-4096:] if len(buffer) > 8192 else buffer
+            # Буфер хэт томрохоос сэргийлж таслах. ГЭХДЭЭ бүрэн бус ЗУРАГ
+            # хуримтлагдаж байвал таслахгүй — эс бол 600КБ зургийн сүүл 4КБ
+            # болж хэрчигдэж, JPEG эвдэрнэ.
+            if len(buffer) > 8192 and _SOI not in buffer:
+                return blocks, buffer[-4096:]
+            return blocks, buffer
         start = i + len("data=")
         depth, j, end = 0, start, -1
         while j < len(buffer):
             ch = buffer[j]
-            if ch == "{":
+            if ch == 0x7B:      # {
                 depth += 1
-            elif ch == "}":
+            elif ch == 0x7D:    # }
                 depth -= 1
                 if depth == 0:
                     end = j + 1
@@ -99,7 +153,7 @@ def _extract_json_blocks(buffer: str):
             return blocks, buffer[i:]  # бүрэн бус — цааш хүлээнэ
         raw = buffer[start:end]
         try:
-            blocks.append(json.loads(raw))
+            blocks.append(json.loads(raw.decode("utf-8", "replace")))
         except Exception:
             pass
         buffer = buffer[end:]
@@ -280,7 +334,7 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
         auth = httpx.DigestAuth(*creds)
         url = variants[vi % len(variants)]
         codes = url.split("codes=")[1].split("&")[0]
-        buffer = ""
+        buffer = b""
         try:
             # read timeout: энэ хугацаанд юу ч ирэхгүй бол холболт үхсэн гэж үзэж
             # ReadTimeout шиднэ → reconnect. read=None үед TCP чимээгүй тасрахад
@@ -353,17 +407,27 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     cycle_start = vi
                     log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}), event хүлээж байна")
                     last_touch = 0.0
-                    async for chunk in resp.aiter_text():
+                    # БАЙТААР уншина: стримд binary JPEG хэсэг ирдэг тул текст
+                    # горимд тэдгээр нь мөхөж, event зураг АЛДАГДДАГ байв.
+                    async for chunk in resp.aiter_bytes():
                         buffer += chunk
                         # Стрим heartbeat 5с тутам ирдэг — событиегүй ч 60с тутам онлайн тэмдэглэнэ
                         if time.monotonic() - last_touch > 60:
                             last_touch = time.monotonic()
                             _touch(device_id)
                         # Дибаг: Code= мөр бүрийг логд харуулна (камер юу илгээж байгааг харах)
-                        for line in chunk.splitlines():
-                            if line.startswith("Code="):
-                                log.info(f"{ip} event: {line[:90]}")
-                        blocks, buffer = _extract_json_blocks(buffer)
+                        # (binary зурагтай chunk дээр мөр таслахгүй — дэмий ажил)
+                        if b"Code=" in chunk:
+                            for line in chunk.splitlines():
+                                if line.startswith(b"Code="):
+                                    log.info(f"{ip} event: {line[:90].decode('utf-8', 'replace')}")
+                        # Event-ийн ЖИНХЭНЭ кадрыг эхлээд таслан авна — snapshot
+                        # түүнийг хүлээж авч, snapshot.cgi рүү унахгүй болно
+                        images, head, tail = _extract_images(buffer)
+                        for img in images:
+                            offer_stream_image(ip, img)
+                        blocks, head = _extract_json_blocks(head)
+                        buffer = head + tail
                         for data in blocks:
                             # Producer: event-ийг ДАРААЛАЛД шидээд шууд дараагийн
                             # chunk-аа уншина. Өмнө нь энд `await _process_event(...)`
