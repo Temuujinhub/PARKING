@@ -1364,6 +1364,36 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
 
 
 # ─────────────────────────── Хар жагсаалт ───────────────────────────
+@router.get("/autoclose/rules")
+def get_autoclose_rules_api(db: Session = Depends(get_db),
+                            user: User = Depends(require("settings"))):
+    """Зогсоолын авто цэвэрлэгээний дүрэм (гацсан бүртгэлийг хэзээ хаах)."""
+    from ..services.app_settings import get_autoclose_rules
+    return get_autoclose_rules(db)
+
+
+@router.put("/autoclose/rules")
+def put_autoclose_rules(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require("settings"))):
+    from ..services.app_settings import set_autoclose_rules
+    rules = set_autoclose_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "autoclose_rules", "-", rules)
+    db.commit()
+    return rules
+
+
+@router.post("/autoclose/run")
+def run_autoclose_now(db: Session = Depends(get_db),
+                      user: User = Depends(require("settings"))):
+    """Авто цэвэрлэгээг ЯГ ОДОО ажиллуулна (30 мин хүлээхгүй) — тохиргоо
+    өөрчилсний дараа үр дүнг шууд харах."""
+    from ..services.auto_close import run_once
+    closed = run_once()
+    _audit(db, user, "AUTO_CLOSE_MANUAL", "session", "-", {"closed": closed})
+    db.commit()
+    return {"closed": closed}
+
+
 @router.get("/blacklist/rules")
 def get_blacklist_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("blacklist", "cashier"))):

@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 
 from ..auth import operator_sites, require
 from ..database import get_db
-from ..models import AuditLog, BlacklistEntry, Compensation, ParkingSession, User
+from ..models import (AuditLog, BlacklistEntry, CashierShift, Compensation, ParkingSession,
+                      Payment, User)
 from ..serializers import to_dict
 from ..session_logic import session_fee_info
 from ..ws import manager
@@ -151,6 +152,29 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
         ebarimt.cache_qr(comp.id, receipt.get("qrData"))
     except Exception as e:  # noqa: BLE001
         log.error(f"нөхөн төлбөрийн e-Barimt амжилтгүй: {comp_id}: {e}")
+    # ТӨЛБӨРИЙН БИЧИЛТ — өмнө нь энд Payment мөр үүсгэдэггүй байсан тул кассчны
+    # цуглуулсан өрийн БЭЛЭН МӨНГӨ орлогын тайлан, ээлжийн тооцоо, мөнгөн
+    # тооцоонд ОГТ харагддаггүй байв (2026-08-09-нд илрүүлэв). Одоо ердийн
+    # төлбөртэй адил бүртгэгдэж, ээлжид холбогдоно.
+    if comp.session_id:
+        shift = (db.query(CashierShift)
+                 .filter(CashierShift.user_id == user.id,
+                         CashierShift.status == "OPEN").first())
+        pay = Payment(
+            session_id=comp.session_id,
+            provider="CASH" if method == "CASH" else "POS",
+            payment_method="CASH" if method == "CASH" else "CARD",
+            source="POS",
+            sender_invoice_no=f"DEBT-{comp.id[:8].upper()}-{datetime.utcnow():%Y%m%d%H%M%S}",
+            amount=amount, vat_amount=vat, status="PAID", paid_at=comp.paid_at,
+            cashier_id=user.id, shift_id=shift.id if shift else None,
+            customer_tin=tin,
+        )
+        db.add(pay)
+        db.flush()
+        comp.payment_id = pay.id
+    else:
+        log.warning(f"нөхөн төлбөр {comp_id} session-гүй — Payment бичилт үүсгэсэнгүй")
     db.add(AuditLog(username=user.username, action="COMPENSATION_PAID", entity="compensation",
                     entity_id=comp_id,
                     detail={"plate": comp.plate_number, "amount": amount, "method": method}))

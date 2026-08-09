@@ -29,17 +29,24 @@ def run_once() -> int:
     db = SessionLocal()
     closed = 0
     try:
+        # Дүрмүүд Тохиргоо → Авто цэвэрлэгээ хэсгээс (app_settings). .env-ийн
+        # утга нь зөвхөн ЭХНИЙ анхдагч — админ UI-аас deploy-гүйгээр өөрчилнө.
+        from .app_settings import get_autoclose_rules
+        rules = get_autoclose_rules(db)
+        if not rules["enabled"]:
+            log.info("авто цэвэрлэгээ Тохиргооноос УНТРААЛТТАЙ — алгаслаа")
+            return 0
         now = datetime.utcnow()
         recent_guard = now - timedelta(hours=1)
         for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
             hours = site.auto_close_hours if site.auto_close_hours is not None \
-                else settings.auto_close_hours
+                else rules["stale_hours"]
 
             # ФОРМАТ БУРУУ phantom (үсэггүй/дутуу дугаар, ж «4132») — ХУРДАН цэвэрлэнэ.
             # Ийм уншилт жинхэнэ гарах дугаартай тохирдоггүй тул мөнхөд гацдаг;
             # 72ц entry-only хүлээхийн оронд invalid_plate_close_hours (2ц) дараа
             # ӨРГҮЙГЭЭР үнэгүй хааж дашбоардыг цэвэрхэн байлгана.
-            ip_hours = settings.invalid_plate_close_hours
+            ip_hours = rules["invalid_plate_hours"]
             if ip_hours and ip_hours > 0:
                 junk = (db.query(ParkingSession)
                         .filter(ParkingSession.site_id == site.id,
@@ -73,7 +80,7 @@ def run_once() -> int:
             # үнэгүй хаана (2026-07-29: эдгээрийг өр болгодог байсан нь худал өрийн
             # уул үүсгэж, гэрээт/энгийн машиныг гарахад нь гацаадаг байв).
             eo_hours = site.entry_only_free_hours if site.entry_only_free_hours is not None \
-                else settings.entry_only_free_hours
+                else rules["entry_only_free_hours"]
             if eo_hours and eo_hours > 0:
                 entry_only = (db.query(ParkingSession)
                               .filter(ParkingSession.site_id == site.id,
@@ -122,7 +129,7 @@ def run_once() -> int:
             # Дагаж гарсан (tailgating) машиныг ХУРДАН өр болгох: гарах хаалтанд
             # уншигдсан (AWAITING_PAYMENT) ч төлөлгүй N цаг ямар ч хөдөлгөөнгүй бол
             # явчихсан — төлбөр нь сүүлд харагдсан үед царцаж, өр бүртгэгдэнэ.
-            aw_hours = settings.auto_close_awaiting_hours
+            aw_hours = rules["awaiting_hours"]
             if aw_hours and aw_hours > 0:
                 awaiting = (db.query(ParkingSession)
                             .filter(ParkingSession.site_id == site.id,
@@ -136,7 +143,7 @@ def run_once() -> int:
                 try:
                     # Junk (буруу форматтай) дугаар нь камерын буруу уншилт — жинхэнэ
                     # машин биш тул өр үүсгэхгүйгээр чимээгүй хаана.
-                    make_debt = settings.auto_close_create_debt and is_valid_plate(s.plate_number)
+                    make_debt = rules["create_debt"] and is_valid_plate(s.plate_number)
                     debt = close_session_forced(db, s, "auto_close", "system", make_debt)
                     db.add(AuditLog(username="system", action="AUTO_CLOSE", entity="session",
                                     entity_id=s.id,

@@ -1,6 +1,7 @@
 // Тохиргоо: Зогсоол / Төхөөрөмж / LED дэлгэц / Түрээслэгч / Холболт — хэсэг бүр settings/ доторх тусдаа файлд
 import { useState } from 'react'
 import { useAuth } from '../auth'
+import AutoCloseSection from './settings/AutoCloseSection'
 import DevicesSection from './settings/DevicesSection'
 import IntegrationsSection from './settings/IntegrationsSection'
 import ScreenSection from './settings/ScreenSection'
@@ -12,6 +13,7 @@ export default function Settings() {
   const { user } = useAuth()
   const canIntegrations = ['SUPER_ADMIN', 'ADMIN'].includes(user?.role)
   const tabs = [['sites', 'Зогсоол'], ['devices', 'Төхөөрөмж'], ['screen', 'LED дэлгэц'],
+    ['autoclose', 'Авто цэвэрлэгээ'],
     // Түрээслэгч зөвхөн SUPER_ADMIN-д; Холболт (данс/API/цэнэглэгч) ADMIN-д мөн
     // харагдана (өөрийн хамрах хүрээгээр — backend шүүнэ)
     ...(user?.role === 'SUPER_ADMIN' ? [['tenants', 'Түрээслэгч']] : []),
@@ -32,6 +34,7 @@ export default function Settings() {
         canIntegrations ? () => setTab('integrations') : null} />}
       {tab === 'devices' && <DevicesSection />}
       {tab === 'screen' && <ScreenSection />}
+      {tab === 'autoclose' && <AutoCloseSection />}
       {tab === 'tenants' && <TenantsSection onGotoIntegrations={() => setTab('integrations')} />}
       {tab === 'integrations' && <IntegrationsSection />}
     </div>
