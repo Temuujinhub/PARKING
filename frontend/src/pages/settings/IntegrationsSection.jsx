@@ -392,8 +392,14 @@ function PaymentAccountsPanel() {
 // ───────────────────────── Гадаад API ─────────────────────────
 
 const CURL_EXAMPLES = (base) => [
-  ['Машины зогсолт, төлөх дүнг лавлах',
-    `curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234УБА"`],
+  ['Машины зогсолт, төлөх дүнг лавлах — бүх зогсоолоос хайна',
+    `# Жолооч аль зогсоолд байгааг wallet мэдэх шаардлагагүй: дугаараар БҮХ
+# зогсоолоос хайж, олдсон зогсолт бүр аль зогсоолд (site_code, site_name),
+# хэдэн төгрөг төлөхийг (amount_due) хариултдаа агуулна.
+curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234УБА"
+
+# Тодорхой НЭГ зогсоолоор хязгаарлах бол site_code нэмнэ:
+curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234УБА&site_code=SITE10"`],
   ['Зогсоолуудын жагсаалт, сул орон тоо',
     `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/sites"`],
   ['Төлбөрийн хүсэлт (intent) үүсгэх',
@@ -430,10 +436,8 @@ function PartnerApiPanel() {
               </div>
             )}
         <p className="text-[11px] text-slate-500">
-          Түлхүүрүүд серверийн .env файлын <span className="font-mono">PARKING_PARTNER_KEYS</span>-д
-          хадгалагддаг (энд харагдахгүй). Партнер нэмэх/солиход .env засаад сервер restart
-          хийнэ. Түлхүүрийг UI-гаас үүсгэх/хаах (restart-гүй) удирдлага дараагийн
-          шатанд DB рүү шилжүүлснээр нэмэгдэнэ.
+          Түлхүүр энд харагдахгүй, зөвхөн серверийн админ гаргаж өгнө. Шинэ партнер
+          холбох бол системийн админд хандана уу.
         </p>
       </div>
 
@@ -448,8 +452,17 @@ function PartnerApiPanel() {
         <p className="text-xs text-slate-400">
           TOKI, банкны апп, хэтэвч зэрэг гуравдагч систем машины зогсолтыг лавлаж, өөрийн
           сувгаар төлбөр авч баталгаажуулна. Бүх хүсэлт <span className="font-mono">X-API-Key</span> толгойтой.
-          Батлагдмагц хаалт нээгдэж, e-Barimt автоматаар үүснэ.
         </p>
+        <div className="text-xs text-slate-400 rounded-lg border border-surface-border px-3 py-2 space-y-1">
+          <div className="text-slate-300 font-medium">Бүтэн урсгал:</div>
+          <div>1. Дугаараар зогсолт лавлана → төлөх дүн (amount_due) ирнэ</div>
+          <div>2. Intent үүсгээд wallet өөрийн хэрэглэгчээс дүнг нэхэмжилнэ</div>
+          <div>3. Төлөгдмөгц confirm дуудна → зогсолт ТӨЛӨГДСӨН болж, e-Barimt автоматаар үүснэ</div>
+          <div>4. Жолооч тарифын «үнэгүй гарах хугацаа»-нд (default 15 мин) багтаж гарахад
+            хаалт дугаараар нь автоматаар нээгдэнэ; машин гарах хаалтан дээр аль хэдийн
+            зогсож байсан бол confirm-ын дараа шууд нээгдэнэ</div>
+          <div>Хугацаа хэтэрвэл нэмэлт төлбөр бодогдож, дахин төлүүлнэ.</div>
+        </div>
         {CURL_EXAMPLES(base).map(([title, cmd]) => (
           <div key={title}>
             <div className="flex items-center justify-between mb-1">
@@ -461,8 +474,8 @@ function PartnerApiPanel() {
           </div>
         ))}
         <p className="text-[11px] text-slate-500">
-          Дэлгэрэнгүй (алдааны кодууд, PAX терминал бүртгэл): repo-гийн
-          <span className="font-mono"> docs/INTEGRATION_API.md</span>
+          Дэлгэрэнгүй техникийн баримтыг (алдааны кодууд, PAX терминал бүртгэл)
+          системийн админаас авна.
         </p>
       </div>
     </div>
