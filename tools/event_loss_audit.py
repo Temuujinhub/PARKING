@@ -38,17 +38,24 @@ from app.database import SessionLocal  # noqa: E402
 from app.models import ParkingSession, ParkingSite  # noqa: E402
 from app.services.camera_records import site_camera_events  # noqa: E402
 
-# Журналын мөрөөс шалтгаан таних хэв маягууд (дараалал нь ЧУХАЛ — эхнийх нь ялна)
+# ЧУХАЛ: snapshot.cgi-ийн алдаа (HTTP 400) нь ЗУРАГ татахтай холбоотой бөгөөд
+# event алдагдахад НӨЛӨӨЛӨХГҮЙ. Түүнийг «камер татгалзсан» гэж ангилвал 58%
+# нь худал тайлбар болно (2026-08-10-нд ийм алдаа гаргасан) — тиймээс эхлээд
+# хамааралгүй чимээг ЗАДГАЙ хаяна.
+NOISE = re.compile(r"snapshot\.cgi|зураг ОЛДСОНГҮЙ|RPC түгжээг|GET /api/|POST /api/|"
+                   r"PUT /api/|хаалт open: SUCCESS|\[screen\]")
+
+# Дараалал нь ЧУХАЛ — эхнийх нь ялна
 PATTERNS = [
+    ("сервис дахин эхэлсэн",    re.compile(r"Stopping parking-backend|Started parking-backend|"
+                                           r"Shutting down|зогсож байна")),
     ("камерын холболт тасарсан", re.compile(r"холболт тасарлаа|ХОЛБОГДЛОО|дахин холбогдож")),
     ("дараалал дүүрсэн",        re.compile(r"дараалал дүүрлээ|event АЛДАГДЛАА")),
-    ("камер татгалзсан",        re.compile(r"татгалзлаа|Bad Request|HTTP 4\d\d")),
-    ("боловсруулалтын алдаа",   re.compile(r"Traceback|алдаа: |ERROR|Exception")),
-    ("хаалт олдсонгүй",         re.compile(r"хаалт ОЛДСОНГҮЙ|хаалт алга")),
-    ("давхар уншилт (dedup)",   re.compile(r"dedup|цуврал уншилт")),
+    ("камер татгалзсан",        re.compile(r"татгалзлаа|eventManager\.cgi-ийн БҮХ")),
+    ("боловсруулалтын алдаа",   re.compile(r"Traceback|event боловсруулах алдаа|Exception")),
     ("DB удаашрал",             re.compile(r"lock_timeout|OperationalError|түгжээтэй")),
 ]
-RESTART = re.compile(r"Started|Stopped|Starting|Stopping|systemd")
+RESTART = re.compile(r"Started parking-backend|Stopping parking-backend")
 
 
 def journal(since_local: datetime, until_local: datetime) -> list:
@@ -73,13 +80,26 @@ def journal(since_local: datetime, until_local: datetime) -> list:
     return rows
 
 
-def classify(lines: list) -> str:
+def classify(lines: list, plate: str, cam_ip: str | None) -> str:
+    """Тухайн event ЯАГААД алдагдсаныг журналын мөрүүдээс тогтооно.
+
+    Дараалал: (1) энэ дугаар логт байсан уу → боловсруулагдсан, (2) лог хоосон
+    → сервер унтарсан, (3) тодорхой алдааны хэв маяг, (4) камерын IP-гээс
+    ямар нэг event ирж байсан уу → камер ажиллаж байсан ч ЭНЭ event ирээгүй."""
     if not lines:
         return "сервер унтарсан / journal хоосон"
-    blob = "\n".join(lines)
+    if plate and any(plate in ln for ln in lines):
+        return "боловсруулагдсан (dedup/бусад)"
+    # Хамааралгүй чимээг хассан утга бүхий мөрүүд
+    signal = [ln for ln in lines if not NOISE.search(ln)]
+    blob = "\n".join(signal)
     for label, rx in PATTERNS:
         if rx.search(blob):
             return label
+    if cam_ip:
+        if any(cam_ip in ln for ln in lines):
+            return "камер ажиллаж байсан ч энэ event ирээгүй"
+        return "энэ камераас event огт ирээгүй"
     return "тодорхойгүй (лог чимээгүй)"
 
 
@@ -106,6 +126,8 @@ def main():
 
         # 1. Камерын лог
         cam = site_camera_events(db, site.id, hours=args.hours)
+        entry_ips = [c["ip"] for c in cam["cameras"] if c["lane_dir"] == "entry" and c["ip"]]
+        cam_ip = entry_ips[0] if entry_ips else None
         for c in cam["cameras"]:
             print(f"  {c['name']:22} {c['lane_dir']:6} "
                   + (f"АЛДАА: {c['error']}" if c["error"] else f"{c['events']} event"))
@@ -164,7 +186,7 @@ def main():
             t_local = ev["time"] + tz
             near = [ln for ts, ln in jrows
                     if abs((ts - t_local).total_seconds()) <= args.context]
-            buckets[classify(near)].append((ev, t_local, near))
+            buckets[classify(near, ev["plate"], cam_ip)].append((ev, t_local, near))
 
         print(f"\n── Шалтгаанаар ({len(lost)} машин) ──")
         for reason in sorted(buckets, key=lambda r: -len(buckets[r])):
