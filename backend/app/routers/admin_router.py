@@ -1430,6 +1430,40 @@ def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
     return {"dry_run": dry, "rows": rows}
 
 
+@router.get("/camhealth/rules")
+def get_camhealth_rules_api(db: Session = Depends(get_db),
+                           user: User = Depends(require("settings"))):
+    """Камерын эрүүл мэндийн дүрэм + сүүлийн шалгалтын дүн."""
+    from ..services.app_settings import CAMHEALTH_KEY, get_rules
+    from ..services.camera_health import last_state
+    return {**get_rules(db, CAMHEALTH_KEY), "last": last_state()}
+
+
+@router.put("/camhealth/rules")
+def put_camhealth_rules(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require("settings"))):
+    from ..services.app_settings import CAMHEALTH_KEY, set_rules
+    rules = set_rules(db, CAMHEALTH_KEY, body or {}, user.username)
+    _audit(db, user, "UPDATE", "camhealth_rules", "-", rules)
+    db.commit()
+    return rules
+
+
+@router.post("/camhealth/run")
+def run_camhealth_now(body: dict | None = None, db: Session = Depends(get_db),
+                      user: User = Depends(require("settings"))):
+    """Камерын эрүүл мэндийг ЯГ ОДОО шалгана. body: {dry_run: bool}
+    dry_run=true бол зөвхөн ангилна (reboot ХИЙХГҮЙ)."""
+    from ..services.camera_health import run_once
+    dry = bool((body or {}).get("dry_run"))
+    out = run_once(dry_run=dry)
+    if not dry and out.get("rebooted"):
+        _audit(db, user, "CAMERA_HEALTH_MANUAL", "device", "-",
+               {"rebooted": [r["ip"] for r in out["rebooted"]]})
+        db.commit()
+    return {"dry_run": dry, **out}
+
+
 @router.get("/blacklist/rules")
 def get_blacklist_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("blacklist", "cashier"))):

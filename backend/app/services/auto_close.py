@@ -277,6 +277,7 @@ async def supervisor():
     await asyncio.sleep(300)
     last_retention = 0.0
     last_camsync = 0.0
+    last_camhealth = 0.0
     import time as _t
     while True:
         try:
@@ -304,6 +305,24 @@ async def supervisor():
                     await asyncio.to_thread(camsync_once)
             except Exception as e:  # noqa: BLE001
                 log.error("камерын лог нөхөлтийн алдаа: %r", e)
+
+            # Камерын эрүүл мэнд — өдөрт times_per_day удаа гацсан камерыг
+            # илрүүлж, тохиргоо зөвшөөрвөл reboot хийнэ. camsync-тэй адил
+            # ЗААВАЛ thread дээр (дотроо asyncio.run ашигладаг).
+            try:
+                from .app_settings import CAMHEALTH_KEY, get_rules
+                from .camera_health import run_once as camhealth_once
+                _db = SessionLocal()
+                try:
+                    _hr = get_rules(_db, CAMHEALTH_KEY)
+                finally:
+                    _db.close()
+                _hn = max(1, _hr["times_per_day"])
+                if _hr["enabled"] and _t.monotonic() - last_camhealth > 24 * 3600 / _hn:
+                    last_camhealth = _t.monotonic()
+                    await asyncio.to_thread(camhealth_once)
+            except Exception as e:  # noqa: BLE001
+                log.error("камерын эрүүл мэнд шалгалтын алдаа: %r", e)
 
             free_pct = disk_free_percent(settings.snapshot_dir or "/")
             tight = free_pct < settings.disk_free_min_percent

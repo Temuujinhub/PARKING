@@ -12,8 +12,10 @@ import time
 BLACKLIST_KEY = "blacklist_rules"
 AUTOCLOSE_KEY = "autoclose_rules"
 CAMSYNC_KEY = "camsync_rules"
+CAMHEALTH_KEY = "camhealth_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
+CAMHEALTH_STATE = "camhealth_state"
 
 # Түлхүүр бүрийн default. Утгын ТӨРӨЛ нь валидацийн дүрэм болно (bool/int).
 DEFAULTS: dict[str, dict] = {
@@ -50,6 +52,16 @@ DEFAULTS: dict[str, dict] = {
         "min_age_minutes": 30,     # сүүлийн N минутын event-д хүрэхгүй (яг явж буй)
         "create_debt": True,       # гарсан нь мэдэгдэж буй машинд өр үүсгэх эсэх
         "skip_invalid_plate": True,  # формат буруу (junk) дугаарыг алгасах
+    },
+    CAMHEALTH_KEY: {
+        # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).
+        # Гацсан = event стрим АМЬД (200) атлаа snapshot.cgi ШУУД 400 буцаана
+        # (2026-08-10 Рашбулаг дээр батлагдсан — reboot л засдаг).
+        "enabled": True,           # өдөрт хэдэн удаа шалгах эсэх
+        "times_per_day": 4,        # 4 = 6 цаг тутам
+        "auto_reboot": True,       # ГАЦСАН илэрвэл автоматаар reboot хийх эсэх
+        "cooldown_min": 120,       # нэг камерыг дахин reboot хийхээс өмнөх завсар
+        "samples": 3,              # snapshot.cgi-г хэдэн удаа шалгаж баталгаажуулах
     },
 }
 

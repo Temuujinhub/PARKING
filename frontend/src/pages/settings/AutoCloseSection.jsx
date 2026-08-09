@@ -1,6 +1,6 @@
 // Тохиргоо → Авто цэвэрлэгээ: зогсоолд гацсан бүртгэлийг ХЭЗЭЭ, ЯАЖ хаах дүрэм.
 // Өмнө нь эдгээр нь .env-д хатуу бичигдсэн байсан тул өөрчлөхөд deploy шаарддаг байв.
-import { Eraser, PlayCircle, Save } from 'lucide-react'
+import { Eraser, HeartPulse, PlayCircle, RotateCw, Save } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, useToast } from '../../components/ui'
@@ -141,6 +141,162 @@ function CamSyncCard({ toast }) {
   )
 }
 
+// Камерын эрүүл мэнд — ГАЦСАН камерыг илрүүлж, шаардвал reboot хийнэ.
+// Гацсан = event стрим АМЬД (машин бүртгэгддэг) атлаа snapshot.cgi ШУУД 400
+// (2026-08-10 Рашбулаг дээр батлагдсан — reboot л засдаг).
+const VERDICT = {
+  healthy: ['✓ Эрүүл', 'text-emerald-400'],
+  hung: ['⛔ Гацсан', 'text-rose-400'],
+  busy: ['~ Завгүй', 'text-amber-400'],
+  unreachable: ['✗ Хүрэхгүй', 'text-slate-400'],
+  error: ['✗ Алдаа', 'text-slate-400'],
+}
+
+function CamHealthCard({ toast }) {
+  const [rules, setRules] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => api('/api/admin/camhealth/rules').then(setRules).catch(() => {})
+  useEffect(() => { load() }, [])
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const { last, ...body } = rules
+      await api('/api/admin/camhealth/rules', { method: 'PUT', body })
+      toast('Хадгалагдлаа'); load()
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  const run = async (dryRun) => {
+    if (!dryRun && rules.auto_reboot && !window.confirm(
+      'Одоо шалгаад ГАЦСАН камер олдвол автоматаар REBOOT хийнэ.\n\n' +
+      'Reboot хийгдэж буй камер 1-2 минут хаалт нээхгүй, дугаар танихгүй.\n' +
+      'Хаалганы өмнө машингүй үед ажиллуулна уу. Үргэлжлүүлэх үү?')) return
+    setBusy(true)
+    try {
+      const r = await api('/api/admin/camhealth/run', { method: 'POST', body: { dry_run: dryRun } })
+      const c = r.counts || {}
+      const reb = (r.rebooted || []).length
+      toast(dryRun
+        ? `Эрүүл ${c.healthy || 0} · гацсан ${c.hung || 0} · завгүй ${c.busy || 0} · хүрэхгүй ${c.unreachable || 0}`
+        : (reb ? `${reb} гацсан камер reboot хийгдлээ` : `Гацсан камер олдсонгүй (эрүүл ${c.healthy || 0})`))
+      load()
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  if (!rules) return null
+  const set = (k, v) => setRules({ ...rules, [k]: v })
+  const last = rules.last || {}
+  const problems = last.problems || []
+
+  return (
+    <div className="card space-y-4">
+      <div>
+        <h2 className="font-semibold flex items-center gap-2">
+          <HeartPulse size={16} className="text-accent" /> Камерын эрүүл мэнд
+        </h2>
+        <p className="text-xs text-slate-400 mt-1">
+          Камерын веб/зургийн дэд систем хааяа <b className="text-slate-300">гацдаг</b> —
+          event урсгал амьд (машин бүртгэгдсээр) атлаа зураг татах хүсэлт шууд
+          «Bad Request» болно. Ийм камер зөвхөн <b className="text-slate-300">reboot</b>-оор
+          сэргэдэг. Систем өдөрт хэдэн удаа шалгаж, гацсаныг илрүүлж (тохиргоо зөвшөөрвөл)
+          автоматаар унтрааж асаана.
+        </p>
+      </div>
+
+      <label className="flex items-start gap-2 text-sm cursor-pointer">
+        <input type="checkbox" className="mt-0.5" checked={rules.enabled}
+          onChange={(e) => set('enabled', e.target.checked)} />
+        <span>Автоматаар шалгах
+          <span className="block text-xs text-slate-500">
+            Унтраалттай үед зөвхөн доорх товчоор гараар шалгана.
+          </span>
+        </span>
+      </label>
+
+      <label className="flex items-start gap-2 text-sm cursor-pointer">
+        <input type="checkbox" className="mt-0.5" checked={rules.auto_reboot}
+          disabled={!rules.enabled}
+          onChange={(e) => set('auto_reboot', e.target.checked)} />
+        <span>Гацсан камерыг <b>автоматаар reboot хийх</b>
+          <span className="block text-xs text-amber-500/90">
+            Reboot үед тэр хаалт 1-2 мин ажиллахгүй. Хаалт хүлээж буй үед хийхгүй,
+            камер тутамд завсартай. Унтраавал зөвхөн илрүүлж, эндээс харуулна.
+          </span>
+        </span>
+      </label>
+
+      <div className="grid sm:grid-cols-3 gap-3">
+        <Field label="Өдөрт хэдэн удаа">
+          <input className="input font-mono" type="number" min="1" max="24"
+            value={rules.times_per_day} disabled={!rules.enabled}
+            onChange={(e) => set('times_per_day', Number(e.target.value))} />
+          <span className="block text-[11px] text-slate-500 mt-1">4 = 6 цаг тутам.</span>
+        </Field>
+        <Field label="Дахин reboot-ын завсар (мин)">
+          <input className="input font-mono" type="number" min="10" max="1440"
+            value={rules.cooldown_min} disabled={!rules.enabled || !rules.auto_reboot}
+            onChange={(e) => set('cooldown_min', Number(e.target.value))} />
+          <span className="block text-[11px] text-slate-500 mt-1">
+            Нэг камерыг энэ хугацаанд дахин reboot хийхгүй (шуурга гаргахгүй).
+          </span>
+        </Field>
+        <Field label="Баталгаажуулах уншилт">
+          <input className="input font-mono" type="number" min="1" max="10"
+            value={rules.samples} disabled={!rules.enabled}
+            onChange={(e) => set('samples', Number(e.target.value))} />
+          <span className="block text-[11px] text-slate-500 mt-1">
+            snapshot.cgi-г хэдэн удаа шалгаж «гацсан» гэдгийг батлах.
+          </span>
+        </Field>
+      </div>
+
+      {last.checked_at && (
+        <div className="text-xs text-slate-400 border-t border-surface-border/60 pt-3">
+          <div>
+            Сүүлд шалгасан: <span className="font-mono">
+              {last.checked_at.replace('T', ' ').slice(0, 16)} UTC</span>
+            {last.counts && <> · эрүүл {last.counts.healthy || 0} · гацсан{' '}
+              <b className={last.counts.hung ? 'text-rose-400' : ''}>{last.counts.hung || 0}</b>
+              {' '}· завгүй {last.counts.busy || 0} · хүрэхгүй {last.counts.unreachable || 0}</>}
+          </div>
+          {(last.rebooted || []).length > 0 && (
+            <div className="mt-1 text-rose-300">
+              Reboot хийсэн: {last.rebooted.map((r) => `${r.name} (${r.ip})`).join(', ')}
+            </div>
+          )}
+          {problems.length > 0 && (
+            <div className="mt-1 space-y-0.5 font-mono">
+              {problems.map((p, i) => {
+                const [lbl, cls] = VERDICT[p.verdict] || ['?', '']
+                return (
+                  <div key={i}>
+                    <span className={cls}>{lbl}</span> {p.ip} — {p.name}
+                    {p.min_bad_lat != null && ` (${p.min_bad_lat.toFixed(2)}с)`}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <button className="btn-primary" onClick={save} disabled={busy}>
+          <Save size={15} /> Хадгалах
+        </button>
+        <button className="btn-secondary" onClick={() => run(true)} disabled={busy}>
+          <PlayCircle size={15} /> Одоо шалгах (reboot хийхгүй)
+        </button>
+        <button className="btn-secondary" onClick={() => run(false)} disabled={busy}>
+          <RotateCw size={15} /> Шалгаад засах
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function AutoCloseSection() {
   const toast = useToast()
   const [rules, setRules] = useState(null)
@@ -172,6 +328,7 @@ export default function AutoCloseSection() {
 
   return (
     <div className="space-y-4">
+      <CamHealthCard toast={toast} />
       <CamSyncCard toast={toast} />
       <div className="card space-y-4">
         <div>
