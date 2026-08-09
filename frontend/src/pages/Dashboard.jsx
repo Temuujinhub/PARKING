@@ -37,7 +37,9 @@ export default function Dashboard() {
 
   const maxRev = Math.max(...stats.week_revenue.map((d) => d.revenue), 1)
   const hourly = stats.hourly_load || []
-  const maxHour = Math.max(...hourly.map((h) => Math.max(h.entries, h.exits)), 1)
+  // Орц/гарц ДАВХАРЛАЖ зурагддаг тул нийлбэрээр нь масштаблана — эс бол завгүй
+  // цагуудын багана 100%-иас хэтэрч таслагдаад бүгд ижил өндөр (тэгш) харагддаг
+  const maxHour = Math.max(...hourly.map((h) => (h.entries || 0) + (h.exits || 0)), 1)
   const topSites = [...(stats.sites || [])].sort((a, b) => b.today_revenue - a.today_revenue)
   const maxSiteRev = Math.max(...topSites.map((s) => s.today_revenue), 1)
   // Зогсоол бүрийн байдал — кассчин + камеруудын онлайн статус
@@ -192,27 +194,39 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Зогсоолын ачаалал (багтаамж) */}
+        {/* Зогсоолын ачаалал — ОДОО ЗОГСОЖ БУЙ тоогоор эрэмбэлнэ. Дүүргэлттэй
+            зогсоолын зураас = багтаамжийн хувь (90%+ улаан). Дүүргэлтгүй
+            (хязгааргүй) зогсоолын зураас = хамгийн олон машинтайг нь дүүрэн
+            ногооноор, бусдыг түүнтэй харьцуулсан уртаар. */}
         <div className="card card-hover">
           <h2 className="font-semibold mb-4">Зогсоолын ачаалал</h2>
           <div className="space-y-3">
-            {stats.sites.map((s) => {
-              const pct = s.capacity ? Math.min(100, Math.round((s.occupied / s.capacity) * 100)) : 0
-              return (
-                <div key={s.id}>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span>{s.name}</span>
-                    <span className="text-slate-400 font-mono text-xs">
-                      {s.capacity ? `${s.occupied}/${s.capacity} · Сул: ${s.free}` : `${s.occupied} · Хязгааргүй`}
-                    </span>
+            {(() => {
+              const sorted = [...stats.sites].sort((a, b) => (b.occupied || 0) - (a.occupied || 0))
+              const maxOcc = Math.max(...sorted.filter((s) => !s.capacity).map((s) => s.occupied || 0), 1)
+              return sorted.map((s) => {
+                const pct = s.capacity
+                  ? Math.min(100, Math.round((s.occupied / s.capacity) * 100))
+                  : Math.round(((s.occupied || 0) / maxOcc) * 100)
+                const color = s.capacity
+                  ? (pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-amber-400' : 'bg-accent')
+                  : 'bg-accent'
+                return (
+                  <div key={s.id}>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span>{s.name}</span>
+                      <span className="text-slate-400 font-mono text-xs">
+                        {s.capacity ? `${s.occupied}/${s.capacity} · Сул: ${s.free}` : `${s.occupied} машин · Хязгааргүй`}
+                      </span>
+                    </div>
+                    <div className="h-2 bg-surface-muted rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all ${color}`}
+                        style={{ width: `${pct}%` }} />
+                    </div>
                   </div>
-                  <div className="h-2 bg-surface-muted rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full transition-all ${pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-amber-400' : 'bg-accent'}`}
-                      style={{ width: `${pct}%` }} />
-                  </div>
-                </div>
-              )
-            })}
+                )
+              })
+            })()}
           </div>
         </div>
       </div>

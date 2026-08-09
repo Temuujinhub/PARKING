@@ -208,10 +208,11 @@ export default function Drivers() {
         </select>
         <span className="text-xs text-slate-400">{rows.length} машин</span>
       </div>
-      <Table headers={['Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Төлөв', '']}
-        empty={rows.length === 0}>
-        {rows.map((d) => (
+      <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Төлөв', '']}
+        empty={rows.length === 0} maxH="68vh">
+        {rows.map((d, i) => (
           <tr key={d.id}>
+            <td className="td text-xs text-slate-500 font-mono">{i + 1}</td>
             <td className="td font-mono font-bold">{d.plate_number}</td>
             <td className="td">{d.full_name}</td>
             <td className="td text-xs">{d.company}</td>

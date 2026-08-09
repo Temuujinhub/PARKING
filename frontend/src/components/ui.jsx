@@ -71,11 +71,14 @@ export function StatCard({ icon: Icon, label, value, sub, suffix, color = 'text-
   )
 }
 
-export function Table({ headers, children, empty }) {
+export function Table({ headers, children, empty, maxH }) {
+  // maxH өгвөл (ж: "65vh") хүснэгт өөрөө scroll-той болж, толгой нь наалддаг —
+  // урт жагсаалтад бүх хуудсыг биш зөвхөн хүснэгтийг гүйлгэнэ.
   return (
-    <div className="overflow-x-auto rounded-lg border border-surface-border/60">
+    <div className="overflow-x-auto rounded-lg border border-surface-border/60"
+      style={maxH ? { maxHeight: maxH, overflowY: 'auto' } : undefined}>
       <table className="w-full bg-surface-card">
-        <thead className="bg-surface-muted/50 border-b border-surface-border/60">
+        <thead className={`border-b border-surface-border/60 ${maxH ? 'sticky top-0 z-10 bg-surface-muted' : 'bg-surface-muted/50'}`}>
           <tr>{headers.map((h, i) => <th key={i} className="th">{h}</th>)}</tr>
         </thead>
         <tbody className="divide-y divide-surface-border/40">
