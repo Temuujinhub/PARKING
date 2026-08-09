@@ -106,15 +106,10 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
     all_sites_cond = (RegisteredDriver.site_id.is_(None)) & (
         (RegisteredDriver.tenant_id == site_tenant) if site_tenant
         else RegisteredDriver.tenant_id.is_(None))
-    # СИСТЕМ ДАЯАРХ тусгай хэрэгцээт жагсаалт (ХБИ, түргэн г.м): SPECIAL төрөлтэй,
-    # зогсоол/түрээслэгчгүй бүртгэл ямар ч зогсоолд (түрээслэгч үл харгалзан)
-    # үйлчилнэ — хөгжлийн бэрхшээлтэй иргэний машин бүх зогсоолд үнэгүй байх
-    # журмыг НЭГ бүртгэлээр хангана. SUPER_ADMIN л ийм бүртгэл үүсгэнэ.
-    special_cond = ((RegisteredDriver.site_id.is_(None))
-                    & (RegisteredDriver.tenant_id.is_(None))
-                    & (RegisteredDriver.contract_type == "SPECIAL"))
-    return q.filter((RegisteredDriver.site_id == site_id)
-                    | all_sites_cond | special_cond).first()
+    # Тусгай хэрэгцээт (ХБИ г.м) жагсаалт ч түрээслэгчийн хил ДОТРОО л үйлчилнэ:
+    # site_id NULL + тухайн түрээслэгчийн tenant_id = түрээслэгчийн бүх зогсоол.
+    # Түрээслэгч дамнасан систем-даяарх whitelist байхгүй (2026-08-09 шийдвэр).
+    return q.filter((RegisteredDriver.site_id == site_id) | all_sites_cond).first()
 
 
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:
