@@ -12,19 +12,50 @@
 
 Ажиллуулах (камерын web tab-ууд ХААЛТТАЙ үед):
     sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_records_diag2.py 10.0.106.10
+    # нууц үг нь .env/DB-ээс өөр камерт — browser-т ордог нэр/нууц үгээ өг:
+    sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/camera_records_diag2.py 10.0.106.10 admin НууцҮг
 
 Гаралтыг БҮТНЭЭР нь хуулж өгнө үү.
 """
 import asyncio
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta
 
+os.chdir("/root/PARKING/backend")  # config env_file=".env" нь CWD-д харьцангуй
 sys.path.insert(0, "/root/PARKING/backend")
 import httpx  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.services.barrier import DahuaRpc  # noqa: E402
+
+
+def resolve_creds(ip: str, argv: list) -> tuple:
+    """Нэвтрэлт: CLI аргумент → DB-ийн Device.username/password → .env глобал.
+
+    Dahua олон буруу оролдлогод түгждэг тул ГАНЦХАН хамгийн магадлалтай
+    хослолыг сонгоно (олныг ээлжлэн оролддоггүй)."""
+    if len(argv) >= 4:
+        return argv[2], argv[3], "CLI аргумент"
+    try:
+        from app.database import SessionLocal
+        from app.models import Device
+        from app.services.device_auth import camera_credentials
+        db = SessionLocal()
+        try:
+            dev = (db.query(Device).filter(Device.ip_address == ip)
+                   .filter(Device.status != "deleted").first()
+                   if hasattr(Device, "status") else
+                   db.query(Device).filter(Device.ip_address == ip).first())
+            if dev is not None and (getattr(dev, "username", None) or "").strip():
+                u, p = camera_credentials(dev)
+                return u, p, f"DB төхөөрөмж «{dev.name}»"
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"  (DB лукап бүтсэнгүй: {type(e).__name__}: {str(e)[:60]} — .env рүү унана)")
+    return settings.camera_username, settings.camera_password, ".env глобал"
 
 FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -106,7 +137,7 @@ async def try_snap_records(rpc):
 async def download_variants(rpc, client_plain, ip, file_path):
     """Олдсон FilePath-ийг вэб UI-ийн ашигладаг /RPC2_Loadfile замаар татаж үзнэ."""
     print(f"\n--- Татах туршилт: {file_path} ---")
-    user, pwd = settings.camera_username, settings.camera_password
+    user, pwd = rpc.username, rpc.password
     sess = rpc.session_id
     variants = [
         ("/RPC2_Loadfile + сешн cookie",
@@ -173,11 +204,21 @@ async def try_media_find(rpc, client_plain, ip, start, end):
 
 
 async def main(ip):
-    print(f"=== Камер {ip} — Snapshot Records оношилгоо v3 ===")
+    print(f"=== Камер {ip} — Snapshot Records оношилгоо v3.1 ===")
+    user, pwd, src = resolve_creds(ip, sys.argv)
+    print(f"Нэвтрэлт: {user} ({src})")
     await show_web_caps(ip)
     async with httpx.AsyncClient(timeout=20) as c:
-        rpc = DahuaRpc(c, ip, settings.camera_username, settings.camera_password)
-        await rpc.login()
+        rpc = DahuaRpc(c, ip, user, pwd)
+        try:
+            await rpc.login()
+        except Exception as e:
+            print(f"\n❌ RPC2 login АМЖИЛТГҮЙ: {e}")
+            print("Камер олон буруу оролдлогод ТҮГЖДЭГ тул өөр нууц үг таамаглаагүй.")
+            print("Browser-т энэ камерын web рүү ордог нэр/нууц үгээ CLI-гээр өгнө үү:")
+            print(f"  sudo /root/PARKING/backend/venv/bin/python "
+                  f"/root/PARKING/tools/camera_records_diag2.py {ip} admin <НууцҮг>")
+            return
         print(f"\nRPC2 login OK (session={rpc.session_id})")
         await try_snap_records(rpc)
         now_local = datetime.utcnow() + timedelta(hours=settings.camera_tz_offset_hours)
