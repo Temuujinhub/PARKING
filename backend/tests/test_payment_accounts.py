@@ -26,6 +26,7 @@ settings.qpay_ebarimt = True
 settings.qpay_username = "GLOBAL_USER"
 settings.qpay_password = "GLOBAL_PASS"
 settings.qpay_invoice_code = "EB_GLOBAL_INVOICE"
+settings.partner_keys = "toki:PARTNER_SECRET_KEY_123"
 
 import json  # noqa: E402
 
@@ -85,6 +86,9 @@ out = payment_accounts(db=db, user=super_user)
 raw = json.dumps(out, default=str)
 check("нууц үг хариултад алга", "TEN_PASS" not in raw and "SITE_PASS" not in raw
       and "GLOBAL_PASS" not in raw and "qpay_password'" not in raw)
+# partner_map нь {api_key: нэр} тул .keys() андуурвал ТҮЛХҮҮР задарна (болсон алдаа!)
+check("партнерын API түлхүүр задрахгүй, зөвхөн нэр", "PARTNER_SECRET_KEY_123" not in raw
+      and out["partners"] == ["TOKI"])
 
 by_key = {(a["scope"], a.get("site_code") or a["name"]): a for a in out["accounts"]}
 t_acc = next((a for a in out["accounts"] if a["scope"] == "tenant" and a["name"] == ten.name), None)

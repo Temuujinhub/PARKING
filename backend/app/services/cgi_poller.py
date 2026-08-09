@@ -218,6 +218,28 @@ def ensure_workers():
         _workers.append(asyncio.create_task(_event_worker(len(_workers) + 1)))
 
 
+# Камер бүрийн ЭХНИЙ хэдэн event-ийн БҮТЭН JSON-ыг логлоно (base64 зургийг
+# тайрсан). Зорилго: камер зургаа ХААНА зааж өгч байгааг харах — Dahua ихэвчлэн
+# `FilePath`/`PicName`/`ImageURL` гэсэн замыг өгдөг бөгөөд түүнийг RPC_Loadfile-аар
+# татвал камер дээр «Manual Snapshot» бичлэг ҮҮСГЭХГҮЙ (snapshot.cgi үүсгэдэг).
+# Хязгаартай тул логийг дүүргэхгүй; restart бүрд дахин 3 удаа бичнэ.
+_EVENT_DUMPS = 3
+_dumped: dict[str, int] = {}
+
+
+def _dump_event(device: Device, data: dict) -> None:
+    n = _dumped.get(device.id, 0)
+    if n >= _EVENT_DUMPS:
+        return
+    _dumped[device.id] = n + 1
+    try:
+        from ..session_logic import strip_images
+        body = json.dumps(strip_images(data), ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        body = str(data)
+    log.info("%s (%s) RAW event #%d: %s", device.name, device.ip_address, n + 1, body[:2000])
+
+
 async def _process_event(device_id: str, data: dict, allow_open: bool = True):
     """Нэг ANPR event-ийг боловсруулж session үүсгэнэ."""
     db = SessionLocal()
@@ -228,6 +250,8 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
         device.last_seen = datetime.utcnow()
         db.commit()  # ямар ч event ирвэл камер онлайн болно
         raw_plate, conf = _plate_from(data)
+        if raw_plate:
+            _dump_event(device, data)
         plate = normalize_plate(raw_plate)
         if not plate:
             # Traffic/ANPR event боловч дугаар олдоогүй бол л логлоно (heartbeat г.м-ийг алгасна)

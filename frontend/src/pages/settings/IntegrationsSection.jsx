@@ -410,36 +410,168 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
     `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/payments/PAYMENT_ID"`],
 ]
 
+// Түлхүүр үүсгэх модал — үүссэн түлхүүр НЭГ УДАА л ил гарна
+function KeyCreateModal({ open, sites, onClose, onDone }) {
+  const toast = useToast()
+  const [f, setF] = useState({ name: '', can_pay: true, site_id: '' })
+  const [created, setCreated] = useState(null)
+  useEffect(() => { if (open) { setF({ name: '', can_pay: true, site_id: '' }); setCreated(null) } }, [open])
+  if (!open) return null
+  const copy = (text) => navigator.clipboard.writeText(text)
+    .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
+
+  const save = async (e) => {
+    e.preventDefault()
+    try {
+      const r = await api('/api/admin/partner-keys', { method: 'POST', body: f })
+      setCreated(r); onDone()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
+  return (
+    <Modal open title={created ? 'Түлхүүр үүслээ' : 'API түлхүүр үүсгэх'} onClose={onClose}>
+      {!created ? (
+        <form onSubmit={save} className="space-y-3">
+          <Field label="Партнерын нэр (тайланд provider болно)" required>
+            <input className="input font-mono" value={f.name} required
+              placeholder="toki, monnis-app …"
+              onChange={(e) => setF({ ...f, name: e.target.value })} />
+          </Field>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={f.can_pay}
+              onChange={(e) => setF({ ...f, can_pay: e.target.checked })} />
+            Төлбөр батлах эрхтэй (унтраавал зөвхөн лавлана)
+          </label>
+          <Field label="Зогсоолын хязгаар">
+            <select className="input" value={f.site_id}
+              onChange={(e) => setF({ ...f, site_id: e.target.value })}>
+              <option value="">Бүх зогсоол</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
+            </select>
+          </Field>
+          <button className="btn-primary w-full justify-center">Үүсгэх</button>
+        </form>
+      ) : (
+        <div className="space-y-3">
+          <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-300">
+            <b>Энэ түлхүүр ДАХИН харагдахгүй</b> — одоо хуулаад партнерт аюулгүй сувгаар
+            (биечлэн / нууцлагдсан чат) дамжуулна уу.
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs font-mono bg-surface-muted/60 rounded-lg px-3 py-2.5 break-all">{created.key}</code>
+            <button className="btn-primary py-2 text-xs" onClick={() => copy(created.key)}>Хуулах</button>
+          </div>
+          <button className="btn-secondary w-full justify-center" onClick={onClose}>Хаах</button>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 function PartnerApiPanel() {
   const toast = useToast()
-  const [partners, setPartners] = useState(null)
-  useEffect(() => {
-    api('/api/admin/payment-accounts')
-      .then((d) => setPartners(d.partners)).catch(() => setPartners([]))
-  }, [])
+  const { user } = useAuth()
+  const isSuper = user?.role === 'SUPER_ADMIN'
+  const [data, setData] = useState(null)      // супер: {keys, env_partners}
+  const [partners, setPartners] = useState(null)  // энгийн админ: зөвхөн нэрс
+  const [sites, setSites] = useState([])
+  const [createOpen, setCreateOpen] = useState(false)
+  const load = () => {
+    if (isSuper) {
+      api('/api/admin/partner-keys').then(setData).catch((e) => toast(e.message, 'error'))
+      api('/api/admin/sites').then(setSites)
+    } else {
+      api('/api/admin/payment-accounts')
+        .then((d) => setPartners(d.partners)).catch(() => setPartners([]))
+    }
+  }
+  useEffect(load, [])
   const base = window.location.origin
   const copy = (text) => navigator.clipboard.writeText(text)
     .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
 
+  const revoke = async (k) => {
+    if (!confirm(`«${k.name}» түлхүүрийг хаах уу? Тэр дороо хүчингүй болно, буцаахгүй.`)) return
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/revoke`, { method: 'POST' })
+      toast('Хаагдлаа'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   return (
     <div className="space-y-4">
-      <div className="card space-y-2">
-        <h3 className="font-semibold text-sm flex items-center gap-1.5"><Plug size={15} /> Холбогдсон партнерууд</h3>
-        {partners === null ? <div className="text-xs text-slate-500">Ачаалж байна…</div>
-          : partners.length === 0
-            ? <div className="text-xs text-slate-500">Партнер бүртгэгдээгүй байна</div>
-            : (
-              <div className="flex flex-wrap gap-2">
-                {partners.map((p) => (
-                  <span key={p} className="px-3 py-1 rounded-lg border border-accent/40 bg-accent/5 text-accent text-sm font-mono">{p}</span>
-                ))}
-              </div>
-            )}
-        <p className="text-[11px] text-slate-500">
-          Түлхүүр энд харагдахгүй, зөвхөн серверийн админ гаргаж өгнө. Шинэ партнер
-          холбох бол системийн админд хандана уу.
-        </p>
-      </div>
+      {isSuper ? (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h3 className="font-semibold text-sm flex items-center gap-1.5"><Plug size={15} /> API түлхүүрүүд</h3>
+            <button className="btn-primary py-1.5 text-xs" onClick={() => setCreateOpen(true)}>
+              <Plus size={14} /> Түлхүүр үүсгэх
+            </button>
+          </div>
+          <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Сүүлд ашигласан', 'Төлөв', '']}
+            empty={!data || (data.keys.length === 0 && data.env_partners.length === 0)}>
+            {(data?.keys || []).map((k) => (
+              <tr key={k.id} className={k.is_active ? '' : 'opacity-50'}>
+                <td className="td font-mono text-sm">{k.name}</td>
+                <td className="td font-mono text-xs text-slate-500">{k.key_prefix}…</td>
+                <td className="td text-xs">{k.scopes.includes('pay') ? 'Лавлах + Төлбөр' : 'Зөвхөн лавлах'}</td>
+                <td className="td text-xs">{k.site_code
+                  ? <span>{k.site_name} <span className="font-mono text-slate-500">({k.site_code})</span></span>
+                  : 'Бүх зогсоол'}</td>
+                <td className="td text-xs">{k.last_used_at
+                  ? new Date(k.last_used_at + 'Z').toLocaleString()
+                  : <span className="text-slate-500">ашиглаагүй</span>}</td>
+                <td className="td">{k.is_active
+                  ? <span className="text-accent text-xs">Идэвхтэй</span>
+                  : <span className="text-red-400 text-xs">Хаагдсан</span>}</td>
+                <td className="td text-right">
+                  {k.is_active && (
+                    <button className="btn-secondary py-1 text-xs text-red-400 hover:text-red-300"
+                      onClick={() => revoke(k)}>Хаах</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {(data?.env_partners || []).map((p) => (
+              <tr key={'env-' + p}>
+                <td className="td font-mono text-sm">{p}</td>
+                <td className="td font-mono text-xs text-slate-500">—</td>
+                <td className="td text-xs">Лавлах + Төлбөр</td>
+                <td className="td text-xs">Бүх зогсоол</td>
+                <td className="td text-xs text-slate-500">—</td>
+                <td className="td"><span className="text-accent text-xs">Идэвхтэй</span>
+                  <span className="ml-1.5 text-[10px] text-slate-500 cursor-help"
+                    title="Серверийн тохиргоонд бүртгэлтэй хуучин түлхүүр — UI-гаас хаах боломжгүй. Оронд нь энд шинэ түлхүүр үүсгэж өгөөд хуучныг серверээс хасуулна.">(сервер)</span></td>
+                <td className="td"></td>
+              </tr>
+            ))}
+          </Table>
+          <p className="text-[11px] text-slate-500">
+            Түлхүүр үүсгэх мөчид нэг л удаа бүтнээрээ харагдана; хаасан түлхүүр тэр дороо
+            хүчингүй болно. «Зөвхөн лавлах» түлхүүрээр төлбөр батлах боломжгүй.
+          </p>
+        </div>
+      ) : (
+        <div className="card space-y-2">
+          <h3 className="font-semibold text-sm flex items-center gap-1.5"><Plug size={15} /> Холбогдсон партнерууд</h3>
+          {partners === null ? <div className="text-xs text-slate-500">Ачаалж байна…</div>
+            : partners.length === 0
+              ? <div className="text-xs text-slate-500">Партнер бүртгэгдээгүй байна</div>
+              : (
+                <div className="flex flex-wrap gap-2">
+                  {partners.map((p) => (
+                    <span key={p} className="px-3 py-1 rounded-lg border border-accent/40 bg-accent/5 text-accent text-sm font-mono">{p}</span>
+                  ))}
+                </div>
+              )}
+          <p className="text-[11px] text-slate-500">
+            Түлхүүрийн удирдлага зөвхөн Супер админд байдаг.
+          </p>
+        </div>
+      )}
+
+      <KeyCreateModal open={createOpen} sites={sites}
+        onClose={() => setCreateOpen(false)} onDone={load} />
 
       <div className="card space-y-3">
         <div className="flex items-center justify-between">

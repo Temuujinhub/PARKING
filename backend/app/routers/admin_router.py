@@ -705,8 +705,9 @@ def payment_accounts(db: Session = Depends(get_db),
         },
         "accounts": accounts,
         "bank_accounts": bank_accounts,
-        # Гадаад API-ийн партнер түлхүүрүүд — зөвхөн НЭРС (түлхүүр .env-д, задрахгүй)
-        "partners": sorted(settings.partner_map().keys()),
+        # Гадаад API-ийн партнерууд — зөвхөн НЭРС. АНХААР: partner_map нь
+        # {api_key: нэр} тул .keys() нь ТҮЛХҮҮРИЙГ задлана — заавал .values()!
+        "partners": sorted(set(settings.partner_map().values())),
         "ebarimt": {
             "mock": settings.ebarimt_mock,
             "qpay_ebarimt": settings.qpay_ebarimt,
@@ -714,6 +715,78 @@ def payment_accounts(db: Session = Depends(get_db),
             "posapi_url": settings.ebarimt_posapi_url,
         },
     }
+
+
+# ─────────── Холболт: гадаад API-ийн партнер түлхүүрүүд ───────────
+@router.get("/partner-keys")
+def list_partner_keys(db: Session = Depends(get_db),
+                      user: User = Depends(require_role("SUPER_ADMIN"))):
+    """DB-ийн түлхүүрүүд + .env-ийн хуучин партнерууд (зөвхөн нэрс).
+    Түлхүүр өөрөө хэзээ ч буцаагдахгүй — үүсгэх мөчид л нэг удаа ил гарна."""
+    from ..models import PartnerKey
+    site_names = {s.id: s for s in db.query(ParkingSite).all()}
+    keys = []
+    for k in db.query(PartnerKey).order_by(PartnerKey.created_at).all():
+        site = site_names.get(k.site_id)
+        keys.append({
+            "id": k.id, "name": k.name, "key_prefix": k.key_prefix,
+            "scopes": k.scopes, "site_id": k.site_id,
+            "site_code": site.site_code if site else None,
+            "site_name": site.name if site else None,
+            "is_active": k.is_active,
+            "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
+            "created_by": k.created_by,
+            "created_at": k.created_at.isoformat() if k.created_at else None,
+        })
+    return {"keys": keys, "env_partners": sorted(settings.partner_map().values())}
+
+
+@router.post("/partner-keys")
+def create_partner_key(body: dict, db: Session = Depends(get_db),
+                       user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Шинэ түлхүүр үүсгэнэ. body: {name, scopes?, site_id?}.
+    Түлхүүр ЗӨВХӨН энэ хариултад ил гарна — DB-д sha256 hash нь л үлдэнэ."""
+    import hashlib
+    from ..models import PartnerKey
+    name = (body.get("name") or "").strip().lower()
+    if not name or not name.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(400, "Нэр латин үсэг/цифр/зураас байна (тайланд provider болно)")
+    scopes = "read,pay" if body.get("can_pay", True) else "read"
+    site_id = (body.get("site_id") or "").strip() or None
+    if site_id and not db.get(ParkingSite, site_id):
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    # Нэр давхардвал тайлан дээр хоёр өөр түлхүүрийн төлбөр нийлж харагдана — хориглоно
+    if db.query(PartnerKey).filter(PartnerKey.name == name, PartnerKey.is_active.is_(True)).first():
+        raise HTTPException(400, f"«{name}» нэртэй идэвхтэй түлхүүр аль хэдийн байна")
+    raw = "pk_" + secrets.token_urlsafe(24)
+    k = PartnerKey(name=name, key_hash=hashlib.sha256(raw.encode()).hexdigest(),
+                   key_prefix=raw[:10], scopes=scopes, site_id=site_id,
+                   created_by=user.username)
+    db.add(k)
+    _audit(db, user, "CREATE", "partner_key", k.id,
+           {"name": name, "scopes": scopes, "site_id": site_id})
+    db.commit()
+    return {"id": k.id, "name": name, "key": raw, "key_prefix": k.key_prefix,
+            "scopes": scopes, "site_id": site_id}
+
+
+@router.post("/partner-keys/{key_id}/revoke")
+def revoke_partner_key(key_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Түлхүүрийг хаана — тэр дороо хүчингүй (restart шаардлагагүй). Буцаахгүй:
+    санамсаргүй хаасан бол шинэ түлхүүр үүсгэж партнерт өгнө."""
+    from ..models import PartnerKey
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    if not k.is_active:
+        return {"ok": True, "already": True}
+    k.is_active = False
+    k.revoked_at = datetime.utcnow()
+    _audit(db, user, "UPDATE", "partner_key", key_id, {"action": "revoke", "name": k.name})
+    db.commit()
+    return {"ok": True}
 
 
 @router.put("/sites/{site_id}/tariff")

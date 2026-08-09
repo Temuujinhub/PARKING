@@ -8,11 +8,14 @@ tokI, Easy Wallet зэрэг гадаад төлбөрийн систем энэ
                                               → систем PAID болгож ХААЛТ НЭЭНЭ
   5. GET  /api/v1/payments/{id}             — төлөв шалгах
 
-Нэвтрэлт: X-API-Key толгой. Түлхүүрүүд .env-ийн PARKING_PARTNER_KEYS-д
-("toki:KEY1,easywallet:KEY2") — ШИНЭ WALLET НЭМЭХЭД КОД ӨӨРЧЛӨГДӨХГҮЙ,
-түлхүүр нэмээд л болно. Түншийн нэр Payment.provider болж тайланд ялгарна.
+Нэвтрэлт: X-API-Key толгой. Түлхүүр ХОЁР эх үүсвэртэй:
+  1. partner_keys хүснэгт (Тохиргоо → Холболт → Гадаад API-гаас удирдана,
+     restart шаардлагагүй; DB-д зөвхөн SHA-256 hash хадгалагдана)
+  2. .env-ийн PARKING_PARTNER_KEYS — хуучин fallback, одоогийн партнерууд тасрахгүй
+Түншийн нэр Payment.provider болж тайланд ялгарна.
 """
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import func
@@ -20,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import AuditLog, ParkingSession, ParkingSite, Payment
+from ..models import AuditLog, ParkingSession, ParkingSite, PartnerKey, Payment
 from ..ratelimit import throttle
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
@@ -29,19 +32,61 @@ router = APIRouter(prefix="/api/v1", tags=["integration"])
 OPEN_STATUSES = ("OPEN", "AWAITING_PAYMENT", "PAID")
 
 
-def require_partner(request: Request, x_api_key: str = Header(default="")) -> str:
-    """X-API-Key-ээр түншийг таньж нэрийг нь буцаана (Payment.provider болно)."""
+class PartnerAuth(str):
+    """Танигдсан партнер. str-ээс удамшдаг тул Payment.provider,
+    f"partner:{...}" зэрэг одоогийн бүх хэрэглээ өөрчлөгдөхгүй; дээр нь
+    scopes/site_id хязгаарлалтыг авч явна (.env түлхүүрт хязгаарлалтгүй)."""
+    scopes: str = "read,pay"
+    site_id: str | None = None
+
+    def can_pay(self) -> bool:
+        return "pay" in self.scopes
+
+
+def _auth_fail(request: Request):
+    # Брут-форсоос хамгаалах: буруу түлхүүрийн оролдлогыг IP-ээр хязгаарлана
+    ip = request.client.host if request.client else "?"
+    if throttle(f"partner-bad:{ip}", limit=20, window=60):
+        raise HTTPException(429, "Хэт олон буруу оролдлого")
+    raise HTTPException(401, "API түлхүүр буруу")
+
+
+def require_partner(request: Request, x_api_key: str = Header(default=""),
+                    db: Session = Depends(get_db)) -> PartnerAuth:
+    """X-API-Key-ээр түншийг таньж нэрийг нь буцаана (Payment.provider болно).
+    Эхлээд DB (partner_keys, hash тулгана), дараа нь .env fallback."""
+    key = x_api_key or ""
+    if key:
+        h = hashlib.sha256(key.encode()).hexdigest()
+        row = (db.query(PartnerKey)
+               .filter(PartnerKey.key_hash == h, PartnerKey.is_active.is_(True)).first())
+        if row:
+            # last_used_at-ыг минут тутам л шинэчилнэ — хүсэлт бүрд UPDATE хийхгүй
+            now = datetime.utcnow()
+            if not row.last_used_at or now - row.last_used_at > timedelta(seconds=60):
+                row.last_used_at = now
+                db.commit()
+            auth = PartnerAuth(row.name)
+            auth.scopes = row.scopes or "read"
+            auth.site_id = row.site_id
+            return auth
     partners = settings.partner_map()
-    if not partners:
-        raise HTTPException(503, "Интеграцийн API идэвхгүй (PARKING_PARTNER_KEYS тохируулаагүй)")
-    name = partners.get(x_api_key or "")
+    if not partners and not db.query(PartnerKey.id).first():
+        raise HTTPException(503, "Интеграцийн API идэвхгүй (түлхүүр бүртгэгдээгүй)")
+    name = partners.get(key)
     if not name:
-        # Брут-форсоос хамгаалах: буруу түлхүүрийн оролдлогыг IP-ээр хязгаарлана
-        ip = request.client.host if request.client else "?"
-        if throttle(f"partner-bad:{ip}", limit=20, window=60):
-            raise HTTPException(429, "Хэт олон буруу оролдлого")
-        raise HTTPException(401, "API түлхүүр буруу")
-    return name
+        _auth_fail(request)
+    return PartnerAuth(name)   # .env түлхүүр — бүрэн эрхтэй (хуучин зан төлөв)
+
+
+def _require_pay(partner: PartnerAuth):
+    if not partner.can_pay():
+        raise HTTPException(403, "Энэ түлхүүр зөвхөн лавлах эрхтэй (төлбөрийн эрхгүй)")
+
+
+def _check_site_scope(partner: PartnerAuth, site_id: str | None):
+    if partner.site_id and site_id and partner.site_id != site_id:
+        raise HTTPException(403, "Энэ түлхүүр өөр зогсоолын мэдээлэлд хандах эрхгүй")
 
 
 def _session_payload(db: Session, s: ParkingSession) -> dict:
@@ -67,14 +112,17 @@ def _session_payload(db: Session, s: ParkingSession) -> dict:
 
 
 @router.get("/sites")
-def list_sites(db: Session = Depends(get_db), partner: str = Depends(require_partner)):
+def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
     """Идэвхтэй зогсоолууд + багтаамж, эзэлсэн, сул байрны тоо."""
     occupied_by_site = dict(
         db.query(ParkingSession.site_id, func.count())
         .filter(ParkingSession.status.in_(OPEN_STATUSES))
         .group_by(ParkingSession.site_id).all())
     out = []
-    for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
+    q = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
+    if partner.site_id:   # зогсоолоор хязгаарлагдсан түлхүүр зөвхөн өөрийнхөө зогсоолыг харна
+        q = q.filter(ParkingSite.id == partner.site_id)
+    for site in q.all():
         occupied = occupied_by_site.get(site.id, 0)
         out.append({
             "site_code": site.site_code, "name": site.name,
@@ -88,7 +136,7 @@ def list_sites(db: Session = Depends(get_db), partner: str = Depends(require_par
 
 @router.get("/sessions")
 def find_sessions(plate: str, site_code: str = "",
-                  db: Session = Depends(get_db), partner: str = Depends(require_partner)):
+                  db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
     """Дугаараар нээлттэй session хайна. site_code өгөхгүй бол БҮХ зогсоолоос —
     жолооч аль зогсоолд байгааг wallet апп мэдэхгүй байж болно."""
     plate = normalize_plate(plate)
@@ -97,10 +145,13 @@ def find_sessions(plate: str, site_code: str = "",
     q = (db.query(ParkingSession)
          .filter(ParkingSession.plate_number == plate,
                  ParkingSession.status.in_(OPEN_STATUSES)))
+    if partner.site_id:   # түлхүүрийн зогсоолын хязгаар — бусад зогсоолын зогсолт харагдахгүй
+        q = q.filter(ParkingSession.site_id == partner.site_id)
     if site_code:
         site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
         if not site:
             raise HTTPException(404, "Зогсоол олдсонгүй")
+        _check_site_scope(partner, site.id)
         q = q.filter(ParkingSession.site_id == site.id)
     sessions = q.order_by(ParkingSession.entry_time.desc()).limit(5).all()
     return {"sessions": [_session_payload(db, s) for s in sessions]}
@@ -108,15 +159,17 @@ def find_sessions(plate: str, site_code: str = "",
 
 @router.post("/payments")
 def create_payment_intent(body: dict, db: Session = Depends(get_db),
-                          partner: str = Depends(require_partner)):
+                          partner: PartnerAuth = Depends(require_partner)):
     """Төлбөрийн intent үүсгэнэ. body: {session_id}.
     Буцаах amount-ыг wallet өөрийн талд хэрэглэгчээс нэхэмжилж, амжилттай
     болмогц /payments/{id}/confirm-ыг дуудна. Идэвхтэй PENDING intent
     байвал (дүн зөрөөгүй бол) шинээр үүсгэлгүй түүнийгээ буцаана."""
     from .payments_router import _create_payment
+    _require_pay(partner)
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
+    _check_site_scope(partner, session.site_id)
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
 
@@ -144,11 +197,12 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
 
 @router.post("/payments/{payment_id}/confirm")
 async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get_db),
-                          partner: str = Depends(require_partner)):
+                          partner: PartnerAuth = Depends(require_partner)):
     """Wallet өөрийн талд төлбөрийг амжилттай авсныг баталгаажуулна.
     body: {transaction_id, amount}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
     нээгдэхгүй). Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
     from .payments_router import _finalize_paid, _lock_payment
+    _require_pay(partner)
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
@@ -178,7 +232,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
 
 @router.get("/payments/{payment_id}")
 def payment_status(payment_id: str, db: Session = Depends(get_db),
-                   partner: str = Depends(require_partner)):
+                   partner: PartnerAuth = Depends(require_partner)):
     payment = db.get(Payment, payment_id)
     if not payment or payment.provider != partner:
         raise HTTPException(404, "Payment олдсонгүй")

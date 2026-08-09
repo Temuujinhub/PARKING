@@ -525,3 +525,29 @@ class CompanyInvoice(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("period", "company", name="uq_invoice_period_company"),)
+
+
+class PartnerKey(Base):
+    """Гадаад API (/api/v1)-ийн партнерын түлхүүр — DB-д удирдагдана.
+
+    Өмнө нь түлхүүрүүд зөвхөн .env-ийн PARKING_PARTNER_KEYS-д байсан тул нэмэх/
+    хаахад сервер restart шаарддаг, хэн хэзээ ашигласан нь харагддаггүй байв.
+    Одоо: түлхүүр үүсгэх мөчид НЭГ УДАА ил гарч, DB-д зөвхөн SHA-256 hash нь
+    хадгалагдана (задарсан backup-аас ч түлхүүр сэргэхгүй). .env-ийн хуучин
+    түлхүүрүүд fallback болж хэвээр ажиллана — одоогийн партнерууд тасрахгүй.
+
+    scopes: "read" (лавлах) эсвэл "read,pay" (төлбөр батлах хүртэл).
+    site_id: NULL = бүх зогсоол; заасан бол зөвхөн тэр зогсоолын мэдээлэл/төлбөр.
+    Нэр нь Payment.provider болж тайланд ялгарна (.env-тэй ижил зарчим)."""
+    __tablename__ = "partner_keys"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    name = Column(String(60), nullable=False, index=True)
+    key_hash = Column(String(64), nullable=False, unique=True)     # sha256 hex
+    key_prefix = Column(String(12), nullable=False)                # эхний тэмдэгтүүд (танихад)
+    scopes = Column(String(60), nullable=False, default="read,pay")
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    created_by = Column(String(60), default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
