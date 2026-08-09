@@ -30,7 +30,7 @@ function RulesCard({ toast }) {
         </span>
         <span className="text-xs text-slate-400">
           {rules.auto_enabled
-            ? `авто: ${rules.debt_count || '—'} өр${rules.debt_amount ? ` эсвэл ${rules.debt_amount.toLocaleString()}₮` : ''}`
+            ? `авто: ${rules.debt_count || '—'} өр хуримтлагдвал${rules.debt_amount ? ` эсвэл ${rules.debt_amount.toLocaleString()}₮` : ''}`
             : 'авто хориг унтраалттай'} · {open ? 'хаах' : 'нээх'}
         </span>
       </button>
@@ -46,7 +46,7 @@ function RulesCard({ toast }) {
           </label>
 
           <div className="grid sm:grid-cols-2 gap-3">
-            <Field label="Хэдэн удаагийн өр хурамагц (0 = хэрэглэхгүй)">
+            <Field label="Хэдэн удаагийн өр хуримтлагдсан үед (0 = хэрэглэхгүй)">
               <input className="input font-mono" type="number" min="0" value={rules.debt_count}
                 disabled={!rules.auto_enabled}
                 onChange={(e) => set('debt_count', Number(e.target.value))} />

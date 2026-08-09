@@ -52,18 +52,19 @@ def revenue_excel(data):
     rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"],
              r.get("accrued_amount", 0), r["cash_amount"],
              r["qpay_amount"], r["pos_amount"], r["transfer_amount"],
-             r["paid_amount"], _pct(r), r["unpaid_amount"]]
+             r["paid_amount"], _pct(r), r["unpaid_amount"], r.get("debt_amount", 0)]
             for r in data["rows"]]
     t = data["totals"]
     total_row = ["НИЙТ", t["entered"], t["exited"], t["total_minutes"],
                  t.get("accrued_amount", 0), t["cash_amount"],
                  t["qpay_amount"], t["pos_amount"], t["transfer_amount"],
-                 t["paid_amount"], _pct(t), t["unpaid_amount"]]
+                 t["paid_amount"], _pct(t), t["unpaid_amount"], t.get("debt_amount", 0)]
     return _xlsx("revenue", "Орлогын тайлан",
                  ["Зогсоол", "Орсон", "Гарсан", "Нийт минут", "Үүссэн төлбөр (₮)",
                   "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
-                  "Дансаар (₮)", "Нийт төлөгдсөн (₮)", "Цуглуулалт (%)", "Төлөгдөөгүй (₮)"],
-                 rows, widths=(30, 10, 10, 12, 18, 14, 14, 14, 14, 18, 14, 16),
+                  "Дансаар (₮)", "Нийт төлөгдсөн (₮)", "Цуглуулалт (%)",
+                  "Хүлээгдэж буй (₮)", "Өр болсон (₮)"],
+                 rows, widths=(30, 10, 10, 12, 18, 14, 14, 14, 14, 18, 14, 16, 16),
                  total_row=total_row)
 
 

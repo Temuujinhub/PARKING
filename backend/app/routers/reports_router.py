@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..auth import operator_sites, require
 from ..database import get_db
 from ..models import (
-    AuditLog, LprEvent, ParkingSession, ParkingSite, Payment, User, VatReceipt,
+    AuditLog, Compensation, LprEvent, ParkingSession, ParkingSite, Payment, User, VatReceipt,
 )
 from ..serializers import to_dict
 from . import reports_excel as _excel
@@ -264,11 +264,19 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
         accrued = float(db.query(func.coalesce(func.sum(ParkingSession.total_fee), 0)).filter(
             ParkingSession.site_id == s.id,
             ParkingSession.entry_time >= start, ParkingSession.entry_time < end).scalar())
+        # ӨР БОЛСОН — төлөлгүй хаагдсан (шөнийн хаалт, авто хаалт, админ хассан,
+        # төлбөргүй гарсан) сешнээс үүссэн ТӨЛӨГДӨӨГҮЙ нэхэмжлэл. Үүнгүйгээр
+        # «Үүссэн − Нийт» зөрүү тайлагдахгүй байсан: зөрүүний гол хэсэг нь энэ.
+        debt = float(db.query(func.coalesce(func.sum(Compensation.amount), 0))
+                     .join(ParkingSession, Compensation.session_id == ParkingSession.id)
+                     .filter(Compensation.site_id == s.id, Compensation.status == "PENDING",
+                             ParkingSession.entry_time >= start,
+                             ParkingSession.entry_time < end).scalar())
         out.append({"site_id": s.id, "site_name": s.name, "entered": entered, "exited": exited,
                     "total_minutes": int(minutes or 0),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
                     "transfer_amount": transfer, "accrued_amount": accrued,
-                    "paid_amount": paid, "unpaid_amount": unpaid})
+                    "paid_amount": paid, "unpaid_amount": unpaid, "debt_amount": debt})
     totals = {
         "entered": sum(r["entered"] for r in out), "exited": sum(r["exited"] for r in out),
         "total_minutes": sum(r["total_minutes"] for r in out),
@@ -279,6 +287,7 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
         "accrued_amount": sum(r["accrued_amount"] for r in out),
         "paid_amount": sum(r["paid_amount"] for r in out),
         "unpaid_amount": sum(r["unpaid_amount"] for r in out),
+        "debt_amount": sum(r["debt_amount"] for r in out),
     }
     return {"rows": out, "totals": totals,
             "date_from": start.isoformat(), "date_to": end.isoformat()}

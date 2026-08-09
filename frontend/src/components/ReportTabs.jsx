@@ -130,8 +130,10 @@ export function RevenueTab({ from, to }) {
         <b className="text-slate-300"> «Үүссэн»</b> = машин орж тоолуур явснаар бодогдсон
         нийт төлбөр, <b className="text-slate-300">«Цуглуулалт»</b> = түүнээс хэдэн хувийг
         бодитоор авсан (зогсож байгаа машины дүн бүрэн бодогдоогүй тул ороогүй).
+        Зөрүү нь ихэвчлэн <b className="text-red-300">«Өр болсон»</b> — төлөлгүй гарсан/
+        шөнийн буюу авто хаалтаар хаагдсан машины нэхэмжлэл.
       </div>
-      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Үүссэн (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Төлөгдөөгүй (₮)', 'Нийт (₮)', 'Цуглуулалт', 'Үйлдэл']}
+      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Үүссэн (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Хүлээгдэж буй (₮)', 'Өр болсон (₮)', 'Нийт (₮)', 'Цуглуулалт', 'Үйлдэл']}
         empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.site_id}>
@@ -145,7 +147,10 @@ export function RevenueTab({ from, to }) {
             <td className="td font-mono">{fmt(r.qpay_amount)}</td>
             <td className="td font-mono">{fmt(r.pos_amount)}</td>
             <td className="td font-mono">{fmt(r.transfer_amount)}</td>
-            <td className="td font-mono text-amber-400">{fmt(r.unpaid_amount)}</td>
+            <td className="td font-mono text-amber-400"
+              title="Яг одоо гарах хаалтад төлбөрөө хүлээж буй машины дүн">{fmt(r.unpaid_amount)}</td>
+            <td className="td font-mono text-red-400"
+              title="Төлөлгүй хаагдсан сешнээс үүссэн, хараахан төлөгдөөгүй нэхэмжлэл">{fmt(r.debt_amount)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
             <td className="td"><CollectRate paid={r.paid_amount} accrued={r.accrued_amount} /></td>
             <td className="td">
@@ -165,7 +170,8 @@ export function RevenueTab({ from, to }) {
         <span>Карт: <b className="font-mono">{fmt(t.pos_amount)}₮</b></span>
         <span>Дансаар: <b className="font-mono">{fmt(t.transfer_amount)}₮</b></span>
         <span>Үүссэн төлбөр: <b className="font-mono text-slate-200">{fmt(t.accrued_amount)}₮</b></span>
-        <span>Төлөгдөөгүй: <b className="font-mono text-amber-400">{fmt(t.unpaid_amount)}₮</b></span>
+        <span>Хүлээгдэж буй: <b className="font-mono text-amber-400">{fmt(t.unpaid_amount)}₮</b></span>
+        <span>Өр болсон: <b className="font-mono text-red-400">{fmt(t.debt_amount)}₮</b></span>
         <span>Нийт орлого: <b className="font-mono text-accent">{fmt(t.paid_amount)}₮</b></span>
         <span className="flex items-center gap-1.5">Цуглуулалт:
           <CollectRate paid={t.paid_amount} accrued={t.accrued_amount} /></span>
