@@ -121,23 +121,31 @@ async def main():
         print("RPC2 нэвтрэлт OK\n")
         winner = None
         try:
+            # Веб UI нь `Security.addUserPlain` методыг ашигладаг нь DevTools-оос
+            # илэрсэн (userManager.addUser БИШ). Хариу нь base64 encrypted content
+            # буцаадаг ч хүсэлтийн params энгийн байж болзошгүй тул эхлээд түүнийг
+            # туршина — ажиллавал шифрлэлт хэрэггүй гэсэн үг.
             for label, u in variants(pw, realm):
                 # Өмнөх оролдлогын үлдэгдлийг цэвэрлэнэ
                 try:
                     await rpc._call("userManager.deleteUser", {"name": PROBE_USER})
                 except Exception:  # noqa: BLE001
                     pass
-                try:
-                    r = await rpc._call("userManager.addUser", {"user": u})
-                except Exception as e:  # noqa: BLE001
-                    print(f"  {label:44} АЛДАА {type(e).__name__}")
-                    continue
-                ok = bool(r.get("result"))
-                err = (r.get("error") or {})
-                print(f"  {label:44} {'✅ АМЖИЛТТАЙ' if ok else '✗ code=' + str(err.get('code', '?'))}"
-                      + (f" {err.get('message', '')[:40]}" if err.get("message") else ""))
-                if ok:
-                    winner = (label, u)
+                for method in ("userManager.addUser", "Security.addUserPlain"):
+                    try:
+                        r = await rpc._call(method, {"user": u})
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  {label:40} {method[:22]:24} АЛДАА {type(e).__name__}")
+                        continue
+                    ok = bool(r.get("result"))
+                    err = (r.get("error") or {})
+                    tag = "✅ АМЖИЛТТАЙ" if ok else "✗ code=" + str(err.get("code", "?"))
+                    print(f"  {label:40} {method[:22]:24} {tag}"
+                          + (f" {err.get('message', '')[:30]}" if err.get("message") else ""))
+                    if ok:
+                        winner = (f"{label} · {method}", u)
+                        break
+                if winner:
                     break
 
             if not winner:
