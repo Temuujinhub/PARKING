@@ -13,6 +13,7 @@
 Тохиргоо: Тохиргоо → Авто цэвэрлэгээ → «Камерын лог нөхөлт» (app_settings).
 """
 import logging
+import threading
 from datetime import datetime, timedelta
 
 from ..database import SessionLocal
@@ -22,6 +23,9 @@ from .app_settings import CAMSYNC_STATE, get_camsync_rules, get_state, set_state
 from .camera_records import site_camera_events
 
 log = logging.getLogger("parking.camera_sync")
+
+# Хуваарь ба гар ажиллагаа ДАВХЦАХААС хамгаалах цорго
+_LOCK = threading.Lock()
 
 BURST_SEC = 600          # нэг дугаарын дараалсан уншилтыг нэгтгэх цонх
 ACTIVE = ("OPEN", "AWAITING_PAYMENT", "PAID")
@@ -133,7 +137,27 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
 
 
 def run_once(dry_run: bool = False) -> list:
-    """Бүх идэвхтэй зогсоолыг нэг удаа sync хийнэ."""
+    """Бүх идэвхтэй зогсоолыг нэг удаа sync хийнэ.
+
+    ЧУХАЛ: энэ функц дотроо `asyncio.run` ашигладаг (камер руу зэрэг хандахад)
+    тул event loop-ийн ДОТРООС дуудаж БОЛОХГҮЙ — supervisor нь
+    `asyncio.to_thread`-ээр дуудна. Ингэснээр ачаалалтай үед хаалт нээх/LPR
+    боловсруулалт саатахгүй (камерын хүсэлт 15с хүртэл үргэлжилдэг).
+
+    Мөн ДАВХЦАХААС хамгаална: хуваарийн ажиллагаа явж байхад оператор
+    «Яг одоо нөхөх» дарвал хоёр дахь нь шууд буцна (нэг event хоёр
+    процессоор боловсруулагдаж давхар бүртгэл үүсэхээс сэргийлнэ)."""
+    if not _LOCK.acquire(blocking=False):
+        log.info("камерын лог нөхөлт аль хэдийн ажиллаж байна — алгаслаа")
+        return [{"site": "-", "created": 0, "skipped": 0,
+                 "note": "аль хэдийн ажиллаж байна"}]
+    try:
+        return _run_once_locked(dry_run)
+    finally:
+        _LOCK.release()
+
+
+def _run_once_locked(dry_run: bool = False) -> list:
     db = SessionLocal()
     out = []
     try:

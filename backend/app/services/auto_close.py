@@ -298,7 +298,10 @@ async def supervisor():
                     _db.close()
                 if _t.monotonic() - last_camsync > 24 * 3600 / _n:
                     last_camsync = _t.monotonic()
-                    camsync_once()
+                    # ЗААВАЛ thread дээр: camsync дотроо asyncio.run ашигладаг
+                    # (event loop дотроос дуудвал RuntimeError) бөгөөд камерын
+                    # хүсэлт 15с үргэлжилж болох тул loop-ийг блоклоно.
+                    await asyncio.to_thread(camsync_once)
             except Exception as e:  # noqa: BLE001
                 log.error("камерын лог нөхөлтийн алдаа: %r", e)
 
