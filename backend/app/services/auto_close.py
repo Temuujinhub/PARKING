@@ -60,7 +60,10 @@ def run_once() -> int:
                     try:
                         s.status = "FREE"
                         s.exit_time = now
-                        s.duration_minutes = int((now - s.entry_time).total_seconds() // 60)
+                        # Хугацааг бичихгүй: машин ХЭЗЭЭ гарсныг мэдэхгүй (гарах
+                        # уншилт байхгүй). «Одоо − орсон» гэж бичвэл тайлангийн
+                        # Хугацаа багана хуурамчаар хөөрөгддөг (Моннис 73%).
+                        s.duration_minutes = None
                         s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
                         s.note = f"{s.note + ' | ' if s.note else ''}авто: формат буруу (дутуу уншсан) phantom — {ip_hours}ц дараа үнэгүй хаав"[:1000]
                         db.add(AuditLog(username="system", action="AUTO_JUNK_CLOSE",
@@ -93,7 +96,9 @@ def run_once() -> int:
                     try:
                         s.status = "FREE"
                         s.exit_time = now
-                        s.duration_minutes = int((now - s.entry_time).total_seconds() // 60)
+                        # Гарах уншилт огт байхгүй тул бодит зогсолтын хугацаа
+                        # ТОДОРХОЙГҮЙ — хуурамч дүн бичихгүй (дээрхтэй ижил шалтгаан)
+                        s.duration_minutes = None
                         s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
                         s.note = f"{s.note + ' | ' if s.note else ''}авто: зөвхөн орох уншилттай тул {eo_hours}ц дараа үнэгүй хаав"[:1000]
                         db.add(AuditLog(username="system", action="AUTO_FREE_CLOSE",
@@ -195,26 +200,75 @@ def retention_once() -> dict:
         log.error("retention DB алдаа: %r", e)
     finally:
         db.close()
-    # Snapshot зургууд — хамгийн их диск иддэг төрөл
+    # Snapshot зургууд — хамгийн их диск иддэг төрөл. ХОЁР дүрмээр цэвэрлэнэ:
+    #   1) хугацаа (retention_snapshot_days)
+    #   2) НИЙТ ХЭМЖЭЭ (retention_snapshot_max_gb) — хугацааны дүрэм хүрэлцэхгүй
+    #      үед хатуу таг. Сард ~20GB хуримтлагддаг тул 120 хоногийн дүрэм
+    #      ганцаараа 98GB дискийг дүүргэдэг байв (2026-08-09).
     days = settings.retention_snapshot_days
     snap_dir = settings.snapshot_dir
-    if days and days > 0 and snap_dir and os.path.isdir(snap_dir):
-        cutoff = _t.time() - days * 86400
-        removed = 0
+    if snap_dir and os.path.isdir(snap_dir):
+        # Файлын жагсаалтыг НЭГ удаа цуглуулна (77GB-ийн дор дахин алхах үнэтэй)
+        entries = []   # (mtime, size, path)
         for root_, _dirs, files in os.walk(snap_dir):
             for fn in files:
                 p = os.path.join(root_, fn)
                 try:
-                    if os.path.getmtime(p) < cutoff:
-                        os.remove(p)
-                        removed += 1
+                    st = os.stat(p)
+                    entries.append((st.st_mtime, st.st_size, p))
                 except OSError:
                     pass
+
+        removed = 0
+        freed = 0
+        if days and days > 0:
+            cutoff = _t.time() - days * 86400
+            keep = []
+            for mtime, size, p in entries:
+                if mtime < cutoff:
+                    try:
+                        os.remove(p)
+                        removed += 1
+                        freed += size
+                        continue
+                    except OSError:
+                        pass
+                keep.append((mtime, size, p))
+            entries = keep
+
+        max_bytes = int(settings.retention_snapshot_max_gb * 1024 ** 3)
+        total = sum(size for _m, size, _p in entries)
+        if max_bytes > 0 and total > max_bytes:
+            # Хамгийн ХУУЧНААС нь эхлэн хязгаарт орох хүртэл устгана
+            for mtime, size, p in sorted(entries):
+                if total <= max_bytes:
+                    break
+                try:
+                    os.remove(p)
+                    total -= size
+                    removed += 1
+                    freed += size
+                except OSError:
+                    pass
+            log.warning("retention: зургийн хэмжээ %.1fGB хязгаараас хэтэрсэн тул "
+                        "хуучныг устгав → %.1fGB",
+                        (total + freed) / 1024 ** 3, total / 1024 ** 3)
         if removed:
             out["snapshots"] = removed
+            out["snapshots_freed_mb"] = round(freed / 1024 ** 2)
     if out:
         log.info("retention: устгав %s", out)
     return out
+
+
+def disk_free_percent(path: str = "/") -> float:
+    """Дискний сул зайн хувь (алдаа гарвал 100 — цэвэрлэгээ өдөөхгүй)."""
+    import shutil
+    try:
+        usage = shutil.disk_usage(path)
+        return usage.free / usage.total * 100 if usage.total else 100.0
+    except OSError:
+        return 100.0
 
 
 async def supervisor():
@@ -228,7 +282,15 @@ async def supervisor():
             n = run_once()
             if n:
                 log.info(f"нийт {n} гацсан session хаагдлаа")
-            if _t.monotonic() - last_retention > 24 * 3600:
+            # Ердийн хуваарь: өдөрт нэг. ГЭХДЭЭ диск дүүрч эхэлбэл хүлээхгүй —
+            # 30 минут тутмын энэ давталтад шууд цэвэрлэнэ (диск дүүрвэл
+            # backend бичих боломжгүй болж бүхэлдээ зогсдог).
+            free_pct = disk_free_percent(settings.snapshot_dir or "/")
+            tight = free_pct < settings.disk_free_min_percent
+            if tight or _t.monotonic() - last_retention > 24 * 3600:
+                if tight:
+                    log.warning("дискний сул зай %.1f%% — retention-ийг хуваариас "
+                                "өмнө ажиллуулж байна", free_pct)
                 last_retention = _t.monotonic()
                 retention_once()
         except Exception as e:  # noqa: BLE001
