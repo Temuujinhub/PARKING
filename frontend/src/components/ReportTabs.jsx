@@ -132,13 +132,14 @@ export function RevenueTab({ from, to }) {
     <>
       <div className="text-xs text-slate-400">
         Зогсоол дээр дарж тухайн зогсоолын сар бүрийн дүнг харна.
-        <b className="text-slate-300"> «Үүссэн»</b> = машин орж тоолуур явснаар бодогдсон
-        нийт төлбөр, <b className="text-slate-300">«Цуглуулалт»</b> = түүнээс хэдэн хувийг
-        бодитоор авсан (зогсож байгаа машины дүн бүрэн бодогдоогүй тул ороогүй).
-        Зөрүү нь ихэвчлэн <b className="text-red-300">«Өр болсон»</b> — төлөлгүй гарсан/
-        шөнийн буюу авто хаалтаар хаагдсан машины нэхэмжлэл.
+        <b className="text-slate-300"> «Үүссэн»</b> = энэ хугацаанд орсон машины
+        тоолуураар бодогдсон төлбөр. <b className="text-slate-300">«Хураасан»</b> = түүнээс
+        авсан дүн, <b className="text-slate-300">«Цуглуулалт»</b> = тэр хоёрын харьцаа.
+        <b className="text-slate-300"> «Нийт орлого»</b> нь кассын БОДИТ мөнгөн урсгал —
+        өмнөх хугацааны машины төлбөр, хуучин өрийн төлөлт ч энд ордог тул
+        «Үүссэн»-ээс их байж болно.
       </div>
-      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Үүссэн (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Хүлээгдэж буй (₮)', 'Өр болсон (₮)', 'Нийт (₮)', 'Цуглуулалт', 'Үйлдэл']}
+      <Table headers={['Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Үүссэн (₮)', 'Хураасан (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Хүлээгдэж буй (₮)', 'Өр болсон (₮)', 'Нийт орлого (₮)', 'Цуглуулалт', 'Үйлдэл']}
         empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.site_id}>
@@ -148,6 +149,10 @@ export function RevenueTab({ from, to }) {
             <td className="td font-mono">{fmt(r.exited)}</td>
             <td className="td font-mono">{fmtDur(r.total_minutes)}</td>
             <td className="td font-mono text-slate-300">{fmt(r.accrued_amount)}</td>
+            <td className="td font-mono text-slate-300"
+              title="Энэ хугацаанд орсон машинаас хураасан дүн — Цуглуулалт хувь эндээс бодогдоно">
+              {fmt(r.collected_amount)}
+            </td>
             <td className="td font-mono">{fmt(r.cash_amount)}</td>
             <td className="td font-mono">{fmt(r.qpay_amount)}</td>
             <td className="td font-mono">{fmt(r.pos_amount)}</td>
@@ -175,6 +180,7 @@ export function RevenueTab({ from, to }) {
         <span>Карт: <b className="font-mono">{fmt(t.pos_amount)}₮</b></span>
         <span>Дансаар: <b className="font-mono">{fmt(t.transfer_amount)}₮</b></span>
         <span>Үүссэн төлбөр: <b className="font-mono text-slate-200">{fmt(t.accrued_amount)}₮</b></span>
+        <span>Хураасан: <b className="font-mono text-slate-200">{fmt(t.collected_amount)}₮</b></span>
         <span>Хүлээгдэж буй: <b className="font-mono text-amber-400">{fmt(t.unpaid_amount)}₮</b></span>
         <span>Өр болсон: <b className="font-mono text-red-400">{fmt(t.debt_amount)}₮</b></span>
         <span>Нийт орлого: <b className="font-mono text-accent">{fmt(t.paid_amount)}₮</b></span>
@@ -257,12 +263,13 @@ export function MonthlyTab({ from, to, siteId }) {
         <b className="text-slate-300"> «Үүссэн»</b> = тухайн сард орсон машины тоолуураар
         бодогдсон төлбөр, <b className="text-slate-300">«Цуглуулалт»</b> = түүний хэдэн хувийг авсан.
       </div>
-      <Table headers={['Сар', 'Гүйлгээ', 'Үүссэн (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт орлого (₮)', 'Цуглуулалт']} empty={data.rows.length === 0}>
+      <Table headers={['Сар', 'Гүйлгээ', 'Үүссэн (₮)', 'Хураасан (₮)', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт орлого (₮)', 'Цуглуулалт']} empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.month} onClick={() => setMonth(r.month)} className="cursor-pointer hover:bg-surface-muted/40">
             <td className="td font-mono font-medium text-accent underline decoration-dotted">{r.month}</td>
             <td className="td font-mono">{r.count}</td>
             <td className="td font-mono text-slate-300">{fmt(r.accrued)}</td>
+            <td className="td font-mono text-slate-300">{fmt(r.collected)}</td>
             <td className="td font-mono">{fmt(r.cash)}</td>
             <td className="td font-mono">{fmt(r.qpay)}</td>
             <td className="td font-mono">{fmt(r.pos)}</td>
@@ -278,6 +285,7 @@ export function MonthlyTab({ from, to, siteId }) {
         <span>Карт: <b className="font-mono">{fmt(data.totals.pos)}₮</b></span>
         <span>Дансаар: <b className="font-mono">{fmt(data.totals.transfer)}₮</b></span>
         <span>Үүссэн төлбөр: <b className="font-mono text-slate-200">{fmt(data.totals.accrued)}₮</b></span>
+        <span>Хураасан: <b className="font-mono text-slate-200">{fmt(data.totals.collected)}₮</b></span>
         <span>Нийт: <b className="font-mono text-accent">{fmt(data.totals.total)}₮</b></span>
         <span className="flex items-center gap-1.5">Цуглуулалт:
           <CollectRate collected={data.totals.collected} accrued={data.totals.accrued} /></span>

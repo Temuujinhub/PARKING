@@ -282,16 +282,19 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
                           .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
                                   ParkingSession.entry_time >= start,
                                   ParkingSession.entry_time < end).scalar())
-        # Нэг төлбөр нь тухайн сешний хураамж + ӨМНӨХ сешнүүдийн ӨР-ийг хамт
-        # агуулж болно (_create_payment include_debts). Тэр өрийн хэсэг нь энэ
-        # мужид үүссэн төлбөр БИШ тул хасна — эс бол хураасан нь үүссэнээс
+        # Нэг төлбөр нь тухайн сешний хураамж + ӨӨР (хуучин) сешнүүдийн ӨР-ийг
+        # хамт агуулж болно (_create_payment include_debts). Тэр ӨӨР сешний өр
+        # нь энэ сешний хураамж БИШ тул хасна — эс бол хураасан нь үүссэнээс
         # давж, цуглуулалт 100%-иас хэтэрдэг (Кэй Эйч 8 сар −104,000₮).
+        # ЧУХАЛ: сешн ӨӨРИЙНХӨӨ өрийг хожим төлсөн бол тэр нь яг тэр сешний
+        # хураамжийн хойшлогдсон төлөлт тул ХАСАХГҮЙ.
         debt_in_pay = float(db.query(func.coalesce(func.sum(Compensation.amount), 0))
                             .select_from(ParkingSession)
                             .join(Payment, Payment.session_id == ParkingSession.id)
                             .join(Compensation, Compensation.payment_id == Payment.id)
                             .filter(ParkingSession.site_id == s.id,
                                     Payment.status == "PAID", Compensation.status == "PAID",
+                                    Compensation.session_id != ParkingSession.id,
                                     ParkingSession.entry_time >= start,
                                     ParkingSession.entry_time < end).scalar())
         collected = max(0.0, collected - debt_in_pay)
@@ -380,6 +383,7 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
           .join(Payment, Payment.session_id == ParkingSession.id)
           .join(Compensation, Compensation.payment_id == Payment.id)
           .filter(Payment.status == "PAID", Compensation.status == "PAID",
+                  Compensation.session_id != ParkingSession.id,   # өөрийнх бол хойшлогдсон төлөлт
                   ParkingSession.entry_time >= start, ParkingSession.entry_time < end))
     dq = _flt(dq, ParkingSession.site_id, _scope(user, site_id))
     for ym, amt in dq.group_by("ym").all():

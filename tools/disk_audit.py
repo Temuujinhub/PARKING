@@ -66,17 +66,79 @@ def main():
     print(f"/  нийт {human(du.total)} · эзэлсэн {human(du.used)} "
           f"({du.used / du.total * 100:.0f}%) · сул {human(du.free)}\n")
 
-    # 1. Хамгийн том хавтаснууд (du — хурдан, C-ээр бичигдсэн)
-    print("── Хамгийн их зай эзэлсэн хавтаснууд ──")
-    try:
-        out = subprocess.run(
-            ["du", "-x", "-h", "--max-depth=2", "--threshold=500M", "/"],
-            capture_output=True, text=True, timeout=180).stdout
-        rows = [ln.split("\t") for ln in out.strip().splitlines() if "\t" in ln]
-        for size, path in sorted(rows, key=lambda r: -_to_bytes(r[0]))[:15]:
-            print(f"  {size:>8}  {path}")
-    except Exception as e:  # noqa: BLE001
-        print(f"  du ажиллуулж чадсангүй: {e}")
+    # 1. Хамгийн том хавтас руу АВТОМАТААР гүнзгийрч орно. Ганц түвшин харуулбал
+    #    «/var/lib 61GB» гэж зогсдог тул жинхэнэ буруутныг олохгүй.
+    print("── Хамгийн их зай эзэлсэн хавтаснууд (гүнзгийрч) ──")
+    cur = "/"
+    seen = set()
+    for _level in range(6):
+        rows = _du(cur)
+        if not rows:
+            break
+        # cur өөрөө болон түүнээс жижиг зүйлсийг хасаж, дэд хавтсуудыг эрэмбэлнэ
+        subs = [(sz, p) for sz, p in rows if p != cur and p not in seen]
+        if not subs:
+            break
+        subs.sort(key=lambda r: -r[0])
+        for sz, p in subs[:6]:
+            print(f"  {human(sz):>8}  {p}")
+        top_size, top_path = subs[0]
+        seen.add(top_path)
+        # Хамгийн том дэд хавтас нийт зайн 25%-иас их бол дотор нь орно
+        if top_size < du.used * 0.25 or not os.path.isdir(top_path):
+            break
+        print(f"  ↓ {top_path} дотор:")
+        cur = top_path
+
+    # 1.5 Мэдэгдэж буй том хэрэглэгчид — «бидэнд хамаагүй» зүйлийг ялгана
+    print("\n── Танигдсан хэрэглэгчид ──")
+    known = [
+        ("/var/lib/postgresql", "PostgreSQL (WAL хуримтлагдвал асар том болдог)"),
+        ("/var/lib/docker", "Docker образ/контейнерийн лог"),
+        ("/var/lib/parking", "Манай систем (зураг г.м)"),
+        ("/var/log", "Системийн лог"),
+        ("/var/log/journal", "systemd journal (vacuum хийж болно)"),
+        ("/var/cache", "Пакетын кэш (apt clean)"),
+        ("/root", "root хэрэглэгчийн файлууд"),
+        ("/tmp", "Түр файлууд"),
+        ("/var/tmp", "Түр файлууд (дахин ачаалахад ч устдаггүй)"),
+        ("/swapfile", "Swap файл"),
+    ]
+    for path, desc in known:
+        if not os.path.exists(path):
+            continue
+        try:
+            if os.path.isfile(path):
+                sz = os.path.getsize(path)
+            else:
+                r = subprocess.run(["du", "-x", "-s", "-b", path],
+                                   capture_output=True, text=True, timeout=300)
+                sz = int(r.stdout.split("\t")[0]) if r.stdout.strip() else 0
+        except Exception:  # noqa: BLE001
+            continue
+        if sz > 100 * MB:
+            print(f"  {human(sz):>8}  {path:26} {desc}")
+
+    # 1.6 PostgreSQL WAL — DB жижиг байхад дата хавтас том бол ЭНЭ шалтгаан
+    for pg in ("/var/lib/postgresql",):
+        if not os.path.isdir(pg):
+            continue
+        for root_, dirs, _f in os.walk(pg):
+            if os.path.basename(root_) in ("pg_wal", "pg_xlog"):
+                try:
+                    r = subprocess.run(["du", "-x", "-s", "-b", root_],
+                                       capture_output=True, text=True, timeout=120)
+                    sz = int(r.stdout.split("\t")[0])
+                    n = len(os.listdir(root_))
+                except Exception:  # noqa: BLE001
+                    continue
+                print(f"\n  ⚠ WAL: {human(sz)} · {n} файл — {root_}")
+                if sz > 5 * GB:
+                    print("    WAL хэт том. Шалтгаан ихэвчлэн: гацсан replication slot,")
+                    print("    эсвэл archive_command амжилтгүй болж WAL хуримтлагдсан.")
+                    print("    Шалгах: sudo -u postgres psql -c \"SELECT * FROM pg_replication_slots;\"")
+                    print("            sudo -u postgres psql -c \"SHOW archive_mode;\"")
+                dirs[:] = []
 
     # 2. Snapshot хавтас — гол хэрэглэгч
     snap = settings.snapshot_dir
@@ -140,14 +202,23 @@ def main():
     print(f"   Сул зай: {human(du.free)} → {human(du2.free)}")
 
 
-def _to_bytes(s: str) -> float:
-    """du -h гаралтыг байт болгоно (эрэмбэлэхэд)."""
-    s = s.strip()
-    mult = {"K": 1024, "M": MB, "G": GB, "T": 1024 ** 4}
+def _du(path: str):
+    """du -x --max-depth=1 -b → [(байт, зам)]. Алдаа гарвал хоосон."""
     try:
-        return float(s[:-1]) * mult.get(s[-1].upper(), 1) if s[-1].isalpha() else float(s)
-    except ValueError:
-        return 0.0
+        r = subprocess.run(["du", "-x", "-b", "--max-depth=1", path],
+                           capture_output=True, text=True, timeout=600)
+        out = []
+        for ln in r.stdout.strip().splitlines():
+            if "\t" not in ln:
+                continue
+            size, p = ln.split("\t", 1)
+            try:
+                out.append((int(size), p))
+            except ValueError:
+                pass
+        return out
+    except Exception:  # noqa: BLE001
+        return []
 
 
 if __name__ == "__main__":
