@@ -1394,6 +1394,42 @@ def run_autoclose_now(db: Session = Depends(get_db),
     return {"closed": closed}
 
 
+@router.get("/camsync/rules")
+def get_camsync_rules_api(db: Session = Depends(get_db),
+                          user: User = Depends(require("settings"))):
+    """Камерын лог нөхөлтийн дүрэм + зогсоол бүрийн watermark."""
+    from ..services.app_settings import CAMSYNC_STATE, get_camsync_rules, get_state
+    rules = get_camsync_rules(db)
+    state = get_state(db, CAMSYNC_STATE)
+    sites = {s.id: s.name for s in db.query(ParkingSite).all()}
+    return {**rules,
+            "watermarks": [{"site": sites.get(k, k), "at": v} for k, v in state.items()]}
+
+
+@router.put("/camsync/rules")
+def put_camsync_rules(body: dict, db: Session = Depends(get_db),
+                      user: User = Depends(require("settings"))):
+    from ..services.app_settings import set_camsync_rules
+    rules = set_camsync_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "camsync_rules", "-", rules)
+    db.commit()
+    return rules
+
+
+@router.post("/camsync/run")
+def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
+                    user: User = Depends(require("settings"))):
+    """Камерын лог нөхөлтийг ЯГ ОДОО ажиллуулна. body: {dry_run: bool}"""
+    from ..services.camera_sync import run_once
+    dry = bool((body or {}).get("dry_run"))
+    rows = run_once(dry_run=dry)
+    if not dry:
+        _audit(db, user, "CAMERA_SYNC_MANUAL", "session", "-",
+               {"created": sum(r.get("created", 0) for r in rows)})
+        db.commit()
+    return {"dry_run": dry, "rows": rows}
+
+
 @router.get("/blacklist/rules")
 def get_blacklist_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("blacklist", "cashier"))):

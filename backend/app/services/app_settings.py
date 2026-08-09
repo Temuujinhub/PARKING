@@ -11,6 +11,9 @@ import time
 
 BLACKLIST_KEY = "blacklist_rules"
 AUTOCLOSE_KEY = "autoclose_rules"
+CAMSYNC_KEY = "camsync_rules"
+# Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
+CAMSYNC_STATE = "camsync_state"
 
 # Түлхүүр бүрийн default. Утгын ТӨРӨЛ нь валидацийн дүрэм болно (bool/int).
 DEFAULTS: dict[str, dict] = {
@@ -35,6 +38,18 @@ DEFAULTS: dict[str, dict] = {
         "awaiting_hours": 2,        # гарах хаалтад уншигдсан ч төлөөгүй N цаг
         "entry_only_free_hours": 72,  # зөвхөн орох уншилттай (гарц уншаагүй) → үнэгүй
         "invalid_plate_hours": 2,   # формат буруу (junk) дугаар → үнэгүй хаана
+    },
+    CAMSYNC_KEY: {
+        # Камерын дотоод логоос алдагдсан event-ийг нөхөж бүртгэх автомат sync.
+        # ЧУХАЛ: watermark-аар ажиллана — нэг event ХОЁР УДАА боловсруулагдахгүй
+        # (2026-08-10: 48ц-ийн лог бүхлээр нь дахин уншсанаас аль хэдийн
+        # шийдэгдсэн машинууд дахин өр болсон).
+        "enabled": False,          # анхдагчаар УНТРААЛТТАЙ — гараар асаана
+        "times_per_day": 4,        # өдөрт хэдэн удаа (6 цаг тутам)
+        "lookback_hours": 12,      # watermark байхгүй үед хамгийн ихдээ ухрах
+        "min_age_minutes": 30,     # сүүлийн N минутын event-д хүрэхгүй (яг явж буй)
+        "create_debt": True,       # гарсан нь мэдэгдэж буй машинд өр үүсгэх эсэх
+        "skip_invalid_plate": True,  # формат буруу (junk) дугаарыг алгасах
     },
 }
 
@@ -101,6 +116,36 @@ def get_autoclose_rules(db) -> dict:
 
 def set_autoclose_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, AUTOCLOSE_KEY, values, username)
+
+
+def get_camsync_rules(db) -> dict:
+    return get_rules(db, CAMSYNC_KEY)
+
+
+def set_camsync_rules(db, values: dict, username: str) -> dict:
+    return set_rules(db, CAMSYNC_KEY, values, username)
+
+
+# ── ТӨЛӨВ (watermark) — дүрэм биш тул валидацигүй, кэшлэхгүй ────────────────
+def get_state(db, key: str) -> dict:
+    """Чөлөөт JSON төлөв (ж: зогсоол бүрийн сүүлд боловсруулсан event цаг)."""
+    from ..models import AppSetting
+    try:
+        row = db.get(AppSetting, key)
+        return dict(row.value) if row and isinstance(row.value, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def set_state(db, key: str, value: dict, username: str = "system"):
+    """Төлөвийг бүхэлд нь дарж бичнэ (caller commit хийнэ)."""
+    from ..models import AppSetting
+    row = db.get(AppSetting, key)
+    if row is None:
+        row = AppSetting(key=key, value={})
+        db.add(row)
+    row.value = dict(value)
+    row.updated_by = username
 
 
 def invalidate_cache():

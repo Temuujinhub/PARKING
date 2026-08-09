@@ -276,6 +276,7 @@ async def supervisor():
     Хуучин датаны цэвэрлэгээ (retention) өдөрт нэг л удаа хийгдэнэ."""
     await asyncio.sleep(300)
     last_retention = 0.0
+    last_camsync = 0.0
     import time as _t
     while True:
         try:
@@ -285,6 +286,22 @@ async def supervisor():
             # Ердийн хуваарь: өдөрт нэг. ГЭХДЭЭ диск дүүрч эхэлбэл хүлээхгүй —
             # 30 минут тутмын энэ давталтад шууд цэвэрлэнэ (диск дүүрвэл
             # backend бичих боломжгүй болж бүхэлдээ зогсдог).
+            # Камерын лог нөхөлт — өдөрт times_per_day удаа (watermark-тай тул
+            # давхардахгүй). Тохиргооноос унтраалттай бол run_once өөрөө буцна.
+            try:
+                from .app_settings import get_camsync_rules
+                from .camera_sync import run_once as camsync_once
+                _db = SessionLocal()
+                try:
+                    _n = max(1, get_camsync_rules(_db)["times_per_day"])
+                finally:
+                    _db.close()
+                if _t.monotonic() - last_camsync > 24 * 3600 / _n:
+                    last_camsync = _t.monotonic()
+                    camsync_once()
+            except Exception as e:  # noqa: BLE001
+                log.error("камерын лог нөхөлтийн алдаа: %r", e)
+
             free_pct = disk_free_percent(settings.snapshot_dir or "/")
             tight = free_pct < settings.disk_free_min_percent
             if tight or _t.monotonic() - last_retention > 24 * 3600:
