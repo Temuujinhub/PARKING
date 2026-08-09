@@ -3,8 +3,14 @@ backend/venv/
 __pycache__/
 *.pyc
 
-# Нууц тохиргоо — .env.example-г ашиглана
+# Нууц тохиргоо — .env.example-г ашиглана.
+# ЗӨВХӨН `backend/.env` биш: серверт засварлахдаа .env.save / .env.bak /
+# .env.2026-08-09 гэх мэт хуулбар үлдээдэг бөгөөд тэдгээр нь нууц үг, QPay
+# түлхүүрийг БҮТНЭЭР агуулдаг. Repo нээлттэй тул `git add -A` нэг л удаа
+# болгоомжгүй хийхэд задарна — иймд бүх хувилбарыг нь хаана.
 backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Node
 frontend/node_modules/
