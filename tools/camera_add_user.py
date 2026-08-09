@@ -10,6 +10,10 @@
     # 3. Олон камерт нэг дор:
     sudo ... camera_add_user.py 192.168.6.10 192.168.6.11 --create
 
+    # 4. БҮХ камер (эсвэл зөвхөн admin-аар үлдсэнийг):
+    sudo ... camera_add_user.py --all --list
+    sudo ... camera_add_user.py --all --only-admin --create
+
 Юуны учир (2026-07-29 аудит): камеруудад гадны системүүд МАНАЙ ашигладаг admin
 бүртгэлээр ханддаг нь батлагдсан (admin@172.10.20.55/60, admin@172.16.100.254).
 Тэдний нэгэн буруу нэвтрэлт admin-ыг ТҮГЖИХЭД манай хаалт нээх команд ч хамт
@@ -143,6 +147,21 @@ async def handle(ip: str, create: bool) -> None:
 async def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     create = "--create" in sys.argv
+    # --all: DB дэх БҮХ идэвхтэй камер. 22 камерыг гараар жагсаах шаардлагагүй,
+    # мөн admin-аар үлдсэнийг л сонгох (--only-admin) боломжтой.
+    if "--all" in sys.argv:
+        db = SessionLocal()
+        try:
+            q = (db.query(Device)
+                 .filter(Device.device_type == "camera", Device.status == "active",
+                         Device.ip_address != ""))
+            devs = q.all()
+            if "--only-admin" in sys.argv:
+                devs = [d for d in devs if camera_credentials(d)[0] == "admin"]
+            args = sorted({d.ip_address for d in devs})
+        finally:
+            db.close()
+        print(f"Хамрах камер: {len(args)}")
     if not args or ("--list" not in sys.argv and not create):
         print(__doc__)
         return 1
