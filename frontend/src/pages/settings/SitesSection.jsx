@@ -1,16 +1,16 @@
-// Зогсоолын жагсаалт — нэмэх wizard, засах, устгах, QR, QPay туршилт
+// Зогсоолын жагсаалт — нэмэх wizard, засах, устгах, QR.
+// QPay/банкны данс энд БАЙХГҮЙ — Тохиргоо → Холболт хэсэгт нэгдсэн.
 import { Plus, QrCode, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../auth'
 import { Table, useToast } from '../../components/ui'
-import QpayTestModal from './QpayTestModal'
 import { genDevices } from './shared'
 import SiteEditModal from './SiteEditModal'
 import SiteQrModal from './SiteQrModal'
 import SiteWizardModal from './SiteWizardModal'
 
-export default function SitesSection() {
+export default function SitesSection({ onGotoIntegrations }) {
   const toast = useToast()
   const { user } = useAuth()
   const isSuper = user?.role === 'SUPER_ADMIN'
@@ -19,7 +19,6 @@ export default function SitesSection() {
   const [tenants, setTenants] = useState([])
   const [editing, setEditing] = useState(null)
   const [qrSite, setQrSite] = useState(null)
-  const [qpayTest, setQpayTest] = useState(null)
   const [wizard, setWizard] = useState(null)
   const load = () => api('/api/admin/sites').then(setRows)
   useEffect(() => {
@@ -31,23 +30,8 @@ export default function SitesSection() {
   const save = async (e) => {
     e.preventDefault()
     try {
-      // QPay: "ерөнхий данс" сонгосон бол талбаруудыг цэвэрлэж илгээнэ,
-      // "өөрийн данс" сонгосон бол нэр+нууц үг хоёулаа байх ёстой
-      if (editing.qpay_mode === 'own') {
-        if (!editing.qpay_username?.trim()) {
-          toast('QPay нэвтрэх нэрээ бичнэ үү (эсвэл "Системийн ерөнхий данс"-ыг сонгоно уу)', 'error'); return
-        }
-        if (!editing.qpay_password?.trim() && !editing.qpay_password_set) {
-          toast('QPay нууц үгээ бичнэ үү — нэр ганцаараа хангалтгүй', 'error'); return
-        }
-      }
-      const qpayClear = editing.qpay_mode === 'global'
-        ? { qpay_username: '', qpay_password: '', qpay_invoice_code: '',
-            qpay_district_code: '', qpay_branch_code: '' }
-        : {}
       const body = {
         ...editing,
-        ...qpayClear,
         capacity: editing.unlimited ? 0 : +editing.capacity,
         tariff_template_id: editing.tariff_template_id || null,
         // '' = глобал default (72ц), 0 = унтраах, N = тухайн зогсоолын босго
@@ -162,8 +146,7 @@ export default function SitesSection() {
             </td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs mr-1"
-                onClick={() => setEditing({ ...s, unlimited: !s.capacity,
-                  qpay_mode: (s.qpay_username || s.qpay_password_set) ? 'own' : 'global' })}>Засах</button>
+                onClick={() => setEditing({ ...s, unlimited: !s.capacity })}>Засах</button>
               <button className="btn-secondary py-1 text-xs text-red-400 hover:text-red-300"
                 onClick={() => removeSite(s)} aria-label={`${s.name} зогсоолыг устгах`}>
                 <Trash2 size={14} />
@@ -178,9 +161,7 @@ export default function SitesSection() {
 
       <SiteEditModal editing={editing} setEditing={setEditing} templates={templates}
         tenants={isSuper ? tenants : null} sites={rows}
-        onSubmit={save} onTest={() => setQpayTest({ site: editing, amount: 10 })} />
-
-      <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
+        onSubmit={save} onGotoIntegrations={onGotoIntegrations} />
 
       <SiteQrModal qrSite={qrSite} onClose={() => setQrSite(null)} />
     </>

@@ -239,24 +239,6 @@ export default function DevicesSection() {
                 </select>
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Нэвтрэх нэр">
-                <input className="input font-mono" value={editing.username || ''} placeholder="admin"
-                  autoComplete="off"
-                  onChange={(e) => setEditing({ ...editing, username: e.target.value })} />
-              </Field>
-              <Field label="Нууц үг">
-                <input className="input font-mono" type="password" autoComplete="new-password"
-                  value={editing.password ?? ''}
-                  placeholder={editing.password_set ? '•••••• (хадгалагдсан)' : 'Ерөнхий тохиргоог ашиглана'}
-                  onChange={(e) => setEditing({ ...editing, password: e.target.value })} />
-              </Field>
-            </div>
-            <div className="text-xs text-slate-400 -mt-1">
-              Энэ төхөөрөмжийн ӨӨРИЙН нэвтрэлт. Хоосон үлдээвэл системийн ерөнхий
-              тохиргоо (.env) үйлчилнэ. Зогсоол бүрийн камер өөр нууц үгтэй бол энд бичнэ.
-              {editing.password_set && ' Нууц үгийг хоосон болгож хадгалвал устана.'}
-            </div>
             {editing.device_type === 'camera' && editing.lane_dir === 'entry' && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" checked={editing.auto_open}
@@ -264,12 +246,47 @@ export default function DevicesSection() {
                 Дугаар уншмагц хаалтыг автоматаар нээх
               </label>
             )}
+            {/* Нарийн тохиргоонууд эвхэгддэг — модал богино, түгээмэл талбарууд ил */}
+            <details className="rounded-lg border border-slate-700 px-3 py-2"
+              open={!!(editing.username || editing.password_set)}>
+              <summary className="cursor-pointer text-sm font-medium py-1">
+                Төхөөрөмжийн нэвтрэлт
+                {(editing.username || editing.password_set)
+                  ? <span className="ml-2 text-xs text-accent">· тусгай нууц үгтэй</span>
+                  : <span className="ml-2 text-xs text-slate-500">· ерөнхий тохиргоо (.env)</span>}
+              </summary>
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                <Field label="Нэвтрэх нэр">
+                  <input className="input font-mono" value={editing.username || ''} placeholder="admin"
+                    autoComplete="off"
+                    onChange={(e) => setEditing({ ...editing, username: e.target.value })} />
+                </Field>
+                <Field label="Нууц үг">
+                  <input className="input font-mono" type="password" autoComplete="new-password"
+                    value={editing.password ?? ''}
+                    placeholder={editing.password_set ? '•••••• (хадгалагдсан)' : 'Ерөнхий тохиргоог ашиглана'}
+                    onChange={(e) => setEditing({ ...editing, password: e.target.value })} />
+                </Field>
+              </div>
+              <div className="text-xs text-slate-400 mt-1.5">
+                Энэ төхөөрөмжийн ӨӨРИЙН нэвтрэлт. Хоосон үлдээвэл системийн ерөнхий
+                тохиргоо (.env) үйлчилнэ. Зогсоол бүрийн камер өөр нууц үгтэй бол энд бичнэ.
+                {editing.password_set && ' Нууц үгийг хоосон болгож хадгалвал устана.'}
+              </div>
+            </details>
             {/* Давхар зогсоол НЭГ зогсоол дотор: доторх талбайн орох/гарах камер.
                 Session нээхгүй/хаахгүй — зөвхөн төлбөрийн тоолуурыг зогсоож/
                 үргэлжлүүлнэ. Зогсоолыг хоёр болгож салгах шаардлагагүй. */}
             {editing.device_type === 'camera' && (
-              <div className="rounded-lg border border-slate-700 px-3 py-2">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <details className="rounded-lg border border-slate-700 px-3 py-2"
+                open={!!editing.nested_inner}>
+                <summary className="cursor-pointer text-sm font-medium py-1">
+                  Дотоод (давхар) зогсоолын камер
+                  {editing.nested_inner
+                    ? <span className="ml-2 text-xs text-accent">· идэвхтэй</span>
+                    : <span className="ml-2 text-xs text-slate-500">· энгийн камер</span>}
+                </summary>
+                <label className="flex items-center gap-2 text-sm cursor-pointer mt-2">
                   <input type="checkbox" checked={!!editing.nested_inner}
                     onChange={(e) => setEditing({ ...editing, nested_inner: e.target.checked })} />
                   Дотоод (давхар) зогсоолын камер
@@ -285,7 +302,7 @@ export default function DevicesSection() {
                   <br />Тоолуур зогсох дээд хугацааг Тохиргоо → Зогсоол → Засах дээрээс
                   тохируулна (хоосон = 4 цаг).
                 </div>
-              </div>
+              </details>
             )}
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>

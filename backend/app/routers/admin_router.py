@@ -602,6 +602,102 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
     return out
 
 
+# ─────────── Холболт: төлбөрийн дансдын нэгдсэн жагсаалт ───────────
+@router.get("/payment-accounts")
+def payment_accounts(db: Session = Depends(get_db),
+                     user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Тохиргоо → Холболт → Төлбөрийн данс: бүх түвшний (глобал .env / түрээслэгч /
+    зогсоол) QPay дансыг НЭГ дор, данс бүрд «яг аль зогсоолууд энэ данс руу төлж
+    байгаа»-г тооцоолж буцаана. Данс шийдэх дүрэм нь qpay.account_for-той ИЖИЛ:
+    нэвтрэх хос (нэр+нууц үг) нэг шатлалаас бүтнээрээ ирнэ — зогсоол → түрээслэгч
+    → глобал. Нууц утга буцаахгүй (зөвхөн *_set)."""
+    def _own_pair(obj) -> bool:
+        return bool((getattr(obj, "qpay_username", None) or "").strip()
+                    and (getattr(obj, "qpay_password", None) or "").strip())
+
+    def _eb_warn(code: str | None) -> str | None:
+        if settings.qpay_ebarimt and code and not code.startswith("EB_"):
+            return ("EB_ угтваргүй нэхэмжлэхийн код — НӨАТ давхар нэмэгдэж, "
+                    "e-Barimt үүсэхгүй эрсдэлтэй")
+        return None
+
+    sites = db.query(ParkingSite).order_by(ParkingSite.created_at).all()
+    tenants = {t.id: t for t in db.query(Tenant).all()}
+
+    # Зогсоол бүрийн данс аль шатлалаас шийдэгдэж буйг тооцно
+    resolved: dict[str, list] = {"global": []}   # account key → [site, ...]
+    for s in sites:
+        if _own_pair(s):
+            resolved.setdefault(f"site:{s.id}", []).append(s)
+        elif s.tenant_id and s.tenant_id in tenants and _own_pair(tenants[s.tenant_id]):
+            resolved.setdefault(f"tenant:{s.tenant_id}", []).append(s)
+        else:
+            resolved["global"].append(s)
+
+    def _site_ref(s):
+        return {"id": s.id, "name": s.name, "site_code": s.site_code,
+                "is_active": s.is_active}
+
+    accounts = []
+    for t in tenants.values():
+        if not (getattr(t, "qpay_username", None) or "").strip() and not t.qpay_password:
+            continue   # данс огт тохируулаагүй түрээслэгчийг жагсаахгүй
+        accounts.append({
+            "scope": "tenant", "id": t.id, "name": t.name,
+            "merchant": t.qpay_username,
+            "invoice_code": t.qpay_invoice_code,
+            "branch_code": t.qpay_branch_code,
+            "district_code": t.qpay_district_code,
+            "qpay_password_set": bool(t.qpay_password),
+            "complete": _own_pair(t),   # нэр+нууц үг хоёул бий юу
+            "warning": _eb_warn(t.qpay_invoice_code),
+            "sites": [_site_ref(s) for s in resolved.get(f"tenant:{t.id}", [])],
+        })
+    for s in sites:
+        if not (s.qpay_username or "").strip() and not s.qpay_password:
+            continue
+        accounts.append({
+            "scope": "site", "id": s.id, "name": s.name,
+            "site_code": s.site_code,
+            "merchant": s.qpay_username,
+            "invoice_code": s.qpay_invoice_code,
+            "branch_code": s.qpay_branch_code,
+            "district_code": s.qpay_district_code,
+            "qpay_password_set": bool(s.qpay_password),
+            "complete": _own_pair(s),
+            "warning": _eb_warn(s.qpay_invoice_code),
+            "sites": [_site_ref(x) for x in resolved.get(f"site:{s.id}", [])],
+        })
+
+    bank_accounts = [{
+        "site_id": s.id, "site_code": s.site_code, "name": s.name,
+        "bank_name": s.bank_name, "bank_account": s.bank_account,
+        "bank_account_name": s.bank_account_name,
+    } for s in sites if (s.bank_account or "").strip()]
+
+    return {
+        "global": {
+            "configured": bool(settings.qpay_username),
+            "merchant": settings.qpay_username or None,
+            "invoice_code": settings.qpay_invoice_code,
+            "mock": settings.qpay_mock,
+            "sandbox": settings.qpay_sandbox,
+            "warning": _eb_warn(settings.qpay_invoice_code),
+            "sites": [_site_ref(s) for s in resolved["global"]],
+        },
+        "accounts": accounts,
+        "bank_accounts": bank_accounts,
+        # Гадаад API-ийн партнер түлхүүрүүд — зөвхөн НЭРС (түлхүүр .env-д, задрахгүй)
+        "partners": sorted(settings.partner_map().keys()),
+        "ebarimt": {
+            "mock": settings.ebarimt_mock,
+            "qpay_ebarimt": settings.qpay_ebarimt,
+            "merchant_tin": settings.ebarimt_merchant_tin or None,
+            "posapi_url": settings.ebarimt_posapi_url,
+        },
+    }
+
+
 @router.put("/sites/{site_id}/tariff")
 def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("settings", "discounts"))):
