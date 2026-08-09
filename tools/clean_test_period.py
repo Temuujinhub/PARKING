@@ -12,7 +12,10 @@
 зөвхөн мөнгөн дүн тэгширнэ, тиймээс түүх алдагдахгүй.
 
 Хамгаалалтууд:
-  • Ямар нэг төлбөр ТӨЛӨГДСӨН сешнийг ХЭЗЭЭ Ч хөндөхгүй (хэсэгчилсэн ч бай)
+  • Төлбөр ТӨЛӨГДСӨН сешнийг тэглэхгүй. (--match-paid өгвөл ХЭСЭГЧЛЭН
+    төлөгдсөнийг нь хураасан дүнтэй нь тэнцүүлнэ — хураасан мөнгө хэвээр,
+    зөвхөн хураагдах боломжгүй үлдэгдэл л арилна. Өр нь хүлээгдэж байгаа
+    сешнийг хөндөхгүй.)
   • Зогсож БУЙ (OPEN) машиныг хөндөхгүй — амьд зогсолт
   • Сүүлийн --min-age-hours (default 3) цагт өөрчлөгдсөн сешнийг хөндөхгүй —
     яг одоо гарах хаалтад байгаа машин санамсаргүй тэгширэхээс сэргийлнэ
@@ -36,6 +39,7 @@ os.chdir("/root/PARKING/backend")
 sys.path.insert(0, "/root/PARKING/backend")
 
 from app.database import SessionLocal  # noqa: E402
+from sqlalchemy import func  # noqa: E402
 from app.models import (AuditLog, BlacklistEntry, Compensation,  # noqa: E402
                         ParkingSession, ParkingSite, Payment)
 
@@ -52,6 +56,9 @@ def main():
     ap.add_argument("--until", default=None, help="YYYY-MM-DD (орсон цагаар, багтахгүй)")
     ap.add_argument("--min-age-hours", type=float, default=3.0,
                     help="Сүүлийн энэ хугацаанд хөдөлсөн сешнийг хөндөхгүй (default 3)")
+    ap.add_argument("--match-paid", action="store_true",
+                    help="ХЭСЭГЧЛЭН төлөгдсөн сешний дүнг бодитоор хураасан дүнтэй нь "
+                         "тэнцүүлэх (өр нь цуцлагдсан тул үлдэгдэл хэзээ ч хураагдахгүй)")
     ap.add_argument("--keep-blacklist", action="store_true",
                     help="Автомат хоригийг хэвээр үлдээх")
     ap.add_argument("--apply", action="store_true", help="Бодитоор цэвэрлэх")
@@ -73,10 +80,21 @@ def main():
             sys.exit(1)
         print("Зогсоол: " + ", ".join(sorted(sites[s] for s in wanted)))
 
-        # Төлбөр ТӨЛӨГДСӨН сешнүүд — эдгээрийг хэзээ ч хөндөхгүй
-        paid_ids = {sid for (sid,) in db.query(Payment.session_id)
-                    .filter(Payment.status == "PAID",
-                            Payment.session_id.isnot(None)).distinct().all()}
+        # Төлбөр ТӨЛӨГДСӨН сешнүүд — эдгээрийн дүнг тэглэхгүй
+        paid_sum: dict[str, float] = {}
+        for sid, amt in (db.query(Payment.session_id, func.sum(Payment.amount))
+                         .filter(Payment.status == "PAID", Payment.session_id.isnot(None))
+                         .group_by(Payment.session_id).all()):
+            paid_sum[sid] = float(amt or 0)
+        # Төлбөрт нийлүүлэгдсэн ӨРИЙН хэсэг — тухайн сешний хураамж БИШ
+        bundled: dict[str, float] = {}
+        for sid, amt in (db.query(Payment.session_id, func.sum(Compensation.amount))
+                         .select_from(Payment)
+                         .join(Compensation, Compensation.payment_id == Payment.id)
+                         .filter(Payment.status == "PAID", Compensation.status == "PAID")
+                         .group_by(Payment.session_id).all()):
+            bundled[sid] = float(amt or 0)
+        paid_ids = set(paid_sum)
 
         q = (db.query(ParkingSession)
              .filter(ParkingSession.site_id.in_(wanted),
@@ -88,17 +106,28 @@ def main():
             q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(args.until))
 
         cutoff = datetime.utcnow() - timedelta(hours=args.min_age_hours)
-        picked, skipped_paid, skipped_live = [], 0, 0
+        picked, matched, skipped_paid, skipped_live = [], [], 0, 0
+        pending_ids = {sid for (sid,) in db.query(Compensation.session_id)
+                       .filter(Compensation.status == "PENDING",
+                               Compensation.session_id.isnot(None)).distinct().all()}
         for s in q.all():
-            if s.id in paid_ids:
-                skipped_paid += 1
-                continue
             if s.status in SKIP_STATUS or (s.updated_at and s.updated_at > cutoff):
                 skipped_live += 1
                 continue
+            if s.id in paid_ids:
+                # ХЭСЭГЧЛЭН төлөгдсөн: хураамжид ногдох дүн нь нийт төлбөрөөс
+                # багассан (өрийн нийлүүлсэн хэсгийг хасаад) — үлдэгдэл нь өр ч
+                # болоогүй бол хэзээ ч хураагдахгүй тул дүнг нь тэнцүүлж болно
+                own = max(0.0, paid_sum[s.id] - bundled.get(s.id, 0.0))
+                short = float(s.total_fee or 0) - own
+                if args.match_paid and short > 0.5 and s.id not in pending_ids:
+                    matched.append((s, own, short))
+                else:
+                    skipped_paid += 1
+                continue
             picked.append(s)
 
-        if not picked:
+        if not picked and not matched:
             print(f"Цэвэрлэх сешн олдсонгүй (төлөгдсөн {skipped_paid}, "
                   f"амьд/шинэ {skipped_live} хөндөгдөөгүй).")
             return
@@ -112,6 +141,14 @@ def main():
             group = by_key[(site_name, ym)]
             amt = sum(float(s.total_fee or 0) for s in group)
             print(f"── {site_name} · {ym}: {len(group)} сешн · {amt:,.0f}₮ тэгширнэ")
+
+        if matched:
+            short_total = sum(sh for _, _, sh in matched)
+            print(f"\n── Хэсэгчлэн төлөгдсөн (--match-paid): {len(matched)} сешн · "
+                  f"{short_total:,.0f}₮ үлдэгдлийг хураасан дүнд тэнцүүлнэ")
+            for s, own, sh in sorted(matched, key=lambda x: -x[2])[:5]:
+                print(f"   {s.plate_number:10} үүссэн {float(s.total_fee or 0):>8,.0f}₮ → "
+                      f"хураасан {own:>8,.0f}₮ (үлдэгдэл {sh:,.0f}₮)")
 
         total_amt = sum(float(s.total_fee or 0) for s in picked)
         plates = {s.plate_number for s in picked}
@@ -148,6 +185,15 @@ def main():
             mark = (f"[{stamp}] нэвтрүүлэлтийн үеийн цэвэрлэгээ — "
                     f"төлбөр хураагдаагүй, өмнөх дүн {was:,.0f}₮")
             s.note = f"{s.note}\n{mark}" if s.note else mark
+        for s, own, sh in matched:
+            was = float(s.total_fee or 0)
+            vat = round(own * 0.1 / 1.1)
+            s.total_fee = own
+            s.vat_amount = vat
+            s.base_fee = own - vat
+            mark = (f"[{stamp}] нэвтрүүлэлтийн цэвэрлэгээ — үүссэн {was:,.0f}₮-өөс "
+                    f"{own:,.0f}₮ хураагдсан, үлдэгдэл {sh:,.0f}₮ хураах боломжгүй")
+            s.note = f"{s.note}\n{mark}" if s.note else mark
         for c in comps:
             c.status = "CANCELLED"
         for b in bl:
@@ -156,6 +202,7 @@ def main():
         db.add(AuditLog(username="system", action="TEST_PERIOD_CLEANUP", entity="session",
                         entity_id=None,
                         detail={"sessions": len(picked), "amount": round(total_amt, 2),
+                                "matched_paid": len(matched),
                                 "plates": len(plates), "compensations": len(comps),
                                 "compensation_amount": round(comp_amt, 2),
                                 "blacklist_cleared": len(bl),
@@ -163,6 +210,7 @@ def main():
                                 "date_from": args.date_from, "until": args.until}))
         db.commit()
         print(f"\n✅ {len(picked)} сешн тэгширлээ ({total_amt:,.0f}₮), "
+              f"{len(matched)} сешн хураасан дүндээ тэнцлээ, "
               f"{len(comps)} нэхэмжлэл цуцлагдлаа, {len(bl)} хориг тайлагдлаа.")
         print("Тайлан → Сараар/Зогсоолоор дээр «Үүссэн» буурч, «Цуглуулалт» "
               "бодит утга руугаа (100%-д ойр) хүрэх ёстой.")
