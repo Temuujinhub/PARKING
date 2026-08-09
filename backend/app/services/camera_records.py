@@ -19,7 +19,7 @@ PlateColor, Lane, JunctionDirection, RecNo, SubscribeIP.
 үеийн event-ийг НӨХӨЖ тулгахад (аудит) зориулагдсан.
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -110,3 +110,91 @@ def normalized_plate(rec: dict) -> str | None:
     if not p or p.lower() in ("unlicensed", "unknown", "none"):
         return None
     return p.upper().replace(" ", "")
+
+
+def plates_similar(a: str, b: str) -> bool:
+    """OCR-ийн 1 тэмдэгтийн зөрүүг илрүүлнэ (солигдсон/дутуу/илүү 1 тэмдэгт).
+
+    Ж: 2420УХР ~ 2420УКР (Х↔К), 220УХР ~ 2420УХР (нэг орон дутуу уншсан)."""
+    if not a or not b or a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1 or min(la, lb) < 4:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    # a богино: нэг тэмдэгт алгасаад тэнцэх эсэх
+    i = 0
+    while i < la and a[i] == b[i]:
+        i += 1
+    return a[i:] == b[i + 1:]
+
+
+# ─── Аудитын нэгдсэн таталт (сайтын бүх камер, TTL кэштэй) ──────────────────
+# Шалгах хуудас WS event болгонд дахин ачаалдаг тул камер руу байнга хандахгүйн
+# тулд сайт бүрд AUDIT_CACHE_SEC хугацаанд кэшлэнэ.
+AUDIT_CACHE_SEC = 60.0
+AUDIT_HOURS = 48.0
+_audit_cache: dict[str, tuple[float, dict]] = {}
+
+
+def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
+    """Зогсоолын бүх идэвхтэй камерын дотоод логийг зэрэг татаж нэгтгэнэ (sync).
+
+    Буцаах: {window_hours, cameras:[{name,ip,lane_dir,events,error}],
+             events:[{plate, raw_plate, time(UTC naive), lane_dir, event, camera}]}
+    Камер тус бүрийн алдаа тусдаа бичигдэнэ — нэг камер унасан ч бусад нь тулгагдана.
+    """
+    import time as _time
+    cached = _audit_cache.get(site_id)
+    if cached and _time.monotonic() - cached[0] < AUDIT_CACHE_SEC:
+        return cached[1]
+
+    from ..models import Device
+    from .device_auth import camera_credentials
+    cams = (db.query(Device)
+            .filter(Device.site_id == site_id, Device.device_type == "camera",
+                    Device.status == "active", Device.ip_address != "")
+            .all())
+    # creds-ийг db session амьд байхад энгийн мөр болгож шийднэ
+    targets = [(c.name or c.ip_address, c.ip_address, c.lane_dir or "entry",
+                camera_credentials(c)) for c in cams]
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
+
+    async def _one(name, ip, lane_dir, creds):
+        try:
+            recs = await asyncio.wait_for(
+                fetch_snap_events(ip, creds[0], creds[1], start, end), timeout=15)
+            return name, ip, lane_dir, recs, None
+        except Exception as e:  # noqa: BLE001
+            return name, ip, lane_dir, [], f"{type(e).__name__}: {str(e)[:120]}"
+
+    async def _all():
+        return await asyncio.gather(*(_one(*t) for t in targets))
+
+    results = asyncio.run(_all()) if targets else []
+
+    cameras, events = [], []
+    for name, ip, lane_dir, recs, err in results:
+        cameras.append({"name": name, "ip": ip, "lane_dir": lane_dir,
+                        "events": len(recs), "error": err})
+        for r in recs:
+            t = r.get("Time")
+            if not isinstance(t, (int, float)):
+                continue
+            events.append({
+                "plate": normalized_plate(r),
+                "raw_plate": r.get("PlateNumber"),
+                "time": datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None),
+                "lane_dir": lane_dir,
+                "event": r.get("event_name"),
+                "source": r.get("SnapSource"),
+                "camera": name,
+            })
+    out = {"window_hours": hours, "cameras": cameras, "events": events}
+    _audit_cache[site_id] = (_time.monotonic(), out)
+    return out

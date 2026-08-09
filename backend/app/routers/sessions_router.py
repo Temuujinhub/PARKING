@@ -149,7 +149,7 @@ def check_plate(plate: str, site_id: str | None = None,
 
 
 @router.get("/audit")
-def audit_sessions(site_id: str | None = None,
+def audit_sessions(site_id: str | None = None, camera: bool = False,
                    db: Session = Depends(get_db),
                    user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Зогсоолын тоог тулгах аудит: "зогсоолд байгаа" гэж тоологдож буй бүх бүртгэлийг
@@ -158,9 +158,16 @@ def audit_sessions(site_id: str | None = None,
     ялган нэг товчоор цэвэрлэх боломжтой.
 
     Тэмдэг (flags):
-      • exit_read    — орсны дараа ГАРАХ камерт уншигдсан (машин гарсан байх магадлалтай)
+      • exit_read    — орсны дараа ГАРАХ камерт уншигдсан (серверийн LPR лог)
       • invalid_plate — дугаар стандарт формат биш (4 орон + 3 кирилл үсэг биш)
       • stale        — auto_close босгоос удаан зогссон
+      • cam_exit_read — КАМЕРЫН ДОТООД логоос: орсны дараа гарах камераар өнгөрсөн
+        (сервер унтарсан/event алдсан үеийг ч барина)
+      • ocr_similar  — камерын логт яг ижил дугаар алга, харин 1 тэмдэгтийн
+        зөрүүтэй дугаар бий — OCR буруу уншилт байх магадлалтай
+
+    camera=true (зөвхөн site_id өгсөн үед) — тухайн зогсоолын бүх идэвхтэй
+    камерын дотоод event сангаас (сүүлийн 48ц, 60с кэштэй) татаж тулгана.
     """
     from ..config import settings
     from ..session_logic import is_valid_plate
@@ -184,7 +191,21 @@ def audit_sessions(site_id: str | None = None,
                        .group_by(LprEvent.plate_number).all()):
             last_exit[pl] = ts
 
+    # ── Камерын дотоод логтой тулгах (зөвхөн нэг зогсоол сонгосон үед) ──
+    cam_info = None
+    cam_events: list[dict] = []
+    if camera and site_id:
+        from ..services.camera_records import site_camera_events
+        try:
+            cam_data = site_camera_events(db, site_id)
+            cam_events = cam_data["events"]
+            cam_info = {"window_hours": cam_data["window_hours"],
+                        "cameras": cam_data["cameras"], "error": None}
+        except Exception as e:  # noqa: BLE001 — камер унасан ч аудит ажиллана
+            cam_info = {"window_hours": None, "cameras": [], "error": str(e)[:200]}
+
     out = []
+    session_plates = {s.plate_number for s in rows}
     for s in rows:
         hours = round((now - s.entry_time).total_seconds() / 3600, 1) if s.entry_time else 0.0
         ex = last_exit.get(s.plate_number)
@@ -193,17 +214,68 @@ def audit_sessions(site_id: str | None = None,
         limit_h = (s.site.auto_close_hours if s.site and s.site.auto_close_hours is not None
                    else settings.auto_close_hours)
         stale = bool(limit_h and hours >= limit_h)
+
+        # Камерын лог: орсны ДАРАА гарах камераар өнгөрсөн үү (сервер event
+        # алдсан байсан ч камерын дотоод сан үүнийг мэднэ)
+        cam_exit_at = None
+        cam_exact = False
+        cam_similar: list[dict] = []
+        if cam_events:
+            from ..services.camera_records import plates_similar
+            for ev in cam_events:
+                if ev["plate"] == s.plate_number:
+                    cam_exact = True
+                    if (ev["lane_dir"] == "exit" and s.entry_time
+                            and ev["time"] > s.entry_time
+                            and (cam_exit_at is None or ev["time"] > cam_exit_at)):
+                        cam_exit_at = ev["time"]
+            if not cam_exact:
+                seen = set()
+                for ev in cam_events:
+                    p = ev["plate"]
+                    if p and p not in seen and p not in session_plates \
+                            and plates_similar(p, s.plate_number):
+                        seen.add(p)
+                        cam_similar.append({"plate": p, "at": ev["time"].isoformat(),
+                                            "lane_dir": ev["lane_dir"]})
+                cam_similar = cam_similar[:3]
+        cam_exit_read = cam_exit_at is not None
+        ocr_similar = bool(cam_similar)
+
         flags = ([f for f, on in (("exit_read", exit_read), ("invalid_plate", invalid),
-                                  ("stale", stale)) if on])
+                                  ("stale", stale), ("cam_exit_read", cam_exit_read),
+                                  ("ocr_similar", ocr_similar)) if on])
         d = _session_out(db, s, with_fee=True)
         d["audit"] = {"hours_parked": hours, "exit_read": exit_read,
                       "exit_read_at": ex.isoformat() if ex else None,
                       "invalid_plate": invalid, "stale": stale,
+                      "cam_exit_read": cam_exit_read,
+                      "cam_exit_at": cam_exit_at.isoformat() if cam_exit_at else None,
+                      "ocr_similar": ocr_similar, "cam_similar": cam_similar,
                       "flags": flags, "suspect": bool(flags)}
         out.append(d)
+
+    # Камерын логт байгаа ч СИСТЕМД БҮРТГЭЛГҮЙ оролтууд (сервер унтарсан үеийн
+    # алдагдсан event) — мужид орсон бүх session-ий дугаартай (хаагдсаныг оролцуулаад)
+    # тулгана
+    if cam_info and cam_events:
+        wstart = now - timedelta(hours=cam_info["window_hours"] or 48)
+        known = {p for (p,) in db.query(ParkingSession.plate_number)
+                 .filter(ParkingSession.site_id == site_id,
+                         ParkingSession.entry_time >= wstart).all()}
+        unmatched = [ev for ev in cam_events
+                     if ev["plate"] and ev["lane_dir"] == "entry" and ev["plate"] not in known]
+        unmatched.sort(key=lambda e: e["time"], reverse=True)
+        cam_info["unmatched_total"] = len(unmatched)
+        cam_info["unmatched"] = [{"plate": ev["plate"], "at": ev["time"].isoformat(),
+                                  "camera": ev["camera"]} for ev in unmatched[:20]]
+
     out = _attach_debt(db, out)
-    return {"total": len(out), "suspect": sum(1 for d in out if d["audit"]["suspect"]),
+    resp = {"total": len(out), "suspect": sum(1 for d in out if d["audit"]["suspect"]),
             "rows": out}
+    if cam_info is not None:
+        resp["camera"] = cam_info
+    return resp
 
 
 @router.get("/recent-exits")

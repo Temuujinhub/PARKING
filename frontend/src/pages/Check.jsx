@@ -39,6 +39,18 @@ function FlagBadges({ audit }) {
           удсан {Math.floor(audit.hours_parked)}ц
         </span>
       )}
+      {audit.cam_exit_read && (
+        <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded"
+          title={`Камерын ДОТООД логоор: орсны дараа гарах камераар өнгөрсөн (${fmtDate(audit.cam_exit_at)}) — сервер event алдсан байсан ч машин гарсан`}>
+          камерт гарсан
+        </span>
+      )}
+      {audit.ocr_similar && (
+        <span className="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded"
+          title={`Камерын логт энэ дугаар яг байхгүй, харин 1 тэмдэгтийн зөрүүтэй ${audit.cam_similar.map((c) => c.plate).join(', ')} бий — OCR буруу уншилт байж магадгүй. Харандаагаар засна уу.`}>
+          OCR? {audit.cam_similar[0]?.plate}
+        </span>
+      )}
     </div>
   )
 }
@@ -61,9 +73,10 @@ export default function Check() {
   const load = () => {
     if (audit) {
       const p = new URLSearchParams()
-      if (siteId) p.set('site_id', siteId)
+      // Зогсоол сонгосон үед камерын дотоод логтой автоматаар тулгана
+      if (siteId) { p.set('site_id', siteId); p.set('camera', '1') }
       api(`/api/sessions/audit?${p}`).then((d) => {
-        setData({ total: d.total, rows: d.rows, suspect: d.suspect })
+        setData({ total: d.total, rows: d.rows, suspect: d.suspect, camera: d.camera })
         setSel((prev) => prev.filter((id) => d.rows.some((r) => r.id === id)))
       }).catch((e) => toast(e.message, 'error'))
       return
@@ -176,7 +189,48 @@ export default function Check() {
           Аудит: зогсоолд <b className="font-mono text-slate-200">{data.total}</b> бүртгэл байгаагаас
           <b className="font-mono text-amber-300"> {data.suspect}</b> нь сэжигтэй.
           «гарсан?» = гарах камерт уншигдсан, «буруу дугаар» = формат буруу (junk),
-          «удсан» = хэт удсан. Сонгоод <b>Зогсоолоос хас</b>-аар цэвэрлэнэ.
+          «удсан» = хэт удсан, «камерт гарсан»/«OCR?» = камерын дотоод логтой тулгасан.
+          Сонгоод <b>Зогсоолоос хас</b>-аар цэвэрлэнэ.
+          {!siteId && (
+            <div className="mt-1 text-xs text-sky-300">
+              Камерын дотоод логтой тулгахын тулд дээрээс <b>зогсоол сонгоно уу</b>.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Камерын дотоод логтой тулгалтын дүн (зогсоол сонгосон үед автоматаар) */}
+      {audit && data.camera && (
+        <div className="card py-3 text-sm space-y-2">
+          <div className="flex flex-wrap gap-4 items-center text-slate-400">
+            <b className="text-slate-200">Камерын лог ({data.camera.window_hours}ц):</b>
+            {data.camera.cameras.map((c) => (
+              <span key={c.ip} className={c.error ? 'text-red-400' : ''}
+                title={c.error || `${c.events} event`}>
+                {c.name} — {c.error ? 'холбогдсонгүй' : `${c.events} event`}
+              </span>
+            ))}
+            {data.camera.error && <span className="text-red-400">{data.camera.error}</span>}
+          </div>
+          {data.camera.unmatched_total > 0 && (
+            <div>
+              <span className="text-amber-300">
+                Камераар орсон ч СИСТЕМД БҮРТГЭЛГҮЙ {data.camera.unmatched_total} машин
+              </span>
+              <span className="text-slate-500 text-xs"> (сервер унтарсан/event алдсан үеийнх байж магадгүй):</span>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {data.camera.unmatched.map((u, i) => (
+                  <span key={i} className="font-mono text-xs bg-surface-muted px-1.5 py-0.5 rounded"
+                    title={`${u.camera} · ${fmtDate(u.at)}`}>
+                    {u.plate} <span className="text-slate-500">{fmtDate(u.at)}</span>
+                  </span>
+                ))}
+                {data.camera.unmatched_total > data.camera.unmatched.length && (
+                  <span className="text-xs text-slate-500">…+{data.camera.unmatched_total - data.camera.unmatched.length}</span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
