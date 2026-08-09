@@ -107,23 +107,27 @@ async def try_snap_records(rpc):
         st = await rpc._call("RecordFinder.startFind", {"condition": cond}, obj=obj)
         print(f"  startFind {json.dumps(cond)} → {json.dumps(st, ensure_ascii=False)[:160]}")
         total = 0
-        for i in range(3):
+        for i in range(4):
             df = await rpc._call("RecordFinder.doFind", {"count": 16}, obj=obj)
             params = df.get("params") or {}
-            infos = params.get("infos") or []
+            # EUSO модуль хариуг e.found + e.records гэж уншдаг (infos БИШ)
+            recs = params.get("records") or params.get("infos") or []
             found = params.get("found")
-            total += len(infos)
-            print(f"  doFind[{i}] → found={found} infos={len(infos)}")
-            if infos:
-                for rec in infos[:3]:
+            if i == 0:
+                print(f"  doFind raw (эхний 1200 тэмдэгт): "
+                      f"{json.dumps(df, ensure_ascii=False)[:1200]}")
+            total += len(recs)
+            print(f"  doFind[{i}] → found={found} records={len(recs)}")
+            if recs:
+                for rec in recs[:4]:
                     ev = rec.get("Event")
                     t = rec.get("Time")
                     ts = datetime.utcfromtimestamp(t).strftime(FMT) if isinstance(t, int) else t
                     print(f"    UTC {ts}  Plate={rec.get('PlateNumber')!r}  "
                           f"Event={ev}({EVENT_NAMES.get(ev, '?')})  Source={rec.get('SnapSource')}")
-                print(f"  БИЧЛЭГ[0] бүтэн: {json.dumps(infos[0], ensure_ascii=False)[:800]}")
-                break
-            if not infos:
+                if i == 0:
+                    print(f"  БИЧЛЭГ[0] бүтэн: {json.dumps(recs[0], ensure_ascii=False)[:900]}")
+            if not recs or found in (0, None) or len(recs) < 16:
                 break
         print(f"  Нийт уншсан: {total}")
     finally:
@@ -132,6 +136,40 @@ async def try_snap_records(rpc):
             await rpc._call("RecordFinder.destroy", obj=obj)
         except Exception:
             pass
+
+
+async def try_storage_and_offline(rpc):
+    """SD/санах ой байгаа эсэх + камерт хуримтлагдсан илгээгдээгүй зургийн тоо."""
+    print("\n--- 1.5 storage + snapManager.getOfflineUploadInfo ---")
+    try:
+        inst = await rpc._call("storage.factory.instance")
+        obj = inst.get("result")
+        if obj:
+            info = await rpc._call("storage.getDeviceAllInfo", obj=obj)
+            print(f"  storage.getDeviceAllInfo → {json.dumps(info, ensure_ascii=False)[:700]}")
+            await rpc._call("storage.destroy", obj=obj)
+        else:
+            print(f"  storage instance бүтсэнгүй: {json.dumps(inst)[:140]}")
+    except Exception as e:
+        print(f"  storage АЛДАА: {type(e).__name__}: {str(e)[:80]}")
+    try:
+        inst = await rpc._call("snapManager.factory.instance")
+        obj = inst.get("result")
+        if obj:
+            for tt in (0, 1, "", "All"):
+                try:
+                    r = await rpc._call("snapManager.getOfflineUploadInfo",
+                                        {"TargetType": tt}, obj=obj)
+                    print(f"  getOfflineUploadInfo TargetType={tt!r} → "
+                          f"{json.dumps(r, ensure_ascii=False)[:300]}")
+                    if r.get("result"):
+                        break
+                except Exception as e:
+                    print(f"  TargetType={tt!r}: {type(e).__name__}: {str(e)[:60]}")
+        else:
+            print(f"  snapManager instance бүтсэнгүй: {json.dumps(inst)[:140]}")
+    except Exception as e:
+        print(f"  snapManager АЛДАА: {type(e).__name__}: {str(e)[:80]}")
 
 
 async def download_variants(rpc, client_plain, ip, file_path):
@@ -221,6 +259,7 @@ async def main(ip):
             return
         print(f"\nRPC2 login OK (session={rpc.session_id})")
         await try_snap_records(rpc)
+        await try_storage_and_offline(rpc)
         now_local = datetime.utcnow() + timedelta(hours=settings.camera_tz_offset_hours)
         start = now_local - timedelta(hours=24)
         print(f"\nmediaFileFind-ийн муж (камерын цаг): {start.strftime(FMT)} → {now_local.strftime(FMT)}")
