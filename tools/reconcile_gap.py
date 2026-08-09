@@ -34,6 +34,41 @@ AWAITING = {"AWAITING_PAYMENT"}
 LIVE = {"OPEN", "PAID"}
 
 
+def _cashflow_breakdown(db, wanted, sites, args):
+    """«Нийт орлого > Үүссэн» яагаад болохыг задалж харуулна.
+
+    Нийт орлого нь мөнгө ОРСОН цагаар (paid_at) тоологддог тул тухайн мужаас
+    ӨМНӨ орсон машины төлбөр, хуучин өрийн төлөлт ч энд ордог. Үүссэн нь
+    зөвхөн мужид ОРСОН машины дүн. Хоёр өөр зүйл — зөрүү нь алдаа биш."""
+    if not (args.date_from or args.until):
+        return
+    start = datetime.fromisoformat(args.date_from) if args.date_from else datetime(1970, 1, 1)
+    end = datetime.fromisoformat(args.until) if args.until else datetime(2999, 1, 1)
+
+    print("\n── «Нийт орлого» задаргаа (мужид орсон мөнгө хаанаас ирсэн бэ) ──")
+    for sid in sorted(wanted, key=lambda i: sites.get(i, "")):
+        q = (db.query(func.coalesce(func.sum(Payment.amount), 0))
+             .select_from(ParkingSession)
+             .join(Payment, Payment.session_id == ParkingSession.id)
+             .filter(ParkingSession.site_id == sid, Payment.status == "PAID",
+                     Payment.paid_at >= start, Payment.paid_at < end))
+        total = float(q.scalar() or 0)
+        if not total:
+            continue
+        inside = float(q.filter(ParkingSession.entry_time >= start,
+                                ParkingSession.entry_time < end).scalar() or 0)
+        before = total - inside
+        debt = float(db.query(func.coalesce(func.sum(Compensation.amount), 0))
+                     .filter(Compensation.site_id == sid, Compensation.status == "PAID",
+                             Compensation.paid_at >= start,
+                             Compensation.paid_at < end).scalar() or 0)
+        print(f"  {sites.get(sid, '?'):22} нийт {total:>10,.0f}₮ = "
+              f"мужид орсон машинаас {inside:>10,.0f}₮ + "
+              f"өмнөх хугацааны машинаас {before:>9,.0f}₮"
+              + (f" (үүнээс өр {debt:,.0f}₮)" if debt else ""))
+    print("  → «Нийт орлого» кассын мөнгөн урсгал тул «Үүссэн»-ээс их байж болно.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -122,6 +157,8 @@ def main():
                        else ("хэсэгчлэн төлөгдсөн" if own_paid > 0
                              else "төлөгдөөгүй, өр ч болоогүй"))
                 gaps.append((s, gap, own_paid, why))
+
+        _cashflow_breakdown(db, wanted, sites, args)
 
         if not gaps:
             print("\n✅ Зөрүү алга — Үүссэн = Хураасан + Хүлээгдэж буй + Өр болсон тэнцэж байна.")

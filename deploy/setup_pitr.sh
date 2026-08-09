@@ -64,7 +64,17 @@ ARCHIVE_DIR="/var/lib/parking/wal-archive"
 BASE_DIR="/var/lib/parking/basebackup"
 DAYS="${PITR_DAYS:-14}"
 STAMP=$(date +%Y%m%d-%H%M%S)
-sudo -u postgres pg_basebackup -D "$BASE_DIR/$STAMP" -Ft -z -Xs 2>/dev/null
+# Basebackup нь 7 ХОНОГТ нэг (энэ скрипт өдөр тутам ажилладаг — архивын
+# цэвэрлэгээ өдөр бүр хэрэгтэй ч basebackup долоо хоногт нэг л хангалттай)
+BASE_EVERY_DAYS="${PITR_BASE_EVERY_DAYS:-7}"
+NEWEST_BASE=$(ls -1dt "$BASE_DIR"/*/ 2>/dev/null | head -1)
+NEED_BASE=1
+if [ -n "$NEWEST_BASE" ] && [ -z "$(find "$NEWEST_BASE" -maxdepth 0 -mtime +"$BASE_EVERY_DAYS")" ]; then
+  NEED_BASE=0
+fi
+if [ "$NEED_BASE" = 1 ]; then
+  sudo -u postgres pg_basebackup -D "$BASE_DIR/$STAMP" -Ft -z -Xs 2>/dev/null
+fi
 # Хадгалах хугацаанаас хуучин basebackup-ууд (хамгийн сүүлийн 2-ыг ЯМАГТ үлдээнэ)
 ls -1dt "$BASE_DIR"/* 2>/dev/null | tail -n +3 | while read -r d; do
   [ "$(find "$d" -maxdepth 0 -mtime +"$DAYS")" ] && rm -rf "$d"
@@ -75,13 +85,28 @@ if [ -n "$OLDEST" ]; then
   LABEL=$(find "$ARCHIVE_DIR" -name "*.backup" -newermt "$(date -r "$OLDEST" '+%Y-%m-%d %H:%M:%S')" 2>/dev/null | sort | head -1)
   [ -n "$LABEL" ] && pg_archivecleanup "$ARCHIVE_DIR" "$(basename "${LABEL%%.*}")" 2>/dev/null || true
 fi
-# Аюулгүйн сүүл: хугацаа хэтэрсэн WAL-ыг ч цэвэрлэнэ (диск дүүрэхээс сэргийлнэ)
+# Аюулгүйн сүүл 1: хугацаа хэтэрсэн WAL-ыг ч цэвэрлэнэ
 find "$ARCHIVE_DIR" -type f -mtime +$((DAYS + 7)) -delete 2>/dev/null || true
+# Аюулгүйн сүүл 2 — ХЭМЖЭЭНИЙ ТАГ. Энэ систем өдөрт ~2.8GB WAL үүсгэдэг тул
+# зөвхөн хугацааны дүрэм хүрэлцдэггүй (2026-08-09: архив 53.7GB болж диск 79%
+# дүүрсэн). Тагаас хэтэрвэл ХАМГИЙН ХУУЧНААС нь устгана; сүүлийн basebackup-аас
+# хойшхи WAL-д хэзээ ч хүрэхгүй (сэргээх чадвар хадгалагдана).
+MAX_GB="${PITR_MAX_GB:-10}"
+GUARD=$(ls -1 "$ARCHIVE_DIR"/*.backup 2>/dev/null | sort | tail -1 | xargs -r basename | cut -d. -f1)
+while [ "$(du -s -B1 "$ARCHIVE_DIR" | cut -f1)" -gt "$((MAX_GB * 1024 * 1024 * 1024))" ]; do
+  OLDEST_WAL=$(ls -1 "$ARCHIVE_DIR" 2>/dev/null | grep -E '^[0-9A-F]{24}$' | sort | head -1)
+  [ -z "$OLDEST_WAL" ] && break
+  # сүүлийн basebackup-аас хойшхийг хамгаална
+  [ -n "$GUARD" ] && [ ! "$OLDEST_WAL" \< "$GUARD" ] && break
+  rm -f "$ARCHIVE_DIR/$OLDEST_WAL" || break
+done
 logger -t parking-pitr "basebackup $STAMP · архив $(du -sh "$ARCHIVE_DIR" | cut -f1)"
 MAINT
 chmod 755 /usr/local/bin/parking-pitr-maint
-printf '30 4 * * 0 root PITR_DAYS=%s /usr/local/bin/parking-pitr-maint >/dev/null 2>&1\n' "$PITR_DAYS" \
-  > /etc/cron.d/parking-pitr
+# ӨДӨР ТУТАМ ажиллана (өмнө нь 7 хоногт нэг байсан тул архив таг тавихаас
+# өмнө 53GB болтол хуримтлагдсан). basebackup нь дотроо 7 хоногийн шалгалттай.
+printf '30 4 * * * root PITR_DAYS=%s PITR_MAX_GB=%s /usr/local/bin/parking-pitr-maint >/dev/null 2>&1\n' \
+  "$PITR_DAYS" "${PITR_MAX_GB:-10}" > /etc/cron.d/parking-pitr
 chmod 644 /etc/cron.d/parking-pitr
 
 echo
