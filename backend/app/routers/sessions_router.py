@@ -260,9 +260,14 @@ def audit_sessions(site_id: str | None = None, camera: bool = False,
     # тулгана
     if cam_info and cam_events:
         wstart = now - timedelta(hours=cam_info["window_hours"] or 48)
+        # ИДЭВХТЭЙ бүртгэлтэй машиныг ямар ч тохиолдолд «бүртгэлгүй» гэж
+        # тэмдэглэхгүй — мужаас өмнө орсон ч зогсоолд байгаа тул алдагдаагүй
         known = {p for (p,) in db.query(ParkingSession.plate_number)
                  .filter(ParkingSession.site_id == site_id,
                          ParkingSession.entry_time >= wstart).all()}
+        known |= {p for (p,) in db.query(ParkingSession.plate_number)
+                  .filter(ParkingSession.site_id == site_id,
+                          ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).all()}
         # Гарах камерын уншилтууд дугаараар — орсон машин ГАРСАН эсэхийг тулгана
         exits_by_plate: dict[str, list] = {}
         for ev in cam_events:
@@ -462,56 +467,74 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
     enforce_site(user, site_id)
     create_debt = bool(body.get("create_debt", True))
 
-    created, skipped, debt_total = [], 0, 0.0
+    created, debt_total = [], 0.0
+    skips: dict[str, int] = {}
+
+    def _skip(why: str):
+        skips[why] = skips.get(why, 0) + 1
+
     for car in cars[:200]:
         plate = normalize_plate(str(car.get("plate") or ""))
         at = car.get("at")
         if not plate or not at:
-            skipped += 1
+            _skip("дугаар/цаг дутуу")
             continue
         try:
             entry_time = datetime.fromisoformat(str(at).replace("Z", ""))
         except ValueError:
-            skipped += 1
+            _skip("цагийн формат буруу")
             continue
-        # Тухайн цагийн орчимд аль хэдийн бүртгэл байвал давхардуулахгүй
-        dup = (db.query(ParkingSession)
-               .filter(ParkingSession.site_id == site_id,
-                       ParkingSession.plate_number == plate,
-                       ParkingSession.entry_time >= entry_time - timedelta(hours=1),
-                       ParkingSession.entry_time <= entry_time + timedelta(hours=1))
-               .first())
-        if dup:
-            skipped += 1
+        # (1) Зогсоолд ИДЭВХТЭЙ бүртгэлтэй бол шинийг үүсгэхгүй — uq_active_session
+        #     индекс зөрчигдөж бүхэл багц уначихдаг байсан («Алдаа гарлаа»).
+        if (db.query(ParkingSession.id)
+                .filter(ParkingSession.site_id == site_id,
+                        ParkingSession.plate_number == plate,
+                        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+                .first()):
+            _skip("зогсоолд идэвхтэй бүртгэлтэй")
+            continue
+        # (2) Тухайн цагийн орчимд аль хэдийн бүртгэл байвал давхардуулахгүй
+        if (db.query(ParkingSession.id)
+                .filter(ParkingSession.site_id == site_id,
+                        ParkingSession.plate_number == plate,
+                        ParkingSession.entry_time >= entry_time - timedelta(hours=1),
+                        ParkingSession.entry_time <= entry_time + timedelta(hours=1))
+                .first()):
+            _skip("тэр цагт бүртгэл бий")
             continue
 
-        s = ParkingSession(site_id=site_id, plate_number=plate, entry_time=entry_time,
-                           status="OPEN",
-                           note=f"камерын логоос нөхөж бүртгэв ({user.username})")
-        exit_raw = car.get("exit_at")
-        if exit_raw:
-            try:
-                s.exit_time = datetime.fromisoformat(str(exit_raw).replace("Z", ""))
-                s.status = "AWAITING_PAYMENT"   # гарсан нь мэдэгдэж байгаа
-            except ValueError:
-                pass
-        db.add(s)
-        db.flush()
-        due = 0.0
-        if s.status == "AWAITING_PAYMENT":
-            # exit_time дээр төлбөрийг царцааж хаана; төлөгдөөгүй тул өр үүснэ
-            due = close_session_forced(db, s, "camera_backfill", user.username,
-                                       create_comp=create_debt)
-            debt_total += due
-        db.add(AuditLog(username=user.username, action="CAMERA_BACKFILL", entity="session",
-                        entity_id=s.id,
-                        detail={"plate": plate, "entry": entry_time.isoformat(),
-                                "exit": exit_raw, "debt": due}))
-        created.append({"plate": plate, "session_id": s.id, "debt": due,
-                        "status": s.status})
-    db.commit()
-    return {"created": len(created), "skipped": skipped,
-            "debt_total": debt_total, "rows": created}
+        # Машин бүрийг ТУСДАА хамгаална — нэг нь уначихвал бусад нь бүртгэгдэнэ
+        try:
+            s = ParkingSession(site_id=site_id, plate_number=plate, entry_time=entry_time,
+                               status="OPEN",
+                               note=f"камерын логоос нөхөж бүртгэв ({user.username})")
+            exit_raw = car.get("exit_at")
+            if exit_raw:
+                try:
+                    s.exit_time = datetime.fromisoformat(str(exit_raw).replace("Z", ""))
+                    s.status = "AWAITING_PAYMENT"   # гарсан нь мэдэгдэж байгаа
+                except ValueError:
+                    pass
+            db.add(s)
+            db.flush()
+            due = 0.0
+            if s.status == "AWAITING_PAYMENT":
+                # exit_time дээр төлбөрийг царцааж хаана; төлөгдөөгүй тул өр үүснэ
+                due = close_session_forced(db, s, "camera_backfill", user.username,
+                                           create_comp=create_debt)
+                debt_total += due
+            db.add(AuditLog(username=user.username, action="CAMERA_BACKFILL",
+                            entity="session", entity_id=s.id,
+                            detail={"plate": plate, "entry": entry_time.isoformat(),
+                                    "exit": exit_raw, "debt": due}))
+            db.commit()
+            created.append({"plate": plate, "session_id": s.id, "debt": due,
+                            "status": s.status})
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            _skip(f"алдаа: {type(e).__name__}")
+    return {"created": len(created), "skipped": sum(skips.values()),
+            "skip_reasons": skips, "debt_total": debt_total, "rows": created}
 
 
 @router.post("/bulk-remove")

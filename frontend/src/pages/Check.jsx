@@ -141,8 +141,10 @@ export default function Check() {
           cars: backfill.rows.map((u) => ({ plate: u.plate, at: u.at, exit_at: u.exit_at })),
         },
       })
+      const why = Object.entries(r.skip_reasons || {})
+        .map(([k, v]) => `${v} ${k}`).join(', ')
       toast(`${r.created} машин бүртгэгдлээ${r.debt_total ? `, өр ${fmt(r.debt_total)}₮` : ''}`
-        + `${r.skipped ? ` (${r.skipped} давхардсан/алгассан)` : ''}`)
+        + `${r.skipped ? ` · алгассан: ${why}` : ''}`)
       setBackfill(null); load()
     } catch (err) { toast(err.message, 'error') }
   }
@@ -163,6 +165,9 @@ export default function Check() {
     return true
   })
   const unpaidTotal = rows.reduce((sum, s) => sum + (s.fee?.total_fee ?? Number(s.total_fee) ?? 0), 0)
+  // Буруу уншсан дугаар БӨГӨӨД камерын логоос ижил төстэй дугаар олдоогүй —
+  // ийм бүртгэл жинхэнэ машинтай хэзээ ч тохирохгүй тул өргүйгээр цэвэрлэнэ
+  const junkRows = rows.filter((r) => r.audit?.invalid_plate && !r.audit?.ocr_similar)
 
   return (
     <div className="space-y-5">
@@ -270,6 +275,29 @@ export default function Check() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Буруу уншсан (junk) дугаар — ижил төстэй дугаар ч олдоогүй бол энэ нь
+          машин биш, камерын хог уншилт. Өр үүсгэх нь худал өр болох тул
+          ӨРГҮЙГЭЭР нэг товчоор цэвэрлэнэ. */}
+      {audit && isAdmin && junkRows.length > 0 && (
+        <div className="card py-3 flex flex-wrap items-center gap-3 border-red-500/30">
+          <span className="text-sm">
+            <b className="font-mono text-red-300">{junkRows.length}</b> бүртгэл буруу
+            уншсан дугаартай <span className="text-slate-500">(ижил төстэй дугаар ч олдоогүй)</span>
+          </span>
+          <button className="btn-secondary text-red-400 py-1 text-xs"
+            onClick={() => setRemoving({
+              ids: junkRows.map((r) => r.id), createComp: false,
+              reason: 'Аудит: буруу уншсан дугаар (өргүй)',
+            })}>
+            <Trash2 size={14} /> Өргүйгээр цэвэрлэх
+          </button>
+          <span className="text-[11px] text-slate-500">
+            Тооцоолсон {fmt(junkRows.reduce((a, r) => a + (r.fee?.total_fee ?? Number(r.total_fee) ?? 0), 0))}₮
+            нь хиймэл — өр болгохгүй.
+          </span>
         </div>
       )}
 
