@@ -47,6 +47,21 @@ def _payload_picture(raw: dict) -> bytes | None:
     return None
 
 
+# Камер тус бүрийн snapshot.cgi төлөв: аль URL хувилбар ажилладаг, дараалсан
+# бүтэлгүйтлийн тоо, хэдий хүртэл түр зогсоосон. Камерын лог/сешнийг дэмий
+# эзлэхгүйн тулд «ажиллахгүй бол оролдохоо болих» зарчмыг хэрэгжүүлнэ.
+_CGI_STATE: dict[str, dict] = {}
+
+
+def cgi_state() -> dict:
+    """Оношилгоонд: камер бүрийн snapshot.cgi төлөв."""
+    import time as _t
+    now = _t.monotonic()
+    return {ip: {"url": v["url"], "fails": v["fails"],
+                 "quiet_sec": max(0, round(v["quiet_until"] - now))}
+            for ip, v in _CGI_STATE.items()}
+
+
 async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> bytes | None:
     """Камерын snapshot.cgi-ээс одоогийн кадрыг татна (digest auth).
 
@@ -55,14 +70,25 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
     (ANPR боловсруулалт + encoder ачаалалтай) үед кадр рендерлэх нь удааширдаг
     тул уншилтын timeout-ыг ӨГӨӨМӨР (25с) авна — өмнө нь 6с байсан тул бүх
     оролдлого timeout болж, орох/гарах зураг огт хадгалагддаггүй байв."""
+    import time as _time
+    st = _CGI_STATE.setdefault(ip, {"url": None, "fails": 0, "quiet_until": 0.0})
+    # Тухайн камер дээр snapshot.cgi дараалан бүтэлгүйтсэн бол ТҮР ЗОГСООНО.
+    # Энэ firmware-үүдийн зарим нь snapshot.cgi-д ямагт «Bad Request» өгдөг —
+    # тэдэн дээр event бүрд 9 хүсэлт (3 оролдлого × 3 URL) илгээх нь камерын
+    # логийг Login бичлэгээр дүүргэж, event subscription-ыг ч холтолдог.
+    if _time.monotonic() < st["quiet_until"]:
+        return None
+
     auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
     # холболт хурдан, харин зураг татах уншилт удаан байж болно
     timeout = httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)
-    # Firmware/тохиргооноос хамаарч channel параметр шаардаж болзошгүй — хувилбаруудыг
-    # дараалан оролдоно (channel-гүй, channel=1, channel=0). Аль нэг нь JPEG өгвөл хангалттай.
-    urls = [f"http://{ip}/cgi-bin/snapshot.cgi",
-            f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
-            f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
+    # Firmware/тохиргооноос хамаарч channel параметр шаардаж болзошгүй. АЖИЛЛАСАН
+    # хувилбарыг цээжилж, дараа нь ЗӨВХӨН түүнийг ашиглана (камерт очих хүсэлт
+    # 3 дахин цөөрнө).
+    all_urls = [f"http://{ip}/cgi-bin/snapshot.cgi",
+                f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
+                f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
+    urls = [st["url"]] if st["url"] else all_urls
     last_err = ""
     # Зургийн таталт нь digest auth-тай — камерын хувьд ЭНЭ Ч БАС нэвтрэлт.
     # Гарах үед зураг татах ба дэлгэц бичих нь ЯГ НЭГ агшинд тохиолддог тул
@@ -100,6 +126,10 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                 if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
                     if attempt > 1 or url != urls[0]:
                         log.info(f"{ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
+                    if st["url"] != url:
+                        log.info("%s: snapshot.cgi ажилладаг хувилбар цээжлэв — %s",
+                                 ip, url.split("cgi-bin/")[-1])
+                    st["url"], st["fails"] = url, 0
                     return r.content
                 last_err = f"{url.split('cgi-bin/')[-1]} → HTTP {r.status_code} ({len(r.content)}b)"
             except Exception as e:
@@ -110,7 +140,19 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
         note_rpc_done(ip)   # дэлгэц энэ агшнаас хойш завсар барина
         if _held:
             _lock.release()
-    log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
+    # Бүтэлгүйтэл — цээжилсэн хувилбарыг мартаж, дараагийн удаад бүгдийг үзнэ
+    st["url"] = None
+    st["fails"] += 1
+    if st["fails"] >= settings.snapshot_cgi_max_fails:
+        st["quiet_until"] = _time.monotonic() + settings.snapshot_cgi_quiet_minutes * 60
+        st["fails"] = 0
+        log.warning("%s: snapshot.cgi %d удаа дараалан бүтэлгүйтэв — %d минут "
+                    "ЗОГСООЛОО (камерын лог/сешнийг дэмий эзлэхгүйн тулд). "
+                    "Зураг нь event стрим/WS-ээр л ирнэ.",
+                    ip, settings.snapshot_cgi_max_fails,
+                    settings.snapshot_cgi_quiet_minutes)
+    else:
+        log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
     return None
 
 

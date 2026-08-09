@@ -243,6 +243,11 @@ class Settings(BaseSettings):
     # үүсгэдэг бөгөөд АМЬД кадр авдаг тул машин өнгөрсний дараа зураг гардаг.
     # Стримийн зураг тогтвортой ажилласны дараа false болгож бүрмөсөн унтраана.
     snapshot_cgi_fallback: bool = True
+    # snapshot.cgi ажиллахгүй камер дээр event бүрд 9 хүсэлт илгээх нь камерын
+    # логийг Login бичлэгээр дүүргэж, event subscription-д саад болдог. Дараалан
+    # N удаа бүтэлгүйтвэл тухайн камер дээр M минут ЗОГСООНО.
+    snapshot_cgi_max_fails: int = 5
+    snapshot_cgi_quiet_minutes: int = 30
 
     # ── И-мэйл (SMTP) — байгууллагын сарын нэхэмжлэл илгээхэд ──
     # Жишээ (Gmail): HOST=smtp.gmail.com PORT=587 TLS=true USER=таны@gmail.com
