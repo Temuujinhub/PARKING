@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Үндэслэлгүй өрийг (нөхөн төлбөр) буцааж цэвэрлэх — 2 нөхцөлөөр.
+"""Үндэслэлгүй өрийг (нөхөн төлбөр) буцааж цэвэрлэх — 3 нөхцөлөөр.
 
 Нөхөж бүртгэх/аудитын цэвэрлэгээний үед БҮХ гацсан машиныг өр болгосноос
 үндэслэлгүй өр асар их үүссэн (2026-08-10: нийт 25 сая₮). Эдгээрээс:
@@ -7,7 +7,10 @@
   1. БУРУУ ТАНИГДСАН дугаар (junk) — «726ДДЦ», «К319УБ», «5557КК» гэх мэт
      формат буруу уншилт. Ийм машин байхгүй тул өр нэхэх хүн ч байхгүй.
 
-  2. ЗӨВХӨН ОРОХ талд уншигдсан — гарах камерт огт уншигдаагүй тул машин
+  2. ЦАГИЙН ЗААГ (--entry-before) — нэвтрүүлэлт/тохируулгын үеийн бүх өрийг
+     нэг мөсөн болиулах. Тэр цагаас ӨМНӨ орсон машины өр бүхэлдээ цуцлагдана.
+
+  3. ЗӨВХӨН ОРОХ талд уншигдсан — гарах камерт огт уншигдаагүй тул машин
      ХЭЗЭЭ гарсныг мэдэхгүй. Төлбөр нь таамаг (ихэвчлэн өдрийн дээд хязгаар)
      тул өр болгох үндэслэлгүй.
 
@@ -19,12 +22,14 @@
     sudo ... clean_bad_debts.py --site "Кэй Эйч" --apply
     sudo ... clean_bad_debts.py --junk-only --apply      # зөвхөн буруу дугаар
     sudo ... clean_bad_debts.py --entry-only-only --apply # зөвхөн орох талынх
+    # бүх зогсоол, өнөөдөр 09:00-аас өмнөх БҮГД + junk + зөвхөн орох:
+    sudo ... clean_bad_debts.py --entry-before "2026-08-10 09:00" --apply
 """
 import argparse
 import os
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 os.chdir("/root/PARKING/backend")
 sys.path.insert(0, "/root/PARKING/backend")
@@ -45,10 +50,25 @@ def main():
     ap.add_argument("--site", action="append", default=[], help="Зогсоолын нэрийн хэсэг")
     ap.add_argument("--junk-only", action="store_true", help="Зөвхөн буруу дугаар")
     ap.add_argument("--entry-only-only", action="store_true", help="Зөвхөн орох талынх")
+    ap.add_argument("--entry-before", default=None,
+                    help="Энэ ЛОКАЛ цагаас өмнө орсон бүх машины өрийг цуцлах "
+                         "(ж: «2026-08-10 09:00» эсвэл «2026-08-10»). Нэвтрүүлэлтийн "
+                         "үеийн бүх өрийг нэг мөсөн болиулахад.")
     ap.add_argument("--apply", action="store_true", help="Бодитоор цуцлах")
     args = ap.parse_args()
     do_junk = not args.entry_only_only
     do_entry = not args.junk_only
+
+    # Локал цагийг UTC болгоно (DB нь UTC хадгалдаг)
+    before_utc = None
+    if args.entry_before:
+        from app.config import settings as _cfg
+        raw = args.entry_before.strip()
+        if len(raw) == 10:            # зөвхөн огноо → тухайн өдрийн 00:00
+            raw += " 00:00"
+        before_utc = (datetime.fromisoformat(raw.replace(" ", "T"))
+                      - timedelta(hours=_cfg.tz_offset_hours))
+        print(f"Цагийн зааг: {args.entry_before} (локал) = {before_utc:%Y-%m-%d %H:%M} UTC")
 
     db = SessionLocal()
     try:
@@ -80,6 +100,10 @@ def main():
         for c in comps:
             s = db.get(ParkingSession, c.session_id) if c.session_id else None
             reasons = []
+            # (1) Цагийн зааг — тэр үеэс өмнө ОРСОН машины өр бүхэлдээ
+            if before_utc is not None and s is not None and s.entry_time \
+                    and s.entry_time < before_utc:
+                reasons.append("заагаас өмнө орсон")
             if do_junk and not is_valid_plate(c.plate_number):
                 reasons.append("буруу дугаар")
             if do_entry and s is not None:
@@ -148,7 +172,8 @@ def main():
                         detail={"cancelled": len(picked), "amount": round(total, 2),
                                 "sessions_zeroed": zeroed,
                                 "sites": args.site or "бүгд",
-                                "junk": do_junk, "entry_only": do_entry}))
+                                "junk": do_junk, "entry_only": do_entry,
+                                "entry_before": args.entry_before}))
         db.commit()
         print(f"\n✅ {len(picked)} өр цуцлагдлаа ({total:,.0f}₮), "
               f"{zeroed} сешний дүн тэгширлээ.")
