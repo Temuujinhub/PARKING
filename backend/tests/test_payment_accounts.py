@@ -111,11 +111,25 @@ check("банкны данстай зогсоол жагсана", "ZZPA_BANK" i
 check("банкгүй зогсоол жагсахгүй", "ZZPA_PLAIN" not in banks)
 
 print("Эрхийн шалгалт:")
-# Endpoint нь Depends(require_role("SUPER_ADMIN"))-тэй — router-ийн бүртгэлээс баталгаажуулна
+# Endpoint нь SUPER_ADMIN + ADMIN dependency-тэй — router-ийн эх кодоос баталгаажуулна
 import inspect  # noqa: E402
 
 sig_src = inspect.getsource(payment_accounts)
-check("зөвхөн SUPER_ADMIN dependency-тэй", 'require_role("SUPER_ADMIN")' in sig_src)
+check("SUPER_ADMIN + ADMIN dependency-тэй", 'require_role("SUPER_ADMIN", "ADMIN")' in sig_src)
+
+print("Хамрах хүрээтэй ADMIN (зөвхөн түрээслэгчийн 1 зогсоол хариуцдаг):")
+scoped = User(username="pa_scope", password_hash="x", role="ADMIN", site_ids=[s_ten.id])
+out2 = payment_accounts(db=db, user=scoped)
+codes2 = {s["site_code"] for a in out2["accounts"] for s in a["sites"]} \
+    | {s["site_code"] for s in out2["global"]["sites"]}
+check("зөвхөн өөрийн зогсоол харагдана", codes2 == {"ZZPA_TEN"})
+scopes2 = {(a["scope"], a["name"]) for a in out2["accounts"]}
+check("өөрийн зогсоолын түрээслэгчийн данс харагдана", ("tenant", ten.name) in scopes2)
+check("хамааралгүй түрээслэгч/зогсоолын данс харагдахгүй",
+      ("tenant", ten_half.name) not in scopes2
+      and not any(a["scope"] == "site" for a in out2["accounts"]))
+check("банкны данс мөн хүрээгээр шүүгдэнэ",
+      all(b["site_code"] != "ZZPA_BANK" for b in out2["bank_accounts"]))
 
 # Цэвэрлэгээ
 db.query(ParkingSite).filter(ParkingSite.site_code.in_(CODES)).delete(synchronize_session=False)

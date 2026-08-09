@@ -2,10 +2,13 @@
 // (QPay/банк/e-Barimt), гадаад API (партнер түлхүүр + баримтжуулалт), EV цэнэглэгч.
 // Өмнө нь QPay данс 3 газар (зогсоолын модал, түрээслэгчийн модал, .env) тарсан
 // байсныг энд нэгтгэв — данс бүрийн ард «яг аль зогсоолууд энэ данс руу төлж
-// байгаа» нь шууд харагдана. Зөвхөн SUPER_ADMIN.
+// байгаа» нь жагсаалтаар шууд харагдана. SUPER_ADMIN бүгдийг, ADMIN өөрийн хамрах
+// хүрээний зогсоол/дансыг харна (backend шүүнэ); түрээслэгчийн данс засах нь
+// зөвхөн SUPER_ADMIN.
 import { CreditCard, KeyRound, Plug, Plus, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useAuth } from '../../auth'
 import { Field, Modal, PasswordInput, Table, useToast } from '../../components/ui'
 import QpayTestModal from './QpayTestModal'
 
@@ -48,28 +51,30 @@ const ScopePill = ({ scope }) => {
   return <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${cls}`}>{label}</span>
 }
 
-const SiteChips = ({ sites }) => sites?.length
+// Данс ашиглаж буй зогсоолууд — жагсаалт хэлбэрээр (код + нэр, идэвхгүй нь зурсан)
+const SiteList = ({ sites }) => sites?.length
   ? (
-    <span className="text-xs">
+    <ul className="text-xs space-y-0.5">
       {sites.map((s) => (
-        <span key={s.id} className={`inline-block mr-1 mb-0.5 px-1.5 py-0.5 rounded bg-surface-muted/60
-          ${s.is_active === false ? 'text-slate-500 line-through' : 'text-slate-300'}`}>
-          {s.site_code}
-        </span>
+        <li key={s.id} className={s.is_active === false ? 'text-slate-500 line-through' : 'text-slate-300'}>
+          <span className="font-mono text-slate-500 mr-1.5">{s.site_code}</span>
+          {s.name}
+        </li>
       ))}
-    </span>
+    </ul>
   )
   : <span className="text-xs text-slate-500">— аль ч зогсоол ашиглахгүй</span>
 
-function AccountModal({ state, tenants, sites, onClose, onDone }) {
+function AccountModal({ state, tenants, sites, isSuper, onClose, onDone }) {
   // state: {mode:'new'} | {mode:'edit', scope, id, ...талбарууд}
   const toast = useToast()
   const [f, setF] = useState({})
   useEffect(() => {
     if (!state) return
     if (state.mode === 'new') {
-      setF({ scope: 'tenant', target_id: '', qpay_username: '', qpay_password: '',
-             qpay_invoice_code: '', qpay_district_code: '' })
+      // ADMIN түрээслэгчийн данс үүсгэхгүй (backend ч 403 өгнө) — зогсоолын л данс
+      setF({ scope: isSuper ? 'tenant' : 'site', target_id: '', qpay_username: '',
+             qpay_password: '', qpay_invoice_code: '', qpay_district_code: '' })
     } else {
       setF({ scope: state.scope, target_id: state.id,
              qpay_username: state.merchant || '', qpay_password: '',
@@ -124,7 +129,9 @@ function AccountModal({ state, tenants, sites, onClose, onDone }) {
         {isNew && (
           <>
             <div className="flex gap-2">
-              {[['tenant', 'Түрээслэгчид (бүх зогсоолд нь)'], ['site', 'Нэг зогсоолд (ховор)']].map(([v, l]) => (
+              {(isSuper
+                ? [['tenant', 'Түрээслэгчид (бүх зогсоолд нь)'], ['site', 'Нэг зогсоолд (ховор)']]
+                : [['site', 'Нэг зогсоолд']]).map(([v, l]) => (
                 <label key={v} className={`flex-1 px-3 py-2 rounded-lg border text-sm cursor-pointer text-center transition-colors
                   ${f.scope === v ? 'border-accent bg-accent/10 text-accent' : 'border-surface-border text-slate-300'}`}>
                   <input type="radio" className="hidden" checked={f.scope === v}
@@ -234,6 +241,8 @@ function BankModal({ state, onClose, onDone }) {
 
 function PaymentAccountsPanel() {
   const toast = useToast()
+  const { user } = useAuth()
+  const isSuper = user?.role === 'SUPER_ADMIN'
   const [data, setData] = useState(null)
   const [tenants, setTenants] = useState([])
   const [sites, setSites] = useState([])
@@ -243,7 +252,7 @@ function PaymentAccountsPanel() {
   const load = () => api('/api/admin/payment-accounts').then(setData).catch((e) => toast(e.message, 'error'))
   useEffect(() => {
     load()
-    api('/api/admin/tenants').then(setTenants)
+    if (isSuper) api('/api/admin/tenants').then(setTenants)  // түрээслэгчийн жагсаалт супер л авна
     api('/api/admin/sites').then(setSites)
   }, [])
   if (!data) return <div className="card text-sm text-slate-500 py-6 text-center">Ачаалж байна…</div>
@@ -282,7 +291,7 @@ function PaymentAccountsPanel() {
           <td className="td font-mono text-xs">{g.invoice_code}
             {g.warning && <span className="ml-1 text-red-400 cursor-help" title={g.warning}>⚠</span>}
           </td>
-          <td className="td"><SiteChips sites={g.sites} /></td>
+          <td className="td"><SiteList sites={g.sites} /></td>
           <td className="td text-right whitespace-nowrap">
             <button className="btn-secondary py-1 text-xs"
               onClick={() => test({ name: 'Үндсэн данс', sites: g.sites })}>Турших</button>
@@ -304,10 +313,13 @@ function PaymentAccountsPanel() {
             <td className="td font-mono text-xs">{a.invoice_code || '—'}
               {a.warning && <span className="ml-1 text-red-400 cursor-help" title={a.warning}>⚠</span>}
             </td>
-            <td className="td"><SiteChips sites={a.sites} /></td>
+            <td className="td"><SiteList sites={a.sites} /></td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs mr-1" onClick={() => test(a)}>Турших</button>
-              <button className="btn-secondary py-1 text-xs" onClick={() => setAccModal({ mode: 'edit', ...a })}>Засах</button>
+              {/* Түрээслэгчийн данс засах нь мөнгөний тохиргоо — зөвхөн Супер админ */}
+              {(isSuper || a.scope === 'site') && (
+                <button className="btn-secondary py-1 text-xs" onClick={() => setAccModal({ mode: 'edit', ...a })}>Засах</button>
+              )}
             </td>
           </tr>
         ))}
@@ -370,7 +382,7 @@ function PaymentAccountsPanel() {
       {bankModal && !bankModal._pick && (
         <BankModal state={bankModal} onClose={() => setBankModal(null)} onDone={load} />
       )}
-      <AccountModal state={accModal} tenants={tenants} sites={sites}
+      <AccountModal state={accModal} tenants={tenants} sites={sites} isSuper={isSuper}
         onClose={() => setAccModal(null)} onDone={load} />
       <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
     </div>

@@ -10,9 +10,12 @@ import TenantsSection from './settings/TenantsSection'
 export default function Settings() {
   const [tab, setTab] = useState('sites')
   const { user } = useAuth()
+  const canIntegrations = ['SUPER_ADMIN', 'ADMIN'].includes(user?.role)
   const tabs = [['sites', 'Зогсоол'], ['devices', 'Төхөөрөмж'], ['screen', 'LED дэлгэц'],
-    // Түрээслэгч + Холболт (данс/API/цэнэглэгч) зөвхөн SUPER_ADMIN-д
-    ...(user?.role === 'SUPER_ADMIN' ? [['tenants', 'Түрээслэгч'], ['integrations', 'Холболт']] : [])]
+    // Түрээслэгч зөвхөн SUPER_ADMIN-д; Холболт (данс/API/цэнэглэгч) ADMIN-д мөн
+    // харагдана (өөрийн хамрах хүрээгээр — backend шүүнэ)
+    ...(user?.role === 'SUPER_ADMIN' ? [['tenants', 'Түрээслэгч']] : []),
+    ...(canIntegrations ? [['integrations', 'Холболт']] : [])]
   return (
     <div className="space-y-5">
       <h1 className="text-2xl font-bold">Тохиргоо</h1>
@@ -26,7 +29,7 @@ export default function Settings() {
         ))}
       </div>
       {tab === 'sites' && <SitesSection onGotoIntegrations={
-        user?.role === 'SUPER_ADMIN' ? () => setTab('integrations') : null} />}
+        canIntegrations ? () => setTab('integrations') : null} />}
       {tab === 'devices' && <DevicesSection />}
       {tab === 'screen' && <ScreenSection />}
       {tab === 'tenants' && <TenantsSection onGotoIntegrations={() => setTab('integrations')} />}

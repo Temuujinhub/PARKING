@@ -605,12 +605,16 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
 # ─────────── Холболт: төлбөрийн дансдын нэгдсэн жагсаалт ───────────
 @router.get("/payment-accounts")
 def payment_accounts(db: Session = Depends(get_db),
-                     user: User = Depends(require_role("SUPER_ADMIN"))):
+                     user: User = Depends(require_role("SUPER_ADMIN", "ADMIN"))):
     """Тохиргоо → Холболт → Төлбөрийн данс: бүх түвшний (глобал .env / түрээслэгч /
     зогсоол) QPay дансыг НЭГ дор, данс бүрд «яг аль зогсоолууд энэ данс руу төлж
     байгаа»-г тооцоолж буцаана. Данс шийдэх дүрэм нь qpay.account_for-той ИЖИЛ:
     нэвтрэх хос (нэр+нууц үг) нэг шатлалаас бүтнээрээ ирнэ — зогсоол → түрээслэгч
-    → глобал. Нууц утга буцаахгүй (зөвхөн *_set)."""
+    → глобал. Нууц утга буцаахгүй (зөвхөн *_set).
+
+    ADMIN мөн харна, гэхдээ хамрах хүрээгээрээ: «Хариуцах зогсоолууд» эсвэл
+    түрээслэгчээр хязгаарлагдсан админ зөвхөн өөрийн зогсоолууд болон тэдгээрийн
+    түрээслэгчдийн дансыг харна (өөр түрээслэгчийн merchant задрахгүй)."""
     def _own_pair(obj) -> bool:
         return bool((getattr(obj, "qpay_username", None) or "").strip()
                     and (getattr(obj, "qpay_password", None) or "").strip())
@@ -621,15 +625,29 @@ def payment_accounts(db: Session = Depends(get_db),
                     "e-Barimt үүсэхгүй эрсдэлтэй")
         return None
 
-    sites = db.query(ParkingSite).order_by(ParkingSite.created_at).all()
-    tenants = {t.id: t for t in db.query(Tenant).all()}
+    allowed = operator_sites(user)   # None = бүх зогсоол
+    sites_q = db.query(ParkingSite).order_by(ParkingSite.created_at)
+    if allowed:
+        sites_q = sites_q.filter(ParkingSite.id.in_(allowed))
+    sites = sites_q.all()
+    tenants_all = {t.id: t for t in db.query(Tenant).all()}
+    # Хязгаартай хэрэглэгчид: зөвхөн харагдах зогсоолуудын (болон өөрийн)
+    # түрээслэгчдийн дансыг жагсаана — данс ШИЙДЭХДЭЭ бүх түрээслэгчийг ашиглана
+    # (зогсоолын жинхэнэ данс нь харагдацаас хамаарахгүй)
+    if allowed:
+        vis_tids = {s.tenant_id for s in sites if s.tenant_id}
+        if getattr(user, "tenant_id", None):
+            vis_tids.add(user.tenant_id)
+        tenants = {k: v for k, v in tenants_all.items() if k in vis_tids}
+    else:
+        tenants = tenants_all
 
     # Зогсоол бүрийн данс аль шатлалаас шийдэгдэж буйг тооцно
     resolved: dict[str, list] = {"global": []}   # account key → [site, ...]
     for s in sites:
         if _own_pair(s):
             resolved.setdefault(f"site:{s.id}", []).append(s)
-        elif s.tenant_id and s.tenant_id in tenants and _own_pair(tenants[s.tenant_id]):
+        elif s.tenant_id and s.tenant_id in tenants_all and _own_pair(tenants_all[s.tenant_id]):
             resolved.setdefault(f"tenant:{s.tenant_id}", []).append(s)
         else:
             resolved["global"].append(s)
