@@ -211,6 +211,10 @@ async def start_vat_auto_send():
     from .services.auto_close import supervisor as auto_close_supervisor
     _bg_task(auto_close_supervisor(), "auto-close")
 
+    # Гарах хаалт ОНГОРХОЙ гацсаныг өөрөө засах (site.barrier_close_sweep_min; 0 = унтраалттай)
+    from .services.barrier_sweep import supervisor as barrier_sweep_supervisor
+    _bg_task(barrier_sweep_supervisor(), "barrier-sweep")
+
     # Сар бүрийн 1-нд өмнөх сарын байгууллагын нэхэмжлэлийг авто үүсгэнэ
     from .services.invoicing import supervisor as invoicing_supervisor
     _bg_task(invoicing_supervisor(), "invoicing")

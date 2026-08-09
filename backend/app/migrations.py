@@ -225,6 +225,7 @@ MIGRATIONS = [
     # биш, доторх камерын БОДИТ орох/гарах уншилт дээр ажиллана.
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS parent_site_id UUID REFERENCES parking_sites(id)",
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS transit_max_hours INTEGER",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS barrier_close_sweep_min INTEGER",
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS no_charge BOOLEAN NOT NULL DEFAULT false",
     "CREATE INDEX IF NOT EXISTS ix_sites_parent ON parking_sites (parent_site_id)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paused_minutes INTEGER NOT NULL DEFAULT 0",

@@ -32,6 +32,7 @@ class SiteCreate(_In):
     # Nested (дамжин) зогсоол — энэ зогсоол аль зогсоолын ДОТОР байна
     parent_site_id: str | None = None
     transit_max_hours: int | None = None
+    barrier_close_sweep_min: int | None = None
     no_charge: bool | None = None
     qr_url: str | None = None
     qpay_username: str | None = None

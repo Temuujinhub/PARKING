@@ -401,7 +401,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
         _assert_parent_ok(db, body["parent_site_id"], self_id=site_id)
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
               "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active",
-              "parent_site_id", "transit_max_hours", "no_charge", "qr_url",
+              "parent_site_id", "transit_max_hours", "barrier_close_sweep_min",
+              "no_charge", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
               "qpay_branch_code", "qpay_district_code",
               "bank_name", "bank_account", "bank_account_name"):

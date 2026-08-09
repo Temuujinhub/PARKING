@@ -99,6 +99,9 @@ class ParkingSite(Base):
     # алдагдвал (дугаар буруу уншигдах) тоолуур мөнхөд зогсож машин 0₮-өөр
     # гарахаас сэргийлнэ. NULL → глобал default (settings.transit_max_hours).
     transit_max_hours = Column(Integer, nullable=True)
+    # Гарах хаалт ОНГОРХОЙ гацсан тохиолдлыг өөрөө засах: N минут тутам «хаах»
+    # команд илгээнэ (машины хөдөлгөөнгүй тайван үед л). NULL/0 = унтраалттай.
+    barrier_close_sweep_min = Column(Integer, nullable=True)
     # Энэ зогсоол өөрөө төлбөр АВАХГҮЙ (цаг тооцохгүй). Ажилчдын/дотоод зогсоолд.
     no_charge = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # Талбайд ХЭВЛЭГДСЭН самбар дээрх QR линк. Бөглөгдсөн бол QR зураг үүгээр

@@ -55,6 +55,9 @@ export default function SitesSection() {
           ? null : +editing.auto_close_hours,
         entry_only_free_hours: editing.entry_only_free_hours === '' || editing.entry_only_free_hours == null
           ? null : +editing.entry_only_free_hours,
+        // '' = глобал default (унтраалттай), 0 = унтраах, N = N минут тутам хаах
+        barrier_close_sweep_min: editing.barrier_close_sweep_min === '' || editing.barrier_close_sweep_min == null
+          ? null : +editing.barrier_close_sweep_min,
       }
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()

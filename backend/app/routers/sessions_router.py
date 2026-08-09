@@ -9,7 +9,7 @@ from ..auth import (enforce_site, get_current_user, operator_site, operator_site
                     require, require_role, scoped_site)
 from ..database import get_db
 from ..services.device_auth import camera_credentials
-from ..models import AuditLog, Compensation, Device, LprEvent, ParkingSession, User
+from ..models import (AuditLog, Compensation, Device, LprEvent, ParkingSession, Payment, User)
 from ..serializers import to_dict
 from ..session_logic import (close_session_forced, get_open_session, normalize_plate,
                              session_fee_info)
@@ -42,6 +42,65 @@ def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
     return dicts
 
 
+# Session-ийг ХААСАН үйлдлүүд — Түүх дээр «хэн/юугаар хаасан» гэдгийг гаргана.
+# Гараар хаасныг операторын нэрээр, автоматыг «систем» гэж ялгаж харуулна.
+_CLOSE_ACTIONS = ("ADMIN_REMOVE", "MANUAL_EXIT", "AUTO_CLOSE", "AUTO_FREE_CLOSE",
+                  "AUTO_JUNK_CLOSE")
+_CLOSE_LABEL = {
+    "ADMIN_REMOVE": "Зогсоолоос хассан",
+    "MANUAL_EXIT": "Гараар гаргасан",
+    "AUTO_CLOSE": "Авто: хугацаа хэтэрсэн",
+    "AUTO_FREE_CLOSE": "Авто: үнэгүй хаасан",
+    "AUTO_JUNK_CLOSE": "Авто: буруу дугаар",
+}
+
+
+def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
+    """Түүхэнд ХЭРХЭН хаагдсаныг хавсаргана — «Гарсан» төлөв хэт ерөнхий байсныг задлана.
+
+      • `payments` — ямар хэрэгслээр төлөгдсөн (QPay QR / карт / бэлэн / данс),
+        кассаар төлсөн бол хүлээж авсан операторын нэртэй.
+      • `closed_by` — гараар/автоматаар хаасан бол хэн, ямар үйлдлээр.
+
+    Бүх мэдээллийг ХОЁР багц query-ээр авна (мөр бүрд query хийхгүй) — Түүх нэг
+    хуудсанд 50-500 мөр харуулдаг тул N+1 болбол хуудас нээгдэхээ болино.
+    """
+    ids = [d["id"] for d in dicts if d.get("id")]
+    if not ids:
+        return dicts
+
+    pays: dict[str, list] = {}
+    rows = (db.query(Payment.session_id, Payment.provider, Payment.payment_method,
+                     Payment.source, Payment.amount, Payment.paid_at, User.username)
+            .outerjoin(User, User.id == Payment.cashier_id)
+            .filter(Payment.session_id.in_(ids), Payment.status == "PAID")
+            .order_by(Payment.paid_at).all())
+    for sid, provider, method, source, amount, paid_at, cashier in rows:
+        pays.setdefault(sid, []).append({
+            "provider": provider, "method": method, "source": source,
+            "amount": float(amount or 0),
+            "paid_at": paid_at.isoformat() if paid_at else None,
+            "cashier": cashier,
+        })
+
+    closed: dict[str, dict] = {}
+    # created_at өсөх дарааллаар — нэг session олон удаа хаагдсан бол СҮҮЛИЙНХ үлдэнэ
+    for eid, username, action, at in (
+            db.query(AuditLog.entity_id, AuditLog.username, AuditLog.action, AuditLog.created_at)
+            .filter(AuditLog.entity == "session", AuditLog.entity_id.in_(ids),
+                    AuditLog.action.in_(_CLOSE_ACTIONS))
+            .order_by(AuditLog.created_at).all()):
+        closed[eid] = {"by": username, "action": action,
+                       "label": _CLOSE_LABEL.get(action, action),
+                       "auto": username == "system",
+                       "at": at.isoformat() if at else None}
+
+    for d in dicts:
+        d["payments"] = pays.get(d["id"], [])
+        d["closed_by"] = closed.get(d["id"])
+    return dicts
+
+
 @router.get("")
 def list_sessions(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
@@ -65,8 +124,8 @@ def list_sessions(
         q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(date_to) + timedelta(days=1))
     total = q.count()
     rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
-    return {"total": total,
-            "rows": _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])}
+    out = _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])
+    return {"total": total, "rows": _attach_close_info(db, out)}
 
 
 @router.get("/check")

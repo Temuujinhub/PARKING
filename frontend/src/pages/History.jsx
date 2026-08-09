@@ -10,6 +10,43 @@ import { Badge, Table, useToast } from '../components/ui'
 // Хаагдсан бүртгэлийг буцаан зогсоолд оруулж болох төлвүүд (төлбөргүй хаагдсан)
 const REOPENABLE = new Set(['MANUAL_CLOSED', 'FREE', 'CLOSED'])
 
+// Төлбөрийн хэрэгслийн богино шошго — «Гарсан» гэдэг төлөв ЮУГААР төлөгдснийг
+// хэлдэггүй тул түүхэн дээр тусад нь харуулна (provider → payment_method).
+const PAY_LABEL = {
+  QPAY: 'QPay QR', POS: 'Карт (ПОС)', CASH: 'Бэлэн', TRANSFER: 'Дансаар',
+}
+
+function PaymentCell({ s }) {
+  const pays = s.payments || []
+  if (pays.length) {
+    return (
+      <div className="space-y-0.5">
+        {pays.map((p, i) => (
+          <div key={i} className="text-[11px] whitespace-nowrap">
+            <span className="text-emerald-400">{PAY_LABEL[p.provider] || p.provider}</span>
+            {p.cashier && <span className="text-slate-500"> · {p.cashier}</span>}
+            {pays.length > 1 && <span className="text-slate-500"> {fmt(p.amount)}₮</span>}
+          </div>
+        ))}
+      </div>
+    )
+  }
+  // Төлбөргүй хаагдсан — яагаад гэдгийг төлөв нь аль хэдийн хэлнэ (Үнэгүй/Гараар хаасан)
+  if (s.status === 'FREE') return <span className="text-cyan-400 text-[11px]">Үнэгүй</span>
+  return <span className="text-slate-600">-</span>
+}
+
+function ClosedByCell({ s }) {
+  const c = s.closed_by
+  if (!c) return <span className="text-slate-600">-</span>
+  return (
+    <span className={`text-[11px] whitespace-nowrap cursor-help ${c.auto ? 'text-slate-400' : 'text-amber-300'}`}
+      title={`${c.label}${c.auto ? '' : ` — ${c.by}`}${c.at ? `\n${fmtDate(c.at)}` : ''}`}>
+      {c.auto ? 'Систем' : c.by}
+    </span>
+  )
+}
+
 const STATUSES = [
   ['', 'Бүгд'], ['OPEN', 'Зогсож буй'], ['AWAITING_PAYMENT', 'Төлбөр хүлээж буй'],
   ['PAID', 'Төлсөн'], ['CLOSED', 'Гарсан'], ['FREE', 'Үнэгүй'], ['MANUAL_CLOSED', 'Гараар хаасан'],
@@ -63,8 +100,8 @@ export default function History() {
           onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} aria-label="Дуусах огноо" />
       </div>
 
-      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Хөнгөлөлт', 'Төлөв', 'Зураг',
-        ...(isAdmin ? [''] : [])]}
+      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Төлбөр', 'Хөнгөлөлт',
+        'Төлөв', 'Хаасан', 'Зураг', ...(isAdmin ? [''] : [])]}
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
           <tr key={s.id} className="hover:bg-surface-muted/30">
@@ -74,8 +111,10 @@ export default function History() {
             <td className="td font-mono text-xs">{fmtDate(s.exit_time)}</td>
             <td className="td font-mono">{fmtDur(s.duration_minutes)}</td>
             <td className="td font-mono font-semibold">{s.total_fee !== null ? `${fmt(s.total_fee)}₮` : '-'}</td>
+            <td className="td"><PaymentCell s={s} /></td>
             <td className="td text-xs">{s.discount_name || '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
+            <td className="td"><ClosedByCell s={s} /></td>
             <td className="td"><SnapshotButton session={s} /></td>
             {isAdmin && (
               <td className="td text-right">
