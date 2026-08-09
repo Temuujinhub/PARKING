@@ -297,7 +297,19 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
                                     Compensation.session_id != ParkingSession.id,
                                     ParkingSession.entry_time >= start,
                                     ParkingSession.entry_time < end).scalar())
-        collected = max(0.0, collected - debt_in_pay)
+        # Эсрэгээр: энэ мужийн сешний ӨӨРИЙНХ нь өр ХОЖИМ (өөр сешний төлбөрт
+        # нийлүүлэгдэж) төлөгдсөн бол тэр нь ЯГ энэ сешний хураамжийн
+        # хойшлогдсон төлөлт мөн — дээрх хасалтад орсон тул буцааж нэмнэ.
+        # Үүнгүйгээр өрөөр цуглуулсан мөнгө хаана ч тоологдохгүй үлддэг.
+        own_debt_paid = float(db.query(func.coalesce(func.sum(Compensation.amount), 0))
+                              .select_from(ParkingSession)
+                              .join(Compensation,
+                                    Compensation.session_id == ParkingSession.id)
+                              .filter(ParkingSession.site_id == s.id,
+                                      Compensation.status == "PAID",
+                                      ParkingSession.entry_time >= start,
+                                      ParkingSession.entry_time < end).scalar())
+        collected = max(0.0, collected - debt_in_pay + own_debt_paid)
         out.append({"site_id": s.id, "site_name": s.name, "entered": entered, "exited": exited,
                     "total_minutes": int(minutes or 0),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
@@ -389,6 +401,16 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
     for ym, amt in dq.group_by("ym").all():
         ym = int(ym)
         collected[ym] = max(0.0, collected.get(ym, 0.0) - float(amt or 0))
+    # Тухайн сарын сешний ӨӨРИЙНХ нь өр хожим төлөгдсөн бол нэмнэ (revenue-тэй ижил)
+    oq = (db.query(ym_entry.label("ym"), func.coalesce(func.sum(Compensation.amount), 0))
+          .select_from(ParkingSession)
+          .join(Compensation, Compensation.session_id == ParkingSession.id)
+          .filter(Compensation.status == "PAID",
+                  ParkingSession.entry_time >= start, ParkingSession.entry_time < end))
+    oq = _flt(oq, ParkingSession.site_id, _scope(user, site_id))
+    for ym, amt in oq.group_by("ym").all():
+        ym = int(ym)
+        collected[ym] = collected.get(ym, 0.0) + float(amt or 0)
     for ym in accrued:
         months.setdefault(ym, {"cash": 0.0, "qpay": 0.0, "pos": 0.0,
                                "transfer": 0.0, "count": 0})

@@ -94,6 +94,15 @@ def main():
                          .filter(Payment.status == "PAID", Compensation.status == "PAID")
                          .group_by(Payment.session_id).all()):
             bundled[sid] = float(amt or 0)
+        # ЧУХАЛ: машины өрийг дараагийн ирэлтэд нь ӨӨР сешний төлбөрт нийлүүлж
+        # авдаг тул тэр сешн дээр өөрийн Payment мөр БАЙДАГГҮЙ. Зөвхөн Payment-ээр
+        # шүүвэл «хураагдаагүй» гэж андуурч, авагдсан мөнгийг тэглэдэг
+        # (2026-08-09-нд ийм алдаа гаргасан). Төлөгдсөн НЭХЭМЖЛЭЛийг ч тооцно.
+        for sid, amt in (db.query(Compensation.session_id, func.sum(Compensation.amount))
+                         .filter(Compensation.status == "PAID",
+                                 Compensation.session_id.isnot(None))
+                         .group_by(Compensation.session_id).all()):
+            paid_sum[sid] = paid_sum.get(sid, 0.0) + float(amt or 0)
         paid_ids = set(paid_sum)
 
         q = (db.query(ParkingSession)

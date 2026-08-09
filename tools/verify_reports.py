@@ -94,6 +94,16 @@ def main():
                              .group_by(Payment.session_id).all()):
                 bundled[sid] += float(amt or 0)
 
+        # Сешн ӨӨРИЙНХӨӨ өрийг хожим төлсөн — энэ нь тэр сешний хураамжийн
+        # хойшлогдсон төлөлт тул «хураасан»-д тооцогдоно
+        own_paid_debt = defaultdict(float)
+        for chunk in [ids[i:i + 900] for i in range(0, len(ids), 900)]:
+            for sid, amt in (db.query(Compensation.session_id, func.sum(Compensation.amount))
+                             .filter(Compensation.session_id.in_(chunk),
+                                     Compensation.status == "PAID")
+                             .group_by(Compensation.session_id).all()):
+                own_paid_debt[sid] += float(amt or 0)
+
         agg = defaultdict(lambda: dict(entered=0, exited=0, open=0, minutes=0, accrued=0.0,
                                        collected=0.0, awaiting=0.0, debt=0.0,
                                        uncleaned=0, stale=0, still_open=0))
@@ -107,8 +117,10 @@ def main():
                 a["open"] += 1
             a["minutes"] += int(s.duration_minutes or 0)
             fee = float(s.total_fee or 0)
-            # Энэ сешний хураамжид ногдох хэсэг (өрийн нийлүүлсэн хэсгийг хасна)
-            paid = max(0.0, paid_by_sess.get(s.id, 0.0) - bundled.get(s.id, 0.0))
+            # Энэ сешний хураамжид ногдох хэсэг: өөрийн төлбөр − бусдын өрийн
+            # нийлүүлсэн хэсэг + ӨӨРИЙНХӨӨ өр хожим төлөгдсөн дүн
+            paid = max(0.0, paid_by_sess.get(s.id, 0.0) - bundled.get(s.id, 0.0)
+                       + own_paid_debt.get(s.id, 0.0))
             debt = debt_by_sess.get(s.id, 0.0)
             a["accrued"] += fee
             a["collected"] += paid

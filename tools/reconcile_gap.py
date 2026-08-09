@@ -34,6 +34,26 @@ AWAITING = {"AWAITING_PAYMENT"}
 LIVE = {"OPEN", "PAID"}
 
 
+def _find_overcleaned(db, wanted, sites):
+    """Өр нь ТӨЛӨГДСӨН мөртлөө дүн нь тэглэгдсэн сешнүүд → [(session, төлсөн_дүн)].
+
+    Ийм сешнд өөрийн Payment мөр байдаггүй (өр нь өөр сешний төлбөрт
+    нийлүүлэгдсэн) тул цэвэрлэгээ «хураагдаагүй» гэж андуурсан."""
+    paid_comp = (db.query(Compensation.session_id, func.sum(Compensation.amount))
+                 .filter(Compensation.status == "PAID",
+                         Compensation.session_id.isnot(None),
+                         Compensation.site_id.in_(wanted))
+                 .group_by(Compensation.session_id).all())
+    out = []
+    for sid, amt in paid_comp:
+        s = db.get(ParkingSession, sid)
+        if s is None:
+            continue
+        if float(s.total_fee or 0) < float(amt or 0) - 0.5:
+            out.append((s, float(amt or 0)))
+    return out
+
+
 def _cashflow_breakdown(db, wanted, sites, args):
     """«Нийт орлого > Үүссэн» яагаад болохыг задалж харуулна.
 
@@ -157,6 +177,41 @@ def main():
                        else ("хэсэгчлэн төлөгдсөн" if own_paid > 0
                              else "төлөгдөөгүй, өр ч болоогүй"))
                 gaps.append((s, gap, own_paid, why))
+
+        # ── 2.5 ЦЭВЭРЛЭГЭЭ ИЛҮҮ УСТГАСАН ЭСЭХ ──
+        # clean_test_period нь «төлбөр төлөгдсөн» сешнийг ӨӨРИЙНХ нь Payment
+        # мөрөөр л таньдаг байв. Гэтэл машины ӨРийг дараагийн ирэлтэд нь ӨӨР
+        # сешний төлбөрт нийлүүлж авдаг (include_debts) тул тэр сешн дээр
+        # Payment мөр байдаггүй → цэвэрлэгээ түүнийг «хураагдаагүй» гэж үзэж
+        # дүнг нь тэглэсэн. Мөнгө нь авагдсан хэрнээ «үүссэн» нь 0 болсон учир
+        # Нийт орлого > Үүссэн болж байсан. Эдгээрийг сэргээнэ.
+        over = _find_overcleaned(db, wanted, sites)
+        if over:
+            total_restore = sum(amt - float(s.total_fee or 0) for s, amt in over)
+            print(f"\n── ⚠ Цэвэрлэгээ ИЛҮҮ устгасан: {len(over)} сешн · "
+                  f"{total_restore:,.0f}₮ сэргээх ──")
+            print("  (өр нь ТӨЛӨГДСӨН мөртлөө сешний дүн тэглэгдсэн — мөнгө нь касст "
+                  "орсон ч тайланд «үүссэн» гэж тоологдохгүй байна)")
+            for s, amt in sorted(over, key=lambda x: -(x[1] - float(x[0].total_fee or 0)))[:8]:
+                print(f"    {s.plate_number:10} {s.entry_time:%m-%d %H:%M} "
+                      f"одоо {float(s.total_fee or 0):>7,.0f}₮ → төлөгдсөн өр {amt:>7,.0f}₮")
+            if args.apply:
+                for s, amt in over:
+                    vat = round(amt * 0.1 / 1.1)
+                    s.total_fee = amt
+                    s.vat_amount = vat
+                    s.base_fee = amt - vat
+                    s.status = "CLOSED"      # өр нь төлөгдсөн тул хаагдсан
+                    mark = f"[сэргээв] төлөгдсөн өр {amt:,.0f}₮-ийн дүнг буцаав"
+                    s.note = f"{s.note}\n{mark}" if s.note else mark
+                db.add(AuditLog(username="system", action="OVERCLEAN_RESTORE",
+                                entity="session", entity_id=None,
+                                detail={"sessions": len(over),
+                                        "amount": round(total_restore, 2)}))
+                db.commit()
+                print(f"  ✅ {len(over)} сешний дүн сэргэв ({total_restore:,.0f}₮)")
+            else:
+                print("  --apply өгвөл эдгээрийн дүнг сэргээнэ.")
 
         _cashflow_breakdown(db, wanted, sites, args)
 
