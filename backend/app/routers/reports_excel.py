@@ -47,8 +47,9 @@ def _xlsx(prefix, title, headers, rows, widths=None, total_row=None):
 def revenue_excel(data):
     """Орлогын тайлан (зогсоолоор)."""
     def _pct(r):
+        # Ижил бүлгээс: тухайн мужид ОРСОН сешнээс хураасан / түүнд үүссэн
         a = r.get("accrued_amount") or 0
-        return round(r["paid_amount"] / a * 100, 1) if a else 0
+        return round((r.get("collected_amount") or 0) / a * 100, 1) if a else 0
     rows = [[r["site_name"], r["entered"], r["exited"], r["total_minutes"],
              r.get("accrued_amount", 0), r["cash_amount"],
              r["qpay_amount"], r["pos_amount"], r["transfer_amount"],

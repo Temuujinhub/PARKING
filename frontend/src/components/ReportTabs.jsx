@@ -16,14 +16,19 @@ const lastDayOf = (month) => {
 const hm = (iso) => iso ? iso.replace('T', ' ').slice(11, 16) : '—'
 
 // Цуглуулалтын хувь — үүссэн төлбөрөөс хэдийг нь бодитоор авсан бэ.
-// 90%+ ногоон, 70%+ шар, доош нь улаан: аль зогсоолд алдагдал их байгааг шууд харуулна.
-export function CollectRate({ paid, accrued }) {
+// ЧУХАЛ: `collected` нь тухайн мужид ОРСОН сешнээс хураасан дүн байх ёстой.
+// Кассын «Нийт орлого» (мөнгө орсон цагаар) нь өмнөх хугацааны машины
+// төлбөрийг агуулдаг тул түүгээр бодвол 100%-иас давдаг (Кэй Эйч 103%).
+// 90%+ ногоон, 70%+ шар, доош нь улаан.
+export function CollectRate({ collected, accrued }) {
   if (!accrued) return <span className="text-slate-600">—</span>
-  const pct = Math.round((paid / accrued) * 100)
+  const pct = Math.round((collected / accrued) * 100)
   const color = pct >= 90 ? 'text-accent' : pct >= 70 ? 'text-amber-400' : 'text-red-400'
   return (
     <span className={`font-mono font-semibold ${color}`}
-      title={`${fmt(paid)}₮ / ${fmt(accrued)}₮ үүссэн төлбөрөөс`}>{pct}%</span>
+      title={`Энэ хугацаанд орсон машинаас хураасан ${fmt(collected)}₮ / үүссэн ${fmt(accrued)}₮`}>
+      {pct}%
+    </span>
   )
 }
 
@@ -152,7 +157,7 @@ export function RevenueTab({ from, to }) {
             <td className="td font-mono text-red-400"
               title="Төлөлгүй хаагдсан сешнээс үүссэн, хараахан төлөгдөөгүй нэхэмжлэл">{fmt(r.debt_amount)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.paid_amount)}</td>
-            <td className="td"><CollectRate paid={r.paid_amount} accrued={r.accrued_amount} /></td>
+            <td className="td"><CollectRate collected={r.collected_amount} accrued={r.accrued_amount} /></td>
             <td className="td">
               <button className="btn-secondary py-1 px-2 text-xs" aria-label={`${r.site_name} дэлгэрэнгүй татах`}
                 onClick={() => dl(`/api/reports/site-sessions/excel?site_id=${r.site_id}&date_from=${from}&date_to=${to}`, `${r.site_name}_${from}_${to}.xlsx`)}>
@@ -174,7 +179,7 @@ export function RevenueTab({ from, to }) {
         <span>Өр болсон: <b className="font-mono text-red-400">{fmt(t.debt_amount)}₮</b></span>
         <span>Нийт орлого: <b className="font-mono text-accent">{fmt(t.paid_amount)}₮</b></span>
         <span className="flex items-center gap-1.5">Цуглуулалт:
-          <CollectRate paid={t.paid_amount} accrued={t.accrued_amount} /></span>
+          <CollectRate collected={t.collected_amount} accrued={t.accrued_amount} /></span>
       </div>
       {siteMonths && (
         <div className="card">
@@ -263,7 +268,7 @@ export function MonthlyTab({ from, to, siteId }) {
             <td className="td font-mono">{fmt(r.pos)}</td>
             <td className="td font-mono">{fmt(r.transfer)}</td>
             <td className="td font-mono text-accent font-semibold">{fmt(r.total)}</td>
-            <td className="td"><CollectRate paid={r.total} accrued={r.accrued} /></td>
+            <td className="td"><CollectRate collected={r.collected} accrued={r.accrued} /></td>
           </tr>
         ))}
       </Table>
@@ -275,7 +280,7 @@ export function MonthlyTab({ from, to, siteId }) {
         <span>Үүссэн төлбөр: <b className="font-mono text-slate-200">{fmt(data.totals.accrued)}₮</b></span>
         <span>Нийт: <b className="font-mono text-accent">{fmt(data.totals.total)}₮</b></span>
         <span className="flex items-center gap-1.5">Цуглуулалт:
-          <CollectRate paid={data.totals.total} accrued={data.totals.accrued} /></span>
+          <CollectRate collected={data.totals.collected} accrued={data.totals.accrued} /></span>
       </div>
       {month && <MonthDays month={month} siteId={siteId} onClose={() => setMonth(null)} />}
     </>

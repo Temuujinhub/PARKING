@@ -272,10 +272,21 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
                      .filter(Compensation.site_id == s.id, Compensation.status == "PENDING",
                              ParkingSession.entry_time >= start,
                              ParkingSession.entry_time < end).scalar())
+        # ЦУГЛУУЛАЛТЫН ХУВЬД зориулсан тоо: тухайн мужид ОРСОН сешнүүдээс
+        # хураасан дүн. `paid_amount` нь мөнгө ОРСОН цагаар (paid_at) тоологддог
+        # тул өмнөх хугацаанд орсон машины төлбөр багтаж, харьцаа 100%-иас
+        # давдаг байсан (Кэй Эйч 103%). Хувь тооцоход ижил бүлгийг харьцуулна.
+        collected = float(db.query(func.coalesce(func.sum(Payment.amount), 0))
+                          .select_from(ParkingSession)
+                          .join(Payment, Payment.session_id == ParkingSession.id)
+                          .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
+                                  ParkingSession.entry_time >= start,
+                                  ParkingSession.entry_time < end).scalar())
         out.append({"site_id": s.id, "site_name": s.name, "entered": entered, "exited": exited,
                     "total_minutes": int(minutes or 0),
                     "cash_amount": cash, "qpay_amount": qpay_amt, "pos_amount": pos,
                     "transfer_amount": transfer, "accrued_amount": accrued,
+                    "collected_amount": collected,
                     "paid_amount": paid, "unpaid_amount": unpaid, "debt_amount": debt})
     totals = {
         "entered": sum(r["entered"] for r in out), "exited": sum(r["exited"] for r in out),
@@ -285,6 +296,7 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
         "pos_amount": sum(r["pos_amount"] for r in out),
         "transfer_amount": sum(r["transfer_amount"] for r in out),
         "accrued_amount": sum(r["accrued_amount"] for r in out),
+        "collected_amount": sum(r["collected_amount"] for r in out),
         "paid_amount": sum(r["paid_amount"] for r in out),
         "unpaid_amount": sum(r["unpaid_amount"] for r in out),
         "debt_amount": sum(r["debt_amount"] for r in out),
@@ -340,6 +352,15 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
           .filter(ParkingSession.entry_time >= start, ParkingSession.entry_time < end))
     aq = _flt(aq, ParkingSession.site_id, _scope(user, site_id))
     accrued = {int(ym): float(amt or 0) for ym, amt in aq.group_by("ym").all()}
+    # Цуглуулалтын хувьд: тухайн сард ОРСОН сешнээс хураасан дүн (мөнгө ямар
+    # сард орсноор биш) — эс бол өмнөх сарын машины төлбөр багтаж 100%+ гардаг
+    cq = (db.query(ym_entry.label("ym"), func.coalesce(func.sum(Payment.amount), 0))
+          .select_from(ParkingSession)   # FROM-ыг тодорхой заана (хоёр хүснэгтийн багана холилдоно)
+          .join(Payment, Payment.session_id == ParkingSession.id)
+          .filter(Payment.status == "PAID",
+                  ParkingSession.entry_time >= start, ParkingSession.entry_time < end))
+    cq = _flt(cq, ParkingSession.site_id, _scope(user, site_id))
+    collected = {int(ym): float(amt or 0) for ym, amt in cq.group_by("ym").all()}
     for ym in accrued:
         months.setdefault(ym, {"cash": 0.0, "qpay": 0.0, "pos": 0.0,
                                "transfer": 0.0, "count": 0})
@@ -349,9 +370,10 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
         m = months[ym]
         out.append({"month": f"{ym // 100}-{ym % 100:02d}", **m,
                     "accrued": accrued.get(ym, 0.0),
+                    "collected": collected.get(ym, 0.0),
                     "total": m["cash"] + m["qpay"] + m["pos"] + m["transfer"]})
     totals = {k: sum(r[k] for r in out) for k in ("cash", "qpay", "pos", "transfer",
-                                                  "accrued", "total", "count")}
+                                                  "accrued", "collected", "total", "count")}
     return {"rows": out, "totals": totals}
 
 
