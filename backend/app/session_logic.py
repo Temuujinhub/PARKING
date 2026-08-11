@@ -670,20 +670,33 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
     entering = device.lane_dir != "exit"
 
     if session is None and is_valid_plate(plate):
-        # Дотоод камерт уншигдсан машин гадна хаалтаар орсон нь гарцаагүй — гадна
-        # орох камер (шороо/тоос) уншиж чадаагүй бол машин session-гүй «үл үзэгдэгч»
-        # болж, дотор тоолол ч, төлбөр ч алдагддаг байв (2026-08-11 Рашбулаг:
-        # дотор байсан 46 машины 15 нь session-гүй). Нөхөж үүсгэнэ: тоолуур
-        # одооноос эхэлж, дотогш орж буй бол шууд зогсоно (доторх хугацаа үнэгүй).
-        session = ParkingSession(
-            site_id=device.site_id, plate_number=plate, entry_time=now,
-            entry_device_id=device.id, status="OPEN", confidence_entry=confidence,
-            is_registered=find_registered(db, plate, device.site_id) is not None,
-            note="Дотоод камераас нөхөж үүсгэв (гадна орох уншилт алдагдсан)")
-        db.add(session)
-        db.flush()
-        log.info("[nested] %s: гадна орох уншилт алдагдсан — session нөхөж үүсгэв (%s)",
-                 plate, session.id[:8])
+        # САЯХАН ГАРСАН машиныг нөхөж болохгүй: шороон зогсоолд эгнээ байхгүй тул
+        # гарч яваа машиныг дотоод ОРОХ камер дахин уншдаг (2026-08-11 Рашбулаг,
+        # 18:17-18:42 event-үүд) — session нь хаагдчихсан байхад нөхвөл гарсан
+        # машин «дотор зогсож байгаа» хий бүртгэл болно.
+        just_left = (db.query(ParkingSession.id)
+                     .filter(ParkingSession.site_id == device.site_id,
+                             ParkingSession.plate_number == plate,
+                             ParkingSession.exit_time.isnot(None),
+                             ParkingSession.exit_time >= now - timedelta(minutes=15))
+                     .first())
+        if just_left:
+            log.info("[nested] %s: 15 минутын дотор гарсан машин — нөхөж үүсгэхгүй", plate)
+        else:
+            # Дотоод камерт уншигдсан машин гадна хаалтаар орсон нь гарцаагүй —
+            # гадна орох камер (шороо/тоос) уншиж чадаагүй бол машин session-гүй
+            # «үл үзэгдэгч» болж, дотор тоолол ч, төлбөр ч алдагддаг байв
+            # (2026-08-11 Рашбулаг: дотор байсан 46 машины 15 нь session-гүй).
+            # Нөхөж үүсгэнэ: тоолуур одооноос, дотогшоо бол шууд зогсоно.
+            session = ParkingSession(
+                site_id=device.site_id, plate_number=plate, entry_time=now,
+                entry_device_id=device.id, status="OPEN", confidence_entry=confidence,
+                is_registered=find_registered(db, plate, device.site_id) is not None,
+                note="Дотоод камераас нөхөж үүсгэв (гадна орох уншилт алдагдсан)")
+            db.add(session)
+            db.flush()
+            log.info("[nested] %s: гадна орох уншилт алдагдсан — session нөхөж үүсгэв (%s)",
+                     plate, session.id[:8])
 
     if entering:
         changed = pause_session(session, now)
