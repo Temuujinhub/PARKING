@@ -14,6 +14,8 @@ const STATUSES = [
   ['OPEN', 'Зогсож байна'],
   ['AWAITING_PAYMENT', 'Төлбөр хүлээж буй'],
   ['PAID', 'Төлсөн (гараагүй)'],
+  // Nested зогсоолтой газарт: тоолуур нь зогссон (дотор байгаа) машинууд
+  ['INNER', 'Дотор зогсоолд'],
 ]
 
 // Аудитын сэжигтэй тэмдгүүд — оператор цэвэрлэх ёстой мөрийг шуурхай ялгана
@@ -83,9 +85,10 @@ export default function Check() {
       return
     }
     const params = new URLSearchParams({
-      status: status || 'OPEN,AWAITING_PAYMENT,PAID',
+      status: status === 'INNER' ? 'OPEN,AWAITING_PAYMENT,PAID' : (status || 'OPEN,AWAITING_PAYMENT,PAID'),
       with_fee: '1', limit: 200,
     })
+    if (status === 'INNER') params.set('inner', '1')
     if (siteId) params.set('site_id', siteId)
     if (plate.trim()) params.set('plate', plate.trim())
     api(`/api/sessions?${params}`).then((d) => {
@@ -350,7 +353,15 @@ export default function Check() {
               ) : <span className="text-slate-600">-</span>}
             </td>
             <td className="td text-xs">{s.is_registered ? <span className="text-accent">Тийм</span> : '-'}</td>
-            <td className="td"><Badge value={s.status} /></td>
+            <td className="td">
+              <Badge value={s.status} />
+              {s.paused_since && (
+                <span className="ml-1 text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded"
+                  title={`Дотор зогсоолд орсон ${fmtDate(s.paused_since)} — тоолуур зогссон (нийт ${s.paused_minutes || 0} мин хасагдана)`}>
+                  дотор
+                </span>
+              )}
+            </td>
             <td className="td"><SnapshotButton session={s} /></td>
             {isAdmin && (
               <td className="td text-right whitespace-nowrap">

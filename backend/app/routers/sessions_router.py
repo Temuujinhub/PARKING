@@ -105,11 +105,14 @@ def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
 def list_sessions(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
     date_from: str | None = None, date_to: str | None = None,
-    limit: int = 100, offset: int = 0, with_fee: bool = False,
+    limit: int = 100, offset: int = 0, with_fee: bool = False, inner: bool = False,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession)
+    if inner:
+        # Зөвхөн ОДОО доторх (nested) зогсоолд байгаа гэж тооцогдож буй машинууд
+        q = q.filter(ParkingSession.paused_since.isnot(None))
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
     elif site_ids:
