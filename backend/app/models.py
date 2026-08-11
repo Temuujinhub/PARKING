@@ -222,6 +222,12 @@ class RegisteredDriver(Base):
     company = Column(String(160), default="", index=True)
     note = Column(Text, default="")          # албан тушаал г.м. нэмэлт тэмдэглэл
     monthly_fee = Column(Numeric(12, 2), nullable=False, default=0)
+    # Үнэгүй цагийн цонх (УБ-ын цагаар, "HH:MM"). Хоёулаа тохируулсан бол машин
+    # ЗӨВХӨН энэ цонхонд үнэгүй — цонхны гаднах хугацаа энгийнээр бодогдоно
+    # (ж: сургуулийн гэрээт 08:00-18:00 үнэгүй, шөнө зогсвол төлбөртэй).
+    # NULL = хуучин зан төлөв: бүх цагт үнэгүй.
+    free_from = Column(String(5), nullable=True)
+    free_until = Column(String(5), nullable=True)
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow)
     valid_to = Column(DateTime, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)

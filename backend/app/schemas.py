@@ -90,6 +90,9 @@ class DriverCreate(_In):
     contract_type: str = "MONTHLY"
     site_id: str | None = None
     monthly_fee: float = 0
+    # Үнэгүй цагийн цонх "HH:MM" (УБ) — хоёулаа байвал зөвхөн цонхонд үнэгүй
+    free_from: str | None = None
+    free_until: str | None = None
     valid_from: str | None = None   # ISO datetime — хуучин fromisoformat логик хэвээр
     valid_to: str                   # заавал (өмнө нь дутуу бол 500 өгдөг байсан)
 
@@ -104,6 +107,8 @@ class DriverUpdate(_In):
     site_id: str | None = None
     monthly_fee: float | None = None
     is_active: bool | None = None
+    free_from: str | None = None
+    free_until: str | None = None
     valid_from: str | None = None
     valid_to: str | None = None
 

@@ -14,7 +14,7 @@
      False үед нэмж тооцно (total = base * (1+r)).
 """
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from .config import settings
@@ -44,6 +44,37 @@ def tier_price(template: TariffTemplate, minutes: int) -> Decimal:
     over_minutes = minutes - last.upto_minutes
     extra_hours = math.ceil(over_minutes / 60)
     return D(last.price) + D(template.extra_hour_price or 0) * extra_hours
+
+
+def free_window_minutes(entry: datetime, until: datetime,
+                        w_from: str, w_until: str, tz_hours: int = 8) -> int:
+    """[entry, until] (UTC) интервалын өдөр бүрийн [w_from, w_until] (локал цаг,
+    "HH:MM") цонхтой давхцах минут — гэрээт машины «үнэгүй цагийн цонх»-д
+    хамаарах хугацааг тоолоход хэрэглэнэ.
+
+    Цонх шөнө дамнахгүй (from < until) гэж үзнэ; буруу утгад 0 буцаана —
+    төлбөрийн тооцоо унахгүй, зүгээр л цонх үйлчлэхгүй."""
+    try:
+        fh, fm = (int(x) for x in (w_from or "").split(":"))
+        uh, um = (int(x) for x in (w_until or "").split(":"))
+    except (ValueError, AttributeError):
+        return 0
+    start_min, end_min = fh * 60 + fm, uh * 60 + um
+    if not (0 <= start_min < end_min <= 24 * 60):
+        return 0
+    tz = timedelta(hours=tz_hours)
+    lo, hi = entry + tz, until + tz
+    if hi <= lo:
+        return 0
+    total = 0
+    day = lo.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < hi:
+        s = max(lo, day + timedelta(minutes=start_min))
+        e = min(hi, day + timedelta(minutes=end_min))
+        if e > s:
+            total += int((e - s).total_seconds() // 60)
+        day += timedelta(days=1)
+    return total
 
 
 def calculate_fee(

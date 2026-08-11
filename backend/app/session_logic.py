@@ -22,7 +22,11 @@ import re
 log = logging.getLogger("parking.session_logic")
 
 # Монгол улсын дугаарын формат: 4 орон + 3 кирилл үсэг (Ө, Ү орно). Жишээ: 1234УБА
-PLATE_RE = re.compile(r"^\d{4}[А-ЯЁӨҮ]{3}$")
+# Энгийн (1234УБА) + тусгай/дипломат (ДК1234 — 2 үсэг ЭХЭНДЭЭ, 4 цифр).
+# АНХААР: 4 цифр + 2 үсэг (1234УБ) хэлбэрийг ЗОРИУД оруулаагүй — энэ нь энгийн
+# дугаарын ТАЙРАГДСАН уншилт бөгөөд plates_ocr_similar-ийн тайралт-тохирол
+# «богино нь буруу форматтай» гэдэгт тулгуурладаг.
+PLATE_RE = re.compile(r"^(?:\d{4}[А-ЯЁӨҮ]{3}|[А-ЯЁӨҮ]{2}\d{4})$")
 
 
 def normalize_plate(plate: str) -> str:
@@ -213,13 +217,13 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     # байгаа машины төлбөрийг тооцох бүрд ДАХИН шалгаснаар шинээр бүртгэсэн машин
     # ямар ч гар ажиллагаагүйгээр шууд гарна (fee.is_free → хаалт авто нээгдэнэ).
     registered = s.is_registered
-    if not registered and db is not None and s.status in ("OPEN", "AWAITING_PAYMENT"):
-        registered = find_registered(db, s.plate_number, s.site_id) is not None
-        if registered:
-            # Session дээр нь тэмдэглэнэ — жагсаалтад "Гэрээт" гэж зөв харагдана
-            # (дараагийн commit-той хамт хадгалагдана; read-only хүсэлтэд хадгалагдахгүй
-            # ч тооцоолол зөв хэвээр).
-            s.is_registered = True
+    drv = find_registered(db, s.plate_number, s.site_id) if db is not None else None
+    if not registered and drv is not None and s.status in ("OPEN", "AWAITING_PAYMENT"):
+        registered = True
+        # Session дээр нь тэмдэглэнэ — жагсаалтад "Гэрээт" гэж зөв харагдана
+        # (дараагийн commit-той хамт хадгалагдана; read-only хүсэлтэд хадгалагдахгүй
+        # ч тооцоолол зөв хэвээр).
+        s.is_registered = True
 
     # Доторх (nested) зогсоолд өнгөрүүлсэн хугацааг хасна. Session-ийг өөрчлөхгүй
     # уншина — энэ функц жагсаалт/урьдчилсан тооцоонд ч дуудагддаг.
@@ -227,9 +231,18 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     paused = (effective_paused_minutes(db, s, at) if db is not None
               else int(getattr(s, "paused_minutes", 0) or 0))
 
+    # Үнэгүй ЦАГИЙН ЦОНХТОЙ гэрээт (ж: сургуулийн машин 08:00-18:00): бүрэн
+    # үнэгүй биш — цонхтой давхцсан минут тоолуураас хасагдаж, гаднах хугацаа
+    # энгийнээр бодогдоно. Цонхгүй гэрээт хуучин шигээ бүх цагт үнэгүй.
+    registered_free = registered
+    if drv is not None and drv.free_from and drv.free_until:
+        from .billing import free_window_minutes
+        registered_free = False
+        paused += free_window_minutes(s.entry_time, at, drv.free_from, drv.free_until)
+
     return calculate_fee(
         template, s.entry_time, at,
-        discount=s.discount, is_registered=registered,
+        discount=s.discount, is_registered=registered_free,
         paused_minutes=paused, no_charge=bool(site and getattr(site, "no_charge", False)),
     )
 

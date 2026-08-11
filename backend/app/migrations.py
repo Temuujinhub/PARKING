@@ -243,6 +243,12 @@ MIGRATIONS = [
         updated_by VARCHAR(60),
         updated_at TIMESTAMP NOT NULL DEFAULT now()
     )""",
+
+    # v3.8 — Гэрээт машины ҮНЭГҮЙ ЦАГИЙН ЦОНХ (УБ-ын цагаар "HH:MM").
+    # Хоёулаа тохируулсан бол зөвхөн цонхонд үнэгүй, гадна нь энгийнээр бодогдоно
+    # (сургуулийн гэрээт 08:00-18:00 г.м). NULL = бүх цагт үнэгүй (хуучин зан).
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS free_from VARCHAR(5)",
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS free_until VARCHAR(5)",
 ]
 
 
