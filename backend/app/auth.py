@@ -34,6 +34,10 @@ ROLE_PERMISSIONS = {
     # хаалт дур мэдэн нээх санхүүгийн эрсдэлээс сэргийлнэ. Итгэмжит операторт
     # админ эрхийн матрицаас free_exit-ийг гараар нэмнэ.
     "OPERATOR": {"cashier", "check", "history", "compensations"},
+    # ONLINE_OPERATOR — оффисоос (зогсоол дээр биечлэн байхгүй) олон зогсоолын
+    # төлбөрийг хянадаг оператор: кассын эрх + «Дансаар» (pay_transfer) төлбөр
+    # баталгаажуулах. free_exit ОРООГҮЙ — хаалт дур мэдэн нээхгүй.
+    "ONLINE_OPERATOR": {"cashier", "check", "history", "compensations", "pay_transfer"},
 }
 
 # UI-ийн чекбокс матриц + create/update_user validation-д ашиглах бүх модуль

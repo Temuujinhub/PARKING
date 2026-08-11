@@ -11,10 +11,12 @@ const ROLES = {
   FINANCE: 'Санхүү (тайлан, төлбөр)',
   HR: 'Хүний нөөц (ажилтан)',
   OPERATOR: 'Оператор (касс, зогсоол)',
+  ONLINE_OPERATOR: 'Онлайн оператор (касс + дансаар, оффисоос)',
 }
 // UI-аас үүсгэж болох эрхүүд — SUPER_ADMIN-ыг оруулахгүй (зөвхөн DB-ээр)
 const CREATABLE_ROLES = {
   ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, HR: ROLES.HR, OPERATOR: ROLES.OPERATOR,
+  ONLINE_OPERATOR: ROLES.ONLINE_OPERATOR,
 }
 
 // Хуудас/модулийн эрхийн матриц — backend auth.ALL_MODULES-тай ижил түлхүүрүүд
@@ -45,6 +47,7 @@ const ROLE_DEFAULTS = {
     'compensations', 'discounts', 'blacklist'],
   HR: ['users'],
   OPERATOR: ['cashier', 'check', 'history', 'compensations'],
+  ONLINE_OPERATOR: ['cashier', 'check', 'history', 'compensations', 'pay_transfer'],
 }
 const isDefaultPerms = (role, perms) => {
   const d = new Set(ROLE_DEFAULTS[role] || [])
@@ -122,6 +125,7 @@ export default function Users() {
         <span><b className="text-slate-200">Санхүү</b> — тайлан, төлбөр, НӨАТ, хөнгөлөлт, тариф, хар жагсаалт</span>
         <span><b className="text-slate-200">Хүний нөөц</b> — зөвхөн ажилтан нэмж/хасах, ажилласан өдрийн тайлан</span>
         <span><b className="text-slate-200">Оператор</b> — өөрийн хариуцах зогсоолын касс, шалгах, түүх</span>
+        <span><b className="text-slate-200">Онлайн оператор</b> — оффисоос олон зогсоолын касс + дансаар төлбөр баталгаажуулах</span>
       </div>
 
       <Table headers={['Нэвтрэх нэр', 'Нэр', 'Утас', 'Эрх', 'Зогсоол', 'Бүртгэсэн', 'Төлөв', '']} empty={visibleRows.length === 0}>
