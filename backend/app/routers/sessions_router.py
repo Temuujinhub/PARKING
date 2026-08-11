@@ -311,18 +311,26 @@ def audit_sessions(site_id: str | None = None, camera: bool = False,
 
 
 @router.get("/recent-exits")
-def recent_exits(site_id: str, minutes: int = 30,
+def recent_exits(site_id: str, minutes: int | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
-    """Касс/PAX: сүүлд гарах камерт уншигдсан, төлбөр хүлээж буй машинууд."""
+    """Касс/PAX: сүүлд гарах камерт уншигдсан, төлбөр хүлээж буй машинууд.
+
+    Гарах уншилтаас хойш `exit_queue_show_min` (default 3) минутын дараа
+    жагсаалтаас алга болно — төлөлгүй буцсан машин кассын дэлгэцийг бөглөхгүй
+    (түүх/хайлтад хэвээр үлдэнэ, дахин уншигдвал буцаж гарна)."""
+    from ..config import settings as _cfg
     allowed = operator_sites(user)
     if allowed and site_id not in allowed:
         site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
-    since = datetime.utcnow() - timedelta(minutes=minutes)
+    win = minutes if minutes is not None else getattr(_cfg, "exit_queue_show_min", 3)
+    since = datetime.utcnow() - timedelta(minutes=win)
     sessions = (
         db.query(ParkingSession)
         .filter(ParkingSession.site_id == site_id,
                 ParkingSession.status == "AWAITING_PAYMENT",
-                ParkingSession.updated_at >= since)
+                # Гарах уншилтын цаг (exit_time); хуучин бичлэгт updated_at уналт
+                func.coalesce(ParkingSession.exit_time,
+                              ParkingSession.updated_at) >= since)
         .order_by(ParkingSession.updated_at.desc()).limit(20).all()
     )
     # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
