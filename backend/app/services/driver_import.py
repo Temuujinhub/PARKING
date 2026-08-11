@@ -129,7 +129,8 @@ def parse_workbook(data: bytes) -> tuple[list[dict], list[str]]:
 
 def import_rows(db, rows: list[dict], site_id: str | None, *,
                 contract_type: str = "CONTRACT", valid_days: int = 365,
-                monthly_fee: float = 0, deactivate_missing: bool = False) -> dict:
+                monthly_fee: float = 0, deactivate_missing: bool = False,
+                default_tenant_id: str | None = None) -> dict:
     """Задалсан мөрүүдийг registered_drivers руу оруулна (идемпотент upsert).
 
     Түлхүүр = (plate_number, site_id). Байвал шинэчилнэ, байхгүй бол үүсгэнэ —
@@ -163,7 +164,7 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
             db.add(RegisteredDriver(
                 plate_number=r["plate"], full_name=r["full_name"], company=r["company"],
                 note=r["note"], contract_type=contract_type, site_id=site_id,
-                tenant_id=_site_tenant_id(db, site_id),
+                tenant_id=_site_tenant_id(db, site_id) or default_tenant_id,
                 monthly_fee=monthly_fee, valid_from=now, valid_to=valid_to, is_active=True))
             created += 1
 

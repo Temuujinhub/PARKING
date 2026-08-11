@@ -112,7 +112,7 @@ def _audit(db: Session, user: User, action: str, entity: str, entity_id: str, de
 
 
 # API/UI-аас үүсгэж болох дүрүүд (SUPER_ADMIN зөвхөн DB-ээр)
-CREATABLE_ROLES = ("ADMIN", "FINANCE", "HR", "OPERATOR")
+CREATABLE_ROLES = ("ADMIN", "FINANCE", "HR", "OPERATOR", "ONLINE_OPERATOR")
 
 
 def _check_password(pw: str):
@@ -1224,6 +1224,17 @@ def _site_tenant(db, site_id: str | None):
     return db.query(ParkingSite.tenant_id).filter(ParkingSite.id == site_id).scalar()
 
 
+def _driver_in_scope(user: User, allowed: list[str] | None, d: RegisteredDriver) -> bool:
+    """Бүртгэл хэрэглэгчийн хамрах хүрээнд байгаа эсэх. «Бүх зогсоол» (site_id
+    NULL) бүртгэл нь ӨӨРИЙН түрээслэгчийнх бол хамаарна — эс бол tenant-ийн
+    админ өөрийн үүсгэсэн «бүх зогсоолын» бүртгэлээ засаж/устгаж чадахгүй байв."""
+    if allowed is None:
+        return True
+    if d.site_id:
+        return d.site_id in allowed
+    return bool(user.tenant_id) and d.tenant_id == user.tenant_id
+
+
 @router.post("/drivers")
 def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     body = payload.dump()
@@ -1263,11 +1274,17 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
         raise HTTPException(404, "Жолооч олдсонгүй")
     allowed = operator_sites(user)
     if allowed is not None:
-        # Өөрийн зогсоолын бүртгэлийг л засна; өөр/бүх зогсоол руу шилжүүлэхгүй
-        if d.site_id not in allowed:
+        # Өөрийн зогсоолын (эсвэл өөрийн түрээслэгчийн «бүх зогсоолын») бүртгэлийг л засна
+        if not _driver_in_scope(user, allowed, d):
             raise HTTPException(403, "Энэ бүртгэл таны хариуцах зогсоолынх биш байна.")
-        if "site_id" in body and body["site_id"] not in allowed:
-            raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоол руу шилжүүлэх эрхтэй.")
+        if "site_id" in body:
+            tgt = body["site_id"]
+            # «Бүх зогсоол» (NULL) болгох нь tenant хэрэглэгчид зөвшөөрөгдөнө —
+            # бүртгэл нь өөрийнх нь түрээслэгчийн хүрээнд л үйлчилнэ
+            if tgt and tgt not in allowed:
+                raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоол руу шилжүүлэх эрхтэй.")
+            if not tgt and not user.tenant_id:
+                raise HTTPException(403, "«Бүх зогсоол» болгох эрх түрээслэгчийн хэрэглэгчид л бий.")
     for k in ("full_name", "phone", "contract_type", "site_id", "monthly_fee",
               "is_active", "company", "note"):
         if k in body:
@@ -1299,7 +1316,7 @@ def delete_driver(driver_id: str, db: Session = Depends(get_db),
     if not d:
         raise HTTPException(404, "Бүртгэл олдсонгүй")
     allowed = operator_sites(user)
-    if allowed is not None and d.site_id not in allowed:
+    if not _driver_in_scope(user, allowed, d):
         raise HTTPException(403, "Энэ бүртгэл таны хариуцах зогсоолынх биш байна.")
     info = {"plate": d.plate_number, "name": d.full_name, "company": d.company,
             "contract_type": d.contract_type, "site_id": d.site_id}
@@ -1325,9 +1342,14 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
     from ..services.driver_import import import_rows, parse_workbook
 
     allowed = operator_sites(user)
-    if allowed is not None and (site_id or None) not in allowed:
-        raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд импорт хийх эрхтэй "
-                                 "(зогсоолоо сонгоно уу).")
+    if allowed is not None:
+        if site_id and site_id not in allowed:
+            raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд импорт хийх эрхтэй.")
+        # «Бүх зогсоол» импорт: tenant хэрэглэгчид зөвшөөрнө (бүртгэл нь өөрийн
+        # түрээслэгчийн хүрээнд үйлчилнэ); tenant-гүй хэрэглэгч зогсоол сонгоно
+        if not site_id and not user.tenant_id:
+            raise HTTPException(403, "«Бүх зогсоол» импортыг түрээслэгчийн хэрэглэгч л хийнэ "
+                                     "(зогсоолоо сонгоно уу).")
 
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Зөвхөн .xlsx файл дэмжинэ")
@@ -1356,7 +1378,10 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
         return {"dry_run": True, **preview}
 
     res = import_rows(db, rows, site_id or None, contract_type=contract_type,
-                      valid_days=valid_days, deactivate_missing=replace)
+                      valid_days=valid_days, deactivate_missing=replace,
+                      # «Бүх зогсоол» импортод бүртгэлийг импортлогчийн түрээслэгчид
+                      # холбоно — эс бол tenant_id NULL болж хэнд ч харагдахгүй
+                      default_tenant_id=user.tenant_id)
     _audit(db, user, "IMPORT", "driver", site_id or "-",
            {"file": file.filename, **{k: v for k, v in res.items()}})
     db.commit()
