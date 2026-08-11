@@ -56,6 +56,18 @@ function ImportModal({ open, onClose, sites, onDone }) {
           нэг байгууллага гэж үзнэ. Хуудсанд «Улсын дугаар» гэсэн гарчигтай багана
           байх шаардлагатай. Ижил дугаар давхардвал шинэчилнэ (давхар бүртгэл үүсэхгүй).
         </div>
+        <button type="button" className="text-accent text-xs underline"
+          onClick={async () => {
+            try {
+              const blob = await api('/api/admin/drivers/import-template', { blob: true })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url; a.download = 'drivers_import_template.xlsx'; a.click()
+              URL.revokeObjectURL(url)
+            } catch (e) { toast(e.message, 'error') }
+          }}>
+          ⬇ Загвар файл татах (.xlsx)
+        </button>
         <Field label="Excel файл (.xlsx)" required>
           <input type="file" accept=".xlsx,.xlsm" className="input"
             onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null) }} />
@@ -221,6 +233,12 @@ export default function Drivers() {
               {d.contract_type === 'SPECIAL'
                 ? <span className="text-cyan-300">Тусгай хэрэгцээт</span>
                 : (CONTRACT_TYPES[d.contract_type]?.split(' (')[0] || d.contract_type)}
+              {d.free_from && d.free_until && (
+                <div className="text-[10px] text-amber-300"
+                  title="Зөвхөн энэ цонхонд үнэгүй — гаднах цаг төлбөртэй">
+                  ⏱ {d.free_from}–{d.free_until} үнэгүй
+                </div>
+              )}
             </td>
             <td className="td">{d.site_name}</td>
             <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
@@ -284,7 +302,21 @@ export default function Drivers() {
                 <input className="input" type="date" value={editing.valid_to} required
                   onChange={(e) => setEditing({ ...editing, valid_to: e.target.value })} />
               </Field>
+              {/* Үнэгүй цагийн цонх: хоёуланг нь тохируулбал ЗӨВХӨН энэ цонхонд
+                  үнэгүй (ж: сургуулийн гэрээт 08:00-18:00), гаднах цаг төлбөртэй.
+                  Хоосон = бүх цагт үнэгүй (хуучин зан). */}
+              <Field label="Үнэгүй эхлэх цаг (хоосон = бүх цагт)">
+                <input className="input" type="time" value={editing.free_from || ''}
+                  onChange={(e) => setEditing({ ...editing, free_from: e.target.value || null })} />
+              </Field>
+              <Field label="Үнэгүй дуусах цаг">
+                <input className="input" type="time" value={editing.free_until || ''}
+                  onChange={(e) => setEditing({ ...editing, free_until: e.target.value || null })} />
+              </Field>
             </div>
+            {(editing.free_from || editing.free_until) && !(editing.free_from && editing.free_until) && (
+              <div className="text-xs text-amber-400">Цагийн цонх үйлчлэхийн тулд эхлэх, дуусах хоёуланг нь бөглөнө.</div>
+            )}
             {editing.id && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">
                 <input type="checkbox" checked={editing.is_active}

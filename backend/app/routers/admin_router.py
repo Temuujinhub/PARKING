@@ -1224,6 +1224,16 @@ def _site_tenant(db, site_id: str | None):
     return db.query(ParkingSite.tenant_id).filter(ParkingSite.id == site_id).scalar()
 
 
+def _hhmm_or_400(v: str | None, field: str) -> str | None:
+    """Үнэгүй цагийн цонхны "HH:MM" утга — хоосон бол None (цонхгүй = бүх цагт үнэгүй)."""
+    if not v:
+        return None
+    import re as _re
+    if not _re.match(r"^([01]\d|2[0-3]):[0-5]\d$", v):
+        raise HTTPException(400, f"{field}: цаг «HH:MM» хэлбэртэй байх ёстой (ж: 08:00)")
+    return v
+
+
 def _driver_in_scope(user: User, allowed: list[str] | None, d: RegisteredDriver) -> bool:
     """Бүртгэл хэрэглэгчийн хамрах хүрээнд байгаа эсэх. «Бүх зогсоол» (site_id
     NULL) бүртгэл нь ӨӨРИЙН түрээслэгчийнх бол хамаарна — эс бол tenant-ийн
@@ -1255,6 +1265,8 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
         contract_type=body.get("contract_type", "MONTHLY"),
         tenant_id=_site_tenant(db, site_id) if site_id else user.tenant_id,
         site_id=site_id, monthly_fee=body.get("monthly_fee", 0),
+        free_from=_hhmm_or_400(body.get("free_from"), "free_from"),
+        free_until=_hhmm_or_400(body.get("free_until"), "free_until"),
         valid_from=_parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow(),
         valid_to=_parse_dt(body["valid_to"], "valid_to"),
     )
@@ -1289,6 +1301,9 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
               "is_active", "company", "note"):
         if k in body:
             setattr(d, k, body[k])
+    for k in ("free_from", "free_until"):
+        if k in body:
+            setattr(d, k, _hhmm_or_400(body[k], k))
     if "site_id" in body:
         # Түрээслэгчийн харьяалал зогсоолыг нь дагана; NULL («бүх зогсоол») болгоход
         # засварлагчийн түрээслэгч (эсвэл хуучин утга) хэвээр
@@ -1324,6 +1339,36 @@ def delete_driver(driver_id: str, db: Session = Depends(get_db),
     _audit(db, user, "DELETE", "driver", driver_id, info)
     db.commit()
     return {"ok": True, "deleted": info}
+
+
+@router.get("/drivers/import-template")
+def import_template(user: User = Depends(require("drivers"))):
+    """Excel импортын загвар файл — гарчиг нь parse_workbook-ийн хайдаг нэрстэй ижил.
+    Хуудас бүр = нэг байгууллага гэдгийг 2 жишээ хуудсаар үзүүлнэ."""
+    import io
+
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Байгууллага 1"
+    ws.append(["Улсын дугаар", "Эзэмшигч", "Албан тушаал"])
+    ws.append(["1234УБА", "Бат-Эрдэнэ", "жишээ мөр — өөрийн жагсаалтаар солино"])
+    ws.append(["ДК1234", "", "дипломат дугаар мөн болно"])
+    ws2 = wb.create_sheet("Байгууллага 2")
+    ws2.append(["Улсын дугаар", "Эзэмшигч", "Албан тушаал"])
+    ws2.append(["5678УНА", "Сарнай", "хуудас бүр тусдаа байгууллага болно"])
+    for w in (ws, ws2):
+        w.column_dimensions["A"].width = 16
+        w.column_dimensions["B"].width = 22
+        w.column_dimensions["C"].width = 40
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="drivers_import_template.xlsx"'})
 
 
 @router.post("/drivers/import")
