@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # e-Barimt үүсгэдэг НӨАТ-ийн мэдээлэлтэй нэхэмжлэхийн код (QPay-ээс олгоно)
     qpay_invoice_code: str = "EB_EASY_2PARKING_INVOICE"
     qpay_mock: bool = True     # Бодит credentials байхгүй үед mock горим
+    # PENDING үлдсэн QPay төлбөрийг сервер талаас дахин шалгах давтамж (сек).
+    # 0 = унтраах. Жолооч Pay хуудсаа хааж, webhook алдагдсан үед аврагч.
+    qpay_recheck_sec: int = 60
 
     # QPay-ээр дамжуулсан e-Barimt 3.0 (ebarimt_v3/create). True үед локал PosAPI-ийн
     # оронд QPay-ийн ebarimt_v3 endpoint ашиглаж баримт үүсгэнэ (QR-аар төлсөн үед).

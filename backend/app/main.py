@@ -227,6 +227,10 @@ async def start_vat_auto_send():
     from .services.camera_recovery import supervisor as camera_recovery_supervisor
     _bg_task(camera_recovery_supervisor(), "camera-recovery")
 
+    # Жолооч Pay хуудсаа хаасан/webhook алдагдсан PENDING QPay төлбөрийг сэргээх
+    from .services.qpay_recheck import supervisor as qpay_recheck_supervisor
+    _bg_task(qpay_recheck_supervisor(), "qpay-recheck")
+
 
 @app.on_event("shutdown")
 async def stop_background_tasks():
