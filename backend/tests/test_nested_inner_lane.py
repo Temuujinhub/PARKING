@@ -144,12 +144,17 @@ try:
     check("110 мин, дотогш ороогүй → төлбөртэй",
           not fee2["is_free"] and fee2["total_fee"] > 0, fee2)
 
-    print("\n4. Гадна орох уншилтгүй машин — дотоод хаалт гацаахгүй")
+    print("\n4. Гадна орох уншилтгүй машин — дотоод хаалт гацаахгүй, session нөхөгдөнө")
     r4 = asyncio.run(handle_inner_pass(db, in_in, "9999ХОО", 0.9,
                                        {"Picture": {"Plate": {"PlateNumber": "9999ХОО"}}}))
     check("зогсоолд бүртгэлгүй ч хаалт нээгдэнэ", r4["barrier_opened"] is True, r4)
-    check("session үүсээгүй", r4["session_id"] is None, r4)
-    check("тоолуур хөндөөгүй", r4["counter_changed"] is False, r4)
+    # Гадна орох камер уншиж чадаагүй машин дотоод камерт харагдвал session
+    # НӨХӨЖ үүснэ (2026-08-11 Рашбулаг: дотор байсан 46 машины 15 нь session-гүй
+    # «үл үзэгдэгч» байсныг засав) — тоолуур одооноос, дотогшоо бол шууд зогсоно.
+    check("session нөхөж үүсэв", r4["session_id"] is not None, r4)
+    s4 = db.get(ParkingSession, r4["session_id"])
+    check("нөхсөн session дотор гэж тэмдэглэгдсэн", s4.paused_since is not None, r4)
+    check("тоолуур зогссон гэж тоологдов", r4["counter_changed"] is True, r4)
 
     print("\n4б. «Автомат нээх» унтраалттай — ГАРАХ талыг гацаахгүй")
     # `auto_open` нь зөвхөн ОРОХ чиглэлд утгатай бөгөөд UI-д ч зөвхөн орох
