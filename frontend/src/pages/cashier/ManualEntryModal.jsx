@@ -3,7 +3,8 @@ import { api } from '../../api'
 import { Field, Modal, useToast } from '../../components/ui'
 
 // Монгол дугаарын формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА)
-const PLATE_RE = /^\d{4}[А-ЯЁӨҮ]{3}$/
+// Энгийн (1234УБА) эсвэл дипломат/тусгай (ДК1234)
+const PLATE_RE = /^\d{4}[А-ЯЁӨҮ]{3}$|^[А-ЯЁӨҮ]{2}\d{4}$/
 
 // datetime-local input-д зориулсан локал цагийн формат (YYYY-MM-DDTHH:MM)
 const toLocalInput = (d) => {
