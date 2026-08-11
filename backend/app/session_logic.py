@@ -655,11 +655,18 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
     нэвтрүүлнэ — хасах хугацаа байхгүй болохоос доторх хаалт нь машиныг
     гацаах ёсгүй. Тэр машин гарцдаа энгийнээр төлбөр төлнө.
     """
-    from .services.nested import cap_minutes, pause_session, resume_session, same_site_session
+    from .services.nested import cap_minutes, pause_session, resume_session
 
     now = datetime.utcnow()
     site = db.get(ParkingSite, device.site_id)
-    session = same_site_session(db, device.site_id, plate)
+    # ЯГ таарахгүй бол OCR-ойролцоо тохирол (гарах хаалттай ижил дүрэм) —
+    # шороон зогсоолд бохир дугаарыг дотоод камер өөр уншихад тоолуур
+    # зогсдоггүй, машин доторх (үнэгүй) хугацаагаа бүрэн төлдөг байв
+    # (2026-08-11 Рашбулаг ЭТТ: 165 машинаас «2 дотор» гэж харагдсан шалтгаан).
+    session, fuzzy = match_open_session(db, plate, device.site_id)
+    if fuzzy:
+        log.info("[nested] %s: дотоод камерын уншилтыг OCR-ойролцоо «%s» session-д тохов",
+                 plate, session.plate_number)
     entering = device.lane_dir != "exit"
 
     if entering:
