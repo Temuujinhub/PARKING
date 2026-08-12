@@ -193,11 +193,17 @@ def _parse_expiry(raw, now: datetime) -> datetime:
     return exp - timedelta(seconds=60)
 
 
-def _vat_of(price: float) -> float:
-    """НӨАТ багтсан үнээс НӨАТ-ыг гаргана (4 орны нарийвчлалтай ТАСЛАЖ — docs жишээ).
-    QPay жишээ: 50₮ → 50*0.1/1.1 = 4.54545… → 4.5454 (round биш truncate)."""
+def _vat_units(price: float) -> int:
+    """НӨАТ-ыг 1/10000 нэгжээр, БҮХЭЛ тоогоор (float алдаа хуримтлагдахгүй).
+    4 орны нарийвчлалтай ТАСЛАНА (round биш truncate — docs жишээ)."""
     r = settings.vat_rate
-    return math.floor(price * r / (1 + r) * 10000) / 10000
+    return math.floor(price * r / (1 + r) * 10000)
+
+
+def _vat_of(price: float) -> float:
+    """НӨАТ багтсан үнээс НӨАТ-ыг гаргана.
+    QPay жишээ: 50₮ → 50*0.1/1.1 = 4.54545… → 4.5454 (round биш truncate)."""
+    return _vat_units(price) / 10000
 
 
 def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]:
@@ -208,9 +214,29 @@ def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]
     tax_type=1 (НӨАТ тооцогдох) үед мөр бүрт VAT taxes нэмнэ. 2/3 үед VAT тооцохгүй.
     """
     acc = acc or global_account()
-    lines = []
     vat_able = acc.tax_type == "1"
-    for it in items:
+    totals = [round(float(it["unit_price"]), 2) * float(it.get("quantity", 1) or 1)
+              for it in items]
+
+    # ЧУХАЛ (production-д QPay «VAT_AMOUNT_INVALID» өгч байсан алдаа):
+    # НӨАТ-ыг мөр БҮРД тусад нь таслахад тасархай хэсгүүд алдагддаг тул
+    # мөрүүдийн НӨАТ-ын нийлбэр нь НИЙТ дүнгээс тасалсан НӨАТ-тай таардаггүй.
+    #   1,000₮ + 2,000₮:  90.9090 + 181.8181 = 272.7271
+    #   3,000₮-аас шууд:                       272.7272   ← QPay үүнийг хүлээдэг
+    # 0.0001₮-ийн зөрүү. Нэг мөртэй нэхэмжлэлд хэзээ ч гардаггүй тул анзаарагдалгүй
+    # өнгөрч, ӨМНӨХ ӨРТЭЙ (2+ мөртэй) жолооч QR-аар ЕРӨӨСӨӨ төлж чаддаггүй байв.
+    # Шийдэл: НӨАТ-ыг 1/10000 бүхэл нэгжээр бодож, нийт дүнгээс гарсан утгад
+    # яг таарган хуваарилна — үлдэгдлийг хамгийн том мөрд өгнө.
+    vat_units: list[int] = []
+    if vat_able:
+        vat_units = [_vat_units(t) for t in totals]
+        drift = _vat_units(sum(totals)) - sum(vat_units)
+        if drift and vat_units:
+            biggest = max(range(len(totals)), key=lambda i: totals[i])
+            vat_units[biggest] += drift
+
+    lines = []
+    for idx, it in enumerate(items):
         price = round(float(it["unit_price"]), 2)
         qty = float(it.get("quantity", 1) or 1)
         line = {
@@ -227,7 +253,7 @@ def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]
             line["taxes"] = [{
                 "tax_code": "VAT",
                 "description": "НӨАТ",
-                "amount": _vat_of(price * qty),
+                "amount": vat_units[idx] / 10000,
                 "note": "НӨАТ",
             }]
         lines.append(line)
