@@ -280,6 +280,21 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         at = s.exit_time or s.updated_at or now
     else:
         at = now
+    # ӨР ҮҮСГЭХГҮЙ + ГАРАХ УНШИЛТ ОГТ БАЙХГҮЙ бол ХУУРАМЧ ДҮН ч бичихгүй.
+    # Ийм машин ҮНЭНДЭЭ хэдийнэ гарсан ч гарцын камер уншаагүй; «одоо − орсон»
+    # гэж бодвол 12 цагийн төлбөр бичигдэж, тайлангийн «Үүссэн» багана хуурамчаар
+    # хөөрөгдөж «Цуглуулалт %»-ийг доогуур харуулдаг (Соёлын төв 22%, Номадс 23%).
+    # Формат буруу phantom-д хэдийнэ хэрэглэдэг зарчмыг (auto_close.py) энд ч мөрдөнө.
+    if not create_comp and s.status == "OPEN" and not s.exit_time and not s.paid_at:
+        from .services.nested import close_open_pause
+        close_open_pause(db, s, now)
+        s.exit_time = now
+        s.duration_minutes = None          # хэзээ гарсныг МЭДЭХГҮЙ — таамаглахгүй
+        s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
+        s.status = "MANUAL_CLOSED"
+        s.note = f"{s.note + ' | ' if s.note else ''}{reason}: гарах уншилтгүй — өргүй, дүнгүй хаав"[:1000]
+        return 0.0
+
     fee = session_fee_info(db, s, at=at)
     due = amount_due(db, s, fee)
     # Доторх (nested) зогсоолд байхад нь хаагдаж байгаа бол явж буй зогсолтыг

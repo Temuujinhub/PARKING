@@ -562,7 +562,10 @@ async def bulk_remove(body: dict, db: Session = Depends(get_db),
     ids = body.get("session_ids") or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(400, "session_ids жагсаалт шаардлагатай")
-    create_comp = bool(body.get("create_compensation", True))
+    # Анхдагч False (2026-08-12): гацсан машиныг хасахад ӨР ҮҮСГЭХГҮЙ.
+    # Гарах уншилтгүй гацсан машин ҮНЭНДЭЭ хэдийнэ гарсан байдаг тул
+    # өр нэхэх нотолгоо байхгүй. Хэрэгтэй бол UI-аас чагтална.
+    create_comp = bool(body.get("create_compensation", False))
     note = (body.get("reason") or "").strip()[:300]
     removed, skipped, debt_total = [], 0, 0.0
     for sid in ids[:200]:

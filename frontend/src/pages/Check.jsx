@@ -308,7 +308,7 @@ export default function Check() {
         <div className="card py-3 flex items-center gap-3 border-red-500/40">
           <span className="text-sm"><b className="font-mono">{sel.length}</b> машин сонгогдсон</span>
           <button className="btn-secondary text-red-400"
-            onClick={() => setRemoving({ ids: sel, createComp: true, reason: audit ? 'Аудит цэвэрлэгээ' : '' })}>
+            onClick={() => setRemoving({ ids: sel, createComp: false, reason: audit ? 'Аудит цэвэрлэгээ' : '' })}>
             <Trash2 size={15} /> Зогсоолоос хасах
           </button>
           <button className="btn-secondary text-xs" onClick={() => setSel([])}>Цуцлах</button>
@@ -370,7 +370,7 @@ export default function Check() {
                   <Pencil size={13} />
                 </button>
                 <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
-                  onClick={() => setRemoving({ ids: [s.id], createComp: true, reason: '' })}>
+                  onClick={() => setRemoving({ ids: [s.id], createComp: false, reason: '' })}>
                   <Trash2 size={13} />
                 </button>
               </td>

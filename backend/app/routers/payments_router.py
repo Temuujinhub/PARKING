@@ -106,6 +106,18 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     # хэсэг тус бүрд тусдаа баримт үүсгэнэ.
     use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
                    and bool(payment.provider_payment_id) and not comps)
+    # АНХААРУУЛГА: локал PosAPI зам нь (а) ebarimt_mock=true үед ХУУРАМЧ баримт
+    # буцаадаг, (б) ГЛОБАЛ merchant TIN хэрэглэдэг — зогсоолын түрээслэгчийнхээр
+    # БИШ (_build_payload site/tenant мэддэггүй). QPay-ээр төлсөн атлаа өр
+    # багтсанаас болж энэ зам руу унасныг чимээгүй өнгөрөөхгүй, логлоно.
+    if not use_qpay_eb and payment.provider == "QPAY" and comps:
+        log.warning("e-Barimt: QPay төлбөр (%s) ӨР багтсан тул локал PosAPI-аар "
+                    "явлаа — mock=%s, ГЛОБАЛ ТТД. Түрээслэгчийн ТТД-ээр гарахгүй.",
+                    payment.id, settings.ebarimt_mock)
+    if settings.ebarimt_mock and not use_qpay_eb:
+        log.warning("e-Barimt MOCK: payment=%s %s₮ — ХУУРАМЧ баримт үүслээ. "
+                    "Production дээр PARKING_EBARIMT_MOCK=false байх ёстой.",
+                    payment.id, float(payment.amount))
     # ВАЖНО: e-Barimt амжилтгүй болсон ч төлбөрийг PAID болгож ХААЛТЫГ НЭЭНЭ —
     # жолооч төлсөн атлаа гацахгүй. Баримтыг FAILED болгож дараа дахин үүсгэж болно.
     receipt_raw, ebarimt_error = {}, None
