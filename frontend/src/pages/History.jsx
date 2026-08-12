@@ -50,6 +50,9 @@ function ClosedByCell({ s }) {
 const STATUSES = [
   ['', 'Бүгд'], ['OPEN', 'Зогсож буй'], ['AWAITING_PAYMENT', 'Төлбөр хүлээж буй'],
   ['PAID', 'Төлсөн'], ['CLOSED', 'Гарсан'], ['FREE', 'Үнэгүй'], ['MANUAL_CLOSED', 'Гараар хаасан'],
+  // Nested зогсоолтой газарт (Рашбулаг ЭТТ): доторх зогсоолд орж, төлбөрийн
+  // тоолуур нь зогссон машинууд. Төлбөр яагаад бага байсныг тайлбарлана.
+  ['INNER', 'Дотор зогссон'],
 ]
 
 export default function History() {
@@ -63,7 +66,12 @@ export default function History() {
   const { data: sites } = useFetch('/api/admin/sites', { initial: [], silent: true })
 
   const params = new URLSearchParams({ limit, offset: page * limit })
-  Object.entries(filters).forEach(([k, v]) => v && params.set(k, v))
+  Object.entries(filters).forEach(([k, v]) => {
+    if (!v) return
+    // «Дотор зогссон» нь төлөв биш — тусдаа шүүлтүүр (аль хэдийн гарсан ч харагдана)
+    if (k === 'status' && v === 'INNER') params.set('inner', 'ever')
+    else params.set(k, v)
+  })
   const { data, reload } = useFetch(`/api/sessions?${params}`, { initial: { total: 0, rows: [] } })
 
   // Андуурч хаасан бүртгэлийг буцаан зогсоолд оруулах (status→OPEN, цаг үргэлжилнэ)
@@ -109,7 +117,19 @@ export default function History() {
             <td className="td">{s.site_name}</td>
             <td className="td font-mono text-xs">{fmtDate(s.entry_time)}</td>
             <td className="td font-mono text-xs">{fmtDate(s.exit_time)}</td>
-            <td className="td font-mono">{fmtDur(s.duration_minutes)}</td>
+            <td className="td font-mono">
+              {fmtDur(s.duration_minutes)}
+              {/* Доторх (nested) зогсоолд өнгөрүүлсэн хугацаа төлбөрөөс хасагдсан —
+                  «яагаад ийм бага дүн гарав» гэдгийг мөрөн дээр нь шууд харуулна */}
+              {(s.paused_minutes > 0 || s.paused_since) && (
+                <div className="text-[10px] text-sky-300"
+                  title={s.paused_since
+                    ? 'ОДОО доторх зогсоолд байна — тоолуур зогссон'
+                    : 'Доторх зогсоолд өнгөрүүлсэн — энэ хугацаа төлбөрөөс хасагдсан'}>
+                  {s.paused_since ? '⏸ дотор' : `дотор ${fmtDur(s.paused_minutes)}`}
+                </div>
+              )}
+            </td>
             <td className="td font-mono font-semibold">{s.total_fee !== null ? `${fmt(s.total_fee)}₮` : '-'}</td>
             <td className="td"><PaymentCell s={s} /></td>
             <td className="td text-xs">{s.discount_name || '-'}</td>
