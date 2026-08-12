@@ -1,0 +1,116 @@
+{
+  "info": {
+    "name": "billingservice.mn Partner API",
+    "description": "billingservice.mn-ийн гаднын системд зориулсан API.\n\nҮйлчилгээнүүд:\n• Үйлчилгээ 2 — API-аар нэхэмжлэх үүсгэж SMS илгээх (scope: invoice)\n• Үйлчилгээ 3 — өөрийн системээс eBarimt баримт шууд үүсгэх (scope: receipt)\n• Үйлчилгээ 4 — POS терминалаас eBarimt (scope: pos, device_id заавал)\n\nТУРШИЛТ: Dashboard → Developers хуудаснаас ТЕСТ түлхүүр (bsk_test_...) үүсгээд {{apiKey}} хувьсагчид тавина. Тест түлхүүр СЕРВЕРТ ЮУ Ч БИЧИХГҮЙ — бодит хэлбэртэй симуляц хариу буцаана (хариунд \"test\": true талбар байна). Бодит ажиллагаанд live түлхүүрээ ашиглана.\n\nIdempotency: POST хүсэлтүүдэд Idempotency-Key header дэмжигдэнэ — ижил түлхүүр+ижил body давтвал хадгалсан хариу буцаана (давхар нэхэмжлэх/баримт үүсэхгүй).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://billing.mastrsys.com/api/v1", "type": "string" },
+    { "key": "apiKey", "value": "bsk_test_ТҮЛХҮҮРЭЭ_ЭНД", "type": "string" }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-Api-Key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Үйлчилгээ 2 — Нэхэмжлэх",
+      "item": [
+        {
+          "name": "Нэхэмжлэх үүсгэж SMS илгээх",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "inv-{{$guid}}", "description": "Давхар илгээлтээс хамгаална — өөрийн системийн захиалгын дугаар г.м. тогтвортой утга тавьбал зохимжтой." }
+            ],
+            "url": { "raw": "{{baseUrl}}/partner/invoices", "host": ["{{baseUrl}}"], "path": ["partner", "invoices"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerName\": \"Бат-Эрдэнэ\",\n  \"customerPhone\": \"99112233\",\n  \"amount\": 150000,\n  \"description\": \"2026 оны 8-р сарын үйлчилгээ\",\n  \"dueDate\": \"2026-08-25\",\n  \"send\": true\n}"
+            },
+            "description": "Нэхэмжлэх үүсгээд төлбөрийн линкийг SMS-ээр илгээнэ. Хариунд pay_url ирнэ. Илгээлт бүр гэрээт үнээр (ж: 75₮) тоологдоно."
+          }
+        },
+        {
+          "name": "Нэхэмжлэхийн төлөв харах",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/partner/invoices/:id", "host": ["{{baseUrl}}"], "path": ["partner", "invoices", ":id"], "variable": [{ "key": "id", "value": "" }] },
+            "description": "Төлөв (SENT/VIEWED/PAID...), үлдэгдэл, төлөгдсөн бол eBarimt баримтын мэдээлэл."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Үйлчилгээ 3 — eBarimt API",
+      "item": [
+        {
+          "name": "Баримт үүсгэх (B2C — иргэн)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "rcpt-{{$guid}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/partner/receipts", "host": ["{{baseUrl}}"], "path": ["partner", "receipts"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 55000,\n  \"description\": \"Борлуулалт #1024\",\n  \"payment_method\": \"CARD\"\n}"
+            },
+            "description": "Өөрийн системийн борлуулалтад eBarimt баримт үүсгэнэ. Сарын тоо шатлалын хязгаартай (Billing хуудас) — хязгаар дүүрвэл 429 RECEIPT_QUOTA_EXCEEDED буцна."
+          }
+        },
+        {
+          "name": "Баримт үүсгэх (B2B — байгууллага)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "rcpt-{{$guid}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/partner/receipts", "host": ["{{baseUrl}}"], "path": ["partner", "receipts"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 1200000,\n  \"description\": \"Гэрээт үйлчилгээ\",\n  \"receipt_type\": \"ORGANIZATION\",\n  \"payer_reg_no\": \"1234567\",\n  \"payment_method\": \"BANK_TRANSFER\"\n}"
+            },
+            "description": "Төлөгч байгууллагын регистр/ТТД-гээр ААН-ийн (B2B) баримт гарна."
+          }
+        },
+        {
+          "name": "Баримтын төлөв харах",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/partner/receipts/:id", "host": ["{{baseUrl}}"], "path": ["partner", "receipts", ":id"], "variable": [{ "key": "id", "value": "" }] },
+            "description": "state=CREATED бол receipt_no (ДДТД), lottery, qr_data ирнэ; FAILED бол error + автомат retry хийгдэнэ."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Үйлчилгээ 4 — POS терминал",
+      "item": [
+        {
+          "name": "POS-оос баримт үүсгэх (device_id-тэй)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "pos-{{$guid}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/partner/receipts", "host": ["{{baseUrl}}"], "path": ["partner", "receipts"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 18000,\n  \"description\": \"Кассын борлуулалт\",\n  \"payment_method\": \"CASH\",\n  \"device_id\": \"POS-001-SERIAL-XYZ\",\n  \"device_name\": \"Салбар 1 — касс\"\n}"
+            },
+            "description": "device_id илгээснээр терминал автоматаар бүртгэгдэж тоологдоно (сарын хураамж = идэвхтэй терминалын тоо × 20,000₮). Баримтын тоон хязгааргүй. Блоклогдсон терминалд 403 TERMINAL_BLOCKED."
+          }
+        }
+      ]
+    }
+  ]
+}
