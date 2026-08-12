@@ -1082,6 +1082,52 @@ def list_templates(db: Session = Depends(get_db), user: User = Depends(get_curre
     return [to_dict(t, extra={"tiers": [to_dict(x) for x in t.tiers]}) for t in templates]
 
 
+@router.post("/tariff-templates/preview")
+def preview_tariff(body: dict, user: User = Depends(require("settings", "discounts"))):
+    """Тарифыг ХАДГАЛАХААС ӨМНӨ жишээ хугацаанууд дээр тооцож харуулна.
+
+    «Загварыг зөв оруулсан уу» гэдгийг таамаглахын оронд тоогоор батална —
+    ЯГ production-ий `tier_price` функцээр бодно (хуулбар логик байхгүй тул
+    урьдчилсан харагдац бодит дүнгээс хэзээ ч зөрөхгүй).
+
+    Хариунд `jump` талбар: өмнөх цэгээс хэдэн төгрөгөөр үсэрснийг өгнө —
+    «120 мин 2000₮ атлаа 121 мин 5000₮» шиг эгзэгтэй үсрэлтийг админ хардаг.
+    """
+    from types import SimpleNamespace
+
+    from ..billing import tier_price
+
+    tiers = sorted(
+        [SimpleNamespace(upto_minutes=int(t["upto_minutes"]), price=float(t["price"]))
+         for t in (body.get("tiers") or []) if t.get("upto_minutes")],
+        key=lambda t: t.upto_minutes)
+    tpl = SimpleNamespace(
+        free_minutes=int(body.get("free_minutes") or 0),
+        extra_hour_price=float(body.get("extra_hour_price") or 0),
+        daily_cap=float(body.get("daily_cap") or 0),
+        tiers=tiers)
+
+    marks = body.get("minutes") or [15, 30, 31, 45, 60, 61, 90, 120, 121, 150,
+                                    180, 240, 300, 360, 480, 720, 1440]
+    out, prev = [], None
+    for m in sorted({int(x) for x in marks if int(x) > 0}):
+        if tpl.free_minutes and m <= tpl.free_minutes:
+            fee, reason = 0.0, f"эхний {tpl.free_minutes} мин үнэгүй"
+        else:
+            fee = float(tier_price(tpl, m))
+            reason = ""
+            if tiers and m > tiers[-1].upto_minutes:
+                import math as _m
+                hrs = _m.ceil((m - tiers[-1].upto_minutes) / 60)
+                reason = f"сүүлийн шатлал + {hrs} цаг × {tpl.extra_hour_price:.0f}₮"
+            if tpl.daily_cap and fee > tpl.daily_cap:
+                fee, reason = tpl.daily_cap, "хоногийн дээд хязгаарт хүрсэн"
+        out.append({"minutes": m, "fee": fee, "reason": reason,
+                    "jump": None if prev is None else fee - prev})
+        prev = fee
+    return {"rows": out}
+
+
 @router.post("/tariff-templates")
 def create_template(payload: schemas.TariffTemplateCreate, db: Session = Depends(get_db), user: User = Depends(require("settings", "discounts"))):
     body = payload.dump()

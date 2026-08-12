@@ -5,6 +5,60 @@ import { api, fmt } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Field, Modal, Table, useToast } from '../components/ui'
 
+// Тарифыг ХАДГАЛАХААС ӨМНӨ бодит дүнг харуулна — «зөв оруулсан уу» гэдгийг
+// таамаглахын оронд тоогоор батална. Тооцоог backend хийнэ (production-ий
+// яг тэр функц) тул урьдчилсан харагдац бодит төлбөрөөс зөрөхгүй.
+function TariffPreview({ draft }) {
+  const [rows, setRows] = useState([])
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    const body = {
+      free_minutes: +draft.free_minutes || 0,
+      extra_hour_price: +draft.extra_hour_price || 0,
+      daily_cap: draft.daily_cap === '' ? 0 : +draft.daily_cap,
+      tiers: draft.tiers.map((t) => ({ upto_minutes: +t.upto_minutes || 0, price: +t.price || 0 })),
+    }
+    // Талбар бичих бүрд хүсэлт явуулахгүй — бичиж дуусахыг хүлээнэ
+    const id = setTimeout(() => {
+      api('/api/admin/tariff-templates/preview', { method: 'POST', body })
+        .then((d) => { setRows(d.rows); setErr('') })
+        .catch((e) => setErr(e.message))
+    }, 400)
+    return () => clearTimeout(id)
+  }, [draft.free_minutes, draft.extra_hour_price, draft.daily_cap, JSON.stringify(draft.tiers)])
+
+  const dur = (m) => (m < 60 ? `${m}м` : `${Math.floor(m / 60)}ц${m % 60 ? ` ${m % 60}м` : ''}`)
+
+  return (
+    <div className="rounded-lg border border-surface-border/60 p-3">
+      <div className="label mb-2">Урьдчилан харах — жолооч хэдийг төлөх вэ</div>
+      {err && <div className="text-xs text-red-400">{err}</div>}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+        {rows.map((r) => (
+          <div key={r.minutes}
+            className={`flex justify-between px-2 py-1 rounded ${
+              r.fee === 0 ? 'bg-accent/10' : 'bg-surface-muted/40'}`}
+            title={r.reason || ''}>
+            <span className="text-slate-400 font-mono">{dur(r.minutes)}</span>
+            <span className="font-mono font-semibold">
+              {r.fee === 0 ? <span className="text-accent">Үнэгүй</span> : `${fmt(r.fee)}₮`}
+              {/* Хоёр хөрш цэгийн хооронд 2 дахин их үсрэлт = жолоочийн гомдлын эх үүсвэр */}
+              {r.jump > 0 && r.fee >= 2 * (r.fee - r.jump) && (r.fee - r.jump) > 0 && (
+                <span className="ml-1 text-amber-400" title={`Өмнөх цэгээс ${fmt(r.jump)}₮ үсэрсэн`}>⚠</span>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="text-[11px] text-slate-500 mt-2">
+        ⚠ = өмнөх цэгээс 2 дахин их үсэрсэн (1 минутын зөрүүд их дүн нэмэгдэж байвал шалгана уу).
+        Дүн НӨАТ-гүй, хөнгөлөлтгүй цэвэр тарифын дүн.
+      </div>
+    </div>
+  )
+}
+
 export default function Tariffs() {
   const [tab, setTab] = useState('templates')
   return (
@@ -175,6 +229,7 @@ function Templates() {
                 </button>
               </div>
             </div>
+            <TariffPreview draft={editing} />
             <button className="btn-primary w-full justify-center">Хадгалах</button>
           </form>
         )}
