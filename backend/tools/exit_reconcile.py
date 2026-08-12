@@ -11,11 +11,19 @@
 `camera_sync` (2026-08-12-нээс) үүнийг урсгалын дунд хийдэг болсон ч зөвхөн
 lookback_hours (анхдагч 8ц) цонхыг хардаг. ХУРИМТЛАГДСАН үлдэгдэлд энэ хэрэгсэл.
 
+ХОЁР ҮЕ ШАТ (дараалал нь ЧУХАЛ — эсрэгээр нь хийвэл орлого устана):
+  1. Камерын логт ГАРАХ УНШИЛТ нь БАЙГАА бүртгэл → ЖИНХЭНЭ гарсан цагаар хаана,
+     төлбөр нь тэр хугацаагаар зөв бодогдоно (орлого хадгалагдана).
+  2. `--free-rest N` өгвөл: логт гарах баримт нь ОЛДООГҮЙ, зөвхөн орох уншилттай,
+     N цагаас хуучин бүртгэл → ҮНЭГҮЙ хаана (0₮, хугацаа NULL, өргүй). Хэзээ
+     гарсныг нь мэдэхгүй тул хуурамч дүн бичихгүй.
+
 Ажиллуулах (эхлээд ЗААВАЛ dry-run):
     cd /root/PARKING/backend
-    venv/bin/python tools/exit_reconcile.py --hours 72              # зөвхөн харуулна
-    venv/bin/python tools/exit_reconcile.py --hours 72 --site KH
-    venv/bin/python tools/exit_reconcile.py --hours 72 --apply      # ҮНЭХЭЭР хаана
+    venv/bin/python tools/exit_reconcile.py --hours 72                    # харуулна
+    venv/bin/python tools/exit_reconcile.py --hours 72 --free-rest 24     # 2 үе шат
+    venv/bin/python tools/exit_reconcile.py --hours 72 --site KH --apply  # нэг зогсоол
+    venv/bin/python tools/exit_reconcile.py --hours 72 --free-rest 24 --apply
 
 Хамгаалалт:
   • ЗӨВХӨН OPEN/PAID бүртгэлд хүрнэ. AWAITING_PAYMENT-д ХҮРЭХГҮЙ — тэр машиныг
@@ -49,6 +57,9 @@ def main():
     ap.add_argument("--site", help="зогсоолын код (жишээ: KH)")
     ap.add_argument("--apply", action="store_true", help="ҮНЭХЭЭР хаана")
     ap.add_argument("--debt", action="store_true", help="хаахдаа өр үүсгэх")
+    ap.add_argument("--free-rest", type=int, metavar="ЦАГ",
+                    help="логоос гарсан нь ОЛДООГҮЙ, зөвхөн орох уншилттай "
+                         "бүртгэлээс N цагаас хуучныг ҮНЭГҮЙ хаах (0₮, өргүй)")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -64,7 +75,7 @@ def main():
         mode = "ХААХ" if args.apply else "DRY-RUN (юу ч өөрчлөгдөхгүй)"
         print(f"\n═══ ГАРАХ УНШИЛТААР ТУЛГАХ · {mode} · сүүлийн {args.hours}ц ═══")
 
-        grand_n, grand_fee = 0, 0.0
+        grand_n, grand_fee, grand_free = 0, 0.0, 0
         for site in sites:
             open_rows = (db.query(ParkingSession)
                          .filter(ParkingSession.site_id == site.id,
@@ -96,8 +107,6 @@ def main():
             print(f"\n── {site.name} ({site.site_code})  ·  нээлттэй {len(open_rows)}"
                   f"  ·  логоос гарсан нь тогтоогдсон {len(hits)}"
                   + (f"  ·  ⚠ {len(broken)} камер уншигдсангүй" if broken else ""))
-            if not hits:
-                continue
             hits.sort(key=lambda h: h[0].entry_time)
             for s, t in hits[:15]:
                 hrs = (t - s.entry_time).total_seconds() / 3600
@@ -106,9 +115,44 @@ def main():
             if len(hits) > 15:
                 print(f"   … бас {len(hits) - 15}")
 
+            # ── 2-р үе шат: логоос ОЛДООГҮЙ, зөвхөн орох уншилттай хуучин
+            # бүртгэлүүд. Гарах баримт хаана ч байхгүй тул хугацаа нь ТОДОРХОЙГҮЙ —
+            # хуурамч дүн бичихгүй, ҮНЭГҮЙ хаана (auto_close-ийн entry_only дүрэмтэй
+            # ижил зарчим, зөвхөн босгыг нь энд гараар өгнө).
+            free_rows = []
+            if args.free_rest:
+                hit_ids = {s.id for s, _ in hits}
+                cutoff = datetime.utcnow() - timedelta(hours=args.free_rest)
+                free_rows = [s for s in open_rows
+                             if s.id not in hit_ids and s.status == "OPEN"
+                             and s.exit_device_id is None and s.entry_time < cutoff]
+                if free_rows:
+                    print(f"   + логт олдоогүй, {args.free_rest}ц-аас хуучин: "
+                          f"{len(free_rows)} → ҮНЭГҮЙ хаана")
+
             if not args.apply:
                 grand_n += len(hits)
+                grand_free += len(free_rows)
                 continue
+            for s in free_rows:
+                try:
+                    s.status = "FREE"
+                    s.exit_time = datetime.utcnow()
+                    s.duration_minutes = None      # хэзээ гарсныг МЭДЭХГҮЙ
+                    s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
+                    s.note = (f"{s.note + ' | ' if s.note else ''}"
+                              f"exit_reconcile: гарах баримт олдсонгүй — "
+                              f"{args.free_rest}ц дараа үнэгүй хаав")[:1000]
+                    db.add(AuditLog(username="system", action="EXIT_RECONCILE_FREE",
+                                    entity="session", entity_id=s.id,
+                                    detail={"plate": s.plate_number,
+                                            "entry": s.entry_time.isoformat(),
+                                            "hours": args.free_rest}))
+                    db.commit()
+                    grand_free += 1
+                except Exception as e:  # noqa: BLE001
+                    db.rollback()
+                    print(f"   ! {s.plate_number}: {e}")
             for s, t in hits:
                 try:
                     s.exit_time = t
@@ -133,8 +177,14 @@ def main():
         if args.apply:
             print(f"✅ {grand_n} бүртгэл ЖИНХЭНЭ гарсан цагаар хаагдлаа "
                   f"(нийт {grand_fee:,.0f}₮ бодогдов)")
+            if grand_free:
+                print(f"✅ {grand_free} бүртгэл гарах баримтгүй тул ҮНЭГҮЙ хаагдлаа "
+                      f"(0₮, өргүй)")
         else:
-            print(f"{grand_n} бүртгэлийг хаах боломжтой. Үнэхээр хаах бол `--apply`.")
+            print(f"{grand_n} бүртгэлийг ЖИНХЭНЭ гарсан цагаар хаах боломжтой.")
+            if grand_free:
+                print(f"{grand_free} бүртгэлийг ҮНЭГҮЙ хаах боломжтой (гарах баримтгүй).")
+            print("Үнэхээр хаах бол `--apply` нэмнэ үү.")
         print()
     finally:
         db.close()
