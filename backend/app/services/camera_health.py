@@ -182,6 +182,15 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
                     pass
             await asyncio.sleep(3)
 
+    # ЭНЭ loop-д нээгдсэн камерын HTTP холболтуудыг хаана. `asyncio.run` loop-ыг
+    # хаамагц хаагдаагүй сокет орхигдоно (22 камер × өдөрт 4 удаа) — тиймээс
+    # loop амьд байхад нь энд цэвэрлэнэ.
+    try:
+        from .barrier import close_camera_clients
+        await close_camera_clients()
+    except Exception:  # noqa: BLE001 — цэвэрлэгээ дүнг хэзээ ч унагаахгүй
+        log.warning("камерын холболт хаахад алдаа гарлаа", exc_info=True)
+
     return {"checked_at": datetime.utcnow().isoformat(),
             "results": results, "hung": [r["ip"] for r in hung],
             "rebooted": rebooted, "skipped": skipped,

@@ -47,31 +47,65 @@ RPC_METHODS = {
 # алдагдалтай байсан тул сүлжээ биш — холболтын сангийн асуудал.
 #
 # Шийдэл: камерын IP тус бүрд НЭГ клиент, keep-alive-аар холболтоо дахин ашиглана.
-_http_clients: dict[str, httpx.AsyncClient] = {}
+# ЧУХАЛ: (event loop id, ip)-ээр түлхүүрлэнэ. httpx.AsyncClient-ийн холболтын сан
+# нь anyio-ийн примитив (asyncio.Event) ашигладаг ба ҮҮССЭН event loop-даа
+# БЭХЛЭГДДЭГ. camera_health.run_once нь `asyncio.run(...)`-аар тусдаа thread дээр
+# ШИНЭ loop үүсгэдэг тул үндсэн FastAPI loop-д үүссэн клиентийг тэндээс ашиглахад:
+#     RuntimeError: <asyncio.locks.Event object ...> is bound to a different event loop
+# гэж унадаг байв — ГАЦСАН КАМЕР REBOOT ХИЙГДЭХГҮЙ (2026-08-12: 22 камерын 9 нь
+# гацсан атлаа 10.0.111.13 яг үүнээс болж сэргээгүй).
+_http_clients: dict[tuple[int, str], tuple] = {}   # (loop id, ip) -> (loop, client)
+
+
+def _loop_id():
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    return id(loop), loop
 
 
 def camera_client(ip: str) -> httpx.AsyncClient:
-    """Тухайн камерын хуваалцсан HTTP клиент (холболт дахин ашиглана)."""
-    c = _http_clients.get(ip)
-    if c is None or c.is_closed:
-        c = _http_clients[ip] = httpx.AsyncClient(
+    """Тухайн камерын хуваалцсан HTTP клиент (холболт дахин ашиглана).
+    Клиент нь АЖИЛЛАЖ БУЙ event loop-д харьяална — loop хооронд хуваалцахгүй."""
+    lid, loop = _loop_id()
+    key = (lid, ip)
+    entry = _http_clients.get(key)
+    # `id()` нь loop устсаны дараа дахин ашиглагдаж болзошгүй тул объектыг мөн шалгана
+    if entry is None or entry[0] is not loop or entry[1].is_closed:
+        c = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.barrier_attempt_timeout_sec),
             limits=httpx.Limits(
                 max_connections=settings.camera_max_connections,
                 max_keepalive_connections=settings.camera_max_connections,
                 keepalive_expiry=60.0),
         )
-    return c
+        entry = _http_clients[key] = (loop, c)
+    return entry[1]
 
 
 async def close_camera_clients():
-    """Зогсох үед бүх холболтыг цэвэр хаана (камерт орхигдсон сокет үлдээхгүй)."""
-    for ip, c in list(_http_clients.items()):
-        try:
-            await c.aclose()
-        except Exception:  # noqa: BLE001
-            pass
-        _http_clients.pop(ip, None)
+    """АЖИЛЛАЖ БУЙ loop-ийн бүх холболтыг цэвэр хаана (орхигдсон сокет үлдээхгүй).
+
+    Зогсох үед үндсэн loop-оос дуудагдана. Мөн богино насалдаг loop
+    (camera_health) ажлаа дуусахдаа ЗААВАЛ дуудна — эс бол тэр loop-ийн
+    клиентүүд хаагдалгүй үлдэж сокет алдагдана (22 камер × өдөрт 4 удаа)."""
+    lid, loop = _loop_id()
+    for key in list(_http_clients):
+        entry = _http_clients.get(key)
+        if entry is None:
+            continue
+        owner, c = entry
+        # Өөрийн loop-ийнхыг хаана; хаагдсан loop-ийнхыг зүгээр бүртгэлээс хасна
+        # (өөр loop-ийн клиентийг эндээс await хийж хааж БОЛОХГҮЙ)
+        if key[0] == lid and owner is loop:
+            try:
+                await c.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            _http_clients.pop(key, None)
+        elif owner is not None and owner.is_closed():
+            _http_clients.pop(key, None)
 
 
 # Камер «өвчтэй» цонх: хаалтны команд бүх оролдлогодоо timeout болбол камер
@@ -97,10 +131,11 @@ async def reset_camera_client(ip: str):
     keep-alive холболт камер талдаа үхсэн байх нь ийм timeout-ын түгээмэл шалтгаан
     бөгөөд шинэ TCP холболтоор дараагийн команд сэргэдэг. Камерыг reboot хийхээс
     хамаагүй аюулгүй — камерын ажиллагаа, бусад системд огт нөлөөгүй."""
-    c = _http_clients.pop(ip, None)
-    if c is not None:
+    lid, _loop = _loop_id()
+    entry = _http_clients.pop((lid, ip), None)
+    if entry is not None:
         try:
-            await c.aclose()
+            await entry[1].aclose()
         except Exception:  # noqa: BLE001
             pass
         log.info("%s: холболтын санг шинэчлэв (дараагийн команд шинэ TCP-ээр)", ip)
@@ -563,7 +598,9 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
 # хаалт ирмэгц дэлгэц давталтаа тасалж бууж өгнө. Хаалт нь түгжээг хэт удаан
 # хүлээхгүй (max 2с) — авч чадаагүй ч команд явуулна, учир нь хаалт нээх нь
 # хамгийн чухал.
-_rpc_locks: dict[str, asyncio.Lock] = {}
+# (event loop id, камерын ip) -> (loop, Lock). Loop-оор түлхүүрлэсэн шалтгааныг
+# _rpc_lock()-ийн тайлбараас хараарай.
+_rpc_locks: dict[tuple[int, str], tuple] = {}
 _barrier_waiting: dict[str, int] = {}     # ip -> хүлээж буй хаалтны командын тоо
 
 # Камер сесс чөлөөлөхөд ХОЦРОГДОЛТОЙ: logout буцсаны дараа ч сессийн слот шууд
@@ -590,10 +627,39 @@ async def wait_rpc_gap(ip: str):
 
 
 def _rpc_lock(ip: str) -> asyncio.Lock:
-    lock = _rpc_locks.get(ip)
-    if lock is None:
-        lock = _rpc_locks[ip] = asyncio.Lock()
-    return lock
+    """Тухайн камерын RPC түгжээ — АЖИЛЛАЖ БУЙ event loop-д харьяалагдана.
+
+    ЯАГААД loop-оор түлхүүрлэв: `asyncio.Lock` нь өөрийг нь үүсгэсэн event
+    loop-д БЭХЛЭГДДЭГ. camera_health.run_once нь `asyncio.run(...)`-аар ШИНЭ
+    loop үүсгэж тусдаа thread дээр ажилладаг тул үндсэн FastAPI loop-д хэдийнэ
+    үүссэн түгжээг тэндээс авахад:
+        RuntimeError: <asyncio.locks.Event ...> is bound to a different event loop
+    гэж унаж, ГАЦСАН КАМЕРЫГ REBOOT ХИЙЖ ЧАДДАГГҮЙ байв (2026-08-12: 22 камерын
+    9 нь гацсан атлаа 10.0.111.13 яг үүнээс болж сэргээгүй).
+
+    Түгжээг loop бүрд ТУСАД НЬ барина — байгаа объектыг ХЭЗЭЭ Ч солихгүй.
+    Солибол үндсэн loop дээр түгжээ БАРИАТАЙ байхад нь өөр объектоор солигдож,
+    нэг камерт хоёр RPC зэрэг очих эрсдэлтэй (Monnis-ийн сесс хязгаарын алдаа).
+
+    Loop хооронд харилцан хаалт үүсэхгүй — camera_health нь reboot хийхээсээ
+    өмнө `barrier_is_waiting(ip)`-ээр хаалтын команд дараалалд байгаа эсэхийг
+    тусад нь шалгаж хамгаалдаг."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    key = (id(loop), ip)
+    entry = _rpc_locks.get(key)
+    # `id()` нь loop устсаны дараа дахин ашиглагдаж болзошгүй тул объектыг нь
+    # мөн шалгана
+    if entry is None or entry[0] is not loop:
+        # Хаагдсан loop-уудын үлдэгдлийг цэвэрлэнэ (camera_health өдөрт хэдэн
+        # удаа шинэ loop үүсгэдэг — эс бол бүртгэл хязгааргүй өснө)
+        for k in [k for k, (lp, _) in _rpc_locks.items()
+                  if lp is not None and lp.is_closed()]:
+            _rpc_locks.pop(k, None)
+        entry = _rpc_locks[key] = (loop, asyncio.Lock())
+    return entry[1]
 
 
 def barrier_is_waiting(ip: str) -> bool:
