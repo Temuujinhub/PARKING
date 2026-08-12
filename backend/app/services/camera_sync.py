@@ -139,6 +139,57 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
             skipped += 1
             log.warning("%s %s: нөхөж бүртгэж чадсангүй — %r", site.name, plate, e)
 
+    # ── ГАРАХ уншилтаар НЭЭЛТТЭЙ бүртгэлийг хаах ─────────────────────────────
+    # Өмнө нь гарах event-ийг ЗӨВХӨН шинэ бүртгэл үүсгэхэд ашигладаг байв —
+    # камерын лог «машин 17:51-д гарсан» гэж хэлж байхад бидний DB «зогсож
+    # байна» гэж үздэг. Үр дагавар нь: зогсоолын багтаамжаас олон машин
+    # «дотор» харагдах (1,878), 24ц+ «зогссон» машин, гарах ЗУРАГТАЙ атлаа
+    # «Зогсож байна» төлөвтэй бүртгэл, эцэст нь 12 цагийн авто хаалт хуурамч
+    # хугацаагаар хаах. Одоо логийн гарах уншилтыг БОДИТ гарсан цаг гэж
+    # хүлээн авч бүртгэлийг ТЭР ЦАГААР хаана.
+    closed_by_log, log_fee = 0, 0.0
+    for raw_plate, times in exits_by_plate.items():
+        p = normalize_plate(raw_plate)
+        if rules["skip_invalid_plate"] and not is_valid_plate(p):
+            continue
+        for t in times:
+            if not (watermark < t <= horizon):
+                continue          # зөвхөн энэ мужийн шинэ уншилт
+            # AWAITING_PAYMENT-д ХҮРЭХГҮЙ: тэр машиныг систем аль хэдийн гарцад
+            # харсан, төлбөр хүлээж байна — auto_close-ийн 2 цагийн дүрэм
+            # (unpaid_exit өртэй) түүнийг зөв шийднэ.
+            s = (db.query(ParkingSession)
+                 .filter(ParkingSession.site_id == site.id,
+                         ParkingSession.plate_number == p,
+                         ParkingSession.status.in_(("OPEN", "PAID")),
+                         ParkingSession.entry_time < t)
+                 .order_by(ParkingSession.entry_time.desc()).first())
+            if not s:
+                continue
+            try:
+                # close_session_forced нь AWAITING_PAYMENT + exit_time үед
+                # төлбөрийг ТЭР ЦАГТ царцаадаг — логийн цагийг хүчинтэй болгоно
+                s.exit_time = t
+                s.exit_confirmed = True
+                if s.status == "OPEN":
+                    s.status = "AWAITING_PAYMENT"
+                due = close_session_forced(db, s, "camera_sync_exit", "system",
+                                           create_comp=rules["create_debt"])
+                db.add(AuditLog(username="system", action="CAMERA_SYNC_EXIT",
+                                entity="session", entity_id=s.id,
+                                detail={"plate": p, "exit": t.isoformat(),
+                                        "entry": s.entry_time.isoformat(), "debt": due}))
+                db.commit()
+                closed_by_log += 1
+                log_fee += float(s.total_fee or 0)
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                log.warning("%s %s: логийн гарах уншилтаар хааж чадсангүй — %r",
+                            site.name, p, e)
+    if closed_by_log:
+        log.info("%s: логийн ГАРАХ уншилтаар %d бүртгэл хаагдлаа (%.0f₮)",
+                 site.name, closed_by_log, log_fee)
+
     # Watermark-ыг УРАГШ нь л зөөнө (боловсруулсан хамгийн сүүлийн event хүртэл)
     if not dry_run:
         # ЧУХАЛ: ОРОХ камер уншигдаагүй бол watermark-ыг УРАГШЛУУЛАХГҮЙ.
@@ -162,6 +213,7 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
         set_state(db, CAMSYNC_STATE, state)
         db.commit()
     return {"site": site.name, "created": created, "skipped": skipped,
+            "closed_by_log": closed_by_log,
             "debt": debt_total, "from": watermark.isoformat(),
             "to": horizon.isoformat()}
 
