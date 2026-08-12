@@ -348,6 +348,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
         base = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes="
         out = []
         for c in code_list:
+            # httptype=multipart нь ЭХЭНД: Dahua энэ параметртэй үед event-ийн
+            # JPEG-ийг мөн адил урсгалаар (multipart/mixed) илгээдэг. Үүнгүйгээр
+            # зөвхөн metadata ирж, зураг бүрд snapshot.cgi рүү тусад нь хандах
+            # шаардлагатай болдог — тэр нь удаан, камерыг ачаалдаг, гацсан үед
+            # огт авагддаггүй. Клиент тал аль хэдийн бэлэн (стримийг БАЙТААР
+            # уншиж _extract_images-ээр JPEG таслан авдаг) — зөвхөн ЗӨВ АСУУХ
+            # хэрэгтэй байсан. Камер танихгүй бол 400/404 өгч дараагийн
+            # хувилбар руу шилжинэ (эрсдэлгүй).
+            out.append(f"{base}{c}&heartbeat={hb}&httptype=multipart")
+            out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}&httptype=multipart")
             out.append(f"{base}{c}&heartbeat={hb}")          # хэвийн
             out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}")  # хаалт encode хийсэн
             out.append(f"{base}{c}")                          # heartbeat-гүй
@@ -387,6 +397,9 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
         url = variants[vi % len(variants)]
         codes = url.split("codes=")[1].split("&")[0]
         buffer = b""
+        # Холболт эхлэхээс ӨМНӨ утга авна: холбогдож ч чадалгүй except руу
+        # унавал доорх шалгалт UnboundLocalError өгөхгүй
+        conn_start, saw_event = 0.0, False
         try:
             # read timeout: энэ хугацаанд юу ч ирэхгүй бол холболт үхсэн гэж үзэж
             # ReadTimeout шиднэ → reconnect. read=None үед TCP чимээгүй тасрахад
@@ -459,6 +472,10 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     cycle_start = vi
                     log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}), event хүлээж байна")
                     last_touch = 0.0
+                    # 200 буцаасан ч ЖИНХЭНЭ event огт ирдэггүй хувилбар дээр
+                    # мөнхөд гацахаас сэргийлнэ (шинэ httptype=multipart хувилбарыг
+                    # камер «хүлээж авсан» мөртөө юу ч илгээхгүй байх эрсдэл).
+                    conn_start = time.monotonic()
                     # БАЙТААР уншина: стримд binary JPEG хэсэг ирдэг тул текст
                     # горимд тэдгээр нь мөхөж, event зураг АЛДАГДДАГ байв.
                     async for chunk in resp.aiter_bytes():
@@ -486,9 +503,17 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             # байсан тул DB бичих хугацаанд стрим зогсож, камерын
                             # буферт event хуримтлагдаж саатал үүсгэдэг байв.
                             _enqueue(device_id, data)
+                            saw_event = True
         except Exception as e:
             log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
                         f"{settings.camera_event_reconnect_sec}с дараа дахин")
+            # Холбогдсон мөртөө 3+ минут ЖИНХЭНЭ event огт ирээгүй бол энэ
+            # хувилбар «хүлээж авдаг ч илгээдэггүй» — дараагийнх руу шилжинэ.
+            if not saw_event and conn_start and time.monotonic() - conn_start > 180:
+                vi = (vi + 1) % len(variants)
+                _codes_ok[device_id] = vi
+                log.warning("%s: холбогдсон ч 3 минутад event ирсэнгүй — "
+                            "дараагийн URL хувилбар руу шилжлээ (#%d)", ip, vi)
             await asyncio.sleep(settings.camera_event_reconnect_sec)
 
 
