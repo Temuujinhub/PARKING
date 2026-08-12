@@ -12,7 +12,10 @@ f.txt = мөр бүрт нэг улсын дугаар (бодитоор дот�
 """
 import os
 import sys
+import warnings
 from datetime import datetime, timedelta
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,12 +62,42 @@ def overview(db, site):
         if not evs:
             print("   ❌ Дотоод камераас 24 цагт НЭГ Ч уншилт ирээгүй — камер event")
             print("      илгээхгүй байна (сүлжээ/тохиргоо/гацсан). camera_push_check.py-аар шалгах.")
+
+        # ── БАЛАНС: хэд орж, хэд гарсан бэ → одоо хэд дотор байх ЁСТОЙ вэ.
+        # «дотор» тоолол бодит байдлаас доогуур байвал алдаа орох талд уу,
+        # гарах талд уу гэдгийг энэ ялгаж өгнө (2026-08-12 Рашбулаг).
+        for label, hrs in (("сүүлийн 1ц", 1), ("сүүлийн 6ц", 6), ("сүүлийн 24ц", 24)):
+            win = [e for e in evs if e.created_at >= now - timedelta(hours=hrs)]
+            ins = [e for e in win if e.lane_dir != "exit"]
+            outs = [e for e in win if e.lane_dir == "exit"]
+            uniq_in = {e.plate_number for e in ins}
+            uniq_out = {e.plate_number for e in outs}
+            print(f"   {label:12} орох {len(ins):4} уншилт ({len(uniq_in)} дугаар)"
+                  f"   гарах {len(outs):4} ({len(uniq_out)} дугаар)"
+                  f"   → дотор үлдэх ёстой ≈ {len(uniq_in - uniq_out)}")
+
+        # Уншилт бүр session-д тохирсон эсэх (OCR-ойролцоо тохирлыг ч тооцно)
+        from app.session_logic import match_open_session
+        miss_in = []
+        for e in [x for x in evs if x.lane_dir != "exit"][:400]:
+            s, _ = match_open_session(db, e.plate_number, site.id)
+            if s is None:
+                miss_in.append(e)
+        print(f"\n   Дотоод ОРОХ уншилтаас session олдоогүй: {len(miss_in)}")
+        for e in miss_in[:10]:
+            print(f"      {L(e.created_at)}  «{e.plate_number}»  ← энэ машин «дотор» гэж тоологдоогүй")
+        if len(miss_in) > 10:
+            print(f"      … нийт {len(miss_in)}")
+
+        print("\n   ── сүүлийн 15 уншилт ──")
         for e in evs[:15]:
-            s = (db.query(ParkingSession)
-                 .filter(ParkingSession.site_id == site.id,
-                         ParkingSession.plate_number == e.plate_number,
-                         ParkingSession.status.in_(_ACTIVE)).first())
-            note = "session ✅" if s else "session ❌ (дугаар зөрсөн байж магадгүй)"
+            s, fuzzy = match_open_session(db, e.plate_number, site.id)
+            if s is None:
+                note = "session ❌"
+            else:
+                mark = " (OCR-ойролцоо)" if fuzzy else ""
+                inside = " · ДОТОР" if s.paused_since else ""
+                note = f"session ✅{mark}{inside}"
             print(f"   {L(e.created_at)}  {e.lane_dir:5}  «{e.plate_number}»  {note}")
         if len(evs) > 15:
             print(f"   … нийт {len(evs)}")
