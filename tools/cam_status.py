@@ -19,7 +19,12 @@
 import argparse
 import os
 import sys
+import warnings
 from datetime import datetime, timedelta
+
+# Кодын сан бүхэлдээ naive utcnow ашигладаг — оношилгооны гаралтыг
+# анхааруулгаар бөглөхгүйн тулд дарна (зан төлөвт нөлөөлөхгүй).
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 sys.path.insert(0, BACKEND)
@@ -62,7 +67,8 @@ def creds_section(db, sites):
     for c in cams:
         by_site.setdefault(c.site_id, []).append(c)
 
-    n_named, n_global = 0, 0
+    now = datetime.utcnow()
+    n_named, n_global, silent = 0, 0, []
     for s in sites:
         cl = by_site.get(s.id, [])
         if not cl:
@@ -76,10 +82,22 @@ def creds_section(db, sites):
             else:
                 n_global += 1
                 who = ".env глобал (тохируулаагүй)"
+            # Камер event илгээхээ больсныг ЭНД шууд харуулна — «зураг ирэхгүй»
+            # гэдгийн хамгийн түгээмэл шалтгаан нь камер өөрөө чимээгүй болсон
+            # байх бөгөөд credential-ийн үр дүнтэй андуурч болзошгүй.
+            mins = int((now - c.last_seen).total_seconds() // 60) if c.last_seen else None
+            flag = ""
+            if mins is None or mins >= 30:
+                flag = f"  ⚠ {mins} мин чимээгүй" if mins is not None else "  ⚠ огт харагдаагүй"
+                silent.append(f"{s.name}/{c.ip_address}")
             print(f"   {c.ip_address:16} {c.name[:22]:24} {who}"
-                  f"   сүүлд: {L(c.last_seen)}")
+                  f"   сүүлд: {L(c.last_seen)}{flag}")
         print()
-    print(f"Нийт: DB-д нэвтрэлт бэхэлсэн {n_named}, .env глобалаар ажиллаж буй {n_global}\n")
+    print(f"Нийт: DB-д нэвтрэлт бэхэлсэн {n_named}, .env глобалаар ажиллаж буй {n_global}")
+    if silent:
+        print(f"⚠ ЧИМЭЭГҮЙ камер ({len(silent)}): {', '.join(silent)}")
+        print("   Эдгээрийн зураг 0% байвал шалтгаан нь нэвтрэлт БИШ — камер/сүлжээ.")
+    print()
 
 
 def snapshot_section(db, sites, hours, split_at):
@@ -89,8 +107,8 @@ def snapshot_section(db, sites, hours, split_at):
     now = datetime.utcnow()
     since = now - timedelta(hours=hours)
 
-    print(f"{'Зогсоол':22} {'ОРОХ зураг: өмнө':>20} {'дараа':>20}"
-          f" {'ГАРАХ зураг: өмнө':>21} {'дараа':>20}")
+    print(f"{'Зогсоол':22} {'ОРОХ зураг: өмнө':>20} {'дараа':>20}    "
+          f"{'ГАРАХ зураг: өмнө':>19} {'дараа':>20}")
     for s in sites:
         rows = (db.query(ParkingSession)
                 .filter(ParkingSession.site_id == s.id,
@@ -117,10 +135,21 @@ def snapshot_section(db, sites, hours, split_at):
         ea, at_ = stat(after)
         xb, xt = stat(before, True)
         xa, xt2 = stat(after, True)
+
+        def arrow(b, bt, a, at2):
+            """Чиглэл: түүвэр хэт бага бол дүгнэхгүй (санамсаргүй хэлбэлзэл)."""
+            if not bt or at2 < 5:
+                return "?"
+            d = (100.0 * a / at2) - (100.0 * b / bt)
+            return "↑" if d >= 10 else ("↓" if d <= -10 else "→")
+
         print(f"{s.name[:22]:22} {pct(eb, et):>20} {pct(ea, at_):>20}"
-              f" {pct(xb, xt):>21} {pct(xa, xt2):>20}")
-    print("\n«дараа» багана «өмнө»-өөс ӨНДӨР бол нэвтрэлт солилт зурагт ТУСАЛСАН.")
-    print("Хоёулаа бага бол камер өөрөө гацсан байх — camera_snapshot_health.py ажиллуулна.\n")
+              f" {arrow(eb, et, ea, at_):2}"
+              f" {pct(xb, xt):>19} {pct(xa, xt2):>20}"
+              f" {arrow(xb, xt, xa, xt2):2}")
+    print("\n↑ сайжирсан · → өөрчлөлтгүй · ↓ муудсан · ? түүвэр цөөн (5-аас бага) тул дүгнэхгүй")
+    print("«дараа» өндөр бол нэвтрэлт солилт зурагт ТУСАЛСАН. Хоёулаа бага хэвээр бол")
+    print("камер өөрөө гацсан байх — camera_snapshot_health.py --all ажиллуулна.\n")
 
 
 def camsync_section(db, sites):
