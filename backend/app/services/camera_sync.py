@@ -95,6 +95,20 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 ParkingSession.entry_time <= ev["time"] + timedelta(hours=1)).first():
             skipped += 1
             continue
+        # Event нь БАРИМТЖСАН зогсолтын хугацаанд багтаж байвал давхардуулахгүй:
+        # орох→гарах хоёулаа бодит уншилттай бүртгэлийн ДОТОР гарсан «орох» уншилт
+        # нь тухайн машины давтан/эргэлзээтэй уншилт болохоос шинэ зогсолт биш.
+        # ЗӨВХӨН exit_confirmed=true бүртгэлийг тооцно: албадан хаалт нь гарах цагт
+        # «одоо» гэж бичдэг тул 12 цагийн ХУУРАМЧ цонх үүсгэдэг ба түүгээр шүүвэл
+        # тэр цонхонд багтсан ЖИНХЭНЭ дараагийн зогсолтууд алдагдана.
+        if db.query(ParkingSession.id).filter(
+                ParkingSession.site_id == site.id,
+                ParkingSession.plate_number == plate,
+                ParkingSession.exit_confirmed.is_(True),
+                ParkingSession.entry_time <= ev["time"],
+                ParkingSession.exit_time >= ev["time"]).first():
+            skipped += 1
+            continue
         if dry_run:
             created += 1
             continue
@@ -105,6 +119,7 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
             ex = next((t for t in exits_by_plate.get(plate, []) if t > ev["time"]), None)
             if ex:
                 s.exit_time = ex
+                s.exit_confirmed = True   # камерын логийн бодит бичлэг
                 s.status = "AWAITING_PAYMENT"
             db.add(s)
             db.flush()

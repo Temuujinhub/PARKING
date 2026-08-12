@@ -269,6 +269,9 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     гарах оролдлогогүй (OPEN) бол одоог хүртэлх дүнгээр (daily_cap хамгаална).
     Буцаах: үүсгэсэн өрийн дүн (0 бол өр үүсээгүй). commit хийхгүй — caller хийнэ."""
     now = datetime.utcnow()
+    # Гарах цаг нь БАРИМТТАЙ юу (гарах камерт уншигдсан) эсвэл ТААМАГ уу.
+    # Зөвхөн AWAITING_PAYMENT нь гарах уншилттай — бусад нь «одоо» гэсэн таамаг.
+    confirmed = s.status == "AWAITING_PAYMENT" and bool(s.exit_time)
     if s.status == "PAID" and s.paid_at:
         # Төлчихсөн машин — grace дотор гарсан гэж үзэж төлбөрийг ТӨЛСӨН/deadline
         # үедээ царцаана. Эс бол одоог хүртэлх хугацаагаар хэт нэхэж, худал өр үүснэ.
@@ -304,6 +307,8 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     from .services.nested import close_open_pause
     close_open_pause(db, s, at)
     s.exit_time = at
+    # Аль хэдийн баримтжсаныг бүү бууруул (camsync логоос цагийг нь оруулсан байж болно)
+    s.exit_confirmed = bool(s.exit_confirmed) or confirmed
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
@@ -562,6 +567,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # Тиймээс: хуучныг өр (нөхөн төлбөр) үүсгэн хааж, шинэ session нээнэ.
         from .routers.compensations_router import create_compensation
         existing.exit_time = existing.updated_at or now
+        existing.exit_confirmed = True   # гарах эгнээнд уншигдсан — бодит
         old_fee = session_fee_info(db, existing, at=existing.exit_time)
         existing.duration_minutes = old_fee["duration_minutes"]
         if existing.total_fee is None:
@@ -1074,6 +1080,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         # тул дүн өөрчлөгдөхгүй — энд зөвхөн session дээр БАРИМТЖУУЛНА.
         close_open_pause(db, session, now)
     session.exit_time = now
+    session.exit_confirmed = True   # камерын гарах уншилт — бодит
     session.duration_minutes = fee["duration_minutes"]
     if session.total_fee is None:
         session.base_fee = fee["base_fee"]

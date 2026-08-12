@@ -528,6 +528,7 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
             if exit_raw:
                 try:
                     s.exit_time = datetime.fromisoformat(str(exit_raw).replace("Z", ""))
+                    s.exit_confirmed = True   # камерын логийн бодит бичлэг
                     s.status = "AWAITING_PAYMENT"   # гарсан нь мэдэгдэж байгаа
                 except ValueError:
                     pass
@@ -774,6 +775,7 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     now = datetime.utcnow()
     fee = session_fee_info(db, s, at=now)
     s.exit_time = now
+    s.exit_confirmed = True   # оператор гаргаж байна — бодит
     s.duration_minutes = fee["duration_minutes"]
     if s.total_fee is None:
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]

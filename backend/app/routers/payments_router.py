@@ -102,18 +102,18 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
 
     receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
     # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар.
-    # QPay-ийн нэгдсэн баримт задаргаа дэмжихгүй тул ӨР БАГТСАН үед локал PosAPI-аар
-    # хэсэг тус бүрд тусдаа баримт үүсгэнэ.
+    #
+    # 2026-08-12: өмнө нь `and not comps` нөхцөлтэй байсан — ӨР БАГТСАН QPay
+    # төлбөр локал PosAPI руу уначихдаг байв. Тэр зам нь (а) ebarimt_mock=true
+    # үед ХУУРАМЧ баримт буцаадаг (production дээр яг тийм байсан), (б) ГЛОБАЛ
+    # merchant TIN хэрэглэдэг — зогсоолын түрээслэгчийнхээр БИШ. Өөрөөр хэлбэл
+    # өргүй жолооч жинхэнэ баримт авч, өртэй жолооч хуурамч баримт авдаг байв.
+    #
+    # Одоо: өр нь QPay-ийн нэхэмжлэлд АЛЬ ХЭДИЙН тусдаа мөрөөр орсон байдаг тул
+    # ebarimt_v3 нь бүтэн дүнг (өнөөдрийн төлбөр + өр бүр) хамарсан НЭГ ЖИНХЭНЭ
+    # баримт үүсгэнэ — түрээслэгчийн ТТД-ээр. Өрүүд ижил баримтад холбогдоно.
     use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
-                   and bool(payment.provider_payment_id) and not comps)
-    # АНХААРУУЛГА: локал PosAPI зам нь (а) ebarimt_mock=true үед ХУУРАМЧ баримт
-    # буцаадаг, (б) ГЛОБАЛ merchant TIN хэрэглэдэг — зогсоолын түрээслэгчийнхээр
-    # БИШ (_build_payload site/tenant мэддэггүй). QPay-ээр төлсөн атлаа өр
-    # багтсанаас болж энэ зам руу унасныг чимээгүй өнгөрөөхгүй, логлоно.
-    if not use_qpay_eb and payment.provider == "QPAY" and comps:
-        log.warning("e-Barimt: QPay төлбөр (%s) ӨР багтсан тул локал PosAPI-аар "
-                    "явлаа — mock=%s, ГЛОБАЛ ТТД. Түрээслэгчийн ТТД-ээр гарахгүй.",
-                    payment.id, settings.ebarimt_mock)
+                   and bool(payment.provider_payment_id))
     if settings.ebarimt_mock and not use_qpay_eb:
         log.warning("e-Barimt MOCK: payment=%s %s₮ — ХУУРАМЧ баримт үүслээ. "
                     "Production дээр PARKING_EBARIMT_MOCK=false байх ёстой.",
@@ -151,43 +151,54 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
 
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
     ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
+    # QPay-ийн ebarimt_v3 нь ТӨЛБӨРИЙН БҮТЭН дүнгээр (нэхэмжлэлийн мөр бүрийг
+    # багтаасан) НЭГ баримт үүсгэдэг — тиймээс өр багтсан үед ч дүнг задалж
+    # бичихгүй, бүтнээр нь бүртгэнэ. Локал PosAPI үед л хэсэг тус бүрд тусдаа.
+    head_amount = float(payment.amount) if use_qpay_eb else sess_amount
+    head_vat = float(payment.vat_amount) if use_qpay_eb else sess_vat
     db.add(VatReceipt(
         payment_id=payment.id, session_id=payment.session_id,
         ebarimt_id=receipt_raw.get("billId"),
         # ААН-ны баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
         lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
-        amount=sess_amount, vat_amount=sess_vat,
+        amount=head_amount, vat_amount=head_vat,
         customer_tin=payment.customer_tin,
         # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа
         status="SENT" if receipt_raw.get("billId") else "FAILED",
         receipt_url=ebarimt_error,
     ))
 
-    # Өр тус бүр: ТУСДАА e-Barimt + PAID (баримт нь өрийн анхны session-д холбогдоно)
     for comp in comps:
         comp_amount, comp_vat = float(comp.amount), comp_vats[comp.id]
-        comp_receipt, comp_error = {}, None
-        try:
-            comp_receipt = await ebarimt.create_receipt(
-                comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
-        except Exception as e:  # noqa: BLE001
-            comp_error = str(e)[:200]
-            log.error(f"e-Barimt амжилтгүй: compensation={comp.id}: {comp_error}")
-        ebarimt.cache_qr(comp.id, comp_receipt.get("qrData"))
-        db.add(VatReceipt(
-            # Өрийн анхны session (байхгүй бол одоо төлж буй session-д) холбоно
-            payment_id=payment.id, session_id=comp.session_id or payment.session_id,
-            ebarimt_id=comp_receipt.get("billId"),
-            lottery_code=None if receiver_type == "COMPANY" else comp_receipt.get("lottery"),
-            amount=comp_amount, vat_amount=comp_vat, customer_tin=payment.customer_tin,
-            status="SENT" if comp_receipt.get("billId") else "FAILED",
-            receipt_url=comp_error,
-        ))
+        if use_qpay_eb:
+            # Өр нь дээрх НЭГ ЖИНХЭНЭ баримтад аль хэдийн багтсан (QPay
+            # нэхэмжлэлд тусдаа мөрөөр орсон) — давхар баримт үүсгэхгүй.
+            ebarimt.cache_qr(comp.id, receipt_raw.get("qrData"))
+        else:
+            # Локал PosAPI (бэлэн/карт): хэсэг тус бүрд тусдаа баримт
+            comp_receipt, comp_error = {}, None
+            try:
+                comp_receipt = await ebarimt.create_receipt(
+                    comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
+            except Exception as e:  # noqa: BLE001
+                comp_error = str(e)[:200]
+                log.error(f"e-Barimt амжилтгүй: compensation={comp.id}: {comp_error}")
+            ebarimt.cache_qr(comp.id, comp_receipt.get("qrData"))
+            db.add(VatReceipt(
+                # Өрийн анхны session (байхгүй бол одоо төлж буй session-д) холбоно
+                payment_id=payment.id, session_id=comp.session_id or payment.session_id,
+                ebarimt_id=comp_receipt.get("billId"),
+                lottery_code=None if receiver_type == "COMPANY" else comp_receipt.get("lottery"),
+                amount=comp_amount, vat_amount=comp_vat, customer_tin=payment.customer_tin,
+                status="SENT" if comp_receipt.get("billId") else "FAILED",
+                receipt_url=comp_error,
+            ))
         comp.status = "PAID"
         comp.paid_at = datetime.utcnow()
         comp.paid_by = f"{payment.provider}:QR"
         log.info(f"өр төлөгдөв: {comp.plate_number} {comp_amount:.0f}₮ "
-              f"(comp {comp.id}, payment {payment.id})")
+              f"(comp {comp.id}, payment {payment.id}, "
+              f"баримт={'QPay нэгдсэн' if use_qpay_eb else 'локал'})")
 
     _t1 = _mark("ebarimt", _p0)
     session = db.get(ParkingSession, payment.session_id)

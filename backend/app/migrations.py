@@ -249,6 +249,20 @@ MIGRATIONS = [
     # (сургуулийн гэрээт 08:00-18:00 г.м). NULL = бүх цагт үнэгүй (хуучин зан).
     "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS free_from VARCHAR(5)",
     "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS free_until VARCHAR(5)",
+
+    # v3.9 — exit_time нь ЖИНХЭНЭ гарах баримттай юу, эсвэл бүртгэл хаахад
+    # бичсэн ТААМАГ цаг уу. Албадан хаалт «одоо» гэж бичдэг тул 10 минут
+    # зогссон машин 12 цаг зогссон мэт харагдаж, camsync-ийн давхардлын
+    # шалгалтыг төөрөгдүүлдэг байв.
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_confirmed BOOLEAN NOT NULL DEFAULT false",
+    # Хуучин өгөгдөлд БАТЛАГДСАН нотолгоо нь гарах камерын зураг: exit_snapshot
+    # байгаа бол машин гарцын камерт ЖИНХЭНЭ уншигдсан. Санаатайгаар ХАТУУ
+    # шалгуур авав — эргэлзээтэйг «таамаг» гэж үлдээх нь аюулгүй (шинэ давхардлын
+    # шалгалт зөвхөн НЭМЖ алгасдаг тул хуучин зан алдагдахгүй). Энэ баганыг эндээс
+    # хойш үүсэх бүртгэлд эх сурвалж дээр нь зөв тавина.
+    """UPDATE parking_sessions SET exit_confirmed = true
+       WHERE exit_time IS NOT NULL AND exit_confirmed = false
+         AND exit_snapshot IS NOT NULL AND exit_snapshot <> ''""",
 ]
 
 

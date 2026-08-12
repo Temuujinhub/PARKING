@@ -270,6 +270,13 @@ class ParkingSession(Base):
     plate_number = Column(String(20), nullable=False, index=True)
     entry_time = Column(DateTime, nullable=False)
     exit_time = Column(DateTime, nullable=True)
+    # exit_time нь ЖИНХЭНЭ гарах баримттай юу (камерын уншилт / оператор гаргасан),
+    # эсвэл зүгээр бүртгэл хаахад бичсэн ТААМАГ цаг уу. Албадан хаалт (авто хаалт,
+    # админ хассан, шөнийн хаалт) нь машин хэзээ гарсныг МЭДДЭГГҮЙ ч «одоо» гэж
+    # бичдэг — тэгэхээр 10 минут зогссон машин 12 цаг зогссон мэт харагдана.
+    # Энэ туг байхгүй үед camsync-ийн давхардлын шалгалт тэр хуурамч 12 цагийн
+    # цонхыг бодит зогсолт гэж үзэж эргэлзэж байв (2026-08-12: 7 хоногт 165 давхцал).
+    exit_confirmed = Column(Boolean, nullable=False, default=False)
     duration_minutes = Column(Integer, nullable=True)
     # OPEN → (exit камерт уншигдсан) AWAITING_PAYMENT → PAID → CLOSED; FREE = үнэгүй гарсан
     status = Column(String(30), nullable=False, default="OPEN", index=True)
