@@ -201,6 +201,72 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
     return None, False
 
 
+# Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
+REOPEN_MAX_HOURS = 48
+
+
+def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSession | None:
+    """Гарах камерт уншигдсан ч ИДЭВХТЭЙ бүртгэл алга — САЯХАН АЛБАДАН хаагдсаныг
+    сэргээнэ («Бүртгэлгүй гарах оролдлого»-ын 23%-ийн шалтгаан).
+
+    Юу болдог вэ: машин орж ирээд гарах уншилт алдагдсанаас session нь OPEN
+    хэвээр үлдэнэ → 12 цаг болоод авто хаалт хаана → машин үнэндээ ДОТОР
+    БАЙСААР байгаа → гарахад нь «бүртгэлгүй» болж хаалт нээгдэхгүй, оператор
+    гараар шийддэг. Гараар «Сэргээх» товч байсан ч камерын урсгалд ажилладаггүй
+    байв — үүнийг автоматжуулна.
+
+    ХАМГААЛАЛТ (гараар сэргээхтэй ижил дүрэм + нэмэлт):
+      • ТӨЛБӨР ТӨЛӨГДСӨН бүртгэлд ХҮРЭХГҮЙ (давхар нэхэхгүй)
+      • exit_confirmed=True (жинхэнэ гарах уншилттай) бол ХҮРЭХГҮЙ — тэр машин
+        үнэхээр гарсан, одоогийнх нь ШИНЭ зогсолт
+      • зөвхөн REOPEN_MAX_HOURS дотор хаагдсан
+      • нэр дэвшигч ЯГ НЭГ байх ёстой (эс бол буруу машинд төлбөр тохоно)
+      • тухайн дугаараар өөр идэвхтэй бүртгэл байвал хүрэхгүй (uq_active_session)
+      • хаалтаас үүссэн PENDING өрийг цуцална — сэргээсэн бүртгэл дээр төлбөр
+        дахин бодогдох тул үлдээвэл ДАВХАР нэхэгдэнэ
+    """
+    if not is_valid_plate(plate):
+        return None                      # junk уншилт — сэргээх үндэслэлгүй
+    if get_open_session(db, plate, site_id):
+        return None                      # идэвхтэй бүртгэл бий — энэ функц хэрэггүй
+    since = datetime.utcnow() - timedelta(hours=REOPEN_MAX_HOURS)
+    closed = (db.query(ParkingSession)
+              .filter(ParkingSession.site_id == site_id,
+                      ParkingSession.status.in_(["MANUAL_CLOSED", "CLOSED", "FREE"]),
+                      ParkingSession.exit_confirmed.is_(False),
+                      ParkingSession.paid_at.is_(None),
+                      ParkingSession.exit_time >= since)
+              .all())
+    cands = [s for s in closed if s.plate_number == plate]
+    if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
+        cands = [s for s in closed if plates_ocr_similar(plate, s.plate_number)]
+    if len(cands) != 1:
+        return None
+    s = cands[0]
+    if paid_total(db, s) > 0:
+        return None
+    from .models import AuditLog, Compensation
+    canceled = (db.query(Compensation)
+                .filter(Compensation.session_id == s.id, Compensation.status == "PENDING")
+                .update({"status": "CANCELLED"}, synchronize_session=False))
+    s.status = "OPEN"
+    s.exit_time = None
+    s.exit_device_id = None
+    s.duration_minutes = None
+    s.total_fee = s.base_fee = s.vat_amount = None
+    s.exit_deadline = None
+    s.note = (f"{s.note + ' | ' if s.note else ''}"
+              f"Гарах уншилтаар АВТО сэргээв (албадан хаалт эрт байсан)")[:1000]
+    db.add(AuditLog(username="system", action="AUTO_REOPEN", entity="session",
+                    entity_id=s.id,
+                    detail={"plate": s.plate_number, "read_plate": plate,
+                            "canceled_debt": canceled}))
+    db.flush()
+    log.info("[exit] АВТО сэргээв: %s (session %s, цуцалсан өр %d)",
+             s.plate_number, s.id, canceled)
+    return s
+
+
 def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None) -> dict:
     site: ParkingSite = s.site
     template = site.tariff_template if site else None
@@ -811,6 +877,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
+    if session is None:
+        # Идэвхтэй бүртгэл алга — саяхан АЛБАДАН хаагдсаныг сэргээж үзнэ.
+        # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт
+        # «бүртгэлгүй гарах»-ын 23%). Олдвол ердийн гарах урсгал үргэлжилнэ.
+        session = auto_reopen_for_exit(db, plate, site_id)
     # Гарах камерын өнгө/төрлөөр session-ий мэдээллийг нөхнө (орох дээр алга байсан
     # эсвэл орох дутуу уншсан бол) — оператор дугаар зөрүүтэй үед машиныг таних тусламж
     if session:
