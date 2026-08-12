@@ -126,7 +126,22 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
 
     # Watermark-ыг УРАГШ нь л зөөнө (боловсруулсан хамгийн сүүлийн event хүртэл)
     if not dry_run:
-        new_mark = max([e["time"] for e in entries], default=horizon)
+        # ЧУХАЛ: ОРОХ камер уншигдаагүй бол watermark-ыг УРАГШЛУУЛАХГҮЙ.
+        # Өмнө нь `default=horizon` байсан тул орох камер алдаа өгөхөд (эсвэл
+        # гацахад) `entries` хоосон болж, watermark нь «одоо» руу үсэрдэг байв —
+        # уншиж амжаагүй БҮХ орох event үүрд алдагдана (watermark хэзээ ч ухрахгүй).
+        # 2026-08-12-нд 22 камерын 9 нь гацсан байхад энэ нь идэвхтэй ажиллаж
+        # байсан: нөхөлт хийх ёстой хэрэгсэл өөрөө өгөгдлөө алдаж байв.
+        entry_cams = [c for c in cam["cameras"] if (c.get("lane_dir") or "entry") != "exit"]
+        entry_broken = [c for c in entry_cams if c.get("error")]
+        if entry_broken and not entries:
+            log.warning("%s: ОРОХ камер уншигдсангүй (%s) — watermark хэвээр "
+                        "үлдээв, дараагийн удаа дахин оролдоно",
+                        site.name, ", ".join(c["ip"] for c in entry_broken))
+            new_mark = watermark
+        else:
+            new_mark = max([e["time"] for e in entries],
+                           default=(watermark if entry_broken else horizon))
         new_mark = max(new_mark, watermark)
         state[site.id] = new_mark.isoformat()
         set_state(db, CAMSYNC_STATE, state)
