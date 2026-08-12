@@ -148,12 +148,23 @@ def run_once() -> int:
                 try:
                     # Junk (буруу форматтай) дугаар нь камерын буруу уншилт — жинхэнэ
                     # машин биш тул өр үүсгэхгүйгээр чимээгүй хаана.
-                    make_debt = rules["create_debt"] and is_valid_plate(s.plate_number)
-                    debt = close_session_forced(db, s, "auto_close", "system", make_debt)
+                    valid = is_valid_plate(s.plate_number)
+                    # ХОЁР ӨӨР ТОХИОЛДЛЫГ ЯЛГАНА (2026-08-12):
+                    #  • AWAITING_PAYMENT = машин ГАРЦЫН КАМЕРТ УНШИГДСАН мөртөө
+                    #    төлбөрөө төлөөгүй. Гарсан нь БАРИМТТАЙ, төлөөгүй нь мэдэгдэж
+                    #    байгаа → ЖИНХЭНЭ АВЛАГА. `unpaid_exit` шалтгаанаар өр үүснэ.
+                    #  • OPEN = гарах уншилт ОГТ БАЙХГҮЙ. Машин хэдийнэ гарсан ч
+                    #    камер уншаагүй байх нь элбэг тул төлөөгүй гэх нотолгоо алга
+                    #    → өр үүсгэхгүй (create_debt тохиргоо энэ тохиолдолд үйлчилнэ).
+                    if s.status == "AWAITING_PAYMENT" and valid:
+                        reason, make_debt = "unpaid_exit", True
+                    else:
+                        reason, make_debt = "auto_close", (rules["create_debt"] and valid)
+                    debt = close_session_forced(db, s, reason, "system", make_debt)
                     db.add(AuditLog(username="system", action="AUTO_CLOSE", entity="session",
                                     entity_id=s.id,
                                     detail={"plate": s.plate_number, "site": site.name,
-                                            "hours": hours, "debt": debt}))
+                                            "hours": hours, "reason": reason, "debt": debt}))
                     db.commit()
                     closed += 1
                     log.info(f"{site.name}: {s.plate_number} хаагдлаа "
