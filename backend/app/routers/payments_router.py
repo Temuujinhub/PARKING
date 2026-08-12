@@ -5,11 +5,12 @@ import re
 import uuid
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, require, require_role, scoped_site
+from ..auth import enforce_site, require, scoped_site
 from ..config import settings
 from ..database import get_db
 from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Payment,
@@ -371,12 +372,35 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         })
     acc = qpay.account_for(session.site)
     lines = qpay.build_lines(line_items, acc)
-    inv = await qpay.create_invoice(
-        payment.sender_invoice_no,
-        f"Зогсоолын төлбөр — {session.plate_number}",
-        f"terminal_{session.site.site_code if session.site else 'X'}", callback,
-        lines, receiver_data=receiver_data, acc=acc,
-    )
+    # QPay унах нь ЖОЛООЧИД харагддаг алдаа — «QR гарахгүй байна» гомдол. Өмнө нь
+    # raise_for_status()/timeout нь endpoint-оос шууд гарч 500 болдог байсан:
+    # (а) жолоочид ойлгомжгүй, (б) rollback болохоор DB-д ЯМАР Ч ул мөр үлддэггүй
+    # тул «хэдэн удаа тохиолдов» гэдгийг хойшоо хэмжих боломжгүй байв. Одоо
+    # шалтгааныг логлож, хүнд ойлгомжтой 502 буцаана (frontend дахин оролдоно).
+    try:
+        inv = await qpay.create_invoice(
+            payment.sender_invoice_no,
+            f"Зогсоолын төлбөр — {session.plate_number}",
+            f"terminal_{session.site.site_code if session.site else 'X'}", callback,
+            lines, receiver_data=receiver_data, acc=acc,
+        )
+    except httpx.HTTPStatusError as e:
+        body_txt = (e.response.text or "")[:400]
+        log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): HTTP %s — %s",
+                  session.plate_number, acc.username, e.response.status_code, body_txt)
+        db.rollback()
+        raise HTTPException(502, "QPay-тэй холбогдож чадсангүй — QR үүсгэж чадаагүй. "
+                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+    except httpx.HTTPError as e:  # timeout, DNS, холболт тасрах
+        log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): %r", session.plate_number, acc.username, e)
+        db.rollback()
+        raise HTTPException(502, "QPay хариу өгсөнгүй (сүлжээ) — QR үүсгэж чадаагүй. "
+                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+    except KeyError as e:  # QPay 200 буцаасан ч хүлээгдсэн талбар алга
+        log.error("QPay invoice хариу дутуу (%s): талбар %s алга", session.plate_number, e)
+        db.rollback()
+        raise HTTPException(502, "QPay-ээс ирсэн хариу дутуу байна — QR үүсгэж чадаагүй. "
+                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
     payment.provider_invoice_id = inv["invoice_id"]
     payment.qr_text = inv["qr_text"]
     payment.deep_link = inv["deep_link"]
@@ -461,9 +485,16 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
 
 
 # ─────────────────────────── Касс (бэлэн мөнгө) ───────────────────────────
+# ЭРХ (бүх кассын endpoint): role биш «cashier» МОДУЛИАР. Өмнө нь
+# require_role("OPERATOR", "SUPER_ADMIN") байсан тул:
+#   • ADMIN — кассын хуудас нээгддэг ч төлбөр авахад 403 («операторын эрх
+#     шаардаж байна» гэсэн гомдол яг үүнээс)
+#   • ONLINE_OPERATOR — pay_transfer эрхтэй атлаа /transfer рүү огт ороогүй
+#     (энэ ролийн БҮХ утга учир нь дансаар төлбөр батлах)
+# free_exit шиг санхүүгийн эрсдэлтэй тусгай үйлдлүүд ХЭВЭЭР тусдаа эрхтэй.
 @router.post("/cash")
 async def cash_payment(body: dict, db: Session = Depends(get_db),
-                       user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+                       user: User = Depends(require("cashier"))):
     """Кассын бэлэн мөнгөний төлбөр. body: {session_id}"""
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
@@ -482,7 +513,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
 # ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
 @router.post("/transfer")
 async def transfer_payment(body: dict, db: Session = Depends(get_db),
-                           user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+                           user: User = Depends(require("cashier"))):
     """Дансаар (банкны шилжүүлгээр) төлбөр авах — online operator-ын урсгал.
 
     Оператор жолоочид зогсоолын дансыг хэлж, шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас
@@ -533,7 +564,7 @@ def _find_terminal(db: Session, terminal_id: str):
 
 @router.get("/pos/terminal/{terminal_id}")
 def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
-                      user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+                      user: User = Depends(require("cashier"))):
     """POS апп асахдаа өөрийн terminal_id-ээр дуудаж АЛЬ ЗОГСООЛД харьяалагдахаа
     танина + тухайн зогсоолын төлбөр хүлээж буй машинуудыг авна.
     Терминалыг Тохиргоо→Төхөөрөмжид device_type=pax_terminal, device_key=terminal_id-ээр бүртгэнэ."""
@@ -559,7 +590,7 @@ def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
 
 @router.post("/pos/confirm")
 async def pos_confirm(body: dict, db: Session = Depends(get_db),
-                      user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+                      user: User = Depends(require("cashier"))):
     """PAX A9000 апп картын төлбөр авсныг баталгаажуулна.
     body: {session_id, amount, auth_code, card_last4, card_brand, terminal_id, transaction_id}"""
     session = db.get(ParkingSession, body.get("session_id", ""))

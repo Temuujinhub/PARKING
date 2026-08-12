@@ -253,9 +253,18 @@ MIGRATIONS = [
 
 
 def run_migrations():
-    with engine.begin() as conn:
-        for stmt in MIGRATIONS:
-            try:
+    # ЧУХАЛ: миграц бүр ӨӨРИЙН транзакцаар. Өмнө нь бүгд НЭГ `engine.begin()`
+    # дотор явдаг байсан тул эхний алдаа гарсны дараа Postgres транзакцыг
+    # «aborted» болгож, ҮЛДСЭН БҮХ миграц («current transaction is aborted»
+    # гэж) чимээгүй алгасагддаг байв — нэг эрхийн алдаанаас болж шинэ багана
+    # огт нэмэгдэхгүй, кодоо deploy хийсэн ч ажиллахгүй байх эрсдэлтэй.
+    failed = 0
+    for stmt in MIGRATIONS:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(stmt))
-            except Exception as e:  # нэг миграц алдвал бусдыг зогсоохгүй
-                log.warning(f"[migration skip] {stmt[:60]}... — {e}")
+        except Exception as e:  # нэг миграц алдвал бусдыг зогсоохгүй
+            failed += 1
+            log.warning(f"[migration skip] {stmt[:60]}... — {e}")
+    if failed:
+        log.warning("[migrations] %d миграц алдаатай — дээрх мөрүүдийг шалгана уу", failed)

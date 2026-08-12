@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import operator_site, require, require_role
+from ..auth import enforce_site, operator_site, require
 from ..database import get_db
 from ..models import AuditLog, CashierShift, ParkingSession, Payment, User
 from ..serializers import to_dict
@@ -41,11 +41,18 @@ def current_shift(db: Session = Depends(get_db), user: User = Depends(require("c
 
 @router.post("/shift/open")
 def open_shift(body: dict, db: Session = Depends(get_db),
-               user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+               user: User = Depends(require("cashier"))):
+    # ЭРХ: role биш «cashier» МОДУЛИАР шалгана. Өмнө require_role("OPERATOR",
+    # "SUPER_ADMIN") байсан тул кассын хуудас НЭЭГДЭЖ байж (GET /shift/current
+    # нь require("cashier")) ээлж нээхэд ADMIN/ONLINE_OPERATOR 403 иддэг байв —
+    # «админаар орсон ч операторын эрх шаардаж байна» гомдол яг үүнээс.
     if db.query(CashierShift).filter(CashierShift.user_id == user.id,
                                      CashierShift.status == "OPEN").first():
         raise HTTPException(400, "Танд нээлттэй ээлж байна. Эхлээд хаана уу.")
-    shift = CashierShift(user_id=user.id, site_id=body.get("site_id") or user.site_id,
+    # ADMIN-д үндсэн site_id байхгүй байж болно — хамрах хүрээнийхээ эхнийг авна
+    site_id = body.get("site_id") or user.site_id or operator_site(user)
+    enforce_site(user, site_id)
+    shift = CashierShift(user_id=user.id, site_id=site_id,
                          opening_amount=body.get("opening_amount", 0))
     db.add(shift)
     db.add(AuditLog(username=user.username, action="SHIFT_OPEN", entity="shift", entity_id=""))
@@ -55,7 +62,7 @@ def open_shift(body: dict, db: Session = Depends(get_db),
 
 @router.post("/shift/close")
 def close_shift(body: dict | None = None, db: Session = Depends(get_db),
-                user: User = Depends(require_role("OPERATOR", "SUPER_ADMIN"))):
+                user: User = Depends(require("cashier"))):
     """Ээлж хаах + тооцоо. body: {confirmed_cash?, close_cars?, note?}.
     close_cars=True үед зогсоолд үлдсэн бүх машиныг гаргаж, төлбөртэйд нь нөхөн төлбөр
     үүсгэнэ. confirmed_cash = операторын данс руу шилжүүлэхээр баталгаажуулсан бэлэн."""
