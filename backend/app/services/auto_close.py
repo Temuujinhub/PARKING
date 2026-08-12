@@ -276,9 +276,42 @@ async def supervisor():
     Хуучин датаны цэвэрлэгээ (retention) өдөрт нэг л удаа хийгдэнэ."""
     await asyncio.sleep(300)
     last_retention = 0.0
-    last_camsync = 0.0
-    last_camhealth = 0.0
     import time as _t
+
+    # ЧУХАЛ: camsync/camhealth-ийн сүүлийн ажилласан цагийг DB-ЭЭС сэргээнэ.
+    # Өмнө нь 0.0-ээс эхэлдэг байсан тул backend дахин асах БҮРД (deploy,
+    # watchdog) 5 минутын дараа хоёулаа ШУУД ажилладаг — камерын эрүүл мэнд
+    # гацсан БҮХ камерыг дахин reboot хийж, 60-120с тус бүрээр унтраадаг.
+    # 2026-08-12: нэг цагт 4 удаа, тус бүр 10-13 камер reboot хийгдсэн.
+    def _restore(getter) -> float:
+        """Хамгийн сүүлийн ажиллагаанаас хойш өнгөрсөн хугацааг monotonic-т буулгана."""
+        try:
+            _db = SessionLocal()
+            try:
+                raw = getter(_db)
+            finally:
+                _db.close()
+            if not raw:
+                return 0.0
+            from datetime import datetime as _dt
+            age = (_dt.utcnow() - _dt.fromisoformat(raw)).total_seconds()
+            return max(0.0, _t.monotonic() - max(0.0, age))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _camhealth_last(_db):
+        from .app_settings import get_state
+        from .camera_health import CAMHEALTH_STATE
+        return (get_state(_db, CAMHEALTH_STATE) or {}).get("checked_at")
+
+    def _camsync_last(_db):
+        from .app_settings import CAMSYNC_STATE, get_state
+        marks = [v for v in (get_state(_db, CAMSYNC_STATE) or {}).values()
+                 if isinstance(v, str)]
+        return max(marks) if marks else None
+
+    last_camsync = _restore(_camsync_last)
+    last_camhealth = _restore(_camhealth_last)
     while True:
         try:
             n = run_once()

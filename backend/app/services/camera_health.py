@@ -38,7 +38,13 @@ SNAP_URLS = ("cgi-bin/snapshot.cgi", "cgi-bin/snapshot.cgi?channel=1",
              "cgi-bin/snapshot.cgi?channel=0")
 INSTANT_400 = 0.2   # секунд — үүнээс хурдан 400 = «үүдэн дээр татгалзсан» = гацсан шинж
 
-_last_reboot: dict[str, float] = {}   # ip -> monotonic
+# ip -> reboot илгээсэн цаг (UTC ISO). ЧУХАЛ: DB-д (CAMHEALTH_STATE) хадгална.
+# Өмнө нь санах ойн `monotonic` байсан тул backend дахин асах бүрд ТЭГЛЭГДЭЖ
+# cooldown алга болдог байв — deploy/watchdog restart бүрийн 5 минутын дараа
+# ГАЦСАН БҮХ КАМЕР дахин reboot хийгддэг (2026-08-12: нэг цагт 4 удаа, тус бүр
+# 10-13 камер). Reboot нь 60-120с камерыг бүрэн унтраадаг тул шуурга нь
+# засахын оронд асуудлыг УЛАМ ДОРДУУЛНА.
+REBOOTS_KEY = "reboots"
 
 
 async def _snapshot_probe(c, ip, auth, samples: int) -> dict:
@@ -141,6 +147,12 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
 
     hung = [r for r in results if r["verdict"] == "hung"]
     rebooted, skipped = [], []
+    # Cooldown-ын түүхийг ҮРГЭЛЖ DB-ээс уншина — restart-ыг даван гарна
+    _db = SessionLocal()
+    try:
+        reboots = dict((get_state(_db, CAMHEALTH_STATE) or {}).get(REBOOTS_KEY) or {})
+    finally:
+        _db.close()
     if rules.get("auto_reboot") and not dry_run:
         cool = max(1, int(rules.get("cooldown_min", 120))) * 60
         meta = {t[3]: t for t in targets}   # ip -> target tuple
@@ -150,13 +162,19 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
             if barrier_is_waiting(ip):
                 skipped.append({"ip": ip, "why": "хаалт хүлээж байна"})
                 continue
-            # 2) Cooldown — reboot-ын шуурга гаргахгүй
-            if time.monotonic() - _last_reboot.get(ip, 0.0) < cool:
-                skipped.append({"ip": ip, "why": "cooldown"})
-                continue
+            # 2) Cooldown — reboot-ын шуурга гаргахгүй (restart-ыг даван гарна)
+            prev = reboots.get(ip)
+            if prev:
+                try:
+                    age = (datetime.utcnow() - datetime.fromisoformat(prev)).total_seconds()
+                except ValueError:
+                    age = cool
+                if age < cool:
+                    skipped.append({"ip": ip, "why": f"cooldown ({int(age / 60)}/{cool // 60} мин)"})
+                    continue
             _did, site_id, name, _, creds = meta[ip]
             err = await reboot_camera(ip, creds)
-            _last_reboot[ip] = time.monotonic()
+            reboots[ip] = datetime.utcnow().isoformat()
             db = SessionLocal()
             try:
                 db.add(AuditLog(username="system", action="CAMERA_HEALTH_REBOOT",
@@ -192,6 +210,7 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
         log.warning("камерын холболт хаахад алдаа гарлаа", exc_info=True)
 
     return {"checked_at": datetime.utcnow().isoformat(),
+            "reboots": reboots,   # cooldown-ын түүх — DB-д хадгалагдана
             "results": results, "hung": [r["ip"] for r in hung],
             "rebooted": rebooted, "skipped": skipped,
             "counts": {
@@ -221,6 +240,9 @@ def run_once(dry_run: bool = False) -> dict:
     try:
         set_state(db, CAMHEALTH_STATE, {
             "checked_at": out["checked_at"], "counts": out["counts"],
+            # Reboot-ын цагийг ЗААВАЛ хадгална — эс бол backend дахин асахад
+            # cooldown алга болж reboot-ын шуурга үүснэ
+            REBOOTS_KEY: out.get("reboots") or {},
             "hung": out["hung"], "rebooted": out["rebooted"],
             "skipped": out["skipped"],
             # Зөвхөн асуудалтайг хадгална (жагсаалт богино байлгах)
