@@ -34,8 +34,34 @@ def env_creds():
     return user, pwd
 
 
+def creds_for(ip: str):
+    """Камерын нэвтрэлт: DB-д бүртгэсэн төхөөрөмжийнх → .env глобал.
+
+    2026-08-11-нээс камерууд өөр өөрийн (sysadmin) нэвтрэлттэй болж DB-д
+    хадгалагдсан. .env-ийн ХУУЧИН глобалыг л уншвал «User or password not
+    valid» гэж унана (camera_records_diag дээр яг тийм болсон)."""
+    try:
+        from app.database import SessionLocal
+        from app.models import Device
+        from app.services.device_auth import camera_credentials
+        db = SessionLocal()
+        try:
+            dev = (db.query(Device)
+                   .filter(Device.ip_address == ip, Device.device_type == "camera")
+                   .filter(Device.status != "deleted").first())
+            if dev is not None and (getattr(dev, "username", None) or "").strip():
+                return (*camera_credentials(dev), f"DB «{dev.name}»")
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"  (DB лукап бүтсэнгүй: {type(e).__name__} — .env рүү унана)")
+    u, p = env_creds()
+    return u, p, ".env глобал"
+
+
 async def main(ip: str):
-    user, pwd = env_creds()
+    user, pwd, src = creds_for(ip)
+    print(f"Нэвтрэлт: {user} ({src})")
     auth = httpx.DigestAuth(user, pwd)
     today = datetime.now().strftime("%Y-%m-%d")
     print(f"=== Камер {ip}, хэрэглэгч {user} ===\n")
