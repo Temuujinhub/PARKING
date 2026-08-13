@@ -101,12 +101,39 @@ def classify_verdict(snap_ok: bool, event_alive: bool | None,
     return "busy"
 
 
-async def _classify(ip: str, name: str, creds: tuple[str, str], samples: int) -> dict:
+async def _classify(ip: str, name: str, creds: tuple[str, str], samples: int,
+                    last_seen=None) -> dict:
+    """ЧУХАЛ: камерын ХУВААЛЦСАН клиент + RPC түгжээг ашиглана.
+
+    Өмнө нь энд `httpx.AsyncClient(timeout=20)` гэж ӨӨРИЙН холболт нээж,
+    түгжээ ч авдаггүй байв. Dahua ITC веб сервер нэгэн зэрэг ЦӨӨН холболт л
+    зөвшөөрдөг (энэ шалтгаанаар л бүх систем нэг хуваалцсан клиент дээр
+    ажилладаг) — тэр дээр cgi_poller нь event стримээ барьж байхад эрүүл
+    мэндийн шалгалт 3 дээж × 3 URL хүртэл хүсэлт нэмж, 6 камерыг ЗЭРЭГ
+    цохиход камер шууд (<0.1с) 400 буцаана. Тэгээд бид түүнийг «ГАЦСАН» гэж
+    уншиж reboot хийдэг — өөрөөр хэлбэл ШАЛГАЛТ ӨӨРӨӨ оношоо үйлдвэрлэж
+    байсан (2026-08-13: амарсан камер эхний дуудлагад 300-700KB өгч байсан).
+    """
+    from .barrier import _rpc_lock, camera_client, note_rpc_done, wait_rpc_gap
     auth = httpx.DigestAuth(*creds)
-    async with httpx.AsyncClient(timeout=20) as c:
-        snap = await _snapshot_probe(c, ip, auth, samples)
-        ev = None if snap["ok"] else await _event_alive(c, ip, auth)
-        verdict = classify_verdict(bool(snap["ok"]), ev, snap["min_bad_lat"])
+    async with _rpc_lock(ip):
+        await wait_rpc_gap(ip)          # сүүлийн RPC-ээс хойш завсар үлдээнэ
+        c = camera_client(ip)
+        try:
+            snap = await _snapshot_probe(c, ip, auth, samples)
+            if snap["ok"]:
+                ev = None
+            elif last_seen is not None and \
+                    (datetime.utcnow() - last_seen).total_seconds() < 180:
+                # cgi_poller саяхан event хүлээж авсан = веб АМЬД. Хоёр дахь
+                # attach стрим нээх нь камерын ховор холболтыг дэмий эзэлнэ
+                # (мөн poller-ийн стримтэй өрсөлдөнө).
+                ev = True
+            else:
+                ev = await _event_alive(c, ip, auth)
+        finally:
+            note_rpc_done(ip)
+    verdict = classify_verdict(bool(snap["ok"]), ev, snap["min_bad_lat"])
     return {"ip": ip, "name": name, "verdict": verdict, **snap}
 
 
@@ -126,23 +153,24 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
             if c.ip_address in seen:
                 continue
             seen.add(c.ip_address)
-            targets.append((c.id, c.site_id, c.name, c.ip_address, camera_credentials(c)))
+            targets.append((c.id, c.site_id, c.name, c.ip_address,
+                            camera_credentials(c), c.last_seen))
     finally:
         db.close()
 
     samples = max(1, int(rules.get("samples", 3)))
     sem = asyncio.Semaphore(6)   # камеруудыг зэрэг цохихгүй
 
-    async def _one(name, ip, creds):
+    async def _one(name, ip, creds, last_seen):
         async with sem:
             try:
-                return await _classify(ip, name, creds, samples)
+                return await _classify(ip, name, creds, samples, last_seen)
             except Exception as e:  # noqa: BLE001
                 return {"ip": ip, "name": name, "verdict": "error",
                         "min_bad_lat": None, "note": str(e)[:120]}
 
-    results = await asyncio.gather(*[_one(n, ip, cr)
-                                     for _, _, n, ip, cr in targets])
+    results = await asyncio.gather(*[_one(n, ip, cr, ls)
+                                     for _, _, n, ip, cr, ls in targets])
     by_ip = {r["ip"]: r for r in results}
 
     hung = [r for r in results if r["verdict"] == "hung"]
@@ -172,7 +200,7 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
                 if age < cool:
                     skipped.append({"ip": ip, "why": f"cooldown ({int(age / 60)}/{cool // 60} мин)"})
                     continue
-            _did, site_id, name, _, creds = meta[ip]
+            _did, site_id, name, _, creds, _ls = meta[ip]
             err = await reboot_camera(ip, creds)
             reboots[ip] = datetime.utcnow().isoformat()
             db = SessionLocal()

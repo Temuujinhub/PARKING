@@ -45,21 +45,32 @@ OK, BAD, WARN, SKIP = "✅", "❌", "⚠️ ", "—"
 
 
 async def check_snapshot(ip: str, creds) -> tuple[str, str]:
-    """snapshot.cgi JPEG буцааж байна уу."""
+    """snapshot.cgi JPEG буцааж байна уу.
+
+    ХУВААЛЦСАН клиент + RPC түгжээгээр — Dahua ITC цөөн холболт л зөвшөөрдөг
+    тул тестээ өөрийн холболтоор явуулбал backend-ийн event стримтэй өрсөлдөж,
+    ӨӨРӨӨ шууд 400 үүсгэдэг (2026-08-13-нд яг ийм худал «ГАЦСАН» гарсан)."""
+    from app.services.barrier import _rpc_lock, note_rpc_done, wait_rpc_gap
     auth = httpx.DigestAuth(*creds)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(5, read=12)) as c:
+    async with _rpc_lock(ip):
+        await wait_rpc_gap(ip)
+        c = camera_client(ip)
         for path in ("cgi-bin/snapshot.cgi", "cgi-bin/snapshot.cgi?channel=1"):
             t0 = time.monotonic()
             try:
                 r = await c.get(f"http://{ip}/{path}", auth=auth)
             except Exception as e:  # noqa: BLE001
+                note_rpc_done(ip)
                 return BAD, f"{type(e).__name__}"
             dt = time.monotonic() - t0
             if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+                note_rpc_done(ip)
                 return OK, f"{len(r.content) // 1024}KB {dt:.1f}с"
             last = f"HTTP {r.status_code} {dt:.2f}с"
-        # <0.2с 400 = камерын зургийн дэд систем ГАЦСАН (reboot л засдаг)
-        return BAD, last + (" (ГАЦСАН)" if r.status_code == 400 and dt < 0.2 else "")
+        note_rpc_done(ip)
+        # <0.2с 400 = зургийн дэд систем татгалзав (ихэвчлэн холболт/ачааллын
+        # хязгаар — reboot биш, амралт засдаг)
+        return BAD, last + (" (ТАТГАЛЗАВ)" if r.status_code == 400 and dt < 0.2 else "")
 
 
 async def check_event_stream(ip: str, creds, secs: int) -> tuple[str, str, str]:
