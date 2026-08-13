@@ -228,7 +228,9 @@ _EVENT_DUMPS = 3
 _dumped: dict[str, int] = {}
 
 
-_PIC_HINT = re.compile(r"(pic|image|photo|snap|file|path|url|jpeg|jpg)", re.I)
+# yuv — Dahua-гийн event дэх зургийн багцын нэр (YuvPacket). Үүнгүйгээр
+# «ЗУРАГ-шинжтэй» мөрөнд харагдахгүй өнгөрдөг байв.
+_PIC_HINT = re.compile(r"(pic|image|photo|snap|file|path|url|jpeg|jpg|yuv)", re.I)
 
 
 def _pic_refs(obj, prefix: str = "", out: list | None = None, depth: int = 0) -> list:
@@ -470,7 +472,9 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                         continue
                     _codes_ok[device_id] = vi   # энэ хувилбар ажиллалаа — санана
                     cycle_start = vi
-                    log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}), event хүлээж байна")
+                    _mp = "multipart" if "httptype=multipart" in url else "МULTIPART-ГҮЙ"
+                    log.info(f"{ip}: ХОЛБОГДЛОО (200, codes={codes}, {_mp}), "
+                             f"event хүлээж байна")
                     last_touch = 0.0
                     # 200 буцаасан ч ЖИНХЭНЭ event огт ирдэггүй хувилбар дээр
                     # мөнхөд гацахаас сэргийлнэ (шинэ httptype=multipart хувилбарыг
