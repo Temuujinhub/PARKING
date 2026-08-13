@@ -366,8 +366,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
             out.append(f"{base}{_q(c, safe='')}")             # encode + heartbeat-гүй
         return out
 
+    # TrafficTollGate — камерын ӨӨРИЙН бичлэг ANPR event-ээ ЯГ ЭНЭ нэрээр
+    # ангилдаг (camera_records_diag2, 2026-08-13: «Event=34 TrafficTollGate,
+    # SnapSource=Video»). Гэтэл бидний захиалгад огт байхгүй байв. Эхлээд
+    # ОДОО АЖИЛЛАЖ БУЙ кодуудын ДЭЭР нь нэмсэн олонлогийг оролдоно — ингэснээр
+    # одоо ирж буй event алдагдахгүй, зурагтай нь нэмэгдэх боломжтой. Дараа нь
+    # ганцаарчилсан хувилбар (лавлагаа хэрэгжүүлэлтүүд үүнийг ашигладаг).
     codes_list = [settings.camera_event_codes] + [
-        v for v in ("[TrafficJunction,TrafficSnapPicture,TrafficControl]",
+        v for v in ("[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate]",
+                    "[TrafficTollGate]",
+                    "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
                     "[TrafficJunction]", "[TrafficSnapPicture]", "[All]")
         if v != settings.camera_event_codes]
     variants = _urls(codes_list)
