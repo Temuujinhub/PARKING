@@ -21,6 +21,27 @@ sys.path.insert(0, "/root/PARKING/backend")
 import httpx  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.services.barrier import DahuaRpc  # noqa: E402
+from app.services.device_auth import camera_credentials  # noqa: E402
+
+
+def creds_for(ip: str):
+    """Камерын нэвтрэлт: DB-д бүртгэсэн төхөөрөмжийнх → .env глобал.
+
+    2026-08-11-нээс камерууд өөр өөрийн (sysadmin) нэвтрэлттэй болж DB-д
+    хадгалагдсан. Энэ хэрэгсэл .env-ийн глобалыг л уншсаар байсан тул
+    «User or password not valid» гэж унадаг байв."""
+    from app.database import SessionLocal
+    from app.models import Device
+    db = SessionLocal()
+    try:
+        dev = (db.query(Device)
+               .filter(Device.ip_address == ip, Device.device_type == "camera")
+               .order_by(Device.status.desc()).first())
+        if dev is None:
+            print(f"   (DB-д {ip} бүртгэлгүй — .env глобал нэвтрэлт хэрэглэнэ)")
+        return camera_credentials(dev)
+    finally:
+        db.close()
 
 FMT = "%Y-%m-%d %H:%M:%S"
 # Firmware бүр traffic snapshot record-оо өөр нэрлэдэг — боломжит нэрсийг дараалан үзнэ
@@ -90,7 +111,9 @@ async def try_media_find(rpc, start, end):
 async def main(ip):
     print(f"=== Камер {ip} — Snapshot Records RPC2 судалгаа ===")
     async with httpx.AsyncClient(timeout=20) as c:
-        rpc = DahuaRpc(c, ip, settings.camera_username, settings.camera_password)
+        user, pwd = creds_for(ip)
+        print(f"нэвтрэлт: {user} (эх сурвалж: DB төхөөрөмж → .env)")
+        rpc = DahuaRpc(c, ip, user, pwd)
         await rpc.login()
         print(f"RPC2 login OK (session={rpc.session_id})")
         # Камерын ЛОКАЛ цагаар сүүлийн 24 цаг
