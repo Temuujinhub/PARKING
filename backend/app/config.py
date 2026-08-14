@@ -238,6 +238,23 @@ class Settings(BaseSettings):
     # DEFAULT UNTRAASAN. Зургийг event үед snapshot.cgi-ээр барина (найдвартай).
     # Realtime WS push дэмждэг firmware гарвал PARKING_SNAP_PULL=true болгоно.
     snap_pull: bool = False
+    # ── Comet суваг (2026-08-14-нд production дээр АЖИЛЛАСАН зам)
+    # WS-ийн оронд ЭНГИЙН HTTP урсгал:
+    #   GET /SubscribeNotify.cgi?sessionId=<RPC2 сешн>&type=1
+    #   + snapManager.attachFileProc {"filter":{"Channels":[0],"Types":["jpg"]},
+    #                                 "proc":1}
+    #   → client.notifySnapFile.params.Base64 = ЖИНХЭНЭ JPEG (~690KB)
+    # Дээрх WS хувилбар нь subscribe-ийг зөвшөөрдөг ч зураг өгдөггүй байсан;
+    # энэ суваг 40 секундэд 6 зураг өгсөн (docs/CAMERA_SNAPSHOT_FINDINGS.md).
+    #
+    # DEFAULT UNTRAASAN — учир нь камер бүрд НЭМЭЛТ байнгын HTTP холболт
+    # эзэлнэ. Dahua цөөн зэрэгцээ холболт зөвшөөрдөг тул флот даяар нэг дор
+    # асаах нь хаалтны хариу хугацаанд нөлөөлж болзошгүй. ЭХЛЭЭД нэг камер
+    # дээр `snap_comet_ips`-ээр туршиж, хаалтны хугацааг хараад дэлгэрүүлнэ.
+    snap_comet: bool = False
+    # Хоосон = БҮХ идэвхтэй камер. Таслалаар тусгаарласан IP жагсаалт өгвөл
+    # ЗӨВХӨН тэдгээр дээр асна (аажим нэвтрүүлэх зорилготой).
+    snap_comet_ips: str = ""
     # WS суваг тухайн камераас БОДИТ зураг өгдөг нь батлагдсан үед snapshot.cgi
     # руу орохын өмнө event зургийг энэ хугацаагаар хүлээнэ — ингэснээр камер дээр
     # илүүц "Manual Snapshot" бичлэг үүсгэхгүй. 0 = хүлээхгүй (хуучин зан төлөв).

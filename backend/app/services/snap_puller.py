@@ -281,6 +281,229 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
             await rpc.logout()
 
 
+# ─── Лайв COMET стрим (HTTP) ─────────────────────────────────────────────────
+#
+# WS-ийн оронд камерын вэб UI-ийн ХОЁРДУГААР зам. 2026-08-14-нд production
+# дээр ажилласан цорын ганц зургийн суваг (docs/CAMERA_SNAPSHOT_FINDINGS.md):
+#
+#   1. RPC2 global.login              → 32 hex сешн (шифрлэлт хэрэггүй)
+#   2. GET /SubscribeNotify.cgi?sessionId=<сешн>&type=1   (хоолой нээлттэй)
+#   3. snapManager.factory.instance → object
+#      snapManager.attachFileProc {"filter": {...}, "proc": 1}
+#   4. Хоолойгоор <script>var json={…};receiveMessage(json);</script> ирнэ;
+#      method="client.notifySnapFile", params.Base64 = JPEG
+#
+# `filter`/`proc` гэсэн ТҮЛХҮҮРИЙН НЭРС нь камерын вэб UI-ийн JS-ээс авсан —
+# `condition`/`Types`/`Flags` гэсэн таамаг 20 удаа -267976701 өгсөн.
+COMET_FILTERS = [
+    {"Channels": [0], "Types": ["jpg"]},   # production дээр АЖИЛЛАСАН
+    {"Channels": [1], "Types": ["jpg"]},   # зарим firmware 1-ээс тоолдог
+    {"Channels": [0]},
+]
+
+_COMET_MARK = "var json="
+
+
+def _comet_messages(buf: str):
+    """Comet буферээс БҮРЭН JSON мессежүүдийг гаргаж, үлдсэн хэсгийг буцаана.
+
+    → (мессежийн жагсаалт, боловсруулаагүй үлдэгдэл). Дутуу ирсэн мессежийг
+    буферт үлдээж дараагийн чанк хүлээнэ (нэг зураг ~950KB тул мессеж олон
+    TCP чанкаар ирдэг)."""
+    out, pos = [], 0
+    while True:
+        i = buf.find(_COMET_MARK, pos)
+        if i < 0:
+            break
+        start = buf.find("{", i)
+        if start < 0:
+            break
+        end = _match_brace(buf, start)
+        if end < 0:            # мессеж бүрэн ирээгүй — эндээс цааш хүлээнэ
+            return out, buf[i:]
+        out.append(buf[start:end + 1])
+        pos = end + 1
+    # Сүүлийн бүрэн мессежийн ард үлдсэн хэсгийг л барина
+    return out, buf[pos:] if pos else buf
+
+
+def _match_brace(s: str, start: int) -> int:
+    """`s[start]` дэх `{`-ийн хос `}`. Мөрийн дотор `{`/`}` таарч болох тул
+    хашилт ба escape-ыг тооцно (улсын дугаар, хаяганд юу ч орж болно)."""
+    depth, i, in_str, esc = 0, start, False, False
+    while i < len(s):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _plate_from_snap(params: dict) -> str:
+    """notifySnapFile мессежээс улсын дугаарыг гаргана."""
+    try:
+        ev = (params.get("info") or {}).get("Events") or []
+        car = ((ev[0] or {}).get("Data") or {}).get("TrafficCar") or {}
+        return (car.get("PlateNumber") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _comet_session(ip: str, on_picture, flt: dict,
+                         creds: tuple[str, str] | None = None):
+    """Нэг comet холболтын амьдрал: login → хоолой нээх → attach → зураг.
+
+    `on_picture(plate, jpeg)` бүрэн JPEG бүрд дуудагдана."""
+    import base64 as _b64
+    from .barrier import _rpc_lock, note_rpc_done, wait_rpc_gap
+
+    username, password = creds or camera_credentials(None)
+    # read=None — comet хоолой чимээгүй байх нь ХЭВИЙН (event хүртэл хүлээнэ)
+    timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+    # ЗОРИУД тусдаа клиент: barrier-ийн хуваалцсан клиентийн холболтын санг
+    # байнгын урсгалаар эзэлбэл хаалтны команд хүлээгдэнэ
+    async with httpx.AsyncClient(timeout=timeout) as hc:
+        rpc = DahuaRpc(hc, ip, username, password)
+        async with _rpc_lock(ip):
+            await wait_rpc_gap(ip)
+            await rpc.login()
+            note_rpc_done(ip)
+        sid = rpc.session_id
+        url = f"http://{ip}/SubscribeNotify.cgi?sessionId={sid}&type=1"
+        headers = {"Cookie": f"WebClientHttpSessionID={sid}",
+                   "Referer": f"http://{ip}/"}
+
+        async with hc.stream("GET", url, headers=headers) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"SubscribeNotify HTTP {r.status_code}")
+
+            # Хоолой нээгдсэний ДАРАА захиална — эсрэгээр хийвэл эхний
+            # notification алдагдана
+            async with _rpc_lock(ip):
+                await wait_rpc_gap(ip)
+                inst = await rpc._call("snapManager.factory.instance")
+                obj = inst.get("result")
+                res = await rpc._call("snapManager.attachFileProc",
+                                      {"filter": flt, "proc": 1}, obj=obj)
+                note_rpc_done(ip)
+            if not res.get("result"):
+                raise AttachRejected(
+                    json.dumps(res.get("error") or res, ensure_ascii=False)[:90])
+
+            buf, parts = "", {}
+            async for chunk in r.aiter_bytes():
+                buf += chunk.decode("utf-8", "replace")
+                msgs, buf = _comet_messages(buf)
+                for raw in msgs:
+                    try:
+                        obj_ = json.loads(raw)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if obj_.get("method") != "client.notifySnapFile":
+                        continue
+                    params = obj_.get("params") or {}
+                    b64 = params.get("Base64")
+                    if not isinstance(b64, str) or len(b64) < 512:
+                        continue
+                    try:
+                        data = _b64.b64decode(b64 + "=" * (-len(b64) % 4))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    info = params.get("info") or {}
+                    # Том зураг олон мессежээр ирж болно: PicID-гээр угсарна
+                    key = json.dumps(info.get("PicID") or [])
+                    parts[key] = parts.get(key, b"") + data
+                    whole = parts[key]
+                    if whole[:3] != b"\xff\xd8\xff":
+                        parts.pop(key, None)      # JPEG биш — хаяна
+                        continue
+                    if whole[-2:] != b"\xff\xd9":
+                        continue                  # үргэлжлэл хүлээнэ
+                    parts.pop(key, None)
+                    await on_picture(_plate_from_snap(params), whole)
+                    # Вэб UI шиг хүлээж авсныг баталгаажуулна — эсрэгээр
+                    # камер илгээхээ болих магадлалтай (JS: ackUpload)
+                    pic_id = info.get("PicID") or []
+                    try:
+                        await rpc._call("snapManager.ackUpload",
+                                        {"PicID": pic_id, "ClientID": "",
+                                         "ClientIP": "WEB", "result": True})
+                    except Exception:  # noqa: BLE001
+                        pass
+                if len(buf) > 8 * 1024 * 1024:
+                    # Хог хуримтлагдвал (мессежийн тэмдэг олдохгүй) цэвэрлэнэ
+                    log.warning("%s: comet буфер хэтэрлээ — цэвэрлэв", ip)
+                    buf = ""
+
+
+async def _comet_one(device_id: str, ip: str, lane_dir: str,
+                     creds: tuple[str, str] | None = None):
+    """Нэг камерын comet зургийн сувгийг тасралтгүй барина (reconnect-тэй)."""
+    best: dict[str, tuple[float, bytes]] = {}
+
+    async def flush_stale(force: bool = False):
+        now = time.monotonic()
+        for plate in list(best):
+            ts, data = best[plate]
+            if force or now - ts > 2.5:
+                del best[plate]
+                asyncio.create_task(_attach_to_session(device_id, plate, lane_dir, data))
+
+    async def on_picture(plate: str, data: bytes):
+        _last_pic[ip] = time.monotonic()
+        # snapshot.py-д «энэ камер зургаа стримээр өгдөг» гэж мэдэгдэнэ —
+        # ингэснээр _capture_and_store нь snapshot.cgi рүү унахаа больж,
+        # камер дээр илүүц «Manual Snapshot» бичлэг үүсэхээ болино
+        from .snapshot import offer_stream_image
+        offer_stream_image(ip, data)
+        if not plate:
+            return          # дугааргүй зураг — стримийн санамжид л үлдэнэ
+        ts, old = best.get(plate, (0.0, b""))
+        best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
+        await flush_stale()
+
+    vi = 0
+    while True:
+        flt = COMET_FILTERS[vi % len(COMET_FILTERS)]
+        try:
+            await _comet_session(ip, on_picture, flt, creds=creds)
+        except AttachRejected as e:
+            log.warning("%s: comet filter #%d гологдов (%s) — дараагийнх 10с дараа",
+                        ip, vi % len(COMET_FILTERS) + 1, e)
+            vi += 1
+            await flush_stale(force=True)
+            await asyncio.sleep(10)
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s: comet тасарлаа (%s: %s) — 15с дараа дахин",
+                        ip, type(e).__name__, str(e)[:110])
+        await flush_stale(force=True)
+        await asyncio.sleep(15)
+
+
+def comet_enabled_for(ip: str) -> bool:
+    """Тухайн камер дээр comet суваг асаалттай эсэх (аажим нэвтрүүлэлт)."""
+    if not settings.snap_comet or not ip:
+        return False
+    allow = [s.strip() for s in (settings.snap_comet_ips or "").split(",") if s.strip()]
+    return not allow or ip in allow
+
+
 async def _pull_one(device_id: str, ip: str, lane_dir: str,
                     creds: tuple[str, str] | None = None):
     """Нэг камерын зургийн WS сувгийг тасралтгүй барина (reconnect-тэй).
@@ -321,10 +544,16 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
 
 
 async def supervisor():
-    """Идэвхтэй камер бүрд зургийн WS task ажиллуулна (cgi_poller-тай ижил хэв маяг)."""
-    if not settings.snap_pull:
+    """Идэвхтэй камер бүрд зургийн task ажиллуулна (cgi_poller-тай ижил хэв маяг).
+
+    Хоёр суваг: WS (`snap_pull`) ба comet (`snap_comet`). Comet нь production
+    дээр батлагдсан тул шинэ зогсоолд түүнийг ашиглана; хоёулаа асаалттай
+    байвал камер тус бүрд НЭГИЙГ нь л ажиллуулна (илүү холболт эзлэхгүй)."""
+    if not settings.snap_pull and not settings.snap_comet:
         return
-    log.info("идэвхжлээ — камеруудаас event зураг татаж эхэлж байна (WS/RPC2)")
+    log.info("идэвхжлээ — камеруудаас event зураг татаж эхэлж байна (WS=%s, comet=%s%s)",
+             settings.snap_pull, settings.snap_comet,
+             f" [{settings.snap_comet_ips}]" if settings.snap_comet_ips else "")
     while True:
         db = SessionLocal()
         try:
@@ -334,12 +563,20 @@ async def supervisor():
             ).all()
             active = set()
             for c in cams:
+                # Comet нь батлагдсан зам тул түүнийг эхэнд тавина; аль нэгийг
+                # л ажиллуулна — хоёр байнгын холболт нээвэл камерын зэрэгцээ
+                # холболтын хязгаар дүүрч хаалтны команд хүлээгддэг
+                use_comet = comet_enabled_for(c.ip_address)
+                if not use_comet and not settings.snap_pull:
+                    continue
                 active.add(c.id)
                 if c.id not in _tasks or _tasks[c.id].done():
+                    runner = _comet_one if use_comet else _pull_one
                     _tasks[c.id] = asyncio.create_task(
-                        _pull_one(c.id, c.ip_address, c.lane_dir or "entry",
-                                  camera_credentials(c)))
-                    log.info(f"{c.name} ({c.ip_address}) зургийн стрим эхэллээ")
+                        runner(c.id, c.ip_address, c.lane_dir or "entry",
+                               camera_credentials(c)))
+                    log.info("%s (%s) зургийн стрим эхэллээ — %s", c.name,
+                             c.ip_address, "comet" if use_comet else "WS")
             for did in list(_tasks):
                 if did not in active:
                     _tasks[did].cancel()
