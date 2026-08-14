@@ -373,10 +373,18 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
     # одоо ирж буй event алдагдахгүй, зурагтай нь нэмэгдэх боломжтой. Дараа нь
     # ганцаарчилсан хувилбар (лавлагаа хэрэгжүүлэлтүүд үүнийг ашигладаг).
     codes_list = [settings.camera_event_codes] + [
-        v for v in ("[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate]",
-                    "[TrafficTollGate]",
-                    "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
-                    "[TrafficJunction]", "[TrafficSnapPicture]", "[All]")
+        v for v in (
+            # 1) МЭДЭГДЭЖ БУЙ БҮХ код нэг дор — одоо ажиллаж байгаагаа алдахгүй,
+            #    шинэ кодыг зэрэг нэмнэ. Орлуулах нь эрсдэлтэй: production лог
+            #    дээр TrafficJunction нь PlateNumber-тэй event ЗӨӨЖ байгаа тул
+            #    түүнийг хасвал дугаар таних урсгал тасарна.
+            "[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate,Traffic]",
+            "[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate]",
+            # 2) Гадны хэрэгжүүлэлтүүдийн санал болгодог хослолууд
+            "[TrafficTollGate,Traffic]", "[Traffic]", "[TrafficTollGate]",
+            # 3) Одоо production дээр ажиллаж байгаа хослол (найдвартай суурь)
+            "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
+            "[TrafficJunction]", "[TrafficSnapPicture]", "[All]")
         if v != settings.camera_event_codes]
     variants = _urls(codes_list)
     vi = _codes_ok.get(device_id, 0)

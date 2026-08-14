@@ -14,7 +14,10 @@
   5. Мөн snapshot-ийн ӨӨР URL хувилбаруудыг шалгана (magicBox г.м)
 
 Ажиллуулах (машин орж/гарч байх үед — event гарах ёстой):
-    sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/stream_dump.py 10.0.106.10 60
+    # Нэг codes-оор түүхий дата хадгалж шинжлэх
+    sudo .../tools/stream_dump.py 10.0.106.10 60
+    # ААН codes хувилбар аль нь ЗУРАГ өгөхийг эмпирикээр тогтоох
+    sudo .../tools/stream_dump.py 10.0.106.10 30 --compare
 
 АНХААР: backend аль хэдийн энэ камерт event стрим барьж байгаа. Dahua цөөн
 холболт л зөвшөөрдөг тул энэ хэрэгсэл түүнтэй ӨРСӨЛДӨНӨ — «event гараагүй»
@@ -66,9 +69,21 @@ def creds_for(ip: str):
     return None, None, "камер DB-д олдсонгүй"
 
 
-async def dump_stream(ip: str, creds, secs: int) -> bytes:
+# Аль codes нь ЮУ өгөхийг эмпирикээр тогтоох нэр дэвшигчид
+CODE_CANDIDATES = [
+    "[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate,Traffic]",
+    "[TrafficTollGate,Traffic]",
+    "[Traffic]",
+    "[TrafficTollGate]",
+    "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
+    "[TrafficJunction]",
+]
+
+
+async def dump_stream(ip: str, creds, secs: int,
+                      codes: str = "[TrafficJunction,TrafficSnapPicture,TrafficControl]") -> bytes:
     url = (f"http://{ip}/cgi-bin/eventManager.cgi?action=attach"
-           f"&codes=[TrafficJunction,TrafficSnapPicture,TrafficControl]"
+           f"&codes={codes}"
            f"&heartbeat=5&httptype=multipart")
     print(f"\n── Стрим сонсож байна ({secs}с)\n   {url}")
     buf = bytearray()
@@ -159,7 +174,36 @@ async def try_snap_urls(ip: str, creds):
             await asyncio.sleep(1.0)   # камерыг дараалуулан цохихгүй
 
 
-async def main(ip: str, secs: int):
+async def compare_codes(ip: str, creds, secs: int):
+    """codes хувилбар бүрийг ээлжлэн сонсож, ЮУ өгөхийг хүснэгтээр харуулна."""
+    print(f"\n══ codes харьцуулалт · хувилбар тус бүр {secs}с ══")
+    print(f"  {'codes':<62}{'HTTP':>5}{'байт':>9}{'event':>7}{'JPEG':>6}")
+    rows = []
+    for codes in CODE_CANDIDATES:
+        raw = await dump_stream(ip, creds, secs, codes)
+        ev = raw.count(b"Code=")
+        jp = raw.count(SOI)
+        rows.append((codes, len(raw), ev, jp))
+        print(f"  {codes[:60]:<62}{'':>5}{len(raw):>9,}{ev:>7}{jp:>6}")
+        await asyncio.sleep(2)   # камерыг дараалуулан цохихгүй
+    best = [r for r in rows if r[3] > 0]
+    print()
+    if best:
+        print("🎉 ЗУРАГ ӨГСӨН codes:")
+        for c, b, e, j in best:
+            print(f"   {c}  →  {j} JPEG")
+    else:
+        print("Ямар ч codes хувилбар JPEG өгсөнгүй.")
+        live = [r for r in rows if r[2] > 0]
+        if live:
+            print("Event өгсөн хувилбарууд (зураггүй):")
+            for c, b, e, j in live:
+                print(f"   {c}  →  {e} event")
+        else:
+            print("Event ч гараагүй — энэ хугацаанд машин ороогүй байж болно.")
+
+
+async def main(ip: str, secs: int, mode: str = ""):
     user, pwd, src = creds_for(ip)
     print(f"=== {ip} — event стримийн түүхий шинжилгээ ===")
     if not user:
@@ -168,6 +212,10 @@ async def main(ip: str, secs: int):
         print("   Буруу нэвтрэлт давтвал камер ТҮГЖИГДЭНЭ (remainLoginTimes).")
         return
     print(f"Нэвтрэлт: {user} ({src})")
+    if mode == "--compare":
+        await compare_codes(ip, (user, pwd), secs)
+        print()
+        return
     raw = await dump_stream(ip, (user, pwd), secs)
     analyse(ip, raw)
     await try_snap_urls(ip, (user, pwd))
@@ -178,4 +226,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    asyncio.run(main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 60))
+    _secs = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 60
+    _mode = next((a for a in sys.argv[2:] if a.startswith("--")), "")
+    asyncio.run(main(sys.argv[1], _secs, _mode))
