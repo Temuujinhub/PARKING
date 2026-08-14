@@ -24,6 +24,39 @@ blob:http://10.0.105.10/cb680b4c-…   Content-Length: 753,949
 `salt`/`content` нь ПАРАМЕТРИЙГ шифрлэсэн; ХАРИУ нь ил (DHAV + JPEG).
 Шалгах хэрэгсэл: `tools/subscribe_notify_probe.py`.
 
+### Comet сувгийн БАТЛАГДСАН байдал (2026-08-14 орой)
+
+Шифрлэлт огт хэрэггүй нь тогтоогдов — вэб UI-ийн JS-д (`initComet`) ил зам
+байна:
+
+| Алхам | Үр дүн |
+|---|---|
+| `/SubscribeNotify.cgi?sessionId=<RPC2 сешн>` | ✅ `200` + `subscribe Successfully!` |
+| Сешнгүй | ❌ `287637505 Invalid session in request data!` |
+| Тэр сешн дээр `eventManager.attach` | ✅ `result=True` |
+| Comet-оор event урсав | ✅ `TrafficJunction`, `TrafficManualSnap` (2.2KB/мессеж) |
+| **Event дотор зураг** | ❌ 116 талбар, хамгийн урт нь 19 байт |
+| **Event дотор зургийн ЗАМ** | ❌ `url`/`urlCarPano`/`FilePath` АЛГА |
+
+Зургийн оронд `YuvPacket.AddrY/AddrU/AddrV`, `PhyAddrY…`, `Stride`, `Width`,
+`Height` — өөрөөр хэлбэл **камерын дотоод санах ойн заагч**. Сүлжээгээр
+татах боломжгүй; тэр кадрыг JPEG болгож notify сувагт түлхэх ажлыг зөвхөн
+`snapManager` хийж чадна.
+
+### Үлдсэн ГАНЦ саад: `snapManager.attachFileProc`-ийн параметр
+
+```
+snapManager.attach / attachFile / subscribe → 268894210 "Method not found!"
+snapManager.attachFileProc                  → -267976701, message ""
+```
+
+Хоёр алдаа өөр учир **`attachFileProc` метод БАЙНА**, зөвхөн параметр нь
+буруу. 5 параметрийн хувилбар × 2 объект (`factory.instance` = 57985996) ×
+2 суваг = 20 оролдлого бүгд ижил `-267976701` өгсөн.
+
+**Таамаглахаа болих ёстой.** Параметрийг вэб UI-ийн JS-ээс уншина:
+DevTools → Sources → `Ctrl+Shift+F` → `attachFileProc`.
+
 Доорх хэсэг нь `eventManager.cgi` сувгийн тухайд ХҮЧИНТЭЙ ХЭВЭЭР — тэр
 сувгаар зураг ирдэггүй нь баттай.
 
