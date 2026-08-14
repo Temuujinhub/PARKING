@@ -67,7 +67,8 @@ PLAIN_VARIANTS = [
 
 # Comet урсгалын агуулгыг таних тэмдгүүд
 MARKERS = (b"receiveMessage", b"DHAV", b"JFIF", b"DH_ITC", b"PlateNumber",
-           b"<script", b"Heartbeat", b"TrafficJunction")
+           b"<script", b"Heartbeat", b"TrafficJunction",
+           b"notifySnapFile")   # ← зургийн notify-ийн нэр (JS-ээс)
 
 # «Test Capture» товчийг ПРОГРАММААР дуудах оролдлогууд (stream_dump-аас)
 TEST_TRIGGERS = [
@@ -91,15 +92,28 @@ EVENT_CODES = ["TrafficJunction", "TrafficSnapPicture", "TrafficControl",
 # Өмнөх алдаа: Dahua-гийн RPC2 сервисүүд ихэвчлэн ЭХЛЭЭД `factory.instance`
 # -ээр объект шаарддаг (`FileManager.factory.instance` → 58398944 гэж өгч
 # байсан). `snapManager`-т үүнийг хийгээгүй тул -267976701 гарсан байх.
-SNAP_METHODS = ["snapManager.attachFileProc", "snapManager.attach",
-                "snapManager.attachFile", "snapManager.subscribe"]
+# Параметрийн ЯГ нэрс вэб UI-ийн JS-ээс (2026-08-14):
+#
+#     e.WSObject.send("snapManager.attachFileProc", {
+#         filter: l()(e),          ← «filter» (объект — detach дээр
+#         proc:   e.proc              Object.assign({}, l()(e), t) хийдэг)
+#     }, { object: t.result }, "SubscribeNotify")
+#     ...
+#     e.WSObject.subscribe("client.notifySnapFile", e.parseData)
+#
+# Өмнөх 20 оролдлого бүгд `condition`/`Types`/`Flags` гэсэн БУРУУ түлхүүр
+# ашигласан тул -267976701 өгсөн байна. `filter`/`proc` нь зөв нэрс.
+SNAP_METHODS = ["snapManager.attachFileProc"]
 
 SNAP_PARAMS = [
-    {"condition": {"Channel": 0}, "Types": ["jpg"], "Flags": ["Event"]},
-    {"condition": {"Channel": 0}},
-    {"Types": ["jpg"], "Devices": [{"Channels": [1]}]},
-    {"channel": 0, "Types": ["jpg"]},
-    None,
+    {"filter": {"Channel": 0, "Types": ["jpg"]}, "proc": 1},
+    {"filter": {"Channels": [0], "Types": ["jpg"]}, "proc": 1},
+    {"filter": {"Channel": 0}, "proc": 1},
+    {"filter": {"Types": ["jpg"]}, "proc": 1},
+    {"filter": {}, "proc": 1},
+    {"filter": {"Channel": 0, "Types": ["jpg"]}, "proc": 0},
+    {"filter": {"Channel": 0, "Types": ["jpg"]},
+     "proc": "client.notifySnapFile"},
 ]
 
 
