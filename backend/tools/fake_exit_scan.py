@@ -50,34 +50,55 @@ def main(days: int, minutes: float):
                      if 0 <= (s.exit_time - s.entry_time).total_seconds() / 60 <= minutes]
             if not short:
                 continue
-            still_in, left = [], []
+            fake, quiet = [], []
             for s in short:
-                # Гарсны ДАРАА тэр дугаараар ОРОХ уншилт байсан уу?
-                # Байвал үнэхээр гарч, дахин орсон (хуурамч биш).
+                # ХУУРАМЧ ГАРЦЫН ГАРЫН ҮСЭГ: богино «гарц»-ын ДАРАА тэр машин
+                # ГАРАХ камерт ДАХИН уншигдсан. Тэр нь машин дотор байсныг
+                # НОТОЛНО — үнэхээр гарсан бол дахин гарч чадахгүй.
+                #
+                # Өмнөх хувилбар «дараа нь орох уншилт байхгүй бол дотроо
+                # үлдсэн» гэж үздэг байсан нь БУРУУ: үнэхээр орж гараад тэр
+                # өдөр буцаж ирээгүй машин ч тэр ангилалд ордог байв.
+                again = (db.query(LprEvent)
+                         .filter(LprEvent.site_id == site.id,
+                                 LprEvent.lane_dir == "exit",
+                                 LprEvent.plate_number == s.plate_number,
+                                 LprEvent.accepted.is_(True),
+                                 LprEvent.created_at > s.exit_time + timedelta(minutes=10))
+                         .order_by(LprEvent.created_at).first())
+                if again is None:
+                    quiet.append(s)
+                    continue
+                # Хооронд нь ДАХИН ОРСОН бол хуурамч биш — гарч, буцаж ирээд,
+                # дахин гарсан ердийн урсгал
                 back = (db.query(LprEvent)
                         .filter(LprEvent.site_id == site.id,
                                 LprEvent.lane_dir == "entry",
                                 LprEvent.plate_number == s.plate_number,
                                 LprEvent.accepted.is_(True),
-                                LprEvent.created_at > s.exit_time)
+                                LprEvent.created_at > s.exit_time,
+                                LprEvent.created_at < again.created_at)
                         .first())
-                (left if back else still_in).append(s)
+                (quiet if back else fake).append((s, again.created_at))
             grand["short"] += len(short)
-            grand["still_in"] += len(still_in)
+            grand["fake"] += len(fake)
             print(f"── {site.name} ({site.site_code})")
             print(f"   богино гарц (≤{minutes:.0f}м, төлбөргүй): {len(short)}")
-            print(f"   ├ дараа нь ДАХИН орсон (үнэхээр гарсан): {len(left)}")
-            print(f"   └ дахин ОРООГҮЙ — дотроо үлдсэн байх магадлалтай: "
-                  f"{len(still_in)}")
-            for s in sorted(still_in, key=lambda x: x.entry_time)[:5]:
+            print(f"   ├ дараа нь дахин гарах уншилт АЛГА (хуурамч биш): {len(quiet)}")
+            print(f"   └ ХУУРАМЧ ГАРЦ — дотроо үлдээд дараа нь гарсан: {len(fake)}")
+            for s, t2 in sorted(fake, key=lambda x: x[0].entry_time)[:5]:
                 mins = (s.exit_time - s.entry_time).total_seconds() / 60
+                held = (t2 - s.exit_time).total_seconds() / 3600
                 print(f"        {s.plate_number:<9} {s.entry_time:%m-%d %H:%M} "
-                      f"→ {s.exit_time:%H:%M} ({mins:.0f}м) {s.status}")
+                      f"→ «гарав» {s.exit_time:%H:%M} ({mins:.0f}м) → "
+                      f"ҮНЭНДЭЭ {t2:%H:%M} ({held:.1f}ц дотор) {s.status}")
             print()
 
         print(f"═══ НИЙТ богино гарц {grand['short']}, "
-              f"үүнээс дахин ороогүй {grand['still_in']}")
-        print("\nДахин ороогүй нь = өдөржин зогсоод төлбөргүй гарсан байж болзошгүй.")
+              f"үүнээс ХУУРАМЧ ГАРЦ {grand['fake']} "
+              f"({grand['fake'] * 100 // max(1, grand['short'])}%)")
+        print("\nЗөвхөн ХУУРАМЧ ГАРЦ нь бодит алдагдал: машин «гарсан» гэж")
+        print("бүртгэгдээд дотроо үлдэж, дараа нь төлбөргүй гарсан.")
         print("Одооноос эдгээр нь гарах уншилт дээр АВТО сэргэж, орсон цагаас")
         print(f"төлбөр тооцогдоно (PARKING_SUSPICIOUS_EXIT_MINUTES="
               f"{settings.suspicious_exit_minutes}).")
