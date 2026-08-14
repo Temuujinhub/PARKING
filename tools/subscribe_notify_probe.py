@@ -34,6 +34,7 @@ Backend-ийг ЗОГСООХ шаардлагагүй (энэ нь өөр су�
 tab-уудыг хаасан байвал сайн.
 """
 import asyncio
+import json
 import os
 import sys
 import time
@@ -137,6 +138,82 @@ def carve_jpegs(buf: bytes, tag: str) -> int:
             f.write(img)
         print(f"      🎉 JPEG #{n}: {len(img) // 1024}KB → {out}")
     return n
+
+
+def parse_comet(path: str) -> None:
+    """Comet урсгалын түүхий файлыг задалж, `receiveMessage(...)` доторх
+    JSON-ыг хэвлэнэ. Зорилго: event дотор ЗУРАГ эсвэл зургийн ЗАМ байгаа
+    эсэхийг тогтоох."""
+    import json
+    raw = open(path, "rb").read()
+    txt = raw.decode("utf-8", "replace")
+    print(f"=== {path} — {len(raw):,} байт ===")
+
+    msgs, pos = [], 0
+    while True:
+        i = txt.find("receiveMessage(", pos)
+        if i < 0:
+            break
+        j, depth = i + len("receiveMessage("), 0
+        start = j
+        while j < len(txt):
+            if txt[j] in "({[":
+                depth += 1
+            elif txt[j] in ")}]":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        msgs.append(txt[start:j + 1])
+        pos = j + 1
+
+    print(f"receiveMessage дуудлага: {len(msgs)}\n")
+    seen_keys: dict[str, int] = {}
+    for n, m in enumerate(msgs, 1):
+        try:
+            obj = json.loads(m)
+        except Exception:  # noqa: BLE001
+            print(f"[{n}] JSON биш ({len(m)}б): {m[:160]}")
+            continue
+        method = obj.get("method", "?")
+        params = obj.get("params") or {}
+        # Талбар бүрийг УРТААР нь эрэмбэлж хэвлэнэ — зураг байвал урт нь
+        # бусдаас олон дахин том байх ёстой
+        flat = flatten(params)
+        for k in flat:
+            seen_keys[k] = seen_keys.get(k, 0) + 1
+        big = sorted(flat.items(), key=lambda kv: -len(str(kv[1])))[:6]
+        print(f"[{n}] {method}  ({len(m):,}б, талбар {len(flat)})")
+        for k, v in big:
+            s = str(v)
+            note = ""
+            if len(s) > 200:
+                note = "  ← ЭНЭ ЗУРАГ БАЙЖ МАГАДГҮЙ"
+            print(f"      {k} = {len(s):>7}б  {s[:70]}{note}")
+
+    print("\n── Бүх талбарын нэр (давтамжтай)")
+    for k, cnt in sorted(seen_keys.items()):
+        print(f"   {cnt:>3}×  {k}")
+    # Зургийн зам байж болох нэрсийг тусад нь тодруулна
+    hits = [k for k in seen_keys if any(p in k.lower() for p in
+                                        ("url", "pano", "path", "file", "pic",
+                                         "image", "snap", "base64", "data"))]
+    print(f"\nЗУРАГТАЙ холбоотой байж болох талбарууд: {hits or 'АЛГА'}")
+
+
+def flatten(obj, prefix="", out=None) -> dict:
+    """Үүрлэсэн dict/list-ийг «a.b[0].c» хэлбэрийн хавтгай түлхүүр болгоно."""
+    if out is None:
+        out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            flatten(v, f"{prefix}.{k}" if prefix else k, out)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:20]):
+            flatten(v, f"{prefix}[{i}]", out)
+    else:
+        out[prefix] = obj
+    return out
 
 
 async def fire_test_capture(ip: str, creds) -> bool:
@@ -268,10 +345,14 @@ async def main(ip: str, raw_url: str | None, seconds: int):
                     except Exception as e:  # noqa: BLE001
                         print(f"      · {method:<30} {type(e).__name__}")
                         continue
-                    err = (res.get("error") or {}).get("message", "")
-                    mark = "✅" if res.get("result") else "· "
-                    print(f"      {mark} {method:<30} "
-                          f"{err[:46] or 'result=' + str(res.get('result'))}")
+                    if res.get("result"):
+                        print(f"      ✅ {method:<30} result=True")
+                    else:
+                        # Бүтэлгүйтлийн ЯГ шалтгааныг харах — «result=False»
+                        # гэдэг нь метод байхгүй юу, параметр буруу юу гэдгийг
+                        # ялгаж хэлдэггүй
+                        print(f"      ·  {method:<30} "
+                              f"{json.dumps(res.get('error') or res, ensure_ascii=False)[:80]}")
 
                 await fire_test_capture(ip, (user, pwd))
                 _, _, imgs = await task
@@ -304,6 +385,12 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+    if sys.argv[1] == "--parse":
+        # Цуглуулсан түүхий comet урсгалыг задлах (камерт хандахгүй)
+        for _f in sys.argv[2:] or [f"{OUT_DIR}/sub_devN.raw"]:
+            parse_comet(_f)
+            print()
+        sys.exit(0)
     _args = sys.argv[2:]
     _url, _sec = None, 25
     for i, a in enumerate(_args):
