@@ -1,5 +1,63 @@
 # Камерын зураг авах замууд — 2026-08-13/14-ний бүрэн судалгаа
 
+## ✅ ШИЙДЭГДЛЭЭ (2026-08-14 19:15) — ажиллах жор
+
+Зураг comet сувгаар JSON доторх base64-ээр ирдэг. Production дээр
+батлагдсан: 40 секундэд **6 зураг, тус бүр 687–695 KB**.
+
+```python
+# 1. RPC2-оор нэвтэрч сешн авна (энгийн global.login, шифрлэлт ХЭРЭГГҮЙ)
+session = await rpc.login()                     # 32 hex
+
+# 2. Хүлээж авах хоолойг НЭЭНЭ (зургийн суваг = type=1)
+GET /SubscribeNotify.cgi?sessionId={session}&type=1
+    Cookie: WebClientHttpSessionID={session}
+    → 200 «subscribe Successfully!», холболт нээлттэй үлдэнэ
+
+# 3. ТЭР ЖИГД сешн дээр RPC2-оор захиална
+snapManager.factory.instance          → object id
+snapManager.attachFileProc  params={"filter": {"Channels": [0],
+                                               "Types": ["jpg"]},
+                                    "proc": 1}
+                            object=<instance>    → result=True
+
+# 4. Хоолойгоор ирнэ:
+#    <script>var json={…};receiveMessage(json);</script>
+#    method = "client.notifySnapFile"
+#    params.Base64 = "/9j/4AAQSkZJRg…"   ← ЖИНХЭНЭ JPEG
+```
+
+Нэг мессежид **зураг ба улсын дугаар хоёулаа** байна:
+
+| Талбар | Утга |
+|---|---|
+| `params.Base64` | JPEG (base64) — 687–695 KB |
+| `params.info.Image[0]` | `Width`, `Height`, `Length`, `Offset`, `Type` |
+| `params.info.PicID[0..1]` | зургийн ID (`ackUpload`-д хэрэгтэй) |
+| `params.info.SOF` / `EOF` | эхлэл/төгсгөлийн тэмдэг — **олон хэсэгт хуваагдаж болно** |
+| `params.info.Ack` / `Transfer` | баталгаажуулалтын горим |
+| `params.info.Events[0].Data.TrafficCar.PlateNumber` | улсын дугаар |
+| `params.info.Events[0].Code` | `TrafficJunction` / `TrafficManualSnap` |
+
+Анхаарах зүйлс интеграц хийхээс өмнө:
+
+- **`SOF`/`EOF`/`Offset`/`Length`** — том зураг олон мессежээр хуваагдаж
+  ирж болно. Одоогийн 6 дээж бүгд нэг мессежид багтсан ч кодыг угсралттай
+  бичих ёстой.
+- **`ackUpload(PicID, ClientID, ClientIP, true)`** — вэб UI зураг авсныг
+  баталгаажуулдаг. Хийхгүй бол камер илгээхээ болих магадлалтай.
+- **Урсгалын хэмжээ**: event тутам ~690 KB. 22 камерт байнга асаавал
+  диск/сүлжээ мэдэгдэхүйц ачаална ([диск дүүрэх эрсдэл](#) аль хэдийн бий).
+- **`snapshot.cgi` хэвээр хэрэгтэй** — comet нь зөвхөн event үед зураг
+  өгнө; оператор дурын үед «одоо харах» гэвэл өөр зам алга.
+
+Шалгах хэрэгсэл:
+
+```bash
+sudo .../tools/subscribe_notify_probe.py 10.0.105.10 --seconds 40
+sudo .../tools/subscribe_notify_probe.py --parse /tmp/subnotify/sub_snap.raw
+```
+
 ## ⚠ 2026-08-14 орой — ДООРХ ДҮГНЭЛТ ХАГАС БУРУУ
 
 DevTools-ийн `blob:` хариунаас олдсон нь:

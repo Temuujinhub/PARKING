@@ -33,7 +33,8 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| tool | **`tools/subscribe_notify_probe.py` — ГОЛ ОЛДВОР:** вэб UI-ийн `blob:` хариу 753KB бөгөөд `JFIF`+`DHAV`+event JSON агуулж байв. Зураг ба event НЭГ урсгалаар ирдэг, гэхдээ `eventManager.cgi` биш **`SubscribeNotify.cgi`**-ээр. Өмнөх 7 туршилт бүгд буруу сувагт хайж байсан | `5b04d1f` | ⏳ | ⏳ |
+| tool | **✅ ЗУРГИЙН ЗАМ ШИЙДЭГДЛЭЭ (19:15):** comet суваг + `snapManager.attachFileProc({filter:{Channels:[0],Types:["jpg"]},proc:1})` → `client.notifySnapFile.params.Base64` = ЖИНХЭНЭ JPEG. Production дээр 40 секундэд 6 зураг × 687–695 KB. Нэг мессежид зураг ба улсын дугаар хоёулаа | `fd3c86d` | ⏳ | ⏳ |
+| tool | `tools/subscribe_notify_probe.py` — ГОЛ ОЛДВОР: вэб UI-ийн `blob:` хариу 753KB бөгөөд `JFIF`+`DHAV`+event JSON агуулж байв. Зураг ба event НЭГ урсгалаар ирдэг, гэхдээ `eventManager.cgi` биш **`SubscribeNotify.cgi`**-ээр. Өмнөх 7 туршилт бүгд буруу сувагт хайж байсан | `5b04d1f` | ⏳ | ⏳ |
 | tool | `tools/rpc3_loadfile_probe.py` — `FileManager.downloadPiece` / `RPC3_Loadfile` замыг шалгав. **Үр дүн: сөрөг** — вэб UI энэ дуудлагыг огт хийдэггүй (DevTools `RPC3` шүүлтүүр 0 хүсэлт) | `632dc8e` `b0b671d` | ⏳ | ⏳ |
 | tool | `tools/onvif_snap_probe.py` — ONVIF media service-ээр зураг авах проб (хараахан ажиллуулаагүй) | `c11ff3c` | ⏳ | ⏳ |
 | tool | `tools/stream_dump.py` — event стримийн ТҮҮХИЙ байтыг шинжлэх; `--compare` нь Test Capture-ээр event БАТАЛГААТАЙ үүсгэдэг детерминист хэмжилт болов | `f711006` `2770a1f` | ⏳ | ⏳ |
