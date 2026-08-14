@@ -17,6 +17,9 @@ import os
 import sys
 from datetime import datetime
 
+os.chdir("/root/PARKING/backend")  # ЧУХАЛ: config-ийн env_file=".env" нь CWD-д
+# харьцангуй тул app.* импортоос ӨМНӨ шилжинэ. Функц дотор хийвэл ХОЖУУ —
+# `settings` singleton аль хэдийн буруу утгаар үүссэн байна (DB руу localhost).
 sys.path.insert(0, "/root/PARKING/backend")
 import httpx  # noqa: E402
 
@@ -41,11 +44,7 @@ def creds_for(ip: str):
     2026-08-11-нээс камерууд өөр өөрийн (sysadmin) нэвтрэлттэй болж DB-д
     хадгалагдсан. .env-ийн ХУУЧИН глобалыг л уншвал «User or password not
     valid» гэж унана (camera_records_diag дээр яг тийм болсон)."""
-    # .env нь ХАРЬЦАНГУЙ замаар уншигддаг (config.py: env_file=".env") тул
-    # backend хавтас руу шилжихгүй бол DATABASE_URL олдохгүй, DB лукап унана.
-    _cwd = os.getcwd()
     try:
-        os.chdir("/root/PARKING/backend")
         from app.database import SessionLocal
         from app.models import Device
         from app.services.device_auth import camera_credentials
@@ -60,8 +59,6 @@ def creds_for(ip: str):
             db.close()
     except Exception as e:  # noqa: BLE001
         print(f"  (DB лукап бүтсэнгүй: {type(e).__name__} — .env рүү унана)")
-    finally:
-        os.chdir(_cwd)
     u, p = env_creds()
     return u, p, ".env глобал"
 

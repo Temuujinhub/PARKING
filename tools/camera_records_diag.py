@@ -18,6 +18,9 @@ import os
 import sys
 from datetime import datetime, timedelta
 
+os.chdir("/root/PARKING/backend")  # ЧУХАЛ: config-ийн env_file=".env" нь CWD-д
+# харьцангуй тул app.* импортоос ӨМНӨ шилжинэ. Функц дотор хийвэл ХОЖУУ —
+# `settings` singleton аль хэдийн буруу утгаар үүссэн байна (DB руу localhost).
 sys.path.insert(0, "/root/PARKING/backend")
 import httpx  # noqa: E402
 from app.config import settings  # noqa: E402
@@ -31,9 +34,6 @@ def creds_for(ip: str):
     2026-08-11-нээс камерууд өөр өөрийн (sysadmin) нэвтрэлттэй болж DB-д
     хадгалагдсан. Энэ хэрэгсэл .env-ийн глобалыг л уншсаар байсан тул
     «User or password not valid» гэж унадаг байв."""
-    # .env харьцангуй замтай — backend хавтас руу шилжинэ (доор буцаана)
-    _cwd = os.getcwd()
-    os.chdir("/root/PARKING/backend")
     from app.database import SessionLocal
     from app.models import Device
     db = SessionLocal()
@@ -46,7 +46,6 @@ def creds_for(ip: str):
         return camera_credentials(dev)
     finally:
         db.close()
-        os.chdir(_cwd)
 
 FMT = "%Y-%m-%d %H:%M:%S"
 # Firmware бүр traffic snapshot record-оо өөр нэрлэдэг — боломжит нэрсийг дараалан үзнэ

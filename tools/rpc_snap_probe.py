@@ -29,8 +29,12 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 
+os.chdir("/root/PARKING/backend")  # ЧУХАЛ: config-ийн env_file=".env" нь CWD-д
+# харьцангуй тул app.* импортоос ӨМНӨ шилжинэ. Функц дотор хийвэл ХОЖУУ —
+# `settings` singleton аль хэдийн буруу утгаар үүссэн байна (DB руу localhost).
 sys.path.insert(0, "/root/PARKING/backend")
 
 import httpx  # noqa: E402
@@ -62,9 +66,7 @@ DATA_KEYS = ("data", "Data", "picture", "Picture", "image", "Image",
 
 def creds_for(ip: str):
     """DB-д бүртгэсэн камерын нэвтрэлт → .env глобал."""
-    cwd = os.getcwd()
     try:
-        os.chdir("/root/PARKING/backend")   # .env харьцангуй замтай
         from app.database import SessionLocal
         from app.models import Device
         from app.services.device_auth import camera_credentials
@@ -79,8 +81,6 @@ def creds_for(ip: str):
             db.close()
     except Exception as e:  # noqa: BLE001
         print(f"  (DB лукап бүтсэнгүй: {type(e).__name__}: {str(e)[:70]})")
-    finally:
-        os.chdir(cwd)
     from app.config import settings
     return settings.camera_username, settings.camera_password, ".env глобал"
 
@@ -114,12 +114,29 @@ async def main(ip: str):
     print(f"=== {ip} — RPC2 зургийн метод судалгаа ===")
     print(f"Нэвтрэлт: {user} ({src})\n")
 
+    # ХАМГААЛАЛТ: камерууд 2026-08-11-нээс өөр өөрийн (DB) нэвтрэлттэй. DB-ээс
+    # уншиж чадаагүй бол .env-ийн ГЛОБАЛ нэр буруу байх магадлал өндөр бөгөөд
+    # Dahua буруу оролдлогыг тоолж (remainLoginTimes) 0 болмогц камерыг
+    # ТҮГЖДЭГ. Тиймээс энд огт оролдохгүй, шалтгааныг хэлээд зогсоно.
+    if src != "DB" and not src.startswith("DB"):
+        print("⛔ Нэвтрэлтийг DB-ээс уншиж чадсангүй — .env глобалаар ОРОЛДОХГҮЙ.")
+        print("   Буруу нэвтрэлт давтвал камер ТҮГЖИГДЭНЭ (remainLoginTimes).")
+        print("   Шалтгааныг дээрх «DB лукап бүтсэнгүй» мөрөөс хараарай.")
+        return
+
     async with httpx.AsyncClient(timeout=15) as c:
         rpc = DahuaRpc(c, ip, user, pwd)
         try:
             await rpc.login()
         except Exception as e:  # noqa: BLE001
-            print(f"❌ RPC2 login БҮТСЭНГҮЙ: {e}")
+            msg = str(e)
+            print(f"❌ RPC2 login БҮТСЭНГҮЙ: {msg}")
+            m = re.search(r"remainLoginTimes'?:\s*(\d+)", msg)
+            if m:
+                left = int(m.group(1))
+                print(f"\n⛔ ЭНЭ КАМЕРТ {left} ОРОЛДЛОГО ҮЛДЛЭЭ. Дахин БҮҮ оролдоорой —")
+                print("   0 болмогц камер түгжигдэж, хаалт/event хүртэл зогсоно.")
+                print("   Зөв нэвтрэлтийг: tools/cam_status.py эсвэл Тохиргоо→Төхөөрөмж")
             return
         print(f"RPC2 login OK (session={rpc.session_id})\n")
 
