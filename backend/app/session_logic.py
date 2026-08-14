@@ -168,6 +168,35 @@ def plates_ocr_similar(a: str, b: str) -> bool:
     return sum(1 for x, y in zip(a, b) if x != y) == 1
 
 
+def is_duplicate_read(plate: str, recent: str) -> bool:
+    """Нэг машиныг ХОЁР ДАХЬ УДАА уншсан эсэх (зөвхөн dedup-д, session тохооход БИШ).
+
+    ЯАГААД ТУСДАА ДҮРЭМ: `plates_ocr_similar` нь session тохооход ч ашиглагддаг
+    тул зориуд ХАТУУ — сулруулбал буруу машинд төлбөр тохоно. Гэвч давхар
+    уншилтыг таних нь өөр асуудал: тухайн ХАЖУУГААР нь (20 секундын дотор, ижид
+    зурвас дээр) зөв уншилт аль хэдийн бүртгэгдсэн байхад дараагийн эвдэрсэн
+    уншилт нь бараг үргэлж ТЭР МАШИН байна.
+
+    Хэмжилт (2026-08-14, 2 хоног, 5,357 гарах уншилт): «хог уншилт» 135 удаа
+    гарсны ихэнх нь яг тэр секундэд бүртгэгдсэн зөв уншилтын хажууд байв:
+        4627УКА 13:37  ✓ гарсан
+        4627КД  13:37  ✗ «бүртгэлгүй» → LED дээрх төлбөрийн текстийг дарна
+    Одоогийн дүрэм зөвхөн эхний/сүүлийн тэмдэгт тасарсныг барьдаг тул
+    `4627УКА`.startswith(`4627КД`) худал болж давхар уншилт мэдрэгдээгүй.
+
+    ШИНЭ ШАЛГУУР: уншсан дугаар ФОРМАТ БУРУУ бөгөөд цифрийн хэсэг нь саяхны
+    зөв уншилтын цифрүүдэд багтаж байвал давхар уншилт гэж үзнэ. Цифр шалгах нь
+    санамсаргүй тохиолдлыг хаана — ард нь дараалсан өөр машины дугаар цифрээрээ
+    давхцах магадлал бага."""
+    if plates_ocr_similar(plate, recent):
+        return True
+    if is_valid_plate(plate):
+        return False        # зөв форматтай дугаар — жинхэнэ өөр машин байж болно
+    d_new = "".join(c for c in plate if c.isdigit())
+    d_old = "".join(c for c in recent if c.isdigit())
+    return len(d_new) >= 3 and (d_new in d_old or d_old in d_new)
+
+
 def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSession | None, bool]:
     """Гарах талд session хайх: эхлээд ЯГ таарах, олдохгүй бол OCR-ийн зөрүүтэй
     (үсэг андуурч уншсан) session-ийг олно. Буцаах: (session|None, fuzzy_эсэх).
@@ -573,7 +602,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
         ).all()
     ]
-    if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
+    if any(is_duplicate_read(plate, rp) for rp in recent_plates):
         # Давхар уншилт — шинэ session үүсгэхгүй, ГЭХДЭЭ хаалтыг заавал нээнэ:
         # машин хаалганы өмнө зогсож байгаа тул уншилт давтагдсан байж болно.
         _can_open = allow_open and (not restricted or find_registered(db, plate, site_id))
@@ -865,7 +894,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
         ).all()
     ]
-    if any(plates_ocr_similar(plate, rp) for rp in recent_plates):
+    if any(is_duplicate_read(plate, rp) for rp in recent_plates):
         # Давхар уншилт — session/төлбөрийг ДАХИН боловсруулахгүй. ГЭХДЭЭ өмнөх
         # уншилтын хаалтны команд амжилтгүй болсон бол машин хаалганы өмнө
         # lpr_dedup_seconds (20с) турш ГАЦНА: жолооч ухраад дахин ойртох бүрд
