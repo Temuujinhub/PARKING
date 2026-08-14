@@ -6,7 +6,7 @@
 хараарай. Энэ файлын зорилго — эцэслэгдсэн замаар дахин судалгаа явуулахгүй
 байх, эцэслэгдээгүйг нь ЗӨВ аргаар дахин хэмжих.
 
-## Хэмжилтийн сул тал (2026-08-14-нд илэрсэн)
+## Хэмжилтийн сул тал (илэрч ЗАСАГДСАН)
 
 `--compare` анхны хувилбар нь codes тус бүрийг 30 секунд сонсоод «0 event»
 гарвал «код ажиллахгүй» гэж дүгнэдэг байв. Гэтэл тэр цонхонд **машин орсон
@@ -25,8 +25,8 @@ ANPR event үүсгэдэг. `--compare` одоо түүнийг хувилба�
 
 | # | Зам | Үр дүн | Тайлбар |
 |---|---|---|---|
-| 1 | `eventManager.cgi` + `httptype=multipart` | **JPEG ирэхгүй** | 20/20 камер `200` хүлээж авсан. `selftest`: «6 event, 0 зураг». Event-д `WithSnap=True` гэж бичсэн ч хавсралт илгээдэггүй |
-| 2 | `codes=[TrafficTollGate]` / `[Traffic]` attach | **эргэлзээтэй** | 200 буцаагаад 518б heartbeat л өгсөн. ГЭХДЭЭ тэр цонхонд машин орсон эсэхийг хянаагүй — `[TrafficJunction]` ганцаараа ч 0 event өгсөн нь хэмжилтийн сул тал болохыг харуулна. Детерминист дахин хэмжилт шаардлагатай (`--compare` нь одоо Test Capture-ээр event үүсгэдэг) |
+| 1 | `eventManager.cgi` + `httptype=multipart` | **JPEG ирэхгүй (эцэслэсэн)** | `Content-Type: multipart/x-mixed-replace; boundary=myboundary` зөв ирдэг. Test Capture-ээр БАТАЛГААТАЙ event үүсгэж 2 удаа давтахад: 5,367б / 1 event / **0 JPEG**. Event-д `WithSnap=True` гэж бичсэн ч хавсралт огт илгээдэггүй |
+| 2 | `codes=[TrafficTollGate]` / `[Traffic]` attach | **эцэслэн татгалзсан** | Test Capture-ээр event БАТАЛГААТАЙ үүсгэж 2 удаа давтсан: `[TrafficJunction...]` → 1 event, бусад → 518б/0 event. Зөвхөн `TrafficJunction` агуулсан код event өгдөг |
 | 3 | `mediaFileFind` (6 хувилбар) | **хоосон** | `findFile=False, infos=0`. `storage.getDeviceAllInfo` алдаа — **хадгалах төхөөрөмж алга** |
 | 4 | `snapManager.cgi?action=attachFileProc` (CGI) | **400 / 500** | 5 параметрийн хувилбар бүгд |
 | 5 | `snapManager.postSnap` (RPC2) | **Method not found** | 4 параметрийн хувилбар, ХОЁР firmware дээр ч |
@@ -82,13 +82,15 @@ RPC2 login/RecordFinder/trafficSnap бүгд ажиллаж байдаг — ө�
 
 ## Дахин судлахаас өмнө
 
-№1, №3-№7 замыг ДАХИН турших шаардлагагүй — эцэслэгдсэн. №2 (event `codes`)
-нь дээрх сул талын улмаас ДАХИН хэмжигдэх ёстой:
+Долоон замыг ДАХИН турших шаардлагагүй — бүгд Test Capture-ээр детерминист
+хэмжилтээр эцэслэгдсэн (2026-08-14, хоёр удаа давтсан).
+
+ҮЛДСЭН ГАНЦ туршаагүй суваг: **ONVIF** (`tools/onvif_snap_probe.py`). ONVIF нь
+Dahua-гийн CGI-гээс ТУСДАА дэд систем бөгөөд камерт «ONVIF User» гэсэн тусдаа
+данс ч байдаг. CGI-ийн зургийн зам эвдэрсэн үед ONVIF-ийнх ажиллаж болзошгүй.
 
 ```bash
-sudo systemctl stop parking-backend
-sudo .../tools/stream_dump.py 10.0.106.10 30 --compare    # Test Capture-тэй
-sudo systemctl start parking-backend
+sudo .../tools/onvif_snap_probe.py 10.0.106.10
 ```
 
 Шинэ санаа гарвал эхлээд эдгээр хэрэгслээр баримт цуглуул:
