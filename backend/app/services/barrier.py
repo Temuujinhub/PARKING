@@ -522,7 +522,20 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
             _site = f" {_st.site_code}" if _st is not None else ""
         except Exception:  # noqa: BLE001
             _site = ""
-        _where = f"{ip}{_site}"
+        # Улсын дугаарыг ЗААВАЛ бичнэ. Өмнө нь хаалтны логт дугаар байдаггүй
+        # байсан тул «төлсөн ч нээгдээгүй» гомдол ирэхэд тухайн машины хаалтны
+        # мөрийг дугаараар нь ХАЙХ БОЛОМЖГҮЙ байв (2026-08-14). Энэ хайлт нь
+        # команд аль хэдийн явсны ДАРАА хийгддэг тул жолоочийг хүлээлгэхгүй.
+        _plate = ""
+        if session_id:
+            try:
+                from ..models import ParkingSession
+                _s = db.get(ParkingSession, session_id)
+                if _s is not None and _s.plate_number:
+                    _plate = f" {_s.plate_number}"
+            except Exception:  # noqa: BLE001
+                _plate = ""
+        _where = f"{ip}{_site}{_plate}"
         # Задаргаа: «хаалт Xмс + LED Yмс». Удаашралын анхааруулгыг ХААЛТНЫ хугацаанд
         # тулгуурлана — LED нь хаалт нээгдсэний дараа явдаг тул жолоочийг хүлээлгэдэггүй.
         _brk = ""
