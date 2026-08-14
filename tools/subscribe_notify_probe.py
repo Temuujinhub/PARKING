@@ -81,15 +81,25 @@ TEST_TRIGGERS = [
 EVENT_CODES = ["TrafficJunction", "TrafficSnapPicture", "TrafficControl",
                "TrafficManualSnap", "TrafficSnapPictureSuccess"]
 
-# Comet хоолойд ЮУ урсгахыг захиалах RPC2 дуудлагууд.
-# `snapManager.attachFileProc` бол Dahua-гийн ЗУРАГ түлхэх механизм —
-# `SubscribeNotify.cgi?…&type=1` (snapNotify) сувагтай хосолдог.
-SUBSCRIBE_CALLS = [
-    ("eventManager.attach", {"codes": EVENT_CODES}),
-    ("snapManager.attachFileProc",
-     {"condition": {"Channel": 0}, "Types": ["jpg"], "Flags": ["Event"]}),
-    ("snapManager.attachFileProc",
-     {"Types": ["jpg"], "Devices": [{"Channels": [1]}]}),
+# ── ЗУРГИЙН захиалга
+#
+# 2026-08-14-ний баримт: event-ийн 116 талбарт зураг ч, зургийн зам ч
+# БАЙХГҮЙ. Хамгийн урт талбар 19 байт. Харин `YuvPacket.AddrY/AddrU/AddrV`
+# гэсэн КАМЕРЫН САНАХ ОЙН хаягууд байна — зураг тэнд байгаа бөгөөд түүнийг
+# зөвхөн `snapManager` уншиж notify сувгаар түлхэж чадна.
+#
+# Өмнөх алдаа: Dahua-гийн RPC2 сервисүүд ихэвчлэн ЭХЛЭЭД `factory.instance`
+# -ээр объект шаарддаг (`FileManager.factory.instance` → 58398944 гэж өгч
+# байсан). `snapManager`-т үүнийг хийгээгүй тул -267976701 гарсан байх.
+SNAP_METHODS = ["snapManager.attachFileProc", "snapManager.attach",
+                "snapManager.attachFile", "snapManager.subscribe"]
+
+SNAP_PARAMS = [
+    {"condition": {"Channel": 0}, "Types": ["jpg"], "Flags": ["Event"]},
+    {"condition": {"Channel": 0}},
+    {"Types": ["jpg"], "Devices": [{"Channels": [1]}]},
+    {"channel": 0, "Types": ["jpg"]},
+    None,
 ]
 
 
@@ -242,6 +252,54 @@ def flatten(obj, prefix="", out=None) -> dict:
     return out
 
 
+async def call_show(rpc, method: str, params, obj=None, indent="      "):
+    """RPC2 дуудаад үр дүнг НЭГ мөрөөр хэвлэнэ. Алдааны кодыг БҮТНЭЭР
+    харуулна — «result=False» нь метод байхгүй/параметр буруу хоёрыг
+    ялгадаггүй."""
+    try:
+        res = await asyncio.wait_for(rpc._call(method, params, obj=obj),
+                                     timeout=10)
+    except Exception as e:  # noqa: BLE001
+        print(f"{indent}·  {method:<30} {type(e).__name__}")
+        return None, type(e).__name__
+    if res.get("result"):
+        print(f"{indent}✅ {method:<30} result={res.get('result')}")
+        return res, ""
+    err = res.get("error") or res
+    msg = err.get("message", "") if isinstance(err, dict) else ""
+    print(f"{indent}·  {method:<30} "
+          f"{json.dumps(err, ensure_ascii=False)[:80]}")
+    return None, msg
+
+
+async def subscribe_pictures(rpc) -> bool:
+    """`snapManager`-ээр ЗУРГИЙГ notify сувагт захиалах.
+
+    Эхлээд `factory.instance`-ээр объект авахыг оролдоно — Dahua-гийн RPC2
+    сервисүүд ихэвчлэн үүнийг шаарддаг бөгөөд өмнөх оролдлогод бид үүнийг
+    алгасаж байсан."""
+    objs = [(None, "объектгүй")]
+    for p in (None, {"channel": 0}):
+        res, _ = await call_show(rpc, "snapManager.factory.instance", p)
+        if res and isinstance(res.get("result"), int):
+            objs.insert(0, (res["result"], f"object={res['result']}"))
+            break
+        await asyncio.sleep(0.4)
+
+    for obj, label in objs:
+        for method in SNAP_METHODS:
+            for params in SNAP_PARAMS:
+                res, err = await call_show(rpc, method, params, obj=obj,
+                                           indent=f"      [{label}] ")
+                if res:
+                    print(f"      🎯 ЗУРГИЙН ЗАХИАЛГА БҮРТГЭГДЛЭЭ: {method}")
+                    return True
+                if "not found" in err.lower():
+                    break      # метод байхгүй — параметр солиод нэмэргүй
+                await asyncio.sleep(0.3)
+    return False
+
+
 async def fire_test_capture(ip: str, creds) -> bool:
     """«Test Capture»-ийг программаар дуудна — гараар товч дарах шаардлагагүй."""
     auth = httpx.DigestAuth(*creds)
@@ -364,21 +422,8 @@ async def main(ip: str, raw_url: str | None, seconds: int):
                     listen(c, url, hdrs, None, f"sub_{chan[:4]}", seconds))
                 await asyncio.sleep(2.0)      # хоолой тогтвортой нээгдэх хүртэл
 
-                for method, params in SUBSCRIBE_CALLS:
-                    try:
-                        res = await asyncio.wait_for(
-                            rpc._call(method, params), timeout=10)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"      · {method:<30} {type(e).__name__}")
-                        continue
-                    if res.get("result"):
-                        print(f"      ✅ {method:<30} result=True")
-                    else:
-                        # Бүтэлгүйтлийн ЯГ шалтгааныг харах — «result=False»
-                        # гэдэг нь метод байхгүй юу, параметр буруу юу гэдгийг
-                        # ялгаж хэлдэггүй
-                        print(f"      ·  {method:<30} "
-                              f"{json.dumps(res.get('error') or res, ensure_ascii=False)[:80]}")
+                await call_show(rpc, "eventManager.attach", {"codes": EVENT_CODES})
+                await subscribe_pictures(rpc)
 
                 await fire_test_capture(ip, (user, pwd))
                 _, _, imgs = await task
