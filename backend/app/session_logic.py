@@ -262,10 +262,29 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     closed = (db.query(ParkingSession)
               .filter(ParkingSession.site_id == site_id,
                       ParkingSession.status.in_(["MANUAL_CLOSED", "CLOSED", "FREE"]),
-                      ParkingSession.exit_confirmed.is_(False),
                       ParkingSession.paid_at.is_(None),
                       ParkingSession.exit_time >= since)
               .all())
+
+    def _short_fake_exit(s: ParkingSession) -> bool:
+        """Гарах уншилт БАЙСАН ч зогсолт хэт богино — «хуурамч гарц» уу.
+
+        KH зогсоолын бичлэгээр батлагдсан арга (2026-08-14): жолооч орох
+        камерт уншуулаад ухраад гарах камерт уншуулна → session үнэгүй
+        хаагдана → өдөржин зогсоод оройдоо «бүртгэлгүй» болж гарна.
+
+        Хуурамч гарцыг тэр агшинд нь ялгах аргагүй (орж ирээд эргэж гарах нь
+        бодитой). ГЭХДЭЭ машин ОРОЙ гарах камерт ДАХИН уншигдсан нь өөрөө
+        нотолгоо: үнэхээр гарсан бол дахин ирэхгүй байсан."""
+        if not (s.entry_time and s.exit_time):
+            return False
+        mins = (s.exit_time - s.entry_time).total_seconds() / 60
+        return 0 <= mins <= settings.suspicious_exit_minutes
+
+    # exit_confirmed=True (жинхэнэ гарах уншилттай) бол ердийн үед ХҮРЭХГҮЙ —
+    # тэр машин үнэхээр гарсан, одоогийнх нь ШИНЭ зогсолт. Цорын ганц үл
+    # хамаарах нь дээрх «хуурамч гарц».
+    closed = [s for s in closed if not s.exit_confirmed or _short_fake_exit(s)]
     cands = [s for s in closed if s.plate_number == plate]
     if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
         cands = [s for s in closed if plates_ocr_similar(plate, s.plate_number)]
@@ -274,6 +293,9 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     s = cands[0]
     if paid_total(db, s) > 0:
         return None
+    fake = bool(s.exit_confirmed) and _short_fake_exit(s)
+    fake_min = ((s.exit_time - s.entry_time).total_seconds() / 60
+                if fake and s.entry_time and s.exit_time else 0.0)
     from .models import AuditLog, Compensation
     canceled = (db.query(Compensation)
                 .filter(Compensation.session_id == s.id, Compensation.status == "PENDING")
@@ -284,15 +306,25 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     s.duration_minutes = None
     s.total_fee = s.base_fee = s.vat_amount = None
     s.exit_deadline = None
-    s.note = (f"{s.note + ' | ' if s.note else ''}"
-              f"Гарах уншилтаар АВТО сэргээв (албадан хаалт эрт байсан)")[:1000]
+    # Тэмдэглэл нь АЛЬ тохиолдол болохыг ялгана — оператор маргаан гарвал
+    # юунд үндэслэн төлбөр нэмэгдсэнийг тайлбарлах ёстой
+    if fake:
+        _why = (f"Гарах уншилтаар АВТО сэргээв: {fake_min:.0f} минутын дараа "
+                f"«гарсан» гэж бүртгэгдсэн ч машин ДОТРОО үлдсэн байна "
+                f"(төлбөр орсон цагаас тооцогдоно)")
+    else:
+        _why = "Гарах уншилтаар АВТО сэргээв (албадан хаалт эрт байсан)"
+    s.note = f"{s.note + ' | ' if s.note else ''}{_why}"[:1000]
     db.add(AuditLog(username="system", action="AUTO_REOPEN", entity="session",
                     entity_id=s.id,
                     detail={"plate": s.plate_number, "read_plate": plate,
-                            "canceled_debt": canceled}))
+                            "canceled_debt": canceled,
+                            "short_fake_exit": fake,
+                            "prev_minutes": round(fake_min, 1) if fake else None}))
     db.flush()
-    log.info("[exit] АВТО сэргээв: %s (session %s, цуцалсан өр %d)",
-             s.plate_number, s.id, canceled)
+    log.info("[exit] АВТО сэргээв: %s (session %s, цуцалсан өр %d)%s",
+             s.plate_number, s.id, canceled,
+             f" — ХУУРАМЧ ГАРЦ {fake_min:.0f}м" if fake else "")
     return s
 
 
