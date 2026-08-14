@@ -68,6 +68,29 @@ PLAIN_VARIANTS = [
 MARKERS = (b"receiveMessage", b"DHAV", b"JFIF", b"DH_ITC", b"PlateNumber",
            b"<script", b"Heartbeat", b"TrafficJunction")
 
+# «Test Capture» товчийг ПРОГРАММААР дуудах оролдлогууд (stream_dump-аас)
+TEST_TRIGGERS = [
+    "cgi-bin/trafficSnap.cgi?action=manualSnap&channel=1",
+    "cgi-bin/trafficSnap.cgi?action=manualSnap",
+    "cgi-bin/trafficParking.cgi?action=manualSnap&channel=1",
+    "cgi-bin/snapManager.cgi?action=manualSnap&channel=1",
+    "cgi-bin/devTest.cgi?action=testCapture&channel=1&plateNumber=AB12345",
+]
+
+EVENT_CODES = ["TrafficJunction", "TrafficSnapPicture", "TrafficControl",
+               "TrafficManualSnap", "TrafficSnapPictureSuccess"]
+
+# Comet хоолойд ЮУ урсгахыг захиалах RPC2 дуудлагууд.
+# `snapManager.attachFileProc` бол Dahua-гийн ЗУРАГ түлхэх механизм —
+# `SubscribeNotify.cgi?…&type=1` (snapNotify) сувагтай хосолдог.
+SUBSCRIBE_CALLS = [
+    ("eventManager.attach", {"codes": EVENT_CODES}),
+    ("snapManager.attachFileProc",
+     {"condition": {"Channel": 0}, "Types": ["jpg"], "Flags": ["Event"]}),
+    ("snapManager.attachFileProc",
+     {"Types": ["jpg"], "Devices": [{"Channels": [1]}]}),
+]
+
 
 def creds_for(ip: str):
     """DB-д бүртгэсэн камерын нэвтрэлт. Олдохгүй бол оролдохгүй —
@@ -114,6 +137,23 @@ def carve_jpegs(buf: bytes, tag: str) -> int:
             f.write(img)
         print(f"      🎉 JPEG #{n}: {len(img) // 1024}KB → {out}")
     return n
+
+
+async def fire_test_capture(ip: str, creds) -> bool:
+    """«Test Capture»-ийг программаар дуудна — гараар товч дарах шаардлагагүй."""
+    auth = httpx.DigestAuth(*creds)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5, read=10)) as c:
+        for path in TEST_TRIGGERS:
+            try:
+                r = await c.get(f"http://{ip}/{path}", auth=auth)
+            except Exception:  # noqa: BLE001
+                continue
+            if r.status_code == 200 and b"Error" not in r.content[:32]:
+                print(f"      Test Capture дуудав: {path}")
+                return True
+            await asyncio.sleep(0.5)
+    print("      ⚠ Test Capture программаар дуудагдсангүй — ГАРААР дарна уу")
+    return False
 
 
 async def listen(c: httpx.AsyncClient, url: str, headers: dict, auth, tag: str,
@@ -197,13 +237,49 @@ async def main(ip: str, raw_url: str | None, seconds: int):
                 continue
             path = "/SubscribeNotify.cgi" + tmpl.replace("{S}", sess or "")
             print(f"   [{i}] {name}: {path}")
+            # Энэ алхмын зорилго нь ЗӨВХӨН «хоолой нээгдэж байна уу» —
+            # захиалгагүй тул удаан сонсох нь утгагүй (C алхам үүнийг хийнэ)
             st, n, imgs = await listen(c, f"http://{ip}{path}", hdrs, auth,
-                                       f"plain{i}", seconds)
+                                       f"plain{i}", min(seconds, 6))
             total_imgs += imgs
             if imgs:
                 print(f"   ✅ «{name}» ажиллалаа — энэ бол бидний хайж байсан зам.")
                 break
             await asyncio.sleep(1.5)   # камерыг дараалуулан цохихгүй
+
+        # ── C. Хоолойг НЭЭЭД, тэр сешн дээр ЗАХИАЛГА өгнө
+        # Comet бол зөвхөн доош чиглэсэн хоолой; юу урсгахыг RPC2-оор
+        # захиалдаг. B алхамд «subscribe Successfully!» гараад чимээгүй
+        # байсны шалтгаан яг энэ — захиалга өгөөгүй.
+        if sess and not total_imgs:
+            print("\n── C. Хоолой + захиалга (comet нээгээд eventManager.attach)")
+            for chan, tmpl in (("snapNotify(type=1)", "?sessionId={S}&type=1"),
+                               ("devNotify", "?sessionId={S}")):
+                url = f"http://{ip}/SubscribeNotify.cgi" + tmpl.replace("{S}", sess)
+                print(f"   [{chan}]")
+                task = asyncio.create_task(
+                    listen(c, url, hdrs, None, f"sub_{chan[:4]}", seconds))
+                await asyncio.sleep(2.0)      # хоолой тогтвортой нээгдэх хүртэл
+
+                for method, params in SUBSCRIBE_CALLS:
+                    try:
+                        res = await asyncio.wait_for(
+                            rpc._call(method, params), timeout=10)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"      · {method:<30} {type(e).__name__}")
+                        continue
+                    err = (res.get("error") or {}).get("message", "")
+                    mark = "✅" if res.get("result") else "· "
+                    print(f"      {mark} {method:<30} "
+                          f"{err[:46] or 'result=' + str(res.get('result'))}")
+
+                await fire_test_capture(ip, (user, pwd))
+                _, _, imgs = await task
+                total_imgs += imgs
+                if imgs:
+                    print(f"   ✅ «{chan}» сувгаар зураг ирлээ.")
+                    break
+                await asyncio.sleep(1.5)
 
         try:
             await rpc._call("global.logout")
