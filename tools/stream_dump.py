@@ -20,6 +20,8 @@
     sudo .../tools/stream_dump.py 10.0.106.10 30 --compare
     # МАШИН ХҮЛЭЭЛГҮЙ турших: камерын вэб UI-ийн «Test Capture» товчийг ашиглана
     sudo .../tools/stream_dump.py 10.0.106.10 120 --test-capture
+    # Хадгалсан түүхий датаг КАМЕРТ ХҮРЭЛГҮЙ дахин шинжлэх
+    sudo .../tools/stream_dump.py --dig /tmp/stream_10.0.106.10.bin
 
 АНХААР: backend аль хэдийн энэ камерт event стрим барьж байгаа. Dahua цөөн
 холболт л зөвшөөрдөг тул энэ хэрэгсэл түүнтэй ӨРСӨЛДӨНӨ — «event гараагүй»
@@ -28,6 +30,9 @@
 логтой хамт унших).
 """
 import asyncio
+import base64
+import binascii
+import json
 import os
 import re
 import sys
@@ -168,6 +173,87 @@ async def dump_stream(ip: str, creds, secs: int,
     return bytes(buf)
 
 
+def _walk_strings(obj, path="", out=None):
+    """JSON доторх БҮХ мөрийг зам болон уртаар нь цуглуулна."""
+    if out is None:
+        out = []
+    if isinstance(obj, str):
+        out.append((path or "(root)", obj))
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            _walk_strings(v, f"{path}.{k}" if path else k, out)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            _walk_strings(v, f"{path}[{i}]", out)
+    return out
+
+
+def dig_json(ip: str, raw: bytes):
+    """Event-ийн JSON дотроос BASE64 ЗУРАГ хайна.
+
+    Яагаад хэрэгтэй вэ: бидний стрим скан нь ТҮҮХИЙ JPEG байт (\xff\xd8\xff)
+    хайдаг. Хэрэв камер зургаа JSON доторх base64 мөрөөр илгээж байвал тэр скан
+    ОЛОХГҮЙ өнгөрнө — «зураг ирээгүй» гэсэн ХУДАЛ дүгнэлт гарна. Нэг event
+    5,367 байт байсан нь цэвэр метадатад томдож байгаа тул ЗААВАЛ шалгах ёстой.
+    """
+    print("\n── JSON-ийн гүнзгий шинжилгээ (base64 зураг хайх)")
+    blocks = []
+    for m in re.finditer(rb"data=(\{)", raw):
+        start = m.start(1)
+        depth, i, n = 0, start, len(raw)
+        while i < n:                       # хаалт тоолж бүтэн JSON-ыг таслана
+            c = raw[i:i + 1]
+            if c == b"{":
+                depth += 1
+            elif c == b"}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(raw[start:i + 1])
+                    break
+            i += 1
+    if not blocks:
+        print("   `data={...}` блок олдсонгүй.")
+        return
+    print(f"   JSON блок: {len(blocks)}  ·  хэмжээ: "
+          f"{', '.join(f'{len(b):,}б' for b in blocks[:6])}")
+
+    found = 0
+    for bi, b in enumerate(blocks, 1):
+        try:
+            obj = json.loads(b.decode("utf-8", "replace"))
+        except Exception as e:  # noqa: BLE001
+            print(f"   блок {bi}: JSON задарсангүй ({type(e).__name__})")
+            continue
+        strings = _walk_strings(obj)
+        big = sorted([x for x in strings if len(x[1]) > 100],
+                     key=lambda x: -len(x[1]))
+        print(f"   блок {bi}: {len(strings)} мөр талбар, 100 тэмдэгтээс урт нь {len(big)}")
+        for path, val in big[:8]:
+            head = val[:16].replace("\n", "")
+            note = ""
+            try:                            # base64 задрах уу, JPEG мөн үү
+                pad = "=" * (-len(val) % 4)
+                dec = base64.b64decode(val + pad, validate=True)
+                note = f" → base64 задарлаа {len(dec):,}б"
+                if dec[:2] == b"\xff\xd8":
+                    out = f"/tmp/stream_{ip}_b64_{bi}.jpg"
+                    with open(out, "wb") as f:
+                        f.write(dec)
+                    note += f"  🎉 JPEG! хадгалав: {out}"
+                    found += 1
+                else:
+                    note += f" (JPEG биш, эхлэл {dec[:4]!r})"
+            except (binascii.Error, ValueError):
+                note = " (base64 биш)"
+            print(f"      {path:<40} {len(val):>7,} тэмдэгт  «{head}…»{note}")
+        if not big:
+            # Хамгийн том талбаруудыг ямар ч байсан харуулна
+            top = sorted(strings, key=lambda x: -len(x[1]))[:5]
+            print("      (урт мөр алга) хамгийн том талбарууд: "
+                  + ", ".join(f"{p}={len(v)}б" for p, v in top))
+    print(f"\n   {'🎉 BASE64 ЗУРАГ ОЛДЛОО!' if found else '❌ JSON дотор base64 зураг алга.'}")
+
+
 def analyse(ip: str, raw: bytes):
     print(f"\n── Шинжилгээ: нийт {len(raw):,} байт")
     if not raw:
@@ -209,9 +295,10 @@ def analyse(ip: str, raw: bytes):
         print(f"   🎉 ЗУРАГ {n}: {j + 2 - i:,} байт → {p}")
         pos = j + 2
     if not n:
-        print("   ❌ Бүрэн JPEG ОЛДСОНГҮЙ — камер стримээр зураг илгээгээгүй.")
+        print("   ❌ ТҮҮХИЙ JPEG олдсонгүй — base64-ээр ирсэн эсэхийг доор шалгана.")
         head = raw[:400].decode("utf-8", "replace").replace("\r", "\\r").replace("\n", "\\n")
         print(f"   Эхний 400 байт: {head}")
+    dig_json(ip, raw)
 
 
 async def try_snap_urls(ip: str, creds):
@@ -254,6 +341,13 @@ async def compare_codes(ip: str, creds, secs: int):
         ev = raw.count(b"Code=")
         jp = raw.count(SOI)
         rows.append((codes, len(raw), ev, jp))
+        if ev:                       # event ирсэн хувилбарын датаг ХАДГАЛНА
+            tagname = re.sub(r"[^A-Za-z]+", "", codes)[:28]
+            path = f"/tmp/stream_{ip}_{tagname}.bin"
+            with open(path, "wb") as f:
+                f.write(raw)
+            print(f"     түүхий дата: {path}")
+            dig_json(ip, raw)
         print(f"  {codes[:60]:<62}{len(raw):>9,}{ev:>7}{jp:>6}")
         await asyncio.sleep(2)   # камерыг дараалуулан цохихгүй
     best = [r for r in rows if r[3] > 0]
@@ -271,6 +365,17 @@ async def compare_codes(ip: str, creds, secs: int):
                 print(f"   {c}  →  {e} event")
         else:
             print("Event ч гараагүй — энэ хугацаанд машин ороогүй байж болно.")
+
+
+def dig_file(path: str):
+    """Өмнө хадгалсан .bin файлыг КАМЕРТ ХҮРЭЛГҮЙ гүнзгий шинжилнэ."""
+    raw = open(path, "rb").read()
+    print(f"=== {path} — офлайн шинжилгээ ({len(raw):,} байт) ===")
+    ctypes = re.findall(rb"Content-Type:\s*([^\r\n]+)", raw, re.I)
+    for t in sorted({t.decode('ascii', 'replace').strip() for t in ctypes}):
+        print(f"   Content-Type: {t}")
+    print(f"   ТҮҮХИЙ JPEG SOI: {raw.count(SOI)}")
+    dig_json("file", raw)
 
 
 async def main(ip: str, secs: int, mode: str = ""):
@@ -307,6 +412,9 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+    if sys.argv[1] == "--dig":        # офлайн: stream_dump.py --dig /tmp/xxx.bin
+        dig_file(sys.argv[2])
+        sys.exit(0)
     _secs = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 60
     _mode = next((a for a in sys.argv[2:] if a.startswith("--")), "")
     asyncio.run(main(sys.argv[1], _secs, _mode))
