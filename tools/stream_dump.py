@@ -71,6 +71,45 @@ def creds_for(ip: str):
     return None, None, "камер DB-д олдсонгүй"
 
 
+# «Test Capture» товчны ард байж болох дуудлагууд. Аль нь ажиллахыг ТААМАГЛАЖ
+# болохгүй тул дараалан оролдоно. Олдвол codes хувилбар бүрд event-ийг
+# БАТАЛГААТАЙ үүсгэж чадна — «машин ирээгүй» гэсэн эргэлзээ арилна.
+TEST_TRIGGERS = [
+    "cgi-bin/trafficSnap.cgi?action=manualSnap&channel=1",
+    "cgi-bin/trafficSnap.cgi?action=manualSnap",
+    "cgi-bin/trafficParking.cgi?action=manualSnap&channel=1",
+    "cgi-bin/snapManager.cgi?action=manualSnap&channel=1",
+    "cgi-bin/devTest.cgi?action=testCapture&channel=1&plateNumber=AB12345",
+    "cgi-bin/configManager.cgi?action=testCapture&channel=1",
+]
+
+
+async def find_test_trigger(ip: str, creds):
+    """«Test Capture»-ийг программаар дуудах боломжтой эсэхийг тогтооно."""
+    auth = httpx.DigestAuth(*creds)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5, read=10)) as c:
+        for path in TEST_TRIGGERS:
+            try:
+                r = await c.get(f"http://{ip}/{path}", auth=auth)
+            except Exception:  # noqa: BLE001
+                continue
+            if r.status_code == 200 and b"Error" not in r.content[:32]:
+                print(f"   ✅ Test Capture триггер олдлоо: {path}")
+                return path
+            await asyncio.sleep(0.8)
+    print("   (программын Test Capture триггер олдсонгүй — ГАРААР дарна)")
+    return None
+
+
+async def fire_trigger(ip: str, creds, path: str):
+    auth = httpx.DigestAuth(*creds)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5, read=10)) as c:
+            await c.get(f"http://{ip}/{path}", auth=auth)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # Аль codes нь ЮУ өгөхийг эмпирикээр тогтоох нэр дэвшигчид
 CODE_CANDIDATES = [
     "[TrafficJunction,TrafficSnapPicture,TrafficControl,TrafficTollGate,Traffic]",
@@ -84,7 +123,7 @@ CODE_CANDIDATES = [
 
 async def dump_stream(ip: str, creds, secs: int,
                       codes: str = "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
-                      grace: float = 0.0) -> bytes:
+                      grace: float = 0.0, trigger=None) -> bytes:
     """secs секунд сонсоно. grace>0 үед ЭХНИЙ event ирсний дараа нэмж grace
     секунд сонсоод зогсоно — event-ийн ДАРАА ирэх зургийн хэсгийг барихын тулд
     (зөвлөмжид «Part 2 нь 0.05с дараа ирдэг» гэсэн нэхэмжлэлийг шалгана)."""
@@ -106,6 +145,11 @@ async def dump_stream(ip: str, creds, secs: int,
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + secs
                 ev_at = None
+                if trigger:
+                    # Стрим НЭЭГДСЭНИЙ ДАРАА триггер дарна — event баталгаатай
+                    # энэ цонхонд оногдоно
+                    _ip, _cr, _path = trigger
+                    asyncio.create_task(fire_trigger(_ip, _cr, _path))
                 async for chunk in r.aiter_bytes():
                     buf += chunk
                     now = loop.time()
@@ -189,16 +233,28 @@ async def try_snap_urls(ip: str, creds):
 
 
 async def compare_codes(ip: str, creds, secs: int):
-    """codes хувилбар бүрийг ээлжлэн сонсож, ЮУ өгөхийг хүснэгтээр харуулна."""
+    """codes хувилбар бүрийг ээлжлэн сонсож, ЮУ өгөхийг хүснэгтээр харуулна.
+
+    ЧУХАЛ: хувилбар бүрд event БАТАЛГААТАЙ үүсэх ёстой — эс бол «0 event» нь
+    «код ажиллахгүй» гэдгийг БИШ, «машин ирээгүй» гэдгийг л хэлнэ (2026-08-14-нд
+    яг ийм алдаатай дүгнэлт хийгдсэн). Тиймээс Test Capture-ийг ашиглана."""
+    print("\n── Test Capture триггер хайж байна")
+    trigger = await find_test_trigger(ip, creds)
     print(f"\n══ codes харьцуулалт · хувилбар тус бүр {secs}с ══")
-    print(f"  {'codes':<62}{'HTTP':>5}{'байт':>9}{'event':>7}{'JPEG':>6}")
+    if not trigger:
+        print("  ⚠ Хувилбар бүрийн ЭХЭНД камерын вэб UI-аас «Test Capture» дарна уу.")
+    print(f"  {'codes':<62}{'байт':>9}{'event':>7}{'JPEG':>6}")
     rows = []
     for codes in CODE_CANDIDATES:
-        raw = await dump_stream(ip, creds, secs, codes)
+        if not trigger:
+            print(f"\n  ⏸  ОДОО «Test Capture» дарна уу → {codes[:50]}")
+            await asyncio.sleep(4)   # дарах хугацаа
+        raw = await dump_stream(ip, creds, secs, codes,
+                                grace=5.0, trigger=(ip, creds, trigger) if trigger else None)
         ev = raw.count(b"Code=")
         jp = raw.count(SOI)
         rows.append((codes, len(raw), ev, jp))
-        print(f"  {codes[:60]:<62}{'':>5}{len(raw):>9,}{ev:>7}{jp:>6}")
+        print(f"  {codes[:60]:<62}{len(raw):>9,}{ev:>7}{jp:>6}")
         await asyncio.sleep(2)   # камерыг дараалуулан цохихгүй
     best = [r for r in rows if r[3] > 0]
     print()
