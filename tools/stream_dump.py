@@ -392,13 +392,25 @@ async def main(ip: str, secs: int, mode: str = ""):
         print()
         return
     if mode == "--test-capture":
+        # ЧУХАЛ: «Test Capture» нь TrafficJunction БИШ, `TrafficManualSnap`
+        # (камерын бичлэгт Event=201, Source=Manual, «Trigger Source: Force»)
+        # үүсгэдэг. Өмнө нь зөвхөн TrafficJunction захиалж байсан тул тэр event
+        # шүүгдээд хасагдаж, 25 удаагийн Heartbeat л ирсэн (1,850 байт).
+        codes = ("[TrafficJunction,TrafficSnapPicture,TrafficControl,"
+                 "TrafficManualSnap,TrafficSnapPictureSuccess]")
         print()
         print("  ┌─────────────────────────────────────────────────────────┐")
         print("  │ ОДОО камерын вэб UI руу орж:                            │")
         print("  │   Live → Device Test → «Test Capture» товчийг дарна уу  │")
         print("  │ (дугаар AB12345, чиглэл Approaching — хэвээр нь болно)  │")
         print("  └─────────────────────────────────────────────────────────┘")
-        raw = await dump_stream(ip, (user, pwd), secs, grace=5.0)
+        raw = await dump_stream(ip, (user, pwd), secs, codes, grace=5.0)
+        if not raw.count(b"Code="):
+            print("\n   ⚠ Event ирээгүй. Хоёр шалтгаан байж болно:")
+            print("     а) Test Capture дарагдаагүй / цонхны гадуур дарагдсан")
+            print("     б) энэ камер TrafficManualSnap-ыг attach-аар илгээдэггүй")
+            print("     → [All] кодоор дахин үзнэ:")
+            raw = await dump_stream(ip, (user, pwd), min(secs, 45), "[All]", grace=5.0)
         analyse(ip, raw)
         print()
         return
