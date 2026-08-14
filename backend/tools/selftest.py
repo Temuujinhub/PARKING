@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models import Device, ParkingSite
 from app.services.barrier import DahuaRpc, camera_client
@@ -78,8 +79,13 @@ async def check_event_stream(ip: str, creds, secs: int) -> tuple[str, str, str]:
 
     Буцаах: (event төлөв, event тайлбар, зургийн төлөв+тайлбар)"""
     auth = httpx.DigestAuth(*creds)
-    url = (f"http://{ip}/cgi-bin/eventManager.cgi"
-           f"?action=attach&codes=[All]&heartbeat=5")
+    # ЧУХАЛ: `[All]` нь ЭНЭ флотод HTTP 200 буцаагаад ЗӨВХӨН heartbeat илгээдэг
+    # (2026-08-14, stream_dump --compare: 518 байт, 0 event). Тиймээс энэ тест
+    # «event гараагүй» гэсэн ХУДАЛ сөрөг үр дүн өгсөөр байв. Production-д
+    # ажилладаг нь батлагдсан хослолыг + multipart-ыг ашиглана.
+    url = (f"http://{ip}/cgi-bin/eventManager.cgi?action=attach"
+           f"&codes={settings.camera_event_codes}"
+           f"&heartbeat=5&httptype=multipart")
     buf, events, jpegs = b"", 0, 0
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(6, read=secs + 5)) as c:
