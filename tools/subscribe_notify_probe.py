@@ -140,6 +140,33 @@ def carve_jpegs(buf: bytes, tag: str) -> int:
     return n
 
 
+def match_brace(s: str, start: int) -> int:
+    """`s[start]` дэх `{`-ийн хос `}`-ийн индексийг буцаана.
+
+    Мөрийн дотор `{`/`}` таарч болох тул хашилт ба escape-ыг тооцно —
+    улсын дугаар, хаяг зэрэгт ямар ч тэмдэгт орж болно."""
+    depth, i, in_str, esc = 0, start, False, False
+    while i < len(s):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 def parse_comet(path: str) -> None:
     """Comet урсгалын түүхий файлыг задалж, `receiveMessage(...)` доторх
     JSON-ыг хэвлэнэ. Зорилго: event дотор ЗУРАГ эсвэл зургийн ЗАМ байгаа
@@ -149,25 +176,23 @@ def parse_comet(path: str) -> None:
     txt = raw.decode("utf-8", "replace")
     print(f"=== {path} — {len(raw):,} байт ===")
 
+    # Бодит формат:  <script>var json={…};receiveMessage(json);</script>
+    # тул `receiveMessage(` дараа нь ХУВЬСАГЧИЙН НЭР байдаг, JSON биш.
     msgs, pos = [], 0
     while True:
-        i = txt.find("receiveMessage(", pos)
+        i = txt.find("var json=", pos)
         if i < 0:
             break
-        j, depth = i + len("receiveMessage("), 0
-        start = j
-        while j < len(txt):
-            if txt[j] in "({[":
-                depth += 1
-            elif txt[j] in ")}]":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        msgs.append(txt[start:j + 1])
-        pos = j + 1
+        start = txt.find("{", i)
+        if start < 0:
+            break
+        end = match_brace(txt, start)
+        if end < 0:
+            break
+        msgs.append(txt[start:end + 1])
+        pos = end + 1
 
-    print(f"receiveMessage дуудлага: {len(msgs)}\n")
+    print(f"event мессеж: {len(msgs)}\n")
     seen_keys: dict[str, int] = {}
     for n, m in enumerate(msgs, 1):
         try:
@@ -183,7 +208,8 @@ def parse_comet(path: str) -> None:
         for k in flat:
             seen_keys[k] = seen_keys.get(k, 0) + 1
         big = sorted(flat.items(), key=lambda kv: -len(str(kv[1])))[:6]
-        print(f"[{n}] {method}  ({len(m):,}б, талбар {len(flat)})")
+        codes = {v for k, v in flat.items() if k.endswith(".Code")}
+        print(f"[{n}] {method} {sorted(codes)}  ({len(m):,}б, талбар {len(flat)})")
         for k, v in big:
             s = str(v)
             note = ""
