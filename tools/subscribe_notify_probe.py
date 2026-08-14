@@ -105,16 +105,21 @@ EVENT_CODES = ["TrafficJunction", "TrafficSnapPicture", "TrafficControl",
 # ашигласан тул -267976701 өгсөн байна. `filter`/`proc` нь зөв нэрс.
 SNAP_METHODS = ["snapManager.attachFileProc"]
 
-SNAP_PARAMS = [
-    {"filter": {"Channel": 0, "Types": ["jpg"]}, "proc": 1},
-    {"filter": {"Channels": [0], "Types": ["jpg"]}, "proc": 1},
-    {"filter": {"Channel": 0}, "proc": 1},
-    {"filter": {"Types": ["jpg"]}, "proc": 1},
-    {"filter": {}, "proc": 1},
-    {"filter": {"Channel": 0, "Types": ["jpg"]}, "proc": 0},
-    {"filter": {"Channel": 0, "Types": ["jpg"]},
-     "proc": "client.notifySnapFile"},
+# `filter`-ийн ДОТООД бүтцийг `l()(e)` функц үүсгэдэг бөгөөд минифайд
+# хийгдсэн тул нэрсийг нь таамаглаж байна. `ackUpload(PicID, ClientID,
+# ClientIP, result)`-аас харахад клиентээ IP/ID-гаар таньдаг.
+FILTERS = [
+    {"Channel": 0, "Types": ["jpg"]},
+    {"Channels": [0], "Types": ["jpg"]},
+    {"Channel": 0, "Types": ["jpg"], "ClientType": "WEB"},
+    {"Channel": 0},
+    {"Types": ["jpg"]},
+    {},
 ]
+
+SNAP_PARAMS = ([{"filter": f, "proc": 1} for f in FILTERS] +
+               [{"filter": FILTERS[0], "proc": 0},
+                {"filter": FILTERS[0], "proc": "client.notifySnapFile"}])
 
 
 def creds_for(ip: str):
@@ -307,10 +312,25 @@ async def subscribe_pictures(rpc) -> bool:
                                            indent=f"      [{label}] ")
                 if res:
                     print(f"      🎯 ЗУРГИЙН ЗАХИАЛГА БҮРТГЭГДЛЭЭ: {method}")
+                    print(f"         params={json.dumps(params, ensure_ascii=False)}")
                     return True
                 if "not found" in err.lower():
                     break      # метод байхгүй — параметр солиод нэмэргүй
                 await asyncio.sleep(0.3)
+
+    # `manualUploadPicture` — event хүлээхгүйгээр зургийг ШУУД захиалах
+    # (JS: SnapManager.manualUploadPicture({filter: e}))
+    obj = objs[0][0]
+    for f in FILTERS[:4]:
+        res, err = await call_show(rpc, "snapManager.manualUploadPicture",
+                                   {"filter": f}, obj=obj,
+                                   indent="      [manual] ")
+        if res:
+            print(f"      🎯 ЗУРАГ ЗАХИАЛАВ: manualUploadPicture filter={f}")
+            return True
+        if "not found" in err.lower():
+            break
+        await asyncio.sleep(0.3)
     return False
 
 
