@@ -204,11 +204,17 @@ function BankModal({ state, onClose, onDone }) {
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
   const save = async (e) => {
     e.preventDefault()
+    // site_id === '*' — нэг дансыг БҮХ зогсоолд хадгална
+    const targets = f.site_id === '*' ? (f._all || []).map((s) => s.id) : [f.site_id]
+    if (!targets.length) return toast('Зогсоол олдсонгүй', 'error')
+    const body = { bank_name: f.bank_name || '', bank_account: f.bank_account || '',
+                   bank_account_name: f.bank_account_name || '' }
     try {
-      await api(`/api/admin/sites/${f.site_id}`, { method: 'PUT', body: {
-        bank_name: f.bank_name || '', bank_account: f.bank_account || '',
-        bank_account_name: f.bank_account_name || '' } })
-      toast('Хадгалагдлаа'); onClose(); onDone()
+      for (const id of targets) {
+        await api(`/api/admin/sites/${id}`, { method: 'PUT', body })
+      }
+      toast(targets.length > 1 ? `${targets.length} зогсоолд хадгалагдлаа` : 'Хадгалагдлаа')
+      onClose(); onDone()
     } catch (err) { toast(err.message, 'error') }
   }
   return (
@@ -333,8 +339,9 @@ function PaymentAccountsPanel() {
             <button className="btn-secondary py-1 text-xs"
               onClick={() => {
                 const free = sites.filter((s) => !data.bank_accounts.some((b) => b.site_id === s.id))
-                if (!free.length) return toast('Бүх зогсоолд данс тохируулсан байна')
-                setBankModal({ site_id: free[0].id, name: free[0].name, _pick: free })
+                // Данс байхгүй зогсоол үлдээгүй ч «Бүгд» сонголтоор бүгдийг
+                // нэг дор дарж бичих боломж хэрэгтэй тул модалыг ямагт нээнэ
+                setBankModal({ _pick: free, _all: sites })
               }}>
               <Plus size={13} className="inline -mt-0.5" /> Нэмэх
             </button>
@@ -370,6 +377,17 @@ function PaymentAccountsPanel() {
       {bankModal?._pick && (
         <Modal open title="Аль зогсоолд данс нэмэх вэ?" onClose={() => setBankModal(null)}>
           <div className="space-y-2">
+            {/* Нэг данс бүх зогсоолд — ихэнх тохиолдолд байгууллага НЭГ дансаар
+                хураадаг тул зогсоол бүрээр давтахгүйн тулд */}
+            <button className="btn-primary w-full justify-start"
+              onClick={() => setBankModal({ site_id: '*', name: 'Бүх зогсоол',
+                                            _all: bankModal._all })}>
+              Бүх зогсоол
+              <span className="text-xs opacity-70 ml-1">({bankModal._all.length}) — нэг данс бүгдэд</span>
+            </button>
+            {bankModal._pick.length > 0 && (
+              <div className="text-xs text-slate-500 pt-1">эсвэл тухайн нэг зогсоолд:</div>
+            )}
             {bankModal._pick.map((s) => (
               <button key={s.id} className="btn-secondary w-full justify-start"
                 onClick={() => setBankModal({ site_id: s.id, name: s.name })}>

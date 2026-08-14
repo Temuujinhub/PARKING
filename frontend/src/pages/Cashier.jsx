@@ -180,13 +180,17 @@ export default function Cashier() {
   }
 
   const fee = selected?.fee
-  // Зөвхөн OPERATOR (болон SUPER_ADMIN) касс дээр үйлдэл хийнэ; бусад нь харна
-  const canAct = ['OPERATOR', 'SUPER_ADMIN'].includes(user?.role)
+  // Кассын үйлдлийг РОЛИОР биш ЭРХЭЭР шалгана. Backend 2026-08-12-нд
+  // require_role → require("cashier") болсон ч энд роль шалгасаар байсан тул
+  // ADMIN/ONLINE_OPERATOR хуудсыг хараад товчнууд нь түгжээтэй байв.
+  const canAct = can('cashier')
   const canFreeExit = can('free_exit')  // гараар/төлбөргүй гаргах эрх (санхүүгийн хамгаалалт)
-  // Online operator: «Бэлнээр»-ийн оронд «Дансаар» (шилжүүлэг) товч харагдана.
-  // SUPER_ADMIN бүх эрхтэй тул АЛЬ АЛИНЫГ нь харна (турших/яаралтай үед).
+  // «Дансаар» (шилжүүлэг) — банкны API холбогдоогүй тул оператор гараар
+  // баталгаажуулна. Ээлж хаахад тусад нь нийлбэрээр харагддаг (аудитын мөр).
   const canTransfer = can('pay_transfer')
-  const showCash = !canTransfer || user?.role === 'SUPER_ADMIN'
+  // «Бэлнээр» — ЗӨВХӨН оффисоос ажилладаг ONLINE_OPERATOR дээр нуугдана
+  // (тэдэнд бэлэн мөнгөний касс байхгүй). Бусад бүх эрхэд харагдана.
+  const showCash = user?.role !== 'ONLINE_OPERATOR'
   const site = sites.find((s) => s.id === siteId)
 
   const saveNote = async () => {
