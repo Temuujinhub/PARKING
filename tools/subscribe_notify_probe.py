@@ -34,8 +34,10 @@ Backend-ийг ЗОГСООХ шаардлагагүй (энэ нь өөр су�
 tab-уудыг хаасан байвал сайн.
 """
 import asyncio
+import base64
 import json
 import os
+import re
 import sys
 import time
 
@@ -143,6 +145,57 @@ def creds_for(ip: str):
     return None, None, "камер DB-д олдсонгүй"
 
 
+def json_blocks(txt: str):
+    """Comet урсгалаас `var json={…}` блокуудыг ээлжлэн гаргана."""
+    pos = 0
+    while True:
+        i = txt.find("var json=", pos)
+        if i < 0:
+            return
+        start = txt.find("{", i)
+        if start < 0:
+            return
+        end = match_brace(txt, start)
+        if end < 0:
+            return
+        yield txt[start:end + 1]
+        pos = end + 1
+
+
+_B64 = re.compile(r"^[A-Za-z0-9+/=\s]+$")
+
+
+def carve_base64(txt: str, tag: str) -> int:
+    """JSON мессежийн УРТ талбаруудаас base64 зургийг сугална.
+
+    `client.notifySnapFile` нь зургийг түүхий байтаар биш, JSON доторх
+    base64 мөрөөр дамжуулдаг тул SOI/EOI хайх нь ажиллахгүй."""
+    os.makedirs(OUT_DIR, exist_ok=True)
+    n = 0
+    for blk in json_blocks(txt):
+        try:
+            obj = json.loads(blk)
+        except Exception:  # noqa: BLE001
+            continue
+        for key, val in flatten(obj).items():
+            if not isinstance(val, str) or len(val) < 512:
+                continue
+            if not _B64.match(val):
+                continue
+            try:
+                dec = base64.b64decode(val + "=" * (-len(val) % 4))
+            except Exception:  # noqa: BLE001
+                continue
+            if dec[:3] != b"\xff\xd8\xff":
+                continue
+            n += 1
+            out = f"{OUT_DIR}/{tag}_b64_{n}.jpg"
+            with open(out, "wb") as f:
+                f.write(dec)
+            print(f"      🎉 JPEG #{n}: {len(dec) // 1024}KB  ({key}) → {out}")
+    return n
+
+
 def carve_jpegs(buf: bytes, tag: str) -> int:
     """Урсгалын байтуудаас JPEG-үүдийг сугалж файл болгоно.
 
@@ -207,27 +260,15 @@ def parse_comet(path: str) -> None:
 
     # Бодит формат:  <script>var json={…};receiveMessage(json);</script>
     # тул `receiveMessage(` дараа нь ХУВЬСАГЧИЙН НЭР байдаг, JSON биш.
-    msgs, pos = [], 0
-    while True:
-        i = txt.find("var json=", pos)
-        if i < 0:
-            break
-        start = txt.find("{", i)
-        if start < 0:
-            break
-        end = match_brace(txt, start)
-        if end < 0:
-            break
-        msgs.append(txt[start:end + 1])
-        pos = end + 1
-
-    print(f"event мессеж: {len(msgs)}\n")
+    msgs = list(json_blocks(txt))
+    print(f"мессеж: {len(msgs)}\n")
     seen_keys: dict[str, int] = {}
     for n, m in enumerate(msgs, 1):
         try:
             obj = json.loads(m)
         except Exception:  # noqa: BLE001
-            print(f"[{n}] JSON биш ({len(m)}б): {m[:160]}")
+            if n <= 12:
+                print(f"[{n}] JSON биш ({len(m)}б): {m[:160]}")
             continue
         method = obj.get("method", "?")
         params = obj.get("params") or {}
@@ -236,6 +277,8 @@ def parse_comet(path: str) -> None:
         flat = flatten(params)
         for k in flat:
             seen_keys[k] = seen_keys.get(k, 0) + 1
+        if n > 12:
+            continue          # талбарын нэрс дээр цуглуулсаар, хэвлэхээ болино
         big = sorted(flat.items(), key=lambda kv: -len(str(kv[1])))[:6]
         codes = {v for k, v in flat.items() if k.endswith(".Code")}
         print(f"[{n}] {method} {sorted(codes)}  ({len(m):,}б, талбар {len(flat)})")
@@ -254,6 +297,11 @@ def parse_comet(path: str) -> None:
                                         ("url", "pano", "path", "file", "pic",
                                          "image", "snap", "base64", "data"))]
     print(f"\nЗУРАГТАЙ холбоотой байж болох талбарууд: {hits or 'АЛГА'}")
+
+    tag = os.path.basename(path).rsplit(".", 1)[0]
+    print("\n── Зураг сугалах")
+    n = carve_jpegs(raw, tag) + carve_base64(txt, tag)
+    print(f"   нийт {n} зураг → {OUT_DIR}/")
 
 
 def flatten(obj, prefix="", out=None) -> dict:
@@ -382,7 +430,10 @@ async def listen(c: httpx.AsyncClient, url: str, headers: dict, auth, tag: str,
         # Comet урсгал бол HTML — эхний хэсгийг нүдээр харах нь чухал
         head = got[:400].decode("utf-8", "replace").replace("\n", " ")
         print(f"      эхлэл: {head[:180]}")
-    return 200, len(got), carve_jpegs(got, tag)
+    # Хоёр аргаар хайна: түүхий JPEG (SOI/EOI) БА JSON доторх base64
+    imgs = carve_jpegs(got, tag)
+    imgs += carve_base64(got.decode("utf-8", "replace"), tag)
+    return 200, len(got), imgs
 
 
 async def main(ip: str, raw_url: str | None, seconds: int):
