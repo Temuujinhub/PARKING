@@ -28,7 +28,11 @@
   4. Зам олдвол RPC3_Loadfile-аар татаж, хариуны БҮТЭН бүтцийг хэвлэнэ
 
 Ажиллуулах:
-    sudo /root/PARKING/backend/venv/bin/python /root/PARKING/tools/rpc3_loadfile_probe.py 10.0.105.10
+    sudo .../tools/rpc3_loadfile_probe.py 10.0.105.10
+    # DevTools → Network → RPC3_Loadfile → Payload-оос ЯГ тэр body-г хуулж өгвөл:
+    sudo .../tools/rpc3_loadfile_probe.py 10.0.105.10 --params '{"params":{...}}'
+    # Эрхийн таамгийг шалгах: вэб UI-д ордог данснаас
+    sudo .../tools/rpc3_loadfile_probe.py 10.0.105.10 --user admin --pass НууцҮг
 """
 import asyncio
 import base64
@@ -130,8 +134,12 @@ def show_loadfile(ip: str, r: httpx.Response, tagname: str):
     return False
 
 
-async def main(ip: str):
-    user, pwd, src = creds_for(ip)
+async def main(ip: str, raw_params: str | None = None,
+               cli_user: str | None = None, cli_pwd: str | None = None):
+    if cli_user:
+        user, pwd, src = cli_user, cli_pwd, "гараар өгсөн"
+    else:
+        user, pwd, src = creds_for(ip)
     if not user:
         print(f"⛔ {src} — ОРОЛДОХГҮЙ (буруу нэвтрэлт камерыг түгжинэ).")
         return
@@ -187,6 +195,14 @@ async def main(ip: str):
         print("\n── 3. RPC3_Loadfile — параметрийн хувилбарууд")
         # Зам олдсон бол түүгээр, эс бол бичлэгийн дугаараар оролдоно
         trials = []
+        if raw_params:
+            # DevTools → RPC3_Loadfile → Payload-оос хуулсан ЯГ тэр params
+            try:
+                got = json.loads(raw_params)
+                trials.append(got.get("params", got))
+                print("   (DevTools-оос өгсөн params ЭХЭНД оролдоно)")
+            except Exception as e:  # noqa: BLE001
+                print(f"   ⚠ --params задарсангүй: {type(e).__name__}")
         for p in paths[:3]:
             trials += [{"FileName": p, "Offset": 0, "Length": 65536},
                        {"path": p, "offset": 0, "length": 65536}]
@@ -226,4 +242,17 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    asyncio.run(main(sys.argv[1]))
+    # Хэрэглээ:
+    #   rpc3_loadfile_probe.py <ip>
+    #   rpc3_loadfile_probe.py <ip> --params '{"method":...,"params":{...}}'
+    #   rpc3_loadfile_probe.py <ip> --user admin --pass НууцҮг
+    _args = sys.argv[2:]
+    _p = _u = _w = None
+    for i, a in enumerate(_args):
+        if a == "--params" and i + 1 < len(_args):
+            _p = _args[i + 1]
+        elif a == "--user" and i + 1 < len(_args):
+            _u = _args[i + 1]
+        elif a in ("--pass", "--password") and i + 1 < len(_args):
+            _w = _args[i + 1]
+    asyncio.run(main(sys.argv[1], _p, _u, _w))
