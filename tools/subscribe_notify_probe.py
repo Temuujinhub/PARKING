@@ -45,18 +45,28 @@ import httpx  # noqa: E402
 
 OUT_DIR = "/tmp/subnotify"
 
-# Шифргүй дуудаж болох эсэхийг шалгах параметрийн хувилбарууд.
-# Dahua-гийн бусад CGI-ийн хэв маягаас гаргасан таамаг.
+# Вэб UI-ийн JS (`initComet`, `_getUrl`)-ээс АВСАН — таамаг БИШ:
+#
+#     var n = "/SubscribeNotify.cgi?sessionId=".concat(e);
+#     t && (n = "/SubscribeNotify.cgi"),          // httpOnly горим
+#     ...
+#     "snapNotify" === e && (c += "&type=1")      // ← ЗУРГИЙН суваг
+#
+# Өөрөөр хэлбэл `Security-cgi=2&salt=…&cipher=RPAC-256` бол ЗӨВХӨН НЭГ горим;
+# хажууд нь сешн дугаараар дуудах ЭНГИЙН зам байдаг.
+#
+# {S} нь RPC2 login-оос авсан сешнээр солигдоно.
 PLAIN_VARIANTS = [
-    ("толгойгүй",           {}),
-    ("link=1",              {"link": "1"}),
-    ("heartbeat",           {"heartbeat": "5", "link": "1"}),
-    ("codes бүгд",          {"codes": "[All]", "heartbeat": "5", "link": "1"}),
-    ("codes TrafficJunction",
-     {"codes": "[TrafficJunction]", "heartbeat": "5", "link": "1"}),
-    ("events",              {"events": "[TrafficJunction]", "link": "1"}),
-    ("channel+pic",         {"channel": "1", "picture": "1", "link": "1"}),
+    ("sessionId + type=1 (snapNotify)", "?sessionId={S}&type=1&link=1"),
+    ("sessionId",                       "?sessionId={S}&link=1"),
+    ("sessionId (link-гүй)",            "?sessionId={S}"),
+    ("httpOnly — параметргүй",          ""),
+    ("type=1 (сешнгүй)",                "?type=1&link=1"),
 ]
+
+# Comet урсгалын агуулгыг таних тэмдгүүд
+MARKERS = (b"receiveMessage", b"DHAV", b"JFIF", b"DH_ITC", b"PlateNumber",
+           b"<script", b"Heartbeat", b"TrafficJunction")
 
 
 def creds_for(ip: str):
@@ -106,13 +116,13 @@ def carve_jpegs(buf: bytes, tag: str) -> int:
     return n
 
 
-async def listen(c: httpx.AsyncClient, url: str, auth, tag: str,
+async def listen(c: httpx.AsyncClient, url: str, headers: dict, auth, tag: str,
                  seconds: int) -> tuple[int, int, int]:
     """Урсгалыг `seconds` секунд сонсоод байт цуглуулж, JPEG сугална."""
     buf = bytearray()
     deadline = time.monotonic() + seconds
     try:
-        async with c.stream("GET", url, auth=auth) as r:
+        async with c.stream("GET", url, headers=headers, auth=auth) as r:
             ct = r.headers.get("content-type", "?")
             print(f"      HTTP {r.status_code}  ·  Content-Type: {ct}")
             if r.status_code != 200:
@@ -130,12 +140,13 @@ async def listen(c: httpx.AsyncClient, url: str, auth, tag: str,
     got = bytes(buf)
     print(f"      {len(got):,} байт хүлээж авав")
     if got:
-        marks = [m for m in (b"DHAV", b"JFIF", b"DH_ITC", b"PlateNumber")
-                 if m in got]
-        if marks:
-            print(f"      тэмдэг: {', '.join(m.decode() for m in marks)}")
+        marks = [m.decode() for m in MARKERS if m in got]
+        print(f"      тэмдэг: {', '.join(marks) if marks else '(алга)'}")
         with open(f"{OUT_DIR}/{tag}.raw", "wb") as f:
             f.write(got)
+        # Comet урсгал бол HTML — эхний хэсгийг нүдээр харах нь чухал
+        head = got[:400].decode("utf-8", "replace").replace("\n", " ")
+        print(f"      эхлэл: {head[:180]}")
     return 200, len(got), carve_jpegs(got, tag)
 
 
@@ -155,30 +166,49 @@ async def main(ip: str, raw_url: str | None, seconds: int):
     async with httpx.AsyncClient(timeout=timeout) as c:
         auth = httpx.DigestAuth(user, pwd)
 
+        # Вэб UI шиг RPC2-оор нэвтэрч сешн авна — `?sessionId=` үүнийг хүснэ
+        from app.services.barrier import DahuaRpc
+        rpc = DahuaRpc(c, ip, user, pwd)
+        try:
+            await rpc.login()
+            sess = rpc.session_id
+            print(f"RPC2 login OK — session={sess}")
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠ RPC2 login бүтсэнгүй ({e}) — зөвхөн digest-ээр оролдоно")
+            sess = None
+
+        # Вэб UI сешнээ Cookie-гоор дамжуулдаг (WebClientHttpSessionID)
+        hdrs = {"Referer": f"http://{ip}/",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+        if sess:
+            hdrs["Cookie"] = f"WebClientHttpSessionID={sess}"
+
         if raw_url:
             print("\n── A. DevTools-оос хуулсан URL-ыг ДАВТАХ")
-            print("   (сешн хугацаа дууссан бол 401/403 гарна — тэр ч бас хариулт)")
-            # Хуулсан URL нь аль хэдийн эрх агуулсан байж болзошгүй тул
-            # эхлээд auth-гүй, дараа нь digest-тэй
-            for label, a in (("auth-гүй", None), ("digest", auth)):
-                print(f"   [{label}]")
-                st, n, imgs = await listen(c, raw_url, a, f"replay_{label}", seconds)
-                total_imgs += imgs
-                if imgs:
-                    break
-                await asyncio.sleep(1)
+            print("   (тэр сешн хаагдсан бол 401/403 гарна — тэр ч бас хариулт)")
+            st, n, imgs = await listen(c, raw_url, hdrs, None, "replay", seconds)
+            total_imgs += imgs
+            await asyncio.sleep(1)
 
-        print("\n── B. Шифргүй, ИЛ параметрийн хувилбарууд")
-        for i, (name, params) in enumerate(PLAIN_VARIANTS, 1):
-            q = "&".join(f"{k}={v}" for k, v in params.items())
-            url = f"http://{ip}/SubscribeNotify.cgi" + (f"?{q}" if q else "")
-            print(f"   [{i}] {name}: {url[len(f'http://{ip}'):]}")
-            st, n, imgs = await listen(c, url, auth, f"plain{i}", seconds)
+        print("\n── B. Шифргүй зам (JS-ийн `initComet`-ээс)")
+        for i, (name, tmpl) in enumerate(PLAIN_VARIANTS, 1):
+            if "{S}" in tmpl and not sess:
+                print(f"   [{i}] {name}: сешн байхгүй тул алгаслаа")
+                continue
+            path = "/SubscribeNotify.cgi" + tmpl.replace("{S}", sess or "")
+            print(f"   [{i}] {name}: {path}")
+            st, n, imgs = await listen(c, f"http://{ip}{path}", hdrs, auth,
+                                       f"plain{i}", seconds)
             total_imgs += imgs
             if imgs:
                 print(f"   ✅ «{name}» ажиллалаа — энэ бол бидний хайж байсан зам.")
                 break
             await asyncio.sleep(1.5)   # камерыг дараалуулан цохихгүй
+
+        try:
+            await rpc._call("global.logout")
+        except Exception:  # noqa: BLE001
+            pass
 
     print()
     if total_imgs:
@@ -186,11 +216,12 @@ async def main(ip: str, raw_url: str | None, seconds: int):
         print("   Дараагийн алхам: snapshot.py-д энэ сувгийг нэмж, эхний сонголт")
         print("   болгоно. snapshot.cgi нь fallback болж үлдэнэ.")
     else:
-        print("Зураг гарсангүй.")
-        print("Дараагийн алхам — вэб UI-ийн JS-ээс шифрлэлтийг унших:")
-        print("  DevTools → Sources → Ctrl+Shift+F → «RPAC» гэж хайх")
-        print("  (эсвэл «Security-cgi», «SubscribeNotify», «salt»)")
-        print("  Олдсон функцийг илгээвэл Python-д хөрвүүлнэ.")
+        print(f"Зураг гарсангүй. Түүхий байтууд: {OUT_DIR}/*.raw")
+        print("Эхлээд тэдгээрийг хараарай — урсгал нээгдсэн ч дотор нь юу")
+        print("ирснийг «тэмдэг» ба «эхлэл» мөрүүд хэлнэ:")
+        print(f"   head -c 600 {OUT_DIR}/plain1.raw")
+        print("Хэрэв 401/403 бол сешн хүчингүй; хэрэв 200 боловч хоосон бол")
+        print("Test Capture дарж event үүсгэх шаардлагатай.")
 
 
 if __name__ == "__main__":
