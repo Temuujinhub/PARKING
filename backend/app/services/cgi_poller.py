@@ -230,7 +230,11 @@ _dumped: dict[str, int] = {}
 
 # yuv — Dahua-гийн event дэх зургийн багцын нэр (YuvPacket). Үүнгүйгээр
 # «ЗУРАГ-шинжтэй» мөрөнд харагдахгүй өнгөрдөг байв.
-_PIC_HINT = re.compile(r"(pic|image|photo|snap|file|path|url|jpeg|jpg|yuv)", re.I)
+# 2026-08-14, камерын вэб UI-ийн JS-ээс: event → зургийн замын харгалзаа нь
+#   TrafficJunction   → "urlCarPano"
+#   TrafficManualSnap → "url"
+# Тэр замыг POST /RPC3_Loadfile (FileManager.downloadPiece)-оор татдаг.
+_PIC_HINT = re.compile(r"(pic|image|photo|snap|file|path|url|jpeg|jpg|yuv|pano)", re.I)
 
 
 def _pic_refs(obj, prefix: str = "", out: list | None = None, depth: int = 0) -> list:
