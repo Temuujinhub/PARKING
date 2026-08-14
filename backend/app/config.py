@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     # eventManager.cgi-д асуух event-ийн төрөл. [All] нь firmware бүрд ажилладаг тул
     # default. Камерыг ӨӨР СИСТЕМТЭЙ хуваалцаж байгаа/ачаалал ихтэй үед зөвхөн ANPR:
     #   PARKING_CAMERA_EVENT_CODES=[TrafficJunction,TrafficSnapPicture]
-    camera_event_codes: str = "[All]"
+    # 2026-08-14 эмпирик: ЗӨВХӨН энэ хослол event өгдөг (stream_dump --compare).
+    # `[All]` нь энэ флотод 200 буцаагаад heartbeat л илгээдэг тул анхдагчаар
+    # ажилладагийг нь тавив — эхний оролдлого шууд оносон байхын тулд.
+    camera_event_codes: str = "[TrafficJunction,TrafficSnapPicture,TrafficControl]"
     # Стримээс салгасан боловсруулах worker-ийн тоо ба дарааллын багтаамж
     # 2 байхад нэг хаалтны команд (15с хүртэл) worker-ийг эзлэхэд дараалал гацаж,
     # event-үүд хоцорч боловсруулагддаг байв (Monnis: хаалт 40с хожуу нээгдэх).

@@ -16,8 +16,10 @@
 Ажиллуулах (машин орж/гарч байх үед — event гарах ёстой):
     # Нэг codes-оор түүхий дата хадгалж шинжлэх
     sudo .../tools/stream_dump.py 10.0.106.10 60
-    # ААН codes хувилбар аль нь ЗУРАГ өгөхийг эмпирикээр тогтоох
+    # codes хувилбар аль нь ЗУРАГ өгөхийг эмпирикээр тогтоох
     sudo .../tools/stream_dump.py 10.0.106.10 30 --compare
+    # МАШИН ХҮЛЭЭЛГҮЙ турших: камерын вэб UI-ийн «Test Capture» товчийг ашиглана
+    sudo .../tools/stream_dump.py 10.0.106.10 120 --test-capture
 
 АНХААР: backend аль хэдийн энэ камерт event стрим барьж байгаа. Dahua цөөн
 холболт л зөвшөөрдөг тул энэ хэрэгсэл түүнтэй ӨРСӨЛДӨНӨ — «event гараагүй»
@@ -81,7 +83,11 @@ CODE_CANDIDATES = [
 
 
 async def dump_stream(ip: str, creds, secs: int,
-                      codes: str = "[TrafficJunction,TrafficSnapPicture,TrafficControl]") -> bytes:
+                      codes: str = "[TrafficJunction,TrafficSnapPicture,TrafficControl]",
+                      grace: float = 0.0) -> bytes:
+    """secs секунд сонсоно. grace>0 үед ЭХНИЙ event ирсний дараа нэмж grace
+    секунд сонсоод зогсоно — event-ийн ДАРАА ирэх зургийн хэсгийг барихын тулд
+    (зөвлөмжид «Part 2 нь 0.05с дараа ирдэг» гэсэн нэхэмжлэлийг шалгана)."""
     url = (f"http://{ip}/cgi-bin/eventManager.cgi?action=attach"
            f"&codes={codes}"
            f"&heartbeat=5&httptype=multipart")
@@ -99,9 +105,17 @@ async def dump_stream(ip: str, creds, secs: int,
                     return bytes(buf)
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + secs
+                ev_at = None
                 async for chunk in r.aiter_bytes():
                     buf += chunk
-                    if loop.time() > deadline:
+                    now = loop.time()
+                    if grace and ev_at is None and b"Code=" in buf:
+                        ev_at = now
+                        print(f"   ⚡ EVENT ИРЛЭЭ — нэмж {grace:.0f}с сонсоно "
+                              f"(зураг араас нь ирэх үү?)")
+                    if ev_at is not None and now - ev_at >= grace:
+                        break
+                    if now > deadline:
                         break
     except httpx.ReadTimeout:
         print("   (read timeout — энэ хугацаанд дата ирсэнгүй)")
@@ -214,6 +228,17 @@ async def main(ip: str, secs: int, mode: str = ""):
     print(f"Нэвтрэлт: {user} ({src})")
     if mode == "--compare":
         await compare_codes(ip, (user, pwd), secs)
+        print()
+        return
+    if mode == "--test-capture":
+        print()
+        print("  ┌─────────────────────────────────────────────────────────┐")
+        print("  │ ОДОО камерын вэб UI руу орж:                            │")
+        print("  │   Live → Device Test → «Test Capture» товчийг дарна уу  │")
+        print("  │ (дугаар AB12345, чиглэл Approaching — хэвээр нь болно)  │")
+        print("  └─────────────────────────────────────────────────────────┘")
+        raw = await dump_stream(ip, (user, pwd), secs, grace=5.0)
+        analyse(ip, raw)
         print()
         return
     raw = await dump_stream(ip, (user, pwd), secs)
