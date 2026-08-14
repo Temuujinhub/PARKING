@@ -260,6 +260,33 @@ def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]
     return lines
 
 
+def qr_png_b64(text: str) -> str:
+    """`qr_text`-ээс QR зургийг сервер дээр үүсгэж base64 PNG болгоно.
+
+    ЯАГААД: QPay-ийн хариунд `qr_image` үе үе хоосон ирдэг бөгөөд тэр үед
+    жолоочийн утсанд QR-ийн оронд түүхий текст гарч, төлбөр хийх боломжгүй
+    болдог байв (2026-08-14 гомдол). QR-ийн агуулга нь `qr_text` дотор бүрэн
+    байдаг тул зургийг өөрсдөө зурж болно."""
+    if not text:
+        return ""
+    try:
+        import base64
+        import io
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+        qr = qrcode.QRCode(error_correction=ERROR_CORRECT_M, box_size=8, border=2)
+        qr.add_data(text)
+        qr.make(fit=True)
+        buf = io.BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger("parking.qpay").warning(
+            "QR зураг үүсгэж чадсангүй: %s: %s", type(e).__name__, e)
+        return ""
+
+
 def pick_qpay_deeplink(urls: list[dict]) -> str:
     """ЗӨВХӨН qPay хэтэвчний өөрийнх нь deeplink-ийг сонгоно. АНХААР: банк бүрийн
     линк "...://q?qPay_QRcode=..." хэлбэртэй тул "qpay" substring-ээр хайвал
@@ -313,7 +340,9 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
     return {
         "invoice_id": data.get("invoice_id"),
         "qr_text": data.get("qr_text", ""),
-        "qr_image": data.get("qr_image", ""),  # base64 PNG
+        # QPay `qr_image`-ыг үе үе ХООСОН буцаадаг — тэр үед жолоочийн утсанд
+        # QR-ийн оронд түүхий текст гардаг байв. qr_text-ээс өөрсдөө зурна.
+        "qr_image": data.get("qr_image") or qr_png_b64(data.get("qr_text", "")),
         "deep_link": deep_link,
         "urls": urls,  # бүх банкны deeplink (нэр, лого, линк) — апп/веб сонголт харуулна
         "mock": False,

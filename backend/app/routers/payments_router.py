@@ -362,8 +362,13 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         if include_debts:
             current_due += sum(float(c.amount) for c in _pending_debts(db, session.plate_number))
         if abs(float(existing.amount) - current_due) <= 1:
+            # qr_image-ыг заавал буцаана: өмнө нь энэ (ДАВТАН хүсэлтийн) зам
+            # түүнийг огт өгдөггүй байсан тул хуудсаа сэргээсэн жолоочид QR-ийн
+            # оронд түүхий текст гарч, төлж чаддаггүй байв (2026-08-14 гомдол)
             return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
-                    "qr_text": existing.qr_text, "deep_link": existing.deep_link, "urls": [],
+                    "qr_text": existing.qr_text,
+                    "qr_image": qpay.qr_png_b64(existing.qr_text or ""),
+                    "deep_link": existing.deep_link, "urls": [],
                     "amount": float(existing.amount), "mock": settings.qpay_mock}
         existing.status = "CANCELLED"  # дүн зөрсөн — шинэ invoice үүсгэнэ
         db.flush()
