@@ -108,11 +108,12 @@ def plate_from_notify(payload: dict | None) -> str | None:
 
 # ─── Session-д холбох ────────────────────────────────────────────────────────
 
-async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: bytes):
+async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: bytes,
+                             src: str = "ws"):
     """Зургийг хадгалаад тухайн дугаарын хамгийн сүүлийн session-д холбоно.
     Event боловсруулалт (cgi_poller) зургаас хоцорч болзошгүй тул хэдэнтээ оролдоно."""
     from ..session_logic import normalize_plate
-    from .snapshot import _save
+    from .snapshot import _save, note_source
     plate_n = normalize_plate(plate) or plate.strip().upper()
     # Дискний бичилт thread дээр — event loop блоклохгүй (хаалт нээх хугацаанд нөлөөлнө)
     rel = await asyncio.to_thread(_save, data, plate_n, lane_dir)
@@ -135,7 +136,8 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                 else:
                     s.entry_snapshot = rel
                 db.commit()
-                log.info(f"{plate_n} {lane_dir}: event зураг OK ({len(data)}b) → {rel}")
+                note_source(src)
+                log.info(f"{plate_n} {lane_dir}: OK ({src}, {len(data)}b) → {rel}")
                 return
         except Exception as e:
             log.error(f"{plate_n}: session холбох алдаа: {e}")
@@ -302,6 +304,42 @@ COMET_FILTERS = [
 ]
 
 _COMET_MARK = "var json="
+# Хоолойг хэсэгчлэн уншихад ашиглах алхам (секунд). Чимээгүй байдлыг ЭНЭ
+# нарийвчлалаар хэмжинэ — хэт богино байх нь илүүц сэрэлт, хэт урт нь удаан
+# оношилгоо гэсэн үг.
+_COMET_POLL_SEC = 20.0
+
+# ip → comet сувгийн төлөв. 2026-08-15-ны оношилгооны дараа нэмэгдсэн: суваг
+# «attach хийгдсэн ч чимээгүй» байдалд орж, ямар ч алдаа өгөхгүй мөнхөд гацдаг
+# байсныг барихад хэрэгтэй (доорх `_comet_session`-ы watchdog хэрэглэнэ).
+#   ok_filter — тухайн камер дээр ЗУРАГ ӨГСӨН нь батлагдсан филтерийн дугаар.
+#     Нэг удаа батлагдсаны дараа татгалзал гарсан ч ӨӨР филтер рүү ШИЛЖИХГҮЙ:
+#     14:20-нд гарсан түр зуурын татгалзлын улмаас ажиллаж байсан суваг
+#     орхигдож, зураг өгдөггүй Channels:[1] дээр 11 цаг гацсан явдал давтагдахгүй.
+_comet_ok_filter: dict[str, int] = {}
+_comet_state: dict[str, dict] = {}
+
+
+def comet_state() -> dict:
+    """Оношилгоонд: камер бүрийн comet сувгийн одоогийн байдал."""
+    now = time.monotonic()
+    out = {}
+    for ip, st in _comet_state.items():
+        out[ip] = {
+            "filter_no": st.get("filter_no"),
+            "proven_filter_no": (_comet_ok_filter[ip] + 1) if ip in _comet_ok_filter else None,
+            "attached_sec": round(now - st["attached"]) if st.get("attached") else None,
+            "pics": st.get("pics", 0),
+            "last_pic_sec": round(now - st["last_pic"]) if st.get("last_pic") else None,
+            "reconnects": st.get("reconnects", 0),
+            "last_error": st.get("last_error"),
+        }
+    return out
+
+
+class CometSilent(RuntimeError):
+    """Attach амжилттай боловч суваг зураг өгөхгүй чимээгүй байна — филтер
+    буруу байх магадлалтай тул дараагийнхыг туршина."""
 
 
 def _comet_messages(buf: str):
@@ -362,8 +400,35 @@ def _plate_from_snap(params: dict) -> str:
         return ""
 
 
+async def _comet_keepalive(rpc, ip: str, dead: dict):
+    """RPC2 сешнийг амьд байлгана (WS зам ижил зүйлийг 25с тутам хийдэг).
+
+    Хоёр үүрэгтэй: (1) сешн хугацаагаар хөрөхөөс сэргийлнэ, (2) сешн ҮХСЭН
+    эсэхийг ХЭМЖИНЭ — машин ирэхгүй чимээгүй шөнө ба суваг үхсэн байдлыг
+    ялгах цорын ганц хямд арга. Алдаа гармагц `dead`-д шалтгааныг бичихэд
+    үндсэн давталт холболтоо тасалж дахин холбоно."""
+    from .barrier import _rpc_lock, note_rpc_done, wait_rpc_gap
+    while True:
+        await asyncio.sleep(settings.snap_comet_keepalive_sec)
+        try:
+            async with _rpc_lock(ip):
+                await wait_rpc_gap(ip)
+                res = await rpc._call("global.keepAlive",
+                                      {"timeout": 300, "active": True})
+                note_rpc_done(ip)
+            if not res.get("result"):
+                dead["why"] = f"keepAlive: {json.dumps(res.get('error') or {})[:70]}"
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            dead["why"] = f"keepAlive {type(e).__name__}: {str(e)[:70]}"
+            return
+
+
 async def _comet_session(ip: str, on_picture, flt: dict,
-                         creds: tuple[str, str] | None = None):
+                         creds: tuple[str, str] | None = None,
+                         filter_no: int = 1):
     """Нэг comet холболтын амьдрал: login → хоолой нээх → attach → зураг.
 
     `on_picture(plate, jpeg)` бүрэн JPEG бүрд дуудагдана."""
@@ -403,8 +468,36 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                 raise AttachRejected(
                     json.dumps(res.get("error") or res, ensure_ascii=False)[:90])
 
+            st = _comet_state.setdefault(ip, {})
+            st.update(attached=time.monotonic(), filter_no=filter_no, pics=0,
+                      last_error=None)
             buf, parts = "", {}
-            async for chunk in r.aiter_bytes():
+            dead: dict[str, str] = {}
+            ka = asyncio.create_task(_comet_keepalive(rpc, ip, dead))
+            # Урсгалыг ХЭСГЭЭР нь уншина — `async for` нь хугацааны хязгааргүй
+            # тул хоолой чимээгүй болоход мөнхөд гацдаг байв (2026-08-15).
+            it = r.aiter_bytes()
+            silent = 0.0
+            try:
+              while True:
+                try:
+                    chunk = await asyncio.wait_for(it.__anext__(), timeout=_COMET_POLL_SEC)
+                except StopAsyncIteration:
+                    raise RuntimeError("хоолой хаагдав")
+                except asyncio.TimeoutError:
+                    silent += _COMET_POLL_SEC
+                    if dead.get("why"):
+                        raise RuntimeError(dead["why"])
+                    # Зураг ОГТ өгөөгүй суваг — филтер буруу байх магадлалтай
+                    if not st["pics"] and silent >= settings.snap_comet_probe_sec:
+                        raise CometSilent(f"{silent:.0f}с зураг ирсэнгүй")
+                    # Ажиллаж байсан суваг ч удаан чимээгүй байвал сэргээнэ
+                    if silent >= settings.snap_comet_idle_sec:
+                        raise RuntimeError(f"{silent:.0f}с чимээгүй — сэргээнэ")
+                    continue
+                silent = 0.0
+                if dead.get("why"):
+                    raise RuntimeError(dead["why"])
                 buf += chunk.decode("utf-8", "replace")
                 msgs, buf = _comet_messages(buf)
                 for raw in msgs:
@@ -447,10 +540,13 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                     # Хог хуримтлагдвал (мессежийн тэмдэг олдохгүй) цэвэрлэнэ
                     log.warning("%s: comet буфер хэтэрлээ — цэвэрлэв", ip)
                     buf = ""
+            finally:
+                ka.cancel()
 
 
 async def _comet_one(device_id: str, ip: str, lane_dir: str,
-                     creds: tuple[str, str] | None = None):
+                     creds: tuple[str, str] | None = None,
+                     start_delay: float = 0.0):
     """Нэг камерын comet зургийн сувгийг тасралтгүй барина (reconnect-тэй)."""
     best: dict[str, tuple[float, bytes]] = {}
 
@@ -460,38 +556,77 @@ async def _comet_one(device_id: str, ip: str, lane_dir: str,
             ts, data = best[plate]
             if force or now - ts > 2.5:
                 del best[plate]
-                asyncio.create_task(_attach_to_session(device_id, plate, lane_dir, data))
+                asyncio.create_task(
+                    _attach_to_session(device_id, plate, lane_dir, data, src="comet"))
+
+    cur = {"idx": 0}
 
     async def on_picture(plate: str, data: bytes):
         _last_pic[ip] = time.monotonic()
+        st = _comet_state.setdefault(ip, {})
+        st["pics"] = st.get("pics", 0) + 1
+        st["last_pic"] = time.monotonic()
+        # Энэ филтер ЗУРАГ ӨГЧ БАЙНА — цаашид түүнээс салахгүй
+        if _comet_ok_filter.get(ip) != cur["idx"]:
+            _comet_ok_filter[ip] = cur["idx"]
+            log.info("%s: comet filter #%d зураг өгч байна — цаашид түүнийг барина",
+                     ip, cur["idx"] + 1)
         # snapshot.py-д «энэ камер зургаа стримээр өгдөг» гэж мэдэгдэнэ —
         # ингэснээр _capture_and_store нь snapshot.cgi рүү унахаа больж,
         # камер дээр илүүц «Manual Snapshot» бичлэг үүсэхээ болино
         from .snapshot import offer_stream_image
-        offer_stream_image(ip, data)
+        offer_stream_image(ip, data, src="comet")
         if not plate:
             return          # дугааргүй зураг — стримийн санамжид л үлдэнэ
         ts, old = best.get(plate, (0.0, b""))
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()
 
+    # Бүх камер НЭГ агшинд login хийвэл камерын RPC үйлчилгээ ачаалагдаж
+    # attachFileProc массаар татгалздаг (2026-08-14: 20 камерын 14 нь нэг
+    # секундэд гологдов) — тиймээс эхлэлийг зориуд тараана.
+    if start_delay:
+        await asyncio.sleep(start_delay)
+
     vi = 0
     while True:
-        flt = COMET_FILTERS[vi % len(COMET_FILTERS)]
+        # Батлагдсан филтер байвал ҮРГЭЛЖ түүгээр — татгалзал нь түр зуурын
+        # ачаалал байж болох тул зураг өгдөггүй хувилбар руу шилжихгүй
+        proven = _comet_ok_filter.get(ip)
+        idx = proven if proven is not None else vi % len(COMET_FILTERS)
+        cur["idx"] = idx
+        st = _comet_state.setdefault(ip, {})
         try:
-            await _comet_session(ip, on_picture, flt, creds=creds)
+            await _comet_session(ip, on_picture, COMET_FILTERS[idx],
+                                 creds=creds, filter_no=idx + 1)
         except AttachRejected as e:
-            log.warning("%s: comet filter #%d гологдов (%s) — дараагийнх 10с дараа",
-                        ip, vi % len(COMET_FILTERS) + 1, e)
-            vi += 1
+            st["last_error"] = f"attach: {e}"
+            if proven is None:
+                vi += 1
+                log.warning("%s: comet filter #%d гологдов (%s) — дараагийнх 10с дараа",
+                            ip, idx + 1, e)
+            else:
+                log.warning("%s: comet filter #%d (батлагдсан) түр гологдов (%s) "
+                            "— 10с дараа ДАХИН түүгээр", ip, idx + 1, e)
             await flush_stale(force=True)
             await asyncio.sleep(10)
             continue
+        except CometSilent as e:
+            st["last_error"] = f"чимээгүй: {e}"
+            if proven is None:
+                vi += 1
+                log.warning("%s: comet filter #%d attach хийгдсэн ч %s — дараагийнхыг "
+                            "туршина", ip, idx + 1, e)
+            else:
+                log.warning("%s: comet filter #%d %s — дахин холбоно", ip, idx + 1, e)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
+            st["last_error"] = f"{type(e).__name__}: {str(e)[:70]}"
             log.warning("%s: comet тасарлаа (%s: %s) — 15с дараа дахин",
                         ip, type(e).__name__, str(e)[:110])
+        st["reconnects"] = st.get("reconnects", 0) + 1
+        st["attached"] = None
         await flush_stale(force=True)
         await asyncio.sleep(15)
 
@@ -505,7 +640,8 @@ def comet_enabled_for(ip: str) -> bool:
 
 
 async def _pull_one(device_id: str, ip: str, lane_dir: str,
-                    creds: tuple[str, str] | None = None):
+                    creds: tuple[str, str] | None = None,
+                    start_delay: float = 0.0):
     """Нэг камерын зургийн WS сувгийг тасралтгүй барина (reconnect-тэй).
     Event бүрд хэд хэдэн зураг (бүтэн кадр + тайрмал) ирдэг — 2.5с цонхонд
     дугаар тус бүрийн ХАМГИЙН ТОМЫГ нь session-д холбоно."""
@@ -524,6 +660,9 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
         ts, old = best.get(plate, (0.0, b""))
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()
+
+    if start_delay:
+        await asyncio.sleep(start_delay)
 
     vi = 0  # амжилттай болсон filter хувилбар дээрээ тогтоно
     while True:
@@ -562,6 +701,7 @@ async def supervisor():
                 Device.ip_address.isnot(None), Device.ip_address != "",
             ).all()
             active = set()
+            started = 0        # энэ эргэлтэд шинээр асаасан сувгийн тоо
             for c in cams:
                 # Comet нь батлагдсан зам тул түүнийг эхэнд тавина; аль нэгийг
                 # л ажиллуулна — хоёр байнгын холболт нээвэл камерын зэрэгцээ
@@ -572,11 +712,13 @@ async def supervisor():
                 active.add(c.id)
                 if c.id not in _tasks or _tasks[c.id].done():
                     runner = _comet_one if use_comet else _pull_one
+                    delay = started * settings.snap_comet_start_stagger_sec
+                    started += 1
                     _tasks[c.id] = asyncio.create_task(
                         runner(c.id, c.ip_address, c.lane_dir or "entry",
-                               camera_credentials(c)))
-                    log.info("%s (%s) зургийн стрим эхэллээ — %s", c.name,
-                             c.ip_address, "comet" if use_comet else "WS")
+                               camera_credentials(c), start_delay=delay))
+                    log.info("%s (%s) зургийн стрим эхэллээ — %s (+%.0fс)", c.name,
+                             c.ip_address, "comet" if use_comet else "WS", delay)
             for did in list(_tasks):
                 if did not in active:
                     _tasks[did].cancel()

@@ -1063,6 +1063,83 @@ async def test_device_connection(device_id: str, db: Session = Depends(get_db),
         return {"reachable": False, "detail": f"{device.ip_address} — {e}"}
 
 
+@router.get("/cameras/snap-state")
+def camera_snap_state(user: User = Depends(require("settings", "barriers"))):
+    """Зургийн сувгуудын ОДООГИЙН байдал — камерт хүсэлт илгээхгүй, хямд.
+
+    Юуг хардаг вэ:
+      • `sources` — эх сурвалж бүрээр session-д хадгалагдсан зургийн тоо
+        (`comet` / `event-stream` / `payload` / `snapshot.cgi`). Шинэ суваг
+        ажиллаж байгаа эсэхийг ЛОГ УХАЛГҮЙ энэ тоогоор хардаг.
+      • `comet` — камер тус бүрийн суваг хэдэн секунд attach хийгдсэн, хэдэн
+        зураг өгсөн, сүүлийн зураг хэдэн секундын өмнө ирсэн, филтер аль нь
+        батлагдсан, хэдэн удаа дахин холбогдсон, сүүлийн алдаа юу байсан.
+      • `cgi` — snapshot.cgi-ийн камер тутмын төлөв (ажилласан URL, дараалсан
+        бүтэлгүйтэл, түр зогсоолт хэдэн секунд үлдсэн).
+    """
+    from ..services.snap_puller import comet_state
+    from ..services.snapshot import cgi_state, source_counts
+    return {"sources": source_counts(), "comet": comet_state(), "cgi": cgi_state(),
+            "settings": {"snap_comet": settings.snap_comet,
+                         "snap_comet_ips": settings.snap_comet_ips,
+                         "snap_pull": settings.snap_pull,
+                         "snapshot_cgi_fallback": settings.snapshot_cgi_fallback}}
+
+
+@router.post("/cameras/snap-test")
+async def camera_snap_test(site_id: str | None = None, db: Session = Depends(get_db),
+                           user: User = Depends(require("settings", "barriers"))):
+    """Идэвхтэй камер БҮРЭЭС нэг зураг татаж, аль нь ажиллаж байгааг тоогоор гаргана.
+
+    `snapshot.cgi` (амьд кадр) ашиглана — хаалтны команд хүлээж байвал түүнд
+    зам тавьдаг, камер тутмын дараалалд ордог `_fetch_from_camera`-ээр дамжина.
+    Камерын нөөцийг дүүргэхгүйн тулд зэрэг 4-өөс илүү камер руу хандахгүй.
+    Хариу: камер бүрд {ok, ms, bytes, detail}.
+    """
+    import asyncio
+    import time as _time
+
+    from ..services.device_auth import camera_credentials
+    from ..services.snapshot import _fetch_from_camera
+
+    q = db.query(Device).filter(Device.device_type == "camera",
+                                Device.status == "active",
+                                Device.ip_address.isnot(None), Device.ip_address != "")
+    allowed = operator_sites(user)   # tenant хэрэглэгч зөвхөн өөрийн зогсоол
+    if site_id:
+        enforce_site(user, site_id)
+        q = q.filter(Device.site_id == site_id)
+    elif allowed:
+        q = q.filter(Device.site_id.in_(allowed))
+    cams = q.all()
+    sites = {s.id: s.name for s in db.query(ParkingSite).all()}
+    sem = asyncio.Semaphore(4)
+
+    async def one(c: Device) -> dict:
+        creds = camera_credentials(c)
+        async with sem:
+            t0 = _time.monotonic()
+            try:
+                data = await _fetch_from_camera(c.ip_address, creds)
+                ms = int((_time.monotonic() - t0) * 1000)
+                if data:
+                    return {"site": sites.get(c.site_id), "name": c.name, "ip": c.ip_address,
+                            "lane_dir": c.lane_dir, "ok": True, "ms": ms, "bytes": len(data),
+                            "detail": f"{len(data) // 1024} KB / {ms}ms"}
+                return {"site": sites.get(c.site_id), "name": c.name, "ip": c.ip_address,
+                        "lane_dir": c.lane_dir, "ok": False, "ms": ms, "bytes": 0,
+                        "detail": "зураг ирсэнгүй (түр зогсоолт эсвэл камер татгалзав)"}
+            except Exception as e:  # noqa: BLE001
+                return {"site": sites.get(c.site_id), "name": c.name, "ip": c.ip_address,
+                        "lane_dir": c.lane_dir, "ok": False,
+                        "ms": int((_time.monotonic() - t0) * 1000), "bytes": 0,
+                        "detail": f"{type(e).__name__}: {str(e)[:90]}"}
+
+    rows = await asyncio.gather(*[one(c) for c in cams])
+    rows = sorted(rows, key=lambda r: (r["site"] or "", r["ip"]))
+    return {"total": len(rows), "ok": sum(1 for r in rows if r["ok"]), "rows": rows}
+
+
 @router.delete("/devices/{device_id}")
 def delete_device(device_id: str, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     device = db.get(Device, device_id)

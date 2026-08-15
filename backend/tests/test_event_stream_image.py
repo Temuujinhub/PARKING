@@ -93,7 +93,12 @@ check("итгээгүй үед хүлээхгүй, шууд None",
 snapshot.offer_stream_image(IP, JPEG)
 check("зураг ирсний дараа «өгдөг» болов", snapshot.stream_delivers(IP) is True)
 got = asyncio.run(snapshot._take_stream_image(IP, _t.monotonic()))
-check("зургийг авав", got == JPEG, len(got or b""))
+check("зургийг авав", got and got[0] == JPEG, len((got or (b"",))[0]))
+check("эх сурвалж нь хамт ирнэ (логт бичигдэнэ)", got and got[1] == "event-stream", got)
+
+snapshot.offer_stream_image(IP, JPEG, src="comet")
+got = asyncio.run(snapshot._take_stream_image(IP, _t.monotonic()))
+check("comet сувгийн зураг тэр нэрээрээ ирнэ", got and got[1] == "comet", got)
 check("НЭГ зураг хоёр машинд очихгүй (авмагц хасагдана)",
       asyncio.run(snapshot._take_stream_image(IP, _t.monotonic())) is None)
 

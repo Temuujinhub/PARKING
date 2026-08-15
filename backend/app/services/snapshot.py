@@ -184,8 +184,20 @@ def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
 #     машин байхгүй/сүүлээрээ харагддаг (2026-08-09).
 # Одоо cgi_poller стримээс JPEG-ийг таслан авч энд өгнө; capture нь эхлээд
 # үүнийг хүлээгээд, зөвхөн ирээгүй үед snapshot.cgi рүү унана.
-_stream_images: dict[str, tuple[float, bytes]] = {}   # ip → (monotonic, jpeg)
+_stream_images: dict[str, tuple[float, bytes, str]] = {}  # ip → (monotonic, jpeg, суваг)
 _stream_seen: dict[str, float] = {}                   # ip → сүүлд зураг ирсэн үе
+
+# Эх сурвалж бүрээр session-д ХАДГАЛАГДСАН зургийн тоо. «Шинэ суваг ажиллаж
+# байна уу» гэдгийг лог ухалгүй тоогоор хариулна (/api/admin/cameras/snap-state).
+_src_counts: dict[str, int] = {}
+
+
+def note_source(src: str) -> None:
+    _src_counts[src] = _src_counts.get(src, 0) + 1
+
+
+def source_counts() -> dict:
+    return dict(sorted(_src_counts.items(), key=lambda kv: -kv[1]))
 
 # Камер зураг өгдөг гэдгээ нэг удаа баталсны дараа энэ хугацаанд «өгдөг» гэж
 # итгэнэ. Итгэхгүй бол хүлээхгүй → зан төлөв хуучнаараа (шууд snapshot.cgi).
@@ -194,16 +206,20 @@ _STREAM_TRUST_SEC = 3600.0
 _STREAM_PRE_SEC = 4.0
 
 
-def offer_stream_image(ip: str, data: bytes) -> None:
-    """cgi_poller стримээс таслан авсан event зургийг санал болгоно."""
+def offer_stream_image(ip: str, data: bytes, src: str = "event-stream") -> None:
+    """Стримээс таслан авсан event зургийг санал болгоно.
+
+    `src` — аль суваг өгсөн бэ: `event-stream` (cgi_poller) эсвэл `comet`.
+    Зураг session-д хадгалагдахдаа энэ нэрээр логт бичигдэнэ — аль суваг
+    ХЭДЭН зураг бодитоор өгч байгааг тоолох цорын ганц арга."""
     import time as _time
     if not ip or not data:
         return
     now = _time.monotonic()
-    _stream_images[ip] = (now, data)
+    _stream_images[ip] = (now, data, src)
     if ip not in _stream_seen:
-        log.info("%s: event стримээс ЗУРАГ ирж эхэллээ (%dб) — snapshot.cgi-ийн "
-                 "оронд үүнийг ашиглана", ip, len(data))
+        log.info("%s: %s сувгаас ЗУРАГ ирж эхэллээ (%dб) — snapshot.cgi-ийн "
+                 "оронд үүнийг ашиглана", ip, src, len(data))
     _stream_seen[ip] = now
 
 
@@ -213,7 +229,7 @@ def stream_delivers(ip: str) -> bool:
     return _time.monotonic() - _stream_seen.get(ip, -1e9) < _STREAM_TRUST_SEC
 
 
-async def _take_stream_image(ip: str, t0: float) -> bytes | None:
+async def _take_stream_image(ip: str, t0: float) -> tuple[bytes, str] | None:
     """Event стримийн зургийг хүлээж авна. Байхгүй/хугацаа хэтэрвэл None.
 
     `t0` — event боловсруулагдсан агшин. Түүнээс ӨМНӨХ (_STREAM_PRE_SEC хүртэл)
@@ -229,7 +245,7 @@ async def _take_stream_image(ip: str, t0: float) -> bytes | None:
         item = _stream_images.get(ip)
         if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
             _stream_images.pop(ip, None)
-            return item[1]
+            return item[1], item[2]
         if _time.monotonic() >= deadline:
             return None
         await asyncio.sleep(0.15)
@@ -271,9 +287,9 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         # 1) CGI event стримээр камер өөрөө илгээсэн ЖИНХЭНЭ event кадр. Энэ нь
         #    хамгийн зөв зураг: машин яг хаалганы өмнө байх агшны кадр бөгөөд
         #    камер дээр ямар ч нэмэлт бичлэг үүсгэхгүй.
-        data = await _take_stream_image(camera_ip, t0)
-        if data is not None:
-            source = "event-stream"
+        got = await _take_stream_image(camera_ip, t0)
+        if got is not None:
+            data, source = got
     if data is None and camera_ip:
         # 2) Энэ камер event зургаа WS-ээр өгдөг нь батлагдсан бол түүнийг хүлээнэ.
         from .snap_puller import puller_delivers
@@ -328,6 +344,7 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                 else:
                     s.entry_snapshot = rel
                 db.commit()
+                note_source(source)
                 log.info(f"{plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
                 return
         except OperationalError as e:
