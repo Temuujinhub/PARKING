@@ -461,6 +461,16 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                 await wait_rpc_gap(ip)
                 inst = await rpc._call("snapManager.factory.instance")
                 obj = inst.get("result")
+                # Хуучин ГАЦСАН бүртгэлийг эхлээд цэвэрлэнэ. WS зам дээр 2026-07-нд
+                # батлагдсан зүйл: сешн үхсэн ч камер дээрх attach бүртгэл үлдэж,
+                # ШИНЭ attach-ийг 268959743-аар гологдуулдаг. Comet зам үүнийг
+                # хийдэггүй байсан тул backend дахин ассан болгонд бараг бүх камер
+                # татгалздаг байв (2026-08-15 хэмжилт: 22 камерын 20).
+                try:
+                    await rpc._call("snapManager.detachFileProc",
+                                    {"filter": flt, "proc": 1}, obj=obj)
+                except Exception:  # noqa: BLE001
+                    pass          # бүртгэл байхгүй бол алдаа өгөх нь ХЭВИЙН
                 res = await rpc._call("snapManager.attachFileProc",
                                       {"filter": flt, "proc": 1}, obj=obj)
                 note_rpc_done(ip)
