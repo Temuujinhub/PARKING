@@ -473,6 +473,14 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                       last_error=None)
             buf, parts = "", {}
             dead: dict[str, str] = {}
+            # ЭНЭ холболт зураг өгсөн эсэхийг ӨӨРӨӨ тоолно — дуудагчийн
+            # callback-ийн тоолуурт найдвал probe нь дуудагчаас хамаарна
+            seen = {"n": 0}
+
+            async def _on_pic(plate: str, data: bytes):
+                seen["n"] += 1
+                await on_picture(plate, data)
+
             ka = asyncio.create_task(_comet_keepalive(rpc, ip, dead))
             # Урсгалыг ХЭСГЭЭР нь уншина — `async for` нь хугацааны хязгааргүй
             # тул хоолой чимээгүй болоход мөнхөд гацдаг байв (2026-08-15).
@@ -489,7 +497,7 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                     if dead.get("why"):
                         raise RuntimeError(dead["why"])
                     # Зураг ОГТ өгөөгүй суваг — филтер буруу байх магадлалтай
-                    if not st["pics"] and silent >= settings.snap_comet_probe_sec:
+                    if not seen["n"] and silent >= settings.snap_comet_probe_sec:
                         raise CometSilent(f"{silent:.0f}с зураг ирсэнгүй")
                     # Ажиллаж байсан суваг ч удаан чимээгүй байвал сэргээнэ
                     if silent >= settings.snap_comet_idle_sec:
@@ -526,7 +534,7 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                     if whole[-2:] != b"\xff\xd9":
                         continue                  # үргэлжлэл хүлээнэ
                     parts.pop(key, None)
-                    await on_picture(_plate_from_snap(params), whole)
+                    await _on_pic(_plate_from_snap(params), whole)
                     # Вэб UI шиг хүлээж авсныг баталгаажуулна — эсрэгээр
                     # камер илгээхээ болих магадлалтай (JS: ackUpload)
                     pic_id = info.get("PicID") or []
