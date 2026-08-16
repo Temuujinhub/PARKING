@@ -104,15 +104,40 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
         rows.append((datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None),
                      normalize_plate(p), r))
     rows.sort()
-    rows = rows[-settings.log_tail_max_records:]
 
-    seen = _seen.get(device_id, set())
+    # ── ЭХНИЙ УДАА: зөвхөн ТЭМДЭГЛЭНЭ, боловсруулахгүй ──────────────────────
+    # Лог 20 минутын мужийг буцаадаг тул сервис ассан даруйдаа хуучин бүх
+    # уншилтыг «шинэ» гэж үзэн НЭГ АГШИНД боловсруулах эрсдэлтэй. Тэр нь
+    # `handle_entry`-ийн burst логикт (6с дотор ирсэн орох уншилтууд = НЭГ
+    # машин) орж, 20 машиныг нэг session болгон нийлүүлж дугаарыг нь дараалан
+    # дарж бичдэг (2026-08-16 прод: 42 уншилт → 20 `plate_autocorrect`).
+    if device_id not in _seen:
+        _seen[device_id] = {_key(p, t) for t, p, _r in rows}
+        log.info("%s (%s): анхны таталт — %d хуучин бичлэгийг тэмдэглэв "
+                 "(боловсруулаагүй)", name, ip, len(rows))
+        return 0
+
+    seen = _seen[device_id]
+    # ── ЗӨВХӨН ШИНЭХЭН, ЗӨВХӨН НЭГ ──────────────────────────────────────────
+    # Хуучин уншилт нь `camera_sync`-ийн ажил (тэр цагийг нь зөв бичдэг). Энд
+    # ЗӨВХӨН саяхны уншилтыг авна — хаалт нээх утга нь тэр л уншилтад байна.
+    # Мөн мөчлөг тутамд НЭГ л уншилт: burst цонх (6с) нь серверийн цагаар
+    # ажилладаг тул хэд хэдэн уншилтыг зэрэг өгвөл дахин нийлүүлнэ.
+    fresh_cut = datetime.utcnow() - timedelta(seconds=settings.log_tail_fresh_sec)
+    todo = [r for r in rows if _key(r[1], r[0]) not in seen]
+    for t, plate, raw in todo[:-1]:
+        # Хуучирсан/илүү уншилтыг ДАХИН авахгүйгээр тэмдэглээд өнгөрнө
+        _remember(device_id, _key(plate, t))
+    rows = todo[-1:] if todo else []
+    if rows and rows[0][0] < fresh_cut:
+        _remember(device_id, _key(rows[0][1], rows[0][0]))
+        log.debug("%s: сүүлийн бичлэг хэт хуучин (%s) — camera_sync хариуцна",
+                  name, rows[0][0])
+        rows = []
+
     done = 0
     for t, plate, raw in rows:
-        k = _key(plate, t)
-        if k in seen:
-            continue
-        _remember(device_id, k)
+        _remember(device_id, _key(plate, t))
         db = SessionLocal()
         try:
             device = db.get(Device, device_id)

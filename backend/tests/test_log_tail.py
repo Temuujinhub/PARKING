@@ -68,21 +68,36 @@ def main():
     pulled: list = []
     SKEW = 32   # камерын цаг 32 минутаар түрүүлсэн (Рашбулагийн бодит байдал)
 
+    backlog = [_rec(f"{i}111УБА", now - timedelta(minutes=15 - i), SKEW)
+               for i in range(10)]        # 15..6 минутын өмнөх хуучин уншилтууд
+
     async def fake_fetch(ip, u, p, start, end, plate=None, client=None):
         pulled.append(ip)
-        return [_rec("5678УБА", now - timedelta(seconds=30), SKEW)]
+        return backlog + [_rec("5678УБА", now - timedelta(seconds=30), SKEW)]
 
     log_tail.fetch_snap_events = fake_fetch
     log_tail._seen.clear()
 
     try:
         print("\nЗөвхөн ЧИМЭЭГҮЙ камерт хандана:")
-        res = asyncio.run(log_tail.run_once(site.id))
-        check("чимээгүй камер олдсон", res["silent"] == 1, str(res))
+        res0 = asyncio.run(log_tail.run_once(site.id))
+        check("чимээгүй камер олдсон", res0["silent"] == 1, str(res0))
         check("ажиллаж буй камерт хүрээгүй", loud.ip_address not in pulled, str(pulled))
         check("чимээгүй камераас татсан", quiet.ip_address in pulled, str(pulled))
 
-        print("\nЛогоос уншилт сэргэж, ЖИНХЭНЭ зогсолт үүссэн:")
+        print("\nАНХНЫ таталт хуучин логийг БӨӨНӨӨР боловсруулахгүй:")
+        # 2026-08-16 прод: анхны мөчлөг 42 хуучин уншилтыг зэрэг өгснөөс
+        # handle_entry-ийн 6с burst логик 20 машиныг НЭГ session болгож,
+        # дугаарыг нь дараалан дарж бичсэн (plate_autocorrect).
+        check("анхны мөчлөгт юу ч боловсруулаагүй", res0["recovered"] == 0, str(res0))
+        check("хуучин уншилтаас session үүсээгүй",
+              db.query(ParkingSession).filter(ParkingSession.site_id == site.id).count() == 0)
+
+        print("\nДараагийн мөчлөгт ЗӨВХӨН ШИНЭХЭН уншилтыг авна:")
+        backlog.append(_rec("5678УБА", now - timedelta(seconds=20), SKEW))
+        log_tail._seen[quiet.id].discard(log_tail._key("5678УБА",
+                                                      now - timedelta(seconds=30)))
+        res = asyncio.run(log_tail.run_once(site.id))
         check("нэг уншилт сэргэсэн", res["recovered"] == 1, str(res))
         s = (db.query(ParkingSession)
              .filter(ParkingSession.site_id == site.id,
