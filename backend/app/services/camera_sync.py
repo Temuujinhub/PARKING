@@ -31,6 +31,80 @@ BURST_SEC = 600          # нэг дугаарын дараалсан уншил
 ACTIVE = ("OPEN", "AWAITING_PAYMENT", "PAID")
 
 
+def _sync_inner(db, site, cam: dict, watermark, horizon, rules: dict,
+                dry_run: bool) -> tuple[int, int]:
+    """ДОТООД (дамжин) хаалтны логийг нөхөх — ЭНГИЙН ДҮРЭМ ЭНД ҮЙЛЧЛЭХГҮЙ.
+
+    Бусад зогсоолд «орох уншилт = зогсолт нээ, гарах уншилт = зогсолт хаа»
+    гэсэн дүрэм үйлчилдэг. Дамжин зогсоолд (Рашбулаг ЭТТ: Орох → Орох 2 →
+    Гарах 2 → Гарах) ДУНДАХ хоёр уншилт нь зогсоолд орох/гарахыг ОГТ
+    илэрхийлэхгүй — машин манай талбайд байсаар, зөвхөн төлбөр тоологдохгүй
+    шороон зогсоол руу орж гарч байна. Тиймээс энд ЗӨВХӨН тоолуур зогсоох/
+    үргэлжлүүлэх үйлдэл хийнэ: session ҮҮСГЭХГҮЙ, ХААХГҮЙ, өр ҮҮСГЭХГҮЙ.
+
+    ДАВХАР ТООЛОХООС хамгаалах: амьд урсгал (cgi_poller/lpr_router) тухайн
+    уншилтыг аль хэдийн боловсруулсан бол `lpr_events`-д мөр үлдсэн байна —
+    тэр тохиолдолд логийн хуулбарыг алгасна. Эс бол «орлоо» хоёр удаа бичигдэж
+    хасагдах минут давхарлана.
+    """
+    inner = [e for e in (cam.get("inner_events") or [])
+             if e.get("plate") and watermark < e["time"] <= horizon]
+    if not inner:
+        return 0, 0
+    from ..models import LprEvent
+    from ..session_logic import plates_ocr_similar
+    from .nested import _ACTIVE, pause_cap_minutes, pause_session, resume_session
+
+    inner.sort(key=lambda e: e["time"])
+    cap = pause_cap_minutes(db, site.id)
+    paused_n = resumed_n = 0
+    for ev in inner:
+        p = normalize_plate(ev["plate"])
+        if rules["skip_invalid_plate"] and not is_valid_plate(p):
+            continue
+        entering = (ev.get("lane_dir") or "entry") != "exit"
+        # Амьд урсгал үүнийг аль хэдийн үзсэн үү (±90с) — үзсэн бол алгасна
+        if db.query(LprEvent.id).filter(
+                LprEvent.site_id == site.id, LprEvent.plate_number == p,
+                LprEvent.accepted.is_(True),
+                LprEvent.created_at >= ev["time"] - timedelta(seconds=90),
+                LprEvent.created_at <= ev["time"] + timedelta(seconds=90)).first():
+            continue
+        s = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site.id,
+                     ParkingSession.plate_number == p,
+                     ParkingSession.status.in_(_ACTIVE))
+             .order_by(ParkingSession.entry_time.desc()).first())
+        if s is None:
+            # Шороон зогсоолын тоос/өнцгөөс болж дотоод камер ӨӨР уншсан байж
+            # магадгүй (9920ҮИН ↔ 9920УНН). ЯГ НЭГ нэр дэвшигч байвал зөвшөөрнө —
+            # олон бол буруу машины тоолуурыг зогсоох эрсдэлтэй тул хүрэхгүй.
+            cands = [x for x in db.query(ParkingSession)
+                     .filter(ParkingSession.site_id == site.id,
+                             ParkingSession.status.in_(_ACTIVE)).all()
+                     if plates_ocr_similar(p, x.plate_number)]
+            if len(cands) != 1:
+                continue
+            s = cands[0]
+        if dry_run:
+            paused_n, resumed_n = paused_n + entering, resumed_n + (not entering)
+            continue
+        try:
+            if entering:
+                if pause_session(s, ev["time"]):
+                    paused_n += 1
+            elif resume_session(s, ev["time"], cap):
+                resumed_n += 1
+            db.commit()
+        except Exception as e:  # noqa: BLE001 — нэг уншилт бусдыг зогсоохгүй
+            db.rollback()
+            log.warning("%s %s: дотоод уншилт нөхөж чадсангүй — %r", site.name, p, e)
+    if paused_n or resumed_n:
+        log.info("%s: дотоод логоос тоолуур %d зогсоов, %d үргэлжлүүлэв "
+                 "(session үүсгээгүй/хаагаагүй)", site.name, paused_n, resumed_n)
+    return paused_n, resumed_n
+
+
 def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict:
     """Нэг зогсоолын логийг watermark-аас хойш нөхнө. Хураангуй буцаана."""
     state = get_state(db, CAMSYNC_STATE)
@@ -190,6 +264,8 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
         log.info("%s: логийн ГАРАХ уншилтаар %d бүртгэл хаагдлаа (%.0f₮)",
                  site.name, closed_by_log, log_fee)
 
+    paused_n, resumed_n = _sync_inner(db, site, cam, watermark, horizon, rules, dry_run)
+
     # Watermark-ыг УРАГШ нь л зөөнө (боловсруулсан хамгийн сүүлийн event хүртэл)
     if not dry_run:
         # ЧУХАЛ: ОРОХ камер уншигдаагүй бол watermark-ыг УРАГШЛУУЛАХГҮЙ.
@@ -214,6 +290,7 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
         db.commit()
     return {"site": site.name, "created": created, "skipped": skipped,
             "closed_by_log": closed_by_log,
+            "inner_paused": paused_n, "inner_resumed": resumed_n,
             "debt": debt_total, "from": watermark.isoformat(),
             "to": horizon.isoformat()}
 

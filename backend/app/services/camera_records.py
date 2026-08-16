@@ -160,33 +160,33 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
             .all())
     # creds-ийг db session амьд байхад энгийн мөр болгож шийднэ
     targets = [(c.name or c.ip_address, c.ip_address, c.lane_dir or "entry",
-                camera_credentials(c)) for c in cams]
+                camera_credentials(c), bool(c.nested_inner)) for c in cams]
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
 
-    async def _one(name, ip, lane_dir, creds):
+    async def _one(name, ip, lane_dir, creds, inner):
         try:
             recs = await asyncio.wait_for(
                 fetch_snap_events(ip, creds[0], creds[1], start, end), timeout=15)
-            return name, ip, lane_dir, recs, None
+            return name, ip, lane_dir, recs, None, inner
         except Exception as e:  # noqa: BLE001
-            return name, ip, lane_dir, [], f"{type(e).__name__}: {str(e)[:120]}"
+            return name, ip, lane_dir, [], f"{type(e).__name__}: {str(e)[:120]}", inner
 
     async def _all():
         return await asyncio.gather(*(_one(*t) for t in targets))
 
     results = asyncio.run(_all()) if targets else []
 
-    cameras, events = [], []
-    for name, ip, lane_dir, recs, err in results:
+    cameras, events, inner_events = [], [], []
+    for name, ip, lane_dir, recs, err, inner in results:
         cameras.append({"name": name, "ip": ip, "lane_dir": lane_dir,
-                        "events": len(recs), "error": err})
+                        "events": len(recs), "error": err, "nested_inner": inner})
         for r in recs:
             t = r.get("Time")
             if not isinstance(t, (int, float)):
                 continue
-            events.append({
+            ev = {
                 "plate": normalized_plate(r),
                 "raw_plate": r.get("PlateNumber"),
                 "time": datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None),
@@ -194,7 +194,19 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
                 "event": r.get("event_name"),
                 "source": r.get("SnapSource"),
                 "camera": name,
-            })
-    out = {"window_hours": hours, "cameras": cameras, "events": events}
+                "nested_inner": inner,
+            }
+            # ДОТООД (дамжин) хаалтны уншилтыг `events`-т ОРУУЛАХГҮЙ. Дуудагчид
+            # бүгд «entry = зогсоолд орлоо, exit = зогсоолоос гарлаа» гэж үздэг:
+            #   • camera_sync — дотоод орох уншилтаар ШИНЭ session үүсгэж,
+            #     дотоод гарах уншилтаар ГАДНА session-ийг «гарсан» гэж хаадаг
+            #     байв. Машин шороон зогсоол руу орж байхад «зогсоолоос гарлаа»
+            #     гэж бүртгэгдээд, жинхэнэ гарцад нь «бүртгэлгүй» болдог.
+            #   • /audit ба exit_reconcile — мөн адил «гарсан нь тогтоогдлоо» гэнэ.
+            # Дотоод уншилт нь ТӨЛБӨРИЙН ТООЛУУР зогсоох/үргэлжлүүлэх утгатай
+            # болохоос зогсолт нээх/хаах утгагүй тул тусад нь буцаана.
+            (inner_events if inner else events).append(ev)
+    out = {"window_hours": hours, "cameras": cameras, "events": events,
+           "inner_events": inner_events}
     _audit_cache[site_id] = (_time.monotonic(), out)
     return out
