@@ -70,10 +70,34 @@ def check_site(db, site: ParkingSite, hours: float, listing: int) -> None:
         any_time.append(at)
     any_time.sort()
 
+    # ── ЦАГИЙН ЗӨРҮҮГ ЭХЛЭЭД ХЭМЖИНЭ ─────────────────────────────────────────
+    # Камерын дотоод цаг NTP-гүй бол минут/цагаар гулсдаг. Үүнийг тооцохгүй бол
+    # БҮХ бичлэг «алдагдсан» гэж гарч, оношилгоо өөрөө худал хэлнэ. Ижил
+    # ДУГААРААР тохирсон хосуудын цагийн зөрүүний МЕДИАНЫГ зөрүү гэж авна
+    # (медиан нь цөөн худал хосолтод тэсвэртэй).
+    log_all = cam["events"] + (cam.get("inner_events") or [])
+    deltas = []
+    for ev in log_all:
+        p = normalize_plate(ev.get("plate") or "")
+        for at, _ok, _lane in by_plate.get(p, ()):
+            d = (at - ev["time"]).total_seconds()
+            if abs(d) <= 3600:
+                deltas.append(d)
+    deltas.sort()
+    skew = deltas[len(deltas) // 2] if deltas else 0.0
+    if abs(skew) > MATCH_SEC:
+        print(f"\n   ⚠ ЦАГИЙН ЗӨРҮҮ: камерын лог серверээс {skew / 60:+.1f} минутаар "
+              f"зөрүүтэй ({len(deltas)} хосоор хэмжив) — тулгалтад тооцов.")
+        print("      Камерын NTP тохиргоог засах хэрэгтэй; эс бол camera_sync ч "
+              "буруу цагаар зогсолт бүртгэнэ.")
+    elif not deltas:
+        print("\n   ⚠ Ижил дугаартай нэг ч хос олдсонгүй — цагийн зөрүүг хэмжих "
+              "боломжгүй. Доорх «алдагдсан» тоо ЦАГИЙН ЗӨРҮҮГЭЭС ч үүдсэн байж болно.")
+
     # Камерын лог бүрийг серверийн мөртэй тулгана
     stats: dict = {}
     lost_rows: list = []
-    for ev in cam["events"] + (cam.get("inner_events") or []):
+    for ev in log_all:
         p = normalize_plate(ev.get("plate") or "")
         if not p or not is_valid_plate(p):
             continue          # дугаар таниагүй бичлэг — энэ тестийн сэдэв биш
@@ -82,7 +106,7 @@ def check_site(db, site: ParkingSite, hours: float, listing: int) -> None:
                                      "inner": bool(ev.get("nested_inner"))})
         st["log"] += 1
         hit = next((x for x in by_plate.get(p, [])
-                    if abs((x[0] - ev["time"]).total_seconds()) <= MATCH_SEC), None)
+                    if abs((x[0] - ev["time"]).total_seconds() - skew) <= MATCH_SEC), None)
         if hit is None:
             st["lost"] += 1
             lost_rows.append((ev["time"], p, name, ev.get("lane_dir")))
@@ -95,6 +119,16 @@ def check_site(db, site: ParkingSite, hours: float, listing: int) -> None:
     if not total_log:
         print("   Логт зөв форматтай дугаартай бичлэг олдсонгүй.")
         return
+
+    ok_rows = [t for t, o, _l in ((x[0], x[1], x[2]) for v in by_plate.values() for x in v) if o]
+    print(f"\n   Сервер тал: цонхонд {len(rows)} мөр "
+          f"({sum(1 for _p, _t, o, _l in rows if o)} хүлээн авсан, "
+          f"{sum(1 for _p, _t, o, _l in rows if not o)} гологдсон)")
+    if ok_rows:
+        print(f"      сүүлд ХҮЛЭЭН АВСАН уншилт: {L(max(ok_rows))}"
+              f"  ({(datetime.utcnow() - max(ok_rows)).total_seconds() / 60:.0f} мин өмнө)")
+    else:
+        print("      ⚠ цонхонд ХҮЛЭЭН АВСАН уншилт НЭГ Ч БАЙХГҮЙ — стрим үхсэн байх магадлалтай")
 
     print(f"\n   Камерын бичлэг → сервер (зөрүү ≤{MATCH_SEC}с):")
     print(f"   {'камер':16}{'логт':>7}{'ирсэн':>8}{'гологдсон':>11}"
