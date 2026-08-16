@@ -137,7 +137,7 @@ def plates_similar(a: str, b: str) -> bool:
 # тулд сайт бүрд AUDIT_CACHE_SEC хугацаанд кэшлэнэ.
 AUDIT_CACHE_SEC = 60.0
 AUDIT_HOURS = 48.0
-_audit_cache: dict[str, tuple[float, dict]] = {}
+_audit_cache: dict[tuple, tuple[float, dict]] = {}
 
 
 def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
@@ -148,7 +148,12 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
     Камер тус бүрийн алдаа тусдаа бичигдэнэ — нэг камер унасан ч бусад нь тулгагдана.
     """
     import time as _time
-    cached = _audit_cache.get(site_id)
+    # Кэшийн түлхүүрт `hours`-ийг ЗААВАЛ оруулна — эс бол өөр цонх (48ц vs 72ц)
+    # асуусан хэрэгслүүд бие биенийхээ кэшийг авч, харилцан адилгүй хариу
+    # буцаадаг байв (2026-08-17: parked_audit 48ц кэшилсэн дараа exit_reconcile
+    # 72ц түүнийг авч, гарах уншилт «0» гэж гарсан).
+    ckey = (site_id, round(float(hours), 1))
+    cached = _audit_cache.get(ckey)
     if cached and _time.monotonic() - cached[0] < AUDIT_CACHE_SEC:
         return cached[1]
 
@@ -208,5 +213,5 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
             (inner_events if inner else events).append(ev)
     out = {"window_hours": hours, "cameras": cameras, "events": events,
            "inner_events": inner_events}
-    _audit_cache[site_id] = (_time.monotonic(), out)
+    _audit_cache[ckey] = (_time.monotonic(), out)
     return out
