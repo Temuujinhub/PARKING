@@ -375,16 +375,16 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
         base = f"http://{ip}/cgi-bin/eventManager.cgi?action=attach&codes="
         out = []
         for c in code_list:
-            # httptype=multipart нь ЭХЭНД: Dahua энэ параметртэй үед event-ийн
-            # JPEG-ийг мөн адил урсгалаар (multipart/mixed) илгээдэг. Үүнгүйгээр
-            # зөвхөн metadata ирж, зураг бүрд snapshot.cgi рүү тусад нь хандах
-            # шаардлагатай болдог — тэр нь удаан, камерыг ачаалдаг, гацсан үед
-            # огт авагддаггүй. Клиент тал аль хэдийн бэлэн (стримийг БАЙТААР
-            # уншиж _extract_images-ээр JPEG таслан авдаг) — зөвхөн ЗӨВ АСУУХ
-            # хэрэгтэй байсан. Камер танихгүй бол 400/404 өгч дараагийн
-            # хувилбар руу шилжинэ (эрсдэлгүй).
-            out.append(f"{base}{c}&heartbeat={hb}&httptype=multipart")
-            out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}&httptype=multipart")
+            # httptype=multipart нь Dahua-гаас event-ийн JPEG-ийг ижил урсгалаар
+            # авах зорилготой байв. ГЭВЧ энэ флот дээр ДУГААР ТАНИХЫГ эвдсэн:
+            # камер дугаараа тайлахаас ӨМНӨХ (PlateNumber хоосон) event илгээж,
+            # хүлээн авалт 60/өдөр → 7/өдөр болж унасан (Рашбулаг «Орох 2»,
+            # 2026-08-12..14 хэмжилт). Зураг нь одоо comet сувгаар ТУСДАА ирдэг
+            # тул анхдагчаар УНТРААЛТТАЙ — дахин туршихыг хүсвэл
+            # `PARKING_CAMERA_EVENT_MULTIPART=true` (config.py дээрх тайлбар).
+            if settings.camera_event_multipart:
+                out.append(f"{base}{c}&heartbeat={hb}&httptype=multipart")
+                out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}&httptype=multipart")
             out.append(f"{base}{c}&heartbeat={hb}")          # хэвийн
             out.append(f"{base}{_q(c, safe='')}&heartbeat={hb}")  # хаалт encode хийсэн
             out.append(f"{base}{c}")                          # heartbeat-гүй

@@ -63,7 +63,12 @@ C._codes_ok.clear()
 
 print("\nТохиргоо:")
 check("camera_event_codes тохиргоо байна", isinstance(settings.camera_event_codes, str))
-check("default нь [All]", settings.camera_event_codes == "[All]")
+# 2026-08-14: default нь [All] байхаа больж, эмпирикээр ажилладаг нь батлагдсан
+# хослол болсон (stream_dump --compare) — тест хуучин хүлээлтээ барьсаар байв.
+check("default нь ажилладаг ANPR хослол",
+      settings.camera_event_codes == "[TrafficJunction,TrafficSnapPicture,TrafficControl]")
+# 2026-08-16: multipart нь дугаар танихыг эвдсэн тул анхдагчаар унтраалттай
+check("multipart анхдагчаар унтраалттай", settings.camera_event_multipart is False)
 
 print(f"\n{PASS} PASS, {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)
