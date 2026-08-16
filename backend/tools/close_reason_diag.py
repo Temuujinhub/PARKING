@@ -20,7 +20,9 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import SessionLocal
-from app.models import AuditLog, ParkingSession, ParkingSite
+from sqlalchemy import func
+
+from app.models import AuditLog, Device, LprEvent, ParkingSession, ParkingSite
 
 TZ = timedelta(hours=8)  # УБ-ын цаг
 
@@ -57,6 +59,52 @@ def classify(s: ParkingSession, logs: list) -> tuple[str, str]:
     if s.exit_confirmed:
         return "БҮРТГЭЛГҮЙ: гарах уншилттай ч ямар ч AuditLog алга", "—"
     return "БҮРТГЭЛГҮЙ: ээлж/шөнийн хаалт эсвэл дахин орж ирэхэд хаагдсан", "—"
+
+
+def live_vs_backfill(db, site, since):
+    """Зогсолт АМЬДААР (камерын callback) бүртгэгдэж байна уу, эсвэл дараа нь
+    камерын логоос НӨХӨГДӨЖ байна уу — «Гараар хаасан»-ы жинхэнэ үндэс.
+
+    Нөхөлтөөр үүссэн session гэдэг нь тухайн машин орж/гарах агшинд систем
+    МЭДЭЭГҮЙ байсан гэсэн үг: хаалт автоматаар нээгдээгүй, оператор гараар
+    нээсэн, LED юу ч бичээгүй, төлбөр нэхэгдээгүй. Дараа нь (30 мин тутмын sync)
+    л бүртгэл үүсээд шууд хаагддаг.
+    """
+    q = db.query(ParkingSession).filter(ParkingSession.entry_time >= since)
+    if site:
+        q = q.filter(ParkingSession.site_id == site.id)
+    sess = q.all()
+    if not sess:
+        return
+    synced = {eid for (eid,) in db.query(AuditLog.entity_id)
+              .filter(AuditLog.entity == "session", AuditLog.action == "CAMERA_SYNC",
+                      AuditLog.created_at >= since).all()}
+    back = sum(1 for s in sess
+               if s.id in synced or "логоос нөхөж" in (s.note or ""))
+    live = len(sess) - back
+    print(f"\n══ Зогсолт хэрхэн бүртгэгдэж байна ({len(sess)} session) ══")
+    print(f"   {live:5}  амьд камерын callback-аар ({live * 100 // len(sess)}%) "
+          f"— хаалт автоматаар нээгдсэн")
+    print(f"   {back:5}  камерын логоос НӨХӨГДСӨН ({back * 100 // len(sess)}%) "
+          f"— тэр агшинд систем мэдээгүй, хаалтыг гараар нээсэн")
+
+    # Камер бүрийн амьд уншилт — аль камерын callback ирдэггүйг заана
+    devs = db.query(Device).filter(Device.device_type == "camera",
+                                   Device.status != "deleted")
+    if site:
+        devs = devs.filter(Device.site_id == site.id)
+    devs = devs.all()
+    if not devs:
+        return
+    counts = dict(db.query(LprEvent.device_id, func.count())
+                  .filter(LprEvent.device_id.in_([d.id for d in devs]),
+                          LprEvent.created_at >= since)
+                  .group_by(LprEvent.device_id).all())
+    print(f"\n   Амьд LPR уншилт камер тутамд ({len(sess)} session-тэй харьцуул):")
+    for d in sorted(devs, key=lambda x: (bool(x.nested_inner), x.lane_dir or "")):
+        mark = "🔵 дотоод" if d.nested_inner else "  гадна "
+        print(f"   {mark} {(d.name or '?'):14} {d.lane_dir or '?':5} "
+              f"{counts.get(d.id, 0):5} уншилт   сүүлд: {L(d.last_seen)}")
 
 
 def main():
@@ -123,6 +171,8 @@ def main():
 
         print(f"\nТөлбөр 0₮ мөртөө «Гараар хаасан» гэж бичигдсэн: {free_but_manual}"
               f" / {len(rows)}  (эдгээр нь «Үнэгүй гарсан» байх ёстой)")
+
+        live_vs_backfill(db, site, since)
 
         if args.list:
             print(f"\nЖишээ ({min(args.list, len(rows))} мөр):")
