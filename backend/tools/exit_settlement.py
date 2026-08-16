@@ -37,10 +37,22 @@ def L(dt):
 
 
 def classify(s, pays: list, closed_action: str | None) -> str:
-    """Гарц бүрийн ТӨЛБӨРИЙН эцсийн ангилал (хүн ойлгох)."""
+    """Гарц бүрийн ТӨЛБӨРИЙН эцсийн ангилал (хүн ойлгох).
+
+    ЧУХАЛ ЯЛГАА: `duration_minutes is None` = гарах уншилт ОГТ БАЙГААГҮЙ. Ийм
+    бүртгэлийг «үнэгүй хугацаанд багтсан» гэж хэлж БОЛОХГҮЙ — машин хэдэн цаг
+    зогссоныг систем мэдэхгүй байгаа тул тэглэсэн (25 цаг зогссон ч 0₮). Эдгээр
+    нь бодит алдагдлын гол хэлбэр (гарц дээрээ уншигдаагүй).
+    """
     if pays:
         methods = {_PROVIDER.get(p, p) for p in pays}
         return "Төлсөн: " + ", ".join(sorted(methods))
+    # Гарах уншилт огт байхгүй (хугацаа тодорхойгүй) — төлөвөөс үл хамааран
+    # ТУСАД НЬ. Энэ бол «үнэгүй» биш, «мэдэхгүй тул тэглэсэн».
+    if s.duration_minutes is None and not s.exit_confirmed:
+        if s.is_registered:
+            return "Гэрээт (гарах уншилтгүй)"
+        return "АЛДАГДСАН: гарах уншилтгүй, албадан тэглэсэн"
     if s.status == "FREE":
         if s.is_registered:
             return "Үнэгүй: гэрээт машин"
@@ -131,7 +143,8 @@ def main():
                 lost_n += n
             print(f"{k[:50]:52}{n:5}{kind_amt[k]:12,.0f}{flag}")
 
-        free_n = sum(n for k, n in kinds.items() if k.startswith("Үнэгүй"))
+        free_n = sum(n for k, n in kinds.items()
+                     if k.startswith("Үнэгүй") or k.startswith("Гэрээт"))
         paid_n = sum(n for k, n in kinds.items() if k.startswith("Төлсөн"))
         print(f"\n   Төлсөн {paid_n}  ·  үнэгүй {free_n}  ·  АЛДАГДСАН {lost_n}"
               f"  ({lost_n * 100 // len(rows)}%)")
@@ -156,8 +169,15 @@ def main():
                     break
                 k = classify(s, pays.get(s.id, []), close_act.get(s.id))
                 dur = s.duration_minutes
+                # Хугацаа тодорхойгүй бол орсон→хаагдсан ЗАВСРЫГ (бодит зогсолт
+                # биш ч) харуулна — «5 минутын үнэгүй» биш гэдэг нь ил болно
+                if dur is None and s.entry_time and s.exit_time:
+                    gap_h = (s.exit_time - s.entry_time).total_seconds() / 3600
+                    dtxt = f"~{gap_h:.0f}ц?"
+                else:
+                    dtxt = f"{dur}м" if dur is not None else "—"
                 print(f"   {s.plate_number:10} {L(s.entry_time)}→{L(s.exit_time)}"
-                      f"  {str(dur) + 'м' if dur is not None else '—':>7}"
+                      f"  {dtxt:>7}"
                       f"  {float(s.total_fee or 0):>7,.0f}₮  {k}")
                 shown += 1
     finally:
