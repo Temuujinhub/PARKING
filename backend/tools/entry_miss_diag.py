@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import SessionLocal
 from app.models import ParkingSession, ParkingSite
-from app.services.camera_records import site_camera_events
+from app.services.camera_records import plates_similar, site_camera_events
 from app.session_logic import normalize_plate
 
 TZ = timedelta(hours=8)  # УБ-ын цаг
@@ -46,8 +46,8 @@ def main():
             if not sites:
                 sys.exit(f"«{args.site}» олдсонгүй")
 
-        per_hour: dict = defaultdict(lambda: [0, 0])   # [орсон, бүртгэлгүй]
-        site_tot: dict = defaultdict(lambda: [0, 0])
+        per_hour: dict = defaultdict(lambda: [0, 0, 0])   # [орсон, бүртгэлгүй, ҮНЭХЭЭР дутуу]
+        site_tot: dict = defaultdict(lambda: [0, 0, 0])
         for site in sites:
             try:
                 cam = site_camera_events(db, site.id, hours=args.hours)
@@ -77,6 +77,7 @@ def main():
                     continue
                 uniq.append((p, e["time"]))
 
+            known_list = list(known)
             for p, t in uniq:
                 hour = (t + TZ).strftime("%m-%d %H:00")
                 per_hour[hour][0] += 1
@@ -84,33 +85,42 @@ def main():
                 if p not in known:
                     per_hour[hour][1] += 1
                     site_tot[site.name][1] += 1
+                    # OCR зөрүү юу, ҮНЭХЭЭР дутуу юу? Ойролцоо дугаартай session
+                    # байвал тэр машин session-той (зүгээр өөр уншсан) — жинхэнэ
+                    # алдагдал БИШ. Аль нэгтэй ч ойролцоо биш бол ҮНЭХЭЭР дутуу.
+                    if not any(plates_similar(p, k) for k in known_list):
+                        per_hour[hour][2] += 1
+                        site_tot[site.name][2] += 1
 
         if not per_hour:
             print("Камерын орох уншилт олдсонгүй.")
             return
 
         print(f"══ Камераар ОРСОН машин session АВСАН уу — сүүлийн {args.hours:g}ц ══\n")
-        print("Зогсоол тутам:")
-        print(f"   {'зогсоол':22}{'орсон':>8}{'бүртгэлгүй':>12}{'алдагдал%':>11}")
-        for name in sorted(site_tot):
-            ent, miss = site_tot[name]
-            pct = miss * 100 // ent if ent else 0
-            flag = "  ⚠" if pct >= 10 else ""
-            print(f"   {name[:20]:22}{ent:8}{miss:12}{pct:10}%{flag}")
+        print("Зогсоол тутам ('дутуу' = OCR зөрүүг хассан ҮНЭХЭЭР алдагдсан):")
+        print(f"   {'зогсоол':22}{'орсон':>8}{'бүртгэлгүй':>12}{'дутуу':>8}{'дутуу%':>9}")
+        for name in sorted(site_tot, key=lambda n: -site_tot[n][2]):
+            ent, miss, gone = site_tot[name]
+            pct = gone * 100 // ent if ent else 0
+            flag = "  ⚠" if pct >= 8 else ""
+            print(f"   {name[:20]:22}{ent:8}{miss:12}{gone:8}{pct:8}%{flag}")
 
-        print(f"\nЦагаар (УБ) — засвар 08-17 01:00-д орсон, түүнээс хойш ТЭГ рүү орох ёстой:")
-        print(f"   {'цаг':14}{'орсон':>8}{'бүртгэлгүй':>12}{'алдагдал%':>11}")
+        print(f"\nЦагаар (УБ) — засвар 08-17 01:00-д орсон. 'дутуу' баганыг хар "
+              "(OCR зөрүү хасагдсан):")
+        print(f"   {'цаг':14}{'орсон':>8}{'дутуу':>8}{'дутуу%':>9}")
         for h in sorted(per_hour):
-            ent, miss = per_hour[h]
-            pct = miss * 100 // ent if ent else 0
-            bar = "█" * min(miss, 40)
-            print(f"   {h:14}{ent:8}{miss:12}{pct:9}%  {bar}")
+            ent, miss, gone = per_hour[h]
+            pct = gone * 100 // ent if ent else 0
+            bar = "█" * min(gone, 40)
+            print(f"   {h:14}{ent:8}{gone:8}{pct:8}%  {bar}")
 
         tot_e = sum(v[0] for v in per_hour.values())
         tot_m = sum(v[1] for v in per_hour.values())
-        print(f"\n   НИЙТ: {tot_e} орсон, {tot_m} бүртгэлгүй ({tot_m * 100 // tot_e}%)")
-        print("   «бүртгэлгүй» = камераар орсон ч session ОГТ аваагүй = харагдахгүй алдагдал.")
-        print("   Засвараас ХОЙШХИ цагууд 0-1% бол засвар ажилласны БАТ нотолгоо.")
+        tot_g = sum(v[2] for v in per_hour.values())
+        print(f"\n   НИЙТ: {tot_e} орсон, {tot_m} бүртгэлгүй, "
+              f"үүнээс {tot_g} нь ҮНЭХЭЭР дутуу ({tot_g * 100 // tot_e}%)")
+        print(f"   ({tot_m - tot_g} нь OCR зөрүү — session өөр дугаараар үүссэн, алдагдаагүй)")
+        print("   Засвараас ХОЙШХИ 'дутуу%' 0-1% бол засвар ажилласны БАТ нотолгоо.")
     finally:
         db.close()
 
