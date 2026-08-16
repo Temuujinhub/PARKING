@@ -131,3 +131,24 @@ def test_start_is_staggered():
     assert settings.snap_comet_probe_sec >= 60      # хэт богино бол илүүц эргэлт
     assert settings.snap_comet_idle_sec > settings.snap_comet_probe_sec
     assert settings.snap_comet_keepalive_sec < 60   # RPC2 сешн 60с-д хөрдөг
+
+
+def test_probe_needs_a_real_car(monkeypatch):
+    """Чимээгүй байдлыг МАШИН ирсэн үед л «филтер буруу» гэж үзнэ.
+
+    2026-08-15 орой: шөнө машин ирэхгүй байхыг сувгийн эвдрэл гэж андуурч,
+    22 камер 3 минут тутам дэмий дахин холбогдож камерын нэвтрэлтийн нөөцийг
+    иддэг байв."""
+    from app.services import cgi_poller as cp
+
+    IP = "10.0.113.10"
+    cp._last_car.pop(IP, None)
+    assert cp.last_car_ts(IP) is None, "машин ирээгүй үед шүүх үндэслэлгүй"
+
+    cp.note_car(IP)
+    ts = cp.last_car_ts(IP)
+    assert ts is not None and ts > 0
+
+    # attach-аас ӨМНӨ уншигдсан машин нь энэ холболтыг буруутгах үндэслэл болохгүй
+    attached_at = ts + 1.0
+    assert not (ts >= attached_at)

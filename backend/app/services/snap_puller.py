@@ -434,6 +434,7 @@ async def _comet_session(ip: str, on_picture, flt: dict,
     `on_picture(plate, jpeg)` бүрэн JPEG бүрд дуудагдана."""
     import base64 as _b64
     from .barrier import _rpc_lock, note_rpc_done, wait_rpc_gap
+    from .cgi_poller import last_car_ts
 
     username, password = creds or camera_credentials(None)
     # read=None — comet хоолой чимээгүй байх нь ХЭВИЙН (event хүртэл хүлээнэ)
@@ -479,7 +480,8 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                     json.dumps(res.get("error") or res, ensure_ascii=False)[:90])
 
             st = _comet_state.setdefault(ip, {})
-            st.update(attached=time.monotonic(), filter_no=filter_no, pics=0,
+            attached_at = time.monotonic()
+            st.update(attached=attached_at, filter_no=filter_no, pics=0,
                       last_error=None)
             buf, parts = "", {}
             dead: dict[str, str] = {}
@@ -506,9 +508,17 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                     silent += _COMET_POLL_SEC
                     if dead.get("why"):
                         raise RuntimeError(dead["why"])
-                    # Зураг ОГТ өгөөгүй суваг — филтер буруу байх магадлалтай
+                    # Зураг ОГТ өгөөгүй суваг — филтер буруу байх магадлалтай.
+                    # ГЭХДЭЭ энэ хугацаанд МАШИН уншигдсан байж гэмээнэ: шөнө
+                    # машин ирэхгүй чимээгүй байхыг «филтер буруу» гэж үзвэл
+                    # 22 камер 3 минут тутам дэмий дахин холбогдож, камерын
+                    # нэвтрэлтийн нөөцийг иддэг (2026-08-15 орой илэрсэн).
                     if not seen["n"] and silent >= settings.snap_comet_probe_sec:
-                        raise CometSilent(f"{silent:.0f}с зураг ирсэнгүй")
+                        car = last_car_ts(ip)
+                        if car is not None and car >= attached_at:
+                            raise CometSilent(
+                                f"{silent:.0f}с дотор машин уншигдсан ч зураг ирсэнгүй")
+                        silent = 0.0     # машин ирээгүй — шүүх үндэслэлгүй, хүлээнэ
                     # Ажиллаж байсан суваг ч удаан чимээгүй байвал сэргээнэ
                     if silent >= settings.snap_comet_idle_sec:
                         raise RuntimeError(f"{silent:.0f}с чимээгүй — сэргээнэ")

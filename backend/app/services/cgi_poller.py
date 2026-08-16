@@ -27,6 +27,26 @@ log = logging.getLogger("parking.cgi_poller")
 
 _tasks: dict[str, asyncio.Task] = {}
 
+# ip → сүүлд МАШИН уншигдсан цаг (time.monotonic). Зургийн суваг «би зураг
+# авах ёстой байсан уу» гэдгээ үүгээр мэднэ: машин ирээгүй чимээгүй байдал
+# (шөнө) ба суваг эвдэрсэн байдлыг ялгах цорын ганц зөв шалгуур.
+_last_car: dict[str, float] = {}
+
+
+def note_car(ip: str) -> None:
+    if ip:
+        _last_car[ip] = _mono()
+
+
+def last_car_ts(ip: str) -> float | None:
+    """Тухайн камер сүүлд машин уншсан үе (monotonic) — байхгүй бол None."""
+    return _last_car.get(ip)
+
+
+def _mono() -> float:
+    import time as _t
+    return _t.monotonic()
+
 
 def _touch(device_id: str):
     """Стрим амьд байгааг last_seen-д тэмдэглэнэ — событиегүй ч онлайн гэж зөв харагдана."""
@@ -285,6 +305,7 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
         db.commit()  # ямар ч event ирвэл камер онлайн болно
         raw_plate, conf = _plate_from(data)
         if raw_plate:
+            note_car(device.ip_address)   # зургийн суваг үүгээр өөрийгөө шүүнэ
             _dump_event(device, data)
         plate = normalize_plate(raw_plate)
         if not plate:
