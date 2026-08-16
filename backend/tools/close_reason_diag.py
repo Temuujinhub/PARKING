@@ -96,15 +96,32 @@ def live_vs_backfill(db, site, since):
     devs = devs.all()
     if not devs:
         return
-    counts = dict(db.query(LprEvent.device_id, func.count())
-                  .filter(LprEvent.device_id.in_([d.id for d in devs]),
-                          LprEvent.created_at >= since)
-                  .group_by(LprEvent.device_id).all())
+    # ЯЛГАХ ЗҮЙЛ: callback огт ИРЭЭГҮЙ юу, эсвэл ирсэн ч ГОЛОГДСОН уу.
+    # Хоёрын засвар өөр: эхнийх нь камер/сүлжээ, хоёр дахь нь итгэлцлийн босго
+    # (lpr_min_confidence) эсвэл дугаар танигдаагүй (тоос/шороо/өнцөг).
+    stats: dict = {}
+    for dev_id, accepted, reason, n in (
+            db.query(LprEvent.device_id, LprEvent.accepted, LprEvent.reject_reason,
+                     func.count())
+            .filter(LprEvent.device_id.in_([d.id for d in devs]),
+                    LprEvent.created_at >= since)
+            .group_by(LprEvent.device_id, LprEvent.accepted, LprEvent.reject_reason).all()):
+        st = stats.setdefault(dev_id, {"ok": 0, "bad": 0, "reasons": Counter()})
+        if accepted:
+            st["ok"] += n
+        else:
+            st["bad"] += n
+            st["reasons"][reason or "?"] += n
     print(f"\n   Амьд LPR уншилт камер тутамд ({len(sess)} session-тэй харьцуул):")
     for d in sorted(devs, key=lambda x: (bool(x.nested_inner), x.lane_dir or "")):
         mark = "🔵 дотоод" if d.nested_inner else "  гадна "
+        st = stats.get(d.id, {"ok": 0, "bad": 0, "reasons": Counter()})
+        top = ", ".join(f"{r} ×{n}" for r, n in st["reasons"].most_common(2))
         print(f"   {mark} {(d.name or '?'):14} {d.lane_dir or '?':5} "
-              f"{counts.get(d.id, 0):5} уншилт   сүүлд: {L(d.last_seen)}")
+              f"хүлээн авсан {st['ok']:5} · гологдсон {st['bad']:4}"
+              f"   сүүлд: {L(d.last_seen)}")
+        if top:
+            print(f"            гологдсон шалтгаан: {top}")
 
 
 def main():
