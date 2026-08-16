@@ -124,12 +124,72 @@ def live_vs_backfill(db, site, since):
             print(f"            гологдсон шалтгаан: {top}")
 
 
+def daily(db, site, days: int):
+    """ӨДРӨӨР: камерын уншилт хүлээн авсан/гологдсон + session амьд/нөхөгдсөн.
+
+    Зорилго: «энэ асуудал хэзээнээс эхэлсэн бэ» гэдгийг deploy-ийн огноотой
+    тулгах. Гологдолт нэг өдрөөс огцом үсэрсэн бол шалтгаан нь тэр өдрийн
+    өөрчлөлт — камер/тоос биш.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    devs = db.query(Device).filter(Device.device_type == "camera",
+                                   Device.status != "deleted")
+    if site:
+        devs = devs.filter(Device.site_id == site.id)
+    devs = {d.id: d for d in devs.all()}
+    if not devs:
+        return
+
+    print(f"\n══ ӨДРӨӨР ({days} хоног) — уншилт хүлээн авсан / гологдсон ══")
+    day = func.date(LprEvent.created_at + TZ)      # УБ-ын цагаар өдөрчилнө
+    per: dict = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for d_, dev_id, accepted, n in (
+            db.query(day, LprEvent.device_id, LprEvent.accepted, func.count())
+            .filter(LprEvent.device_id.in_(devs), LprEvent.created_at >= since)
+            .group_by(day, LprEvent.device_id, LprEvent.accepted).all()):
+        per[str(d_)][dev_id][0 if accepted else 1] += n
+
+    names = {i: (d.name or "?")[:12] for i, d in devs.items()}
+    order = sorted(devs, key=lambda i: (bool(devs[i].nested_inner), devs[i].lane_dir or ""))
+    print("   огноо     " + "".join(f"{names[i]:>16}" for i in order))
+    for d_ in sorted(per):
+        cells = []
+        for i in order:
+            ok, bad = per[d_][i]
+            pct = f" {bad * 100 // (ok + bad)}%" if (ok + bad) else ""
+            cells.append(f"{ok}/{bad}{pct}".rjust(16))
+        print(f"   {d_}  " + "".join(cells))
+    print("   (хүлээн авсан/гологдсон · гологдлын хувь)")
+
+    # Session өдөр тутам: амьд vs нөхөгдсөн
+    sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= since)
+    if site:
+        sq = sq.filter(ParkingSession.site_id == site.id)
+    sess = sq.all()
+    if not sess:
+        return
+    synced = {eid for (eid,) in db.query(AuditLog.entity_id)
+              .filter(AuditLog.entity == "session", AuditLog.action == "CAMERA_SYNC",
+                      AuditLog.created_at >= since).all()}
+    per_day: dict = defaultdict(lambda: [0, 0])
+    for s in sess:
+        back = s.id in synced or "логоос нөхөж" in (s.note or "")
+        per_day[str((s.entry_time + TZ).date())][1 if back else 0] += 1
+    print("\n   огноо       амьд  нөхөгдсөн  нөхөлтийн %")
+    for d_ in sorted(per_day):
+        live, back = per_day[d_]
+        tot = live + back
+        print(f"   {d_}  {live:8}{back:9}{(back * 100 // tot if tot else 0):9}%")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--site", help="зогсоолын код эсвэл нэрний эхлэл "
                                    "(ж: RASH, «Рашбулаг»). Өгөхгүй бол бүгд")
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--list", type=int, default=0, help="хэдэн жишээ мөр хэвлэх")
+    ap.add_argument("--daily", type=int, default=0, metavar="ХОНОГ",
+                    help="өдрөөр задлах — асуудал хэзээнээс эхэлснийг deploy-той тулгах")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -190,6 +250,8 @@ def main():
               f" / {len(rows)}  (эдгээр нь «Үнэгүй гарсан» байх ёстой)")
 
         live_vs_backfill(db, site, since)
+        if args.daily:
+            daily(db, site, args.daily)
 
         if args.list:
             print(f"\nЖишээ ({min(args.list, len(rows))} мөр):")
