@@ -41,11 +41,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--site", help="зөвхөн нэг зогсоол (код эсвэл нэрний эхлэл)")
+    ap.add_argument("--since", metavar="'YYYY-MM-DD HH:MM'",
+                    help="зөвхөн энэ УБ-цагаас хойш орсон машин (засвар/deploy-ийн "
+                         "дараах цонхыг тусгаарлах). Өдрийн бүлэглэл хэвээр")
     args = ap.parse_args()
 
     db = SessionLocal()
     try:
-        since = datetime.utcnow() - timedelta(days=args.days)
+        if args.since:
+            # УБ цагаар өгсөн → серверийн UTC болгоно
+            since = datetime.strptime(args.since, "%Y-%m-%d %H:%M") - TZ
+        else:
+            since = datetime.utcnow() - timedelta(days=args.days)
         site = None
         if args.site:
             site = (db.query(ParkingSite)
