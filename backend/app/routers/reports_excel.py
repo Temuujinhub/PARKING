@@ -188,7 +188,7 @@ def site_sessions_excel(site, sessions):
     """Нэг зогсоолын session-уудын дэлгэрэнгүй Excel."""
     STATUS_MN = {"OPEN": "Зогсож байна", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
                  "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
-                 "MANUAL_CLOSED": "Гараар хаасан"}
+                 "MANUAL_CLOSED": "Гарах уншилтгүй"}
     rows = [[s.plate_number,
              (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
              (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",

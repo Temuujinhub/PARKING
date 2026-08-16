@@ -203,6 +203,11 @@ async def start_vat_auto_send():
     from .services.cgi_poller import supervisor as cgi_supervisor
     _bg_task(cgi_supervisor(), "cgi-poller")
 
+    # Стрим чимээгүй болсон камерын логийг богино мөчлөгөөр татах НӨӨЦ зам —
+    # «attach 200 OK атлаа event ирэхгүй» үед машин огт бүртгэгдэхгүй үлддэг
+    from .services.log_tail import supervisor as log_tail_supervisor
+    _bg_task(log_tail_supervisor(), "log-tail")
+
     # Event зургийн стрим — snapManager.attachFileProc (PARKING_SNAP_PULL, default true)
     from .services.snap_puller import supervisor as snap_supervisor
     _bg_task(snap_supervisor(), "snap-puller")

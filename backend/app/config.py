@@ -246,6 +246,23 @@ class Settings(BaseSettings):
     camera_username: str = "admin"   # камерын web admin нэвтрэх нэр
     camera_password: str = ""        # камерын web admin нууц үг (.env-д)
 
+    # ── Логийн БОГИНО МӨЧЛӨГИЙН нөөц зам (services/log_tail.py) ──────────────
+    # Стрим «чимээгүй attach» болоход (камерыг өөр систем хуваалцаж байгаа г.м)
+    # машин огт бүртгэгдэхгүй, хаалт нээгдэхгүй үлддэг. Камерын ӨӨРИЙН бичлэг
+    # тэр уншилтыг мэддэг тул богино мөчлөгөөр татаж, амьд event-тэй ижил
+    # замаар боловсруулна. ЗӨВХӨН чимээгүй камерт хандана.
+    log_tail_enabled: bool = True
+    log_tail_interval_sec: float = 20.0     # мөчлөгийн давтамж
+    log_tail_silence_sec: float = 180.0     # ийм удаан уншилтгүй бол «чимээгүй»
+    log_tail_window_min: int = 20           # логоос хэдэн минутын мужийг асуух
+    # Камерын цаг NTP-гүй бол гулсдаг (Рашбулаг 2026-08-16: +32 мин). Мужийг
+    # энэ хэмжээгээр ХОЁР ТАЛД нь тэлж асууна — эс бол юу ч олдохгүй.
+    log_tail_skew_tolerance_min: int = 120
+    log_tail_max_records: int = 40          # мөчлөг бүрд боловсруулах дээд тоо
+    log_tail_dedup_sec: float = 300.0       # ижил дугаар ойрхон бүртгэгдсэн бол алгас
+    log_tail_timeout_sec: float = 20.0
+    log_tail_concurrency: int = 3           # зэрэг хандах камерын тоо
+
     # LPR snapshot — event бүрд камераас зураг татаж хадгална (нотолгоо/маргаан шийдэхэд)
     snapshot_enabled: bool = True
     snapshot_dir: str = "/var/lib/parking/snapshots"

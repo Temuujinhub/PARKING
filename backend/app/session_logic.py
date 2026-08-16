@@ -438,7 +438,15 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     s.exit_confirmed = bool(s.exit_confirmed) or confirmed
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
-    s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+    # ТӨЛӨВ нь ЮУ БОЛСНЫГ хэлнэ, ХЭН хаасныг биш (түүнийг `closed_by` хэлдэг):
+    #   CLOSED        — төлбөр барагдсан
+    #   FREE          — төлбөр 0₮ (үнэгүй хугацаа/гэрээт/хөнгөлөлт)
+    #   MANUAL_CLOSED — «гарах уншилтгүй», төлбөр үлдсэн
+    # Өмнө нь 0₮ зогсолт ч `MANUAL_CLOSED` болж «Гараар хаасан» гэж харагддаг
+    # байв — жинхэнэ гарц (`_close_and_open`) аль хэдийн энэ дүрэмтэй байсныг
+    # албадан хаалтын зам мөрдөөгүйгээс (2026-08-16 Рашбулаг: 286-аас 138 мөр).
+    s.status = ("CLOSED" if s.paid_at
+                else "FREE" if fee["is_free"] else "MANUAL_CLOSED")
     if create_comp and due > 0 and not fee["is_free"]:
         from .routers.compensations_router import create_compensation
         comp = create_compensation(db, s, reason, username)
@@ -701,11 +709,18 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             existing.base_fee = old_fee["base_fee"]
             existing.vat_amount = old_fee["vat_amount"]
             existing.total_fee = old_fee["total_fee"]
-        existing.status = "MANUAL_CLOSED"
+        existing.status = "FREE" if old_fee["is_free"] else "MANUAL_CLOSED"
         due = amount_due(db, existing, old_fee)
         if due > 0:
             comp = create_compensation(db, existing, "unpaid_exit", "system")
             comp.amount = due
+        # Энэ зам ямар ч AuditLog үлдээдэггүй байсан тул Түүх дээр «хэн хаасан»
+        # нь хоосон харагддаг байв — хамгийн будлиантай тохиолдол (машин гарах
+        # хаалтанд уншигдаад төлөлгүй үлдчихээд дахин орж ирсэн).
+        from .models import AuditLog as _AuditLog
+        db.add(_AuditLog(username="system", action="REENTRY_CLOSE", entity="session",
+                         entity_id=existing.id,
+                         detail={"plate": plate, "due": float(due)}))
         # uq_active_session: шинэ OPEN session оруулахын ӨМНӨ хаалтыг DB-д тулгана
         db.flush()
         if due > 0:

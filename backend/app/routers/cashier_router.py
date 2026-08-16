@@ -83,9 +83,15 @@ def close_shift(body: dict | None = None, db: Session = Depends(get_db),
             fee = session_fee_info(db, s, at=now)
             s.exit_time, s.duration_minutes = now, fee["duration_minutes"]
             s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
-            s.status = "MANUAL_CLOSED"
+            s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
             if not fee["is_free"]:
                 create_compensation(db, s, "shift_close", user.username)
+            # Session тутамд бичнэ — эс бол Түүх дээр «хэн хаасан» нь хоосон
+            # үлдэж, оператор гараар хаасан мэт харагддаг (site-ийн түвшний
+            # SHIFT_CLOSE бүртгэл нь тухайн МӨРийг тайлбарлаж чадахгүй).
+            db.add(AuditLog(username=user.username, action="SHIFT_CLOSE_CAR",
+                            entity="session", entity_id=s.id,
+                            detail={"plate": s.plate_number, "shift": shift.id}))
             closed_cars += 1
     shift.closed_at = datetime.utcnow()
     shift.status = "CLOSED"

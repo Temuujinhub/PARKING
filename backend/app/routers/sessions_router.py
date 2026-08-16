@@ -45,14 +45,27 @@ def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
 # Session-ийг ХААСАН үйлдлүүд — Түүх дээр «хэн/юугаар хаасан» гэдгийг гаргана.
 # Гараар хаасныг операторын нэрээр, автоматыг «систем» гэж ялгаж харуулна.
 _CLOSE_ACTIONS = ("ADMIN_REMOVE", "MANUAL_EXIT", "AUTO_CLOSE", "AUTO_FREE_CLOSE",
-                  "AUTO_JUNK_CLOSE")
+                  "AUTO_JUNK_CLOSE", "CAMERA_SYNC", "CAMERA_SYNC_EXIT",
+                  "SHIFT_CLOSE_CAR", "NIGHT_CLOSE_CAR", "REENTRY_CLOSE")
+# Шалтгаан бүрд НЭГ товч шошиг. Урьд нь 5 нь л шошготой байсан тул нөхөлт,
+# ээлж/шөнийн хаалт, дахин орж ирэлтээр хаагдсан бүртгэлүүд Түүх дээр «Хаасан»
+# багана ХООСОН харагддаг байв (2026-08-16 Рашбулаг: 286-аас 252 мөр).
 _CLOSE_LABEL = {
-    "ADMIN_REMOVE": "Зогсоолоос хассан",
-    "MANUAL_EXIT": "Гараар гаргасан",
+    "ADMIN_REMOVE": "Админ хассан",
+    "MANUAL_EXIT": "Оператор гаргасан",       # доор төлбөртэй/үнэгүй гэж хуваагдана
     "AUTO_CLOSE": "Авто: хугацаа хэтэрсэн",
-    "AUTO_FREE_CLOSE": "Авто: үнэгүй хаасан",
+    "AUTO_FREE_CLOSE": "Авто: орох уншилттай",
     "AUTO_JUNK_CLOSE": "Авто: буруу дугаар",
+    "CAMERA_SYNC": "Логоос нөхсөн",
+    "CAMERA_SYNC_EXIT": "Логийн гарах уншилт",
+    "SHIFT_CLOSE_CAR": "Ээлж хаахад",
+    "NIGHT_CLOSE_CAR": "Шөнийн хаалт",
+    "REENTRY_CLOSE": "Дахин орж ирэхэд",
 }
+# Оператор гараар гаргахад ТӨЛБӨР АВСАН эсэхийг ялгаж харуулна — «үнэгүй
+# гаргалт» нь хяналтын гол цэг тул нэг шошгонд нийлүүлж болохгүй.
+_MANUAL_PAID = "Оператор төлбөртэй гаргасан"
+_MANUAL_FREE = "Оператор ҮНЭГҮЙ гаргасан"
 
 
 def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
@@ -97,7 +110,10 @@ def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
 
     for d in dicts:
         d["payments"] = pays.get(d["id"], [])
-        d["closed_by"] = closed.get(d["id"])
+        c = closed.get(d["id"])
+        if c and c["action"] == "MANUAL_EXIT":
+            c = {**c, "label": _MANUAL_PAID if d["payments"] else _MANUAL_FREE}
+        d["closed_by"] = c
     return dicts
 
 

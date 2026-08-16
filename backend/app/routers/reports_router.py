@@ -651,7 +651,7 @@ def by_company(date_from: str | None = None, date_to: str | None = None, site_id
 
 _STATUS_MN = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
               "PAID": "Төлсөн (дотор)", "CLOSED": "Гарсан", "FREE": "Үнэгүй гарсан",
-              "MANUAL_CLOSED": "Гараар хаасан"}
+              "MANUAL_CLOSED": "Гарах уншилтгүй"}
 
 _CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP", "STAFF": "Ажилтан",
                 "SPECIAL": "Тусгай", "TRANSIT": "Дамжин"}

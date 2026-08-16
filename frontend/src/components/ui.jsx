@@ -41,7 +41,7 @@ const badgeColors = {
 }
 const badgeLabels = {
   OPEN: 'Зогсож байна', AWAITING_PAYMENT: 'Төлбөр хүлээж буй', PAID: 'Төлсөн',
-  CLOSED: 'Гарсан', FREE: 'Үнэгүй гарсан', MANUAL_CLOSED: 'Гараар хаасан',
+  CLOSED: 'Гарсан', FREE: 'Үнэгүй гарсан', MANUAL_CLOSED: 'Гарах уншилтгүй',
   PENDING: 'Хүлээгдэж буй', FAILED: 'Амжилтгүй', SUCCESS: 'Амжилттай', SENT: 'Илгээсэн',
   REVIEW: 'Шалгах шаардлагатай', active: 'Идэвхтэй',
 }

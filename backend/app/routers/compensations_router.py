@@ -214,7 +214,12 @@ async def night_close(body: dict, db: Session = Depends(get_db),
         s.exit_time = now
         s.duration_minutes = fee["duration_minutes"]
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
-        s.status = "MANUAL_CLOSED"
+        s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+        # Session тутмын бүртгэл — site-ийн түвшний NIGHT_CLOSE нь Түүхийн
+        # мөр бүрийг тайлбарлаж чаддаггүй (2026-08-16).
+        db.add(AuditLog(username=user.username, action="NIGHT_CLOSE_CAR",
+                        entity="session", entity_id=s.id,
+                        detail={"plate": s.plate_number}))
         if not fee["is_free"]:
             create_compensation(db, s, "night_close", user.username)
             created += 1
