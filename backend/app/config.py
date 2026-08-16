@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     camera_event_stale_open_sec: float = 12.0
     camera_event_read_timeout_sec: int = 120  # энэ хугацаанд юу ч ирэхгүй бол дахин холбоно
     camera_event_reconnect_sec: int = 15   # тасарсны дараа дахин холбогдох хүлээлт
+    # ЧИМЭЭГҮЙ ҮХЭЛ: heartbeat ирсээр байхад ANPR event нь зогсох тохиолдол.
+    # `read` timeout нь ямар ч байтаар шинэчлэгддэг тул ийм холболт мөнхөд
+    # «эрүүл» харагддаг. Энэ хугацаанд event ирэхгүй бол албадан дахин
+    # холбоно. Шөнө машин үнэхээр ирэхгүй үед ч дахин холбогдоно — тэр нь
+    # хямд (нэг login), харин алдагдлын цонхыг энэ утгаар ХЯЗГААРЛАНА.
+    # 0 = унтраах.
+    camera_event_idle_reconnect_sec: int = 900
 
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
     qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)

@@ -48,6 +48,17 @@ def _mono() -> float:
     return _t.monotonic()
 
 
+def stream_idle(last_event_at: float, now: float) -> bool:
+    """ANPR event ирэхээ больсон тул дахин холбогдох ёстой юу.
+
+    Тусад нь функц болгосон шалтгаан: энэ бол флотын хамгийн үнэтэй алдааны
+    (зогсолтын 35-48% нь логоос нөхөгддөг байсан) цорын ганц шийдвэр — тестээр
+    хамгаалагдсан байх ёстой. `camera_event_idle_reconnect_sec=0` бол унтарна.
+    """
+    idle = settings.camera_event_idle_reconnect_sec
+    return bool(idle) and (now - last_event_at) > idle
+
+
 def _touch(device_id: str):
     """Стрим амьд байгааг last_seen-д тэмдэглэнэ — событиегүй ч онлайн гэж зөв харагдана."""
     db = SessionLocal()
@@ -532,10 +543,30 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     # мөнхөд гацахаас сэргийлнэ (шинэ httptype=multipart хувилбарыг
                     # камер «хүлээж авсан» мөртөө юу ч илгээхгүй байх эрсдэл).
                     conn_start = time.monotonic()
+                    # ── ЧИМЭЭГҮЙ ҮХЛИЙН ХАМГААЛАЛТ ──────────────────────────
+                    # `read` timeout нь ЯМАР Ч байт ирэхэд шинэчлэгддэг. Dahua
+                    # 5-10с тутам heartbeat илгээдэг тул ANPR event нь ЗОГССОН ч
+                    # холболт «эрүүл» хэвээр мөнхөд үлддэг: доорх `saw_event`
+                    # шалгалт нь ЗӨВХӨН холболт тасрахад (except) ажилладаг
+                    # бөгөөд heartbeat байхад тасрал хэзээ ч болдоггүй.
+                    #
+                    # Production хэмжилт (2026-08-17): 11 зогсоолын БҮГД дээр
+                    # зогсолтын 35-48% нь камерын логоос НӨХӨГДӨЖ байв — өөрөөр
+                    # хэлбэл машин ирэх агшинд event ирдэггүй. Логт 19-84 минутын
+                    # чимээгүй завсрууд, тэдгээрийн дараа стрим өөрөө сэргэдэг.
+                    # Comet сувагт яг ижил гэмтэл 2026-08-15-нд зассан байсныг
+                    # энэ суваг аваагүй байв.
+                    last_ev = time.monotonic()
                     # БАЙТААР уншина: стримд binary JPEG хэсэг ирдэг тул текст
                     # горимд тэдгээр нь мөхөж, event зураг АЛДАГДДАГ байв.
                     async for chunk in resp.aiter_bytes():
                         buffer += chunk
+                        if stream_idle(last_ev, time.monotonic()):
+                            log.warning("%s: %.0f минут ANPR event ирсэнгүй (heartbeat "
+                                        "ирсээр) — суваг чимээгүй үхсэн байж магадгүй, "
+                                        "дахин холбогдоно", ip,
+                                        settings.camera_event_idle_reconnect_sec / 60)
+                            break
                         # Стрим heartbeat 5с тутам ирдэг — событиегүй ч 60с тутам онлайн тэмдэглэнэ
                         if time.monotonic() - last_touch > 60:
                             last_touch = time.monotonic()
@@ -560,6 +591,10 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             # буферт event хуримтлагдаж саатал үүсгэдэг байв.
                             _enqueue(device_id, data)
                             saw_event = True
+                            last_ev = time.monotonic()
+                    # Стрим дуусав (watchdog таслав эсвэл камер хаав) — шууд
+                    # дахин цохихгүй, богино завсарлана
+                    await asyncio.sleep(min(5.0, settings.camera_event_reconnect_sec))
         except Exception as e:
             log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
                         f"{settings.camera_event_reconnect_sec}с дараа дахин")
