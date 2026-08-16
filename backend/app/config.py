@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # хямд (нэг login), харин алдагдлын цонхыг энэ утгаар ХЯЗГААРЛАНА.
     # 0 = унтраах.
     camera_event_idle_reconnect_sec: int = 900
+    # Стрим ЭВ ЗҮЙТЭЙ дууссаны (watchdog/камер сешн хаасан) дараа шинэ
+    # холболт авах хүлээлт. Камер эрүүл тул хурдан байна — «байраа
+    # хамгаалах» зарчим: нөгөө систем сешн авсан ч бид секунд тутам эргэж
+    # холбогдвол алдагдлын цонх бараг тэг. Жинхэнэ алдаа л reconnect_sec
+    # (удаан) хүлээнэ — эвдэрсэн камерыг цохихгүйн тулд.
+    camera_event_fast_reconnect_sec: float = 1.0
 
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
     qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)

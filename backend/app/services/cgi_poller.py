@@ -592,9 +592,13 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             _enqueue(device_id, data)
                             saw_event = True
                             last_ev = time.monotonic()
-                    # Стрим дуусав (watchdog таслав эсвэл камер хаав) — шууд
-                    # дахин цохихгүй, богино завсарлана
-                    await asyncio.sleep(min(5.0, settings.camera_event_reconnect_sec))
+                    # Стрим ЭВ ЗҮЙТЭЙ дуусав (watchdog таслав эсвэл камер сешн
+                    # хаав) — камер өөрөө ЭРҮҮЛ (heartbeat ирж байсан) тул ХУРДАН
+                    # шинэ холболт авна. Энэ бол «булаах» бус «байраа хамгаалах»:
+                    # нөгөө систем сешн авсан ч бид секунд тутам эргэж холбогдож
+                    # байвал алдагдлын цонх бараг тэг болно. Жинхэнэ АЛДАА (доорх
+                    # except) л удаан завсарлана — эвдэрсэн камерыг цохихгүй.
+                    await asyncio.sleep(settings.camera_event_fast_reconnect_sec)
         except Exception as e:
             log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
                         f"{settings.camera_event_reconnect_sec}с дараа дахин")
