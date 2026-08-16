@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.database import SessionLocal
 from sqlalchemy import func
 
-from app.models import AuditLog, Device, LprEvent, ParkingSession, ParkingSite
+from app.models import (AuditLog, Compensation, Device, LprEvent, ParkingSession,
+                        ParkingSite, Payment)
 
 TZ = timedelta(hours=8)  # УБ-ын цаг
 
@@ -87,6 +88,28 @@ def live_vs_backfill(db, site, since):
           f"— хаалт автоматаар нээгдсэн")
     print(f"   {back:5}  камерын логоос НӨХӨГДСӨН ({back * 100 // len(sess)}%) "
           f"— тэр агшинд систем мэдээгүй, хаалтыг гараар нээсэн")
+
+    # МӨНГӨ: нөхөгдсөн зогсолт машиныг гарсны ДАРАА бүртгэгддэг тул тэр агшинд
+    # төлбөр нэхэгдээгүй. Дүн бодогдсон ч цуглуулах боломж аль хэдийн өнгөрсөн —
+    # зөвхөн өр (Compensation) үүссэн бол л дараа нь нэхэгдэнэ.
+    ids = [s.id for s in sess if s.id in synced or "логоос нөхөж" in (s.note or "")]
+    if ids:
+        paid = {sid for (sid,) in db.query(Payment.session_id)
+                .filter(Payment.session_id.in_(ids), Payment.status == "PAID").all()}
+        plates = {s.plate_number for s in sess if s.id in set(ids)}
+        owed = {p for (p,) in db.query(Compensation.plate_number)
+                .filter(Compensation.plate_number.in_(plates),
+                        Compensation.status == "PENDING").all()}
+        billed = [s for s in sess if s.id in set(ids)
+                  and float(s.total_fee or 0) > 0 and s.id not in paid]
+        total = sum(float(s.total_fee or 0) for s in billed)
+        with_debt = sum(1 for s in billed if s.plate_number in owed)
+        print(f"\n   Нөхөгдсөн зогсолтын мөнгө: {len(billed)} машинд {total:,.0f}₮ "
+              f"бодогдсон ч төлөгдөөгүй")
+        print(f"      үүнээс өр (нэхэмжлэх) үүссэн: {with_debt}  ·  "
+              f"ул мөргүй өнгөрсөн: {len(billed) - with_debt}")
+        print(f"      мөн {len(ids) - len(billed)} нь 0₮ (үнэгүй хугацаанд багтсан "
+              f"эсвэл дүн бодогдоогүй)")
 
     # Камер бүрийн амьд уншилт — аль камерын callback ирдэггүйг заана
     devs = db.query(Device).filter(Device.device_type == "camera",
