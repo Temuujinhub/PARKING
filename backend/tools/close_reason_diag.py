@@ -61,7 +61,8 @@ def classify(s: ParkingSession, logs: list) -> tuple[str, str]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--site", help="зогсоолын код (ж: RASH). Өгөхгүй бол бүгд")
+    ap.add_argument("--site", help="зогсоолын код эсвэл нэрний эхлэл "
+                                   "(ж: RASH, «Рашбулаг»). Өгөхгүй бол бүгд")
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--list", type=int, default=0, help="хэдэн жишээ мөр хэвлэх")
     args = ap.parse_args()
@@ -76,8 +77,13 @@ def main():
         if args.site:
             site = (db.query(ParkingSite)
                     .filter(ParkingSite.site_code == args.site).first())
+            if not site:   # код биш нэрээр бичсэн байж болно (ж: «Рашбулаг»)
+                site = (db.query(ParkingSite)
+                        .filter(ParkingSite.name.ilike(f"{args.site}%")).first())
             if not site:
-                sys.exit(f"«{args.site}» зогсоол олдсонгүй")
+                names = ", ".join(f"{s.site_code}={s.name}" for s in
+                                  db.query(ParkingSite).order_by(ParkingSite.name).all())
+                sys.exit(f"«{args.site}» зогсоол олдсонгүй. Байгаа нь: {names}")
             q = q.filter(ParkingSession.site_id == site.id)
         rows = q.order_by(ParkingSession.exit_time.desc()).all()
 
