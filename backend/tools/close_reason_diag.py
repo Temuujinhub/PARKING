@@ -147,6 +147,43 @@ def live_vs_backfill(db, site, since):
             print(f"            гологдсон шалтгаан: {top}")
 
 
+def rejected_raw(db, site, days: int, limit: int):
+    """Гологдсон event-үүд ЯМАР төрөл болохыг raw JSON-оос харуулна.
+
+    Хоёр тэс өөр тохиолдлыг ялгах ЦОРЫН ГАНЦ арга:
+      • `Code` нь TrafficTollGate/TrafficJunction мэт ӨӨР event → захиалгад
+        (codes) нэмсэн нэмэлт төрлийн ЧИМЭЭ. Машин алдагдаагүй, зөвхөн
+        гологдлын тоолуур хөөрөгдсөн.
+      • `Code` нь ANPR-ийнх мөртөө PlateNumber талбар байхгүй/хоосон → event
+        ТАЙРАГДСАН эсвэл камер дугаарыг таниагүй. Энэ бол ЖИНХЭНЭ алдагдал.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    q = (db.query(LprEvent)
+         .filter(LprEvent.accepted.is_(False), LprEvent.created_at >= since,
+                 LprEvent.reject_reason.ilike("%not parsed%")))
+    if site:
+        q = q.filter(LprEvent.site_id == site.id)
+    rows = q.order_by(LprEvent.created_at.desc()).limit(limit).all()
+    if not rows:
+        return
+    print(f"\n══ Гологдсон event-ийн ТӨРӨЛ (сүүлийн {len(rows)}) ══")
+    codes = Counter()
+    for e in rows:
+        raw = e.raw if isinstance(e.raw, dict) else {}
+        tc = raw.get("TrafficCar") if isinstance(raw.get("TrafficCar"), dict) else {}
+        codes[f"{raw.get('Code', '?')} · TrafficCar түлхүүр: "
+              f"{'бий' if tc else 'алга'}"] += 1
+    for k, n in codes.most_common():
+        print(f"   {n:5}  {k}")
+    e = rows[0]
+    raw = e.raw if isinstance(e.raw, dict) else {}
+    print(f"\n   Сүүлийн жишээ ({L(e.created_at)}) дээд түвшний түлхүүрүүд:")
+    print(f"      {', '.join(sorted(raw))[:400] or '(хоосон)'}")
+    tc = raw.get("TrafficCar")
+    if isinstance(tc, dict):
+        print(f"   TrafficCar түлхүүрүүд: {', '.join(sorted(tc))[:400]}")
+
+
 def daily(db, site, days: int):
     """ӨДРӨӨР: камерын уншилт хүлээн авсан/гологдсон + session амьд/нөхөгдсөн.
 
@@ -213,6 +250,8 @@ def main():
     ap.add_argument("--list", type=int, default=0, help="хэдэн жишээ мөр хэвлэх")
     ap.add_argument("--daily", type=int, default=0, metavar="ХОНОГ",
                     help="өдрөөр задлах — асуудал хэзээнээс эхэлснийг deploy-той тулгах")
+    ap.add_argument("--raw", type=int, default=0, metavar="ТОО",
+                    help="гологдсон event-ийн raw төрлийг харах (чимээ vs жинхэнэ алдагдал)")
     args = ap.parse_args()
 
     db = SessionLocal()
@@ -273,6 +312,8 @@ def main():
               f" / {len(rows)}  (эдгээр нь «Үнэгүй гарсан» байх ёстой)")
 
         live_vs_backfill(db, site, since)
+        if args.raw:
+            rejected_raw(db, site, args.days, args.raw)
         if args.daily:
             daily(db, site, args.daily)
 
