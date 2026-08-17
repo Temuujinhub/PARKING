@@ -158,6 +158,30 @@ def main():
                                 for d in days)
                 print(f"   {uname[:15]:16}{cells}")
 
+        # ── 2г. ЗОГСООЛ тутам өдрөөр — аль зогсоол «харанхуйлсныг» заана ─────
+        # Кассир ажиллахаа больсон бол тэр зогсоолын орлого унана. Энэ хүснэгт
+        # ажилтны асуудлыг ЗОГСООЛЫН газрын зурагт буулгана.
+        sq2 = (db.query(Payment.paid_at, Payment.amount, ParkingSite.name)
+               .join(ParkingSession, ParkingSession.id == Payment.session_id)
+               .join(ParkingSite, ParkingSite.id == ParkingSession.site_id)
+               .filter(Payment.status == "PAID", Payment.paid_at >= since))
+        if site:
+            sq2 = sq2.filter(ParkingSession.site_id == site.id)
+        by_site: dict = defaultdict(lambda: defaultdict(float))
+        for at, amt, sname in sq2.all():
+            by_site[sname][(at + TZ).strftime("%m-%d")] += float(amt or 0)
+        if by_site:
+            print(f"\n══ ЗОГСООЛ тутам өдрөөр (мян.₮) — аль нь харанхуйлав ══")
+            print("   зогсоол         " + "".join(d.rjust(8) for d in days))
+            for sname in sorted(by_site, key=lambda n: -sum(by_site[n].values())):
+                row = by_site[sname]
+                cells = "".join(f"{row.get(d, 0) / 1000:,.0f}".rjust(8) for d in days)
+                # Сүүлийн 3 хоног өмнөх 3 хоногийн 25%-аас бага бол анхааруулна
+                prev = sum(row.get(d, 0) for d in days[-6:-3]) or 0
+                last = sum(row.get(d, 0) for d in days[-3:]) or 0
+                flag = "  ⚠ УНАСАН" if prev > 100_000 and last < prev * 0.25 else ""
+                print(f"   {sname[:15]:16}{cells}{flag}")
+
         # ── 3. Гарцын цуглуулалт ─────────────────────────────────────────────
         eq = (db.query(ParkingSession)
               .filter(ParkingSession.exit_time >= since,
