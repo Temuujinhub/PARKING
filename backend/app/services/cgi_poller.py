@@ -59,6 +59,26 @@ def stream_idle(last_event_at: float, now: float) -> bool:
     return bool(idle) and (now - last_event_at) > idle
 
 
+def reconnect_delay(lived_sec: float | None) -> float:
+    """Тасарсан холболтын дараах хүлээлт — АЛДАГДЛЫН ЦОНХЫГ багасгана.
+
+    Прод хэмжилт (2026-08-17, backfill_source_diag): зогсолтын 40% нь backfill
+    байсан ба 364/364 нь «event сервэрт ОГТ ирээгүй» — өөрөөр хэлбэл манай
+    боловсруулалт биш, холболтын СОХОР ЦОНХ. Камер (өөр системтэй нөөц
+    булаалдаж) холболтыг ойр ойрхон таслахад тасралт бүрд 15с хатуу хүлээдэг
+    байсан нь: ~20с ажиллаад тасарч 15с хүлээвэл цагийн ~43% сохор = яг
+    хэмжигдсэн алдагдал.
+
+    Дүрэм: ТОГТВОРТОЙ (min_stable_sec+) ажиллаад тасарсан холболт = сүлжээний
+    түр саатал эсвэл камер нөөц эргэлдүүлсэн — ХУРДАН эргэж холбогдоно.
+    ШУУД унасан холболт = камер өөрөө өвчтэй (auth түгжээ, унтарсан) —
+    удаан хүлээж цохилтыг багасгана.
+    """
+    if lived_sec is not None and lived_sec >= settings.camera_event_min_stable_sec:
+        return float(settings.camera_event_fast_reconnect_sec)
+    return float(settings.camera_event_reconnect_sec)
+
+
 def _touch(device_id: str):
     """Стрим амьд байгааг last_seen-д тэмдэглэнэ — событиегүй ч онлайн гэж зөв харагдана."""
     db = SessionLocal()
@@ -600,8 +620,11 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     # except) л удаан завсарлана — эвдэрсэн камерыг цохихгүй.
                     await asyncio.sleep(settings.camera_event_fast_reconnect_sec)
         except Exception as e:
+            lived = (time.monotonic() - conn_start) if conn_start else None
+            wait = reconnect_delay(lived)
             log.warning(f"{ip}: холболт тасарлаа ({type(e).__name__}: {e}) — "
-                        f"{settings.camera_event_reconnect_sec}с дараа дахин")
+                        f"{wait:g}с дараа дахин"
+                        f"{f' (холболт {lived:.0f}с ажилласан)' if lived else ''}")
             # Холбогдсон мөртөө 3+ минут ЖИНХЭНЭ event огт ирээгүй бол энэ
             # хувилбар «хүлээж авдаг ч илгээдэггүй» — дараагийнх руу шилжинэ.
             if not saw_event and conn_start and time.monotonic() - conn_start > 180:
@@ -609,7 +632,7 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                 _codes_ok[device_id] = vi
                 log.warning("%s: холбогдсон ч 3 минутад event ирсэнгүй — "
                             "дараагийн URL хувилбар руу шилжлээ (#%d)", ip, vi)
-            await asyncio.sleep(settings.camera_event_reconnect_sec)
+            await asyncio.sleep(wait)
 
 
 async def supervisor():

@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings  # noqa: E402
-from app.services.cgi_poller import stream_idle  # noqa: E402
+from app.services.cgi_poller import reconnect_delay, stream_idle  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -46,6 +46,22 @@ def main():
         print("\nТохиргоогоор унтраах боломжтой:")
         settings.camera_event_idle_reconnect_sec = 0
         check("0 = хамгаалалт унтарна", not stream_idle(1000.0, 1000.0 + 10 * 3600))
+
+        print("\nТасралтын дараах хүлээлт (reconnect_delay):")
+        settings.camera_event_min_stable_sec = 60.0
+        settings.camera_event_fast_reconnect_sec = 1.0
+        settings.camera_event_reconnect_sec = 15
+        check("тогтвортой (5 мин) ажиллаад тасарсан → ХУРДАН (1с)",
+              reconnect_delay(300.0) == 1.0, str(reconnect_delay(300.0)))
+        check("яг босго дээр (60с) → хурдан", reconnect_delay(60.0) == 1.0)
+        check("шууд унасан (5с) → удаан (15с)", reconnect_delay(5.0) == 15.0)
+        check("огт холбогдоогүй (None) → удаан", reconnect_delay(None) == 15.0)
+        # 2026-08-17-ны алдагдлын арифметик: 20с ажиллаад тасардаг камер дээр
+        # 15с хүлээлт = цагийн 43% сохор байв; 1с хүлээлт = 4.8% болно
+        check("20с/15с мөчлөгийн сохор хувь 40%+ байсан",
+              15 / (20 + 15) > 0.40)
+        check("20с/1с мөчлөгийн сохор хувь <5% болно",
+              1 / (20 + 1) < 0.05)
 
         print("\nАнхдагч утга ажиллах хэмжээнд байна:")
         settings.camera_event_idle_reconnect_sec = old

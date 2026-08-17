@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # холбогдвол алдагдлын цонх бараг тэг. Жинхэнэ алдаа л reconnect_sec
     # (удаан) хүлээнэ — эвдэрсэн камерыг цохихгүйн тулд.
     camera_event_fast_reconnect_sec: float = 1.0
+    # Тасрахаасаа өмнө ийм удаан ажилласан холболтыг «тогтвортой байсан»
+    # гэж үзэж fast_reconnect-оор эргэж холбоно (алдагдлын цонх багасна).
+    # Үүнээс богино амьдарсан холболт = камер өвчтэй → reconnect_sec (15с)
+    # хүлээж цохилтыг багасгана. 2026-08-17: тасралт бүрд 15с хатуу хүлээж
+    # байсан нь флотын 40% event-алдагдлын («сервэрт огт ирээгүй») цонх байв.
+    camera_event_min_stable_sec: float = 60.0
 
     qpay_sandbox: bool = True  # True=merchant-sandbox.qpay.mn, False=merchant.qpay.mn
     qpay_username: str = ""    # client_id (QPay merchant гэрээнээс, ж: EASY_2PARKING)
