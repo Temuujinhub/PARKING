@@ -103,9 +103,25 @@ function CamSyncCard({ toast }) {
         </Field>
         <div className="space-y-2 pt-6">
           <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="checkbox" className="mt-0.5" checked={rules.create_debt_log_exit}
+              onChange={(e) => set('create_debt_log_exit', e.target.checked)} />
+            <span>Логоор <b>гарсан нь тогтоогдсон</b> машинд өр үүсгэх
+              <span className="block text-xs text-slate-500">
+                Камерын өөрийн бичлэг гарсан цагийг гэрчилнэ — төлбөр нь тэр
+                цагаар зөв бодогдох тул ЖИНХЭНЭ авлага. Унтраавал бүртгэл
+                зүгээр хаагдаж, мөнгө нэхэгдэхгүй.
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
             <input type="checkbox" className="mt-0.5" checked={rules.create_debt}
               onChange={(e) => set('create_debt', e.target.checked)} />
-            <span>Гарсан машинд <b>өр үүсгэх</b></span>
+            <span>Гарах уншилтгүй машинд өр үүсгэх
+              <span className="block text-xs text-slate-500">
+                Машин хэзээ гарсныг МЭДЭХГҮЙ тул хугацаа нь таамаг — 2026-08-12-нд
+                ийм дүрэм 1,786 хуурамч өр (3.3 сая₮) үүсгэсэн. Унтраалттай орхино уу.
+              </span>
+            </span>
           </label>
           <label className="flex items-start gap-2 text-sm cursor-pointer">
             <input type="checkbox" className="mt-0.5" checked={rules.skip_invalid_plate}

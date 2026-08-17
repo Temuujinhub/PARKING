@@ -199,8 +199,11 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
             db.flush()
             due = 0.0
             if ex:
+                # `ex` байна = камерын логт ГАРСАН нь тогтоогдсон → баримттай
+                # авлага (create_debt_log_exit). Гарах уншилтгүй бол энд огт
+                # орохгүй (session OPEN хэвээр үлдэнэ).
                 due = close_session_forced(db, s, "camera_sync", "system",
-                                           create_comp=rules["create_debt"])
+                                           create_comp=rules["create_debt_log_exit"])
                 debt_total += due
             db.add(AuditLog(username="system", action="CAMERA_SYNC", entity="session",
                             entity_id=s.id,
@@ -247,8 +250,9 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 s.exit_confirmed = True
                 if s.status == "OPEN":
                     s.status = "AWAITING_PAYMENT"
+                # Логийн ГАРАХ уншилтаар хаагдаж байна — гарсан нь баримтжсан
                 due = close_session_forced(db, s, "camera_sync_exit", "system",
-                                           create_comp=rules["create_debt"])
+                                           create_comp=rules["create_debt_log_exit"])
                 db.add(AuditLog(username="system", action="CAMERA_SYNC_EXIT",
                                 entity="session", entity_id=s.id,
                                 detail={"plate": p, "exit": t.isoformat(),
