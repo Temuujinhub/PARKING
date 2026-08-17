@@ -132,6 +132,25 @@ def main():
             print("     Дийлэнх нь СЕРВЭРТ ИРСЭН → cgi_poller хүлээж авсан ч session")
             print("     амьд үүсээгүй (танилт эсвэл OCR давхардал). Боловсруулалтын тал.")
 
+        # ── ЦАГААР: өдрийн мөчлөг илэрч байна уу ─────────────────────────────
+        # Камерын нөөцийн хуучин мөчлөг (зургийн хувь өдөржин унаад 07:00 УБ
+        # орчим сэргэдэг) event-ийн алдагдалд ч үйлчилж байж болзошгүй. Оройн
+        # оргилд backfill% эргэж өсвөл шалтгаан нь бидний засвар БИШ, өдрийн
+        # мөчлөг (өөр системийн ачаалал) гэсэн үг.
+        bf_ids = {s2.id for s2 in backfilled}
+        hourly: dict = defaultdict(lambda: [0, 0])
+        for s2 in sess:
+            h = (s2.entry_time + TZ).strftime("%m-%d %H:00")
+            hourly[h][0] += 1
+            if s2.id in bf_ids:
+                hourly[h][1] += 1
+        print(f"\n   Орсон ЦАГААР (УБ) — амьд vs backfill:")
+        print(f"   {'цаг':14}{'машин':>7}{'backfill':>10}{'bf%':>6}")
+        for h in sorted(hourly):
+            tot, bf = hourly[h]
+            bar = "█" * min(bf, 40)
+            print(f"   {h:14}{tot:7}{bf:10}{(bf * 100 // tot if tot else 0):5}%  {bar}")
+
         print(f"\n   Зогсоол тутам (backfill: ирээгүй / гологдсон / зөрчил):")
         for name in sorted(per_site, key=lambda n: -per_site[n][0]):
             tot, no_ev, rej, conf = per_site[name]
