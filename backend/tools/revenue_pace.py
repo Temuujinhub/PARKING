@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import SessionLocal
-from app.models import ParkingSession, ParkingSite, Payment
+from app.models import ParkingSession, ParkingSite, Payment, User
 
 TZ = timedelta(hours=8)
 _PROV = {"QPAY": "QPay", "POS": "Карт", "CASH": "Бэлэн", "TRANSFER": "Данс"}
@@ -118,6 +118,45 @@ def main():
             tot = sum(prov[d].values())
             print(f"   {d} " + "".join(f"{prov[d].get(p, 0) / 1000:,.0f}".rjust(9)
                                        for p in provs) + f"{tot / 1000:,.0f}".rjust(10))
+
+        # ── 2б. Хэрэгслээр — МӨН ЦАГ хүртэл (шударга харьцуулалт) ────────────
+        # Дээрх хүснэгт дууссан өдрийг дуусаагүйтэй харьцуулдаг тул суваг унасан
+        # эсэхийг өнөөдрийн байдлаар хэлж чадахгүй. Энэ нь өдөр бүрийн яг
+        # ОДООГИЙН ЦАГ хүртэлх дүн — бэлэн суваг ӨНӨӨДӨР ч унасан хэвээр үү
+        # гэдгийг шууд харна.
+        prov_cut: dict = defaultdict(lambda: defaultdict(float))
+        for at, amt, provider in pays:
+            loc = at + TZ
+            if loc.hour <= cur_h:
+                prov_cut[loc.strftime("%m-%d")][_PROV.get(provider, provider or "?")] +=                     float(amt or 0)
+        print(f"\n══ Хэрэгслээр — өдөр бүрийн {cur_h:02d}ц ХҮРТЭЛ (мян.₮) ══")
+        print("   өдөр   " + "".join(p2.rjust(9) for p2 in provs) + "    нийт".rjust(10))
+        for d in days:
+            tot = sum(prov_cut[d].values())
+            print(f"   {d} " + "".join(f"{prov_cut[d].get(p2, 0) / 1000:,.0f}".rjust(9)
+                                       for p2 in provs) + f"{tot / 1000:,.0f}".rjust(10))
+
+        # ── 2в. Бэлэн/Карт/Данс — КАССИР тутам өдрөөр ────────────────────────
+        # Суваг унасан бол ХЭН бичихээ больсоныг нэрээр нь заана (ажлаа хийгээгүй
+        # юу, эрх нь хаагдсан уу, огт нэвтрээгүй юу — эндээс мөрдөнө).
+        cq = (db.query(Payment.paid_at, Payment.amount, User.username)
+              .outerjoin(User, User.id == Payment.cashier_id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= since,
+                      Payment.provider.in_(["CASH", "POS", "TRANSFER"])))
+        if site:
+            cq = cq.join(ParkingSession, ParkingSession.id == Payment.session_id) \
+                   .filter(ParkingSession.site_id == site.id)
+        by_cashier: dict = defaultdict(lambda: defaultdict(float))
+        for at, amt, uname in cq.all():
+            by_cashier[uname or "(кассиргүй)"][(at + TZ).strftime("%m-%d")] += float(amt or 0)
+        if by_cashier:
+            print(f"\n══ Бэлэн+Карт+Данс — кассир тутам өдрөөр (мян.₮) ══")
+            print("   кассир          " + "".join(d.rjust(8) for d in days))
+            for uname in sorted(by_cashier,
+                                key=lambda u: -sum(by_cashier[u].values())):
+                cells = "".join(f"{by_cashier[uname].get(d, 0) / 1000:,.0f}".rjust(8)
+                                for d in days)
+                print(f"   {uname[:15]:16}{cells}")
 
         # ── 3. Гарцын цуглуулалт ─────────────────────────────────────────────
         eq = (db.query(ParkingSession)
