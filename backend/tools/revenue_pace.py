@@ -182,6 +182,38 @@ def main():
                 flag = "  ⚠ УНАСАН" if prev > 100_000 and last < prev * 0.25 else ""
                 print(f"   {sname[:15]:16}{cells}{flag}")
 
+        # ── 2д. КАССИР × ЗОГСООЛ — хэн хаана ажилладаг байсан бэ ────────────
+        # Бизнесийн загвар (2026-08-17): онлайн оператор «Дансаар» аваад алсаас
+        # хаалт нээнэ; БЭЛЭН мөнгийг ЗӨВХӨН газар дээрх ажилтан POS дээр авна.
+        # Тиймээс газар дээрх кассир алга болвол тэр зогсоолын бэлэн орлого
+        # ТЭГ болно — онлайн оператор түүнийг орлож чадах эсэхийг эндээс харна.
+        cs = (db.query(User.username, ParkingSite.name, Payment.provider,
+                       Payment.amount, Payment.paid_at)
+              .join(Payment, Payment.cashier_id == User.id)
+              .join(ParkingSession, ParkingSession.id == Payment.session_id)
+              .join(ParkingSite, ParkingSite.id == ParkingSession.site_id)
+              .filter(Payment.status == "PAID", Payment.paid_at >= since))
+        if site:
+            cs = cs.filter(ParkingSession.site_id == site.id)
+        pair: dict = defaultdict(lambda: defaultdict(float))
+        pair_last: dict = defaultdict(str)
+        for uname, sname, provider, amt, at in cs.all():
+            key = (uname, sname)
+            pair[key][_PROV.get(provider, provider or "?")] += float(amt or 0)
+            d = (at + TZ).strftime("%m-%d")
+            if d > pair_last[key]:
+                pair_last[key] = d
+        if pair:
+            print(f"\n══ КАССИР × ЗОГСООЛ ({args.days} хоног, мян.₮) ══")
+            print(f"   {'кассир':14}{'зогсоол':17}"
+                  + "".join(p2.rjust(8) for p2 in provs) + f"{'сүүлд':>8}")
+            for (uname, sname) in sorted(pair, key=lambda k: -sum(pair[k].values())):
+                cells = "".join(f"{pair[(uname, sname)].get(p2, 0) / 1000:,.0f}".rjust(8)
+                                for p2 in provs)
+                last = pair_last[(uname, sname)]
+                flag = "  ⚠ ЗОГССОН" if last < days[-1] and last < days[-2] else ""
+                print(f"   {uname[:12]:14}{sname[:15]:17}{cells}{last:>8}{flag}")
+
         # ── 3. Гарцын цуглуулалт ─────────────────────────────────────────────
         eq = (db.query(ParkingSession)
               .filter(ParkingSession.exit_time >= since,
