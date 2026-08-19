@@ -263,6 +263,10 @@ async def run():
     rec = db.store["receipt"]
     check("provider=TERMINAL, ДДТД=TERM123, SENT", rec.provider == "TERMINAL" and rec.ebarimt_id == "TERM123" and rec.status == "SENT")
     check("msgbill/локал дуудаагүй", len(FakeClient.calls) == 0 and seen["local"] == 0)
+    ext = pr._external_receipt({"ebarimt_id": " 123 ", "lottery": "L", "ebarimt_provider": "tdb poslink!"})
+    check("_external_receipt: provider цэвэрлэгдэж TDBPOSLINK, billId trim", ext["provider"] == "TDBPOSLINK" and ext["billId"] == "123" and ext["lottery"] == "L")
+    check("_external_receipt: ebarimt_id байхгүй → None", pr._external_receipt({"lottery_code": "x"}) is None)
+    check("дотоод сувгийн нэр → EXT-", pr._external_receipt({"ebarimt_id": "1", "ebarimt_provider": "QPAY"})["provider"] == "EXT-QPAY")
     settings.msgbill_methods = "TRANSFER"
 
     ebarimt.create_receipt, qpay.create_ebarimt = orig_local, orig_qpay

@@ -69,6 +69,24 @@ def _receipt_desc(payment: Payment, extra: str | None = None) -> str:
     return " · ".join(p for p in parts if p)[:200]
 
 
+def _external_receipt(body: dict | None) -> dict | None:
+    """Гадны системд (POS терминал, банкны PosLink, өөр e-Barimt API) АЛЬ ХЭДИЙН үүссэн
+    баримтыг хүсэлтийн биетээс уншина: {ebarimt_id, lottery_code|lottery, qr_data,
+    ebarimt_provider?}. Байвал систем ШИНЭЭР баримт үүсгэхгүй, үүнийг бүртгэнэ
+    (давхар баримтаас сэргийлнэ). provider: TERMINAL (анхдагч) | дурын нэр ≤20 тэмдэгт."""
+    if not body or not body.get("ebarimt_id"):
+        return None
+    prov = str(body.get("ebarimt_provider") or body.get("ebarimt_source") or "TERMINAL")
+    prov = "".join(ch for ch in prov.upper() if ch.isalnum() or ch in "-_")[:20] or "TERMINAL"
+    if prov in ("QPAY", "MSGBILL", "POSAPI"):
+        prov = "EXT-" + prov[:16]   # дотоод сувгийн нэртэй андуурахгүй
+    return {"billId": str(body["ebarimt_id"]).strip()[:120],
+            "lottery": (str(body.get("lottery_code") or body.get("lottery") or "").strip()[:60] or None),
+            "qrData": body.get("qr_data") or None,
+            "provider": prov,
+            "msgbillId": (str(body.get("ebarimt_ref") or "")[:80] or None)}
+
+
 def _ebarimt_err(e: Exception) -> str:
     """e-Barimt/msgbill/QPay алдааг богино текст болгоно (VatReceipt.receipt_url-д)."""
     import httpx as _httpx
@@ -200,7 +218,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
     except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
         ebarimt_error = _ebarimt_err(e)
         log.error(f"e-Barimt амжилтгүй: payment={payment.id}: {ebarimt_error}")
-    rcpt_provider = ("TERMINAL" if use_external else
+    rcpt_provider = ((external_receipt.get("provider") or "TERMINAL") if use_external else
                      "QPAY" if use_qpay_eb else ("MSGBILL" if use_msgbill else "POSAPI"))
 
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
@@ -605,7 +623,8 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
 @router.post("/cash")
 async def cash_payment(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier"))):
-    """Кассын бэлэн мөнгөний төлбөр. body: {session_id}"""
+    """Кассын бэлэн мөнгөний төлбөр. body: {session_id, customer_tin?,
+    ebarimt_id?/lottery_code?/qr_data?/ebarimt_provider? — гадна үүссэн баримт}"""
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
@@ -613,7 +632,11 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
     payment = _create_payment(db, session, "CASH", "CASH", cashier=user)
-    await _finalize_paid(db, payment)
+    if body.get("customer_tin"):
+        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
+        payment.ebarimt_receiver_type = "COMPANY"
+    # Гадна системд (POS/өөр e-Barimt API) үүссэн баримт ирвэл түүнийг бүртгэнэ
+    await _finalize_paid(db, payment, external_receipt=_external_receipt(body))
     db.add(AuditLog(username=user.username, action="CASH_PAYMENT", entity="payment",
                     entity_id=payment.id, detail={"amount": float(payment.amount)}))
     db.commit()
@@ -646,7 +669,7 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
         payment.ebarimt_receiver_type = "COMPANY"
     else:
         payment.ebarimt_receiver_type = "CITIZEN"
-    await _finalize_paid(db, payment)
+    await _finalize_paid(db, payment, external_receipt=_external_receipt(body))
     site = session.site
     db.add(AuditLog(username=user.username, action="TRANSFER_PAYMENT", entity="payment",
                     entity_id=payment.id,
@@ -758,12 +781,7 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     _c0 = _t.monotonic()
     # Терминал өөрөө e-Barimt гаргасан бол (банкны PosLink-ийн Ибаримт үйлчилгээ)
     # апп ДДТД-г дамжуулна → систем давхар баримт үүсгэхгүй, терминалынхыг бүртгэнэ
-    ext = None
-    if body.get("ebarimt_id"):
-        ext = {"billId": str(body["ebarimt_id"])[:120],
-               "lottery": (str(body.get("lottery_code") or body.get("lottery") or "")[:60] or None),
-               "qrData": body.get("qr_data") or None}
-    await _finalize_paid(db, payment, raw=body, external_receipt=ext)
+    await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body))
     db.commit()
     out = {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
            **_print_payload(db, payment)}
@@ -975,10 +993,14 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
                     continue
                 if r.get("state") not in ("CANCELLED", ""):
                     raise RuntimeError(f"msgbill төлөв {r.get('state')}: {r.get('error') or ''}")
-            else:
+            elif prov == "POSAPI":
                 date = (rec.created_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S")
                 if not await ebarimt.delete_receipt(rec.ebarimt_id, date):
                     raise RuntimeError("PosAPI баримт буцаахыг зөвшөөрсөнгүй")
+            else:
+                # ГАДНА системд (терминал/өөр API) үүссэн баримт — бид ТЕГ-т буцааж чадахгүй,
+                # зөвхөн өөрийн бүртгэлээ цуцална; жинхэнэ буцаалтыг тэр системд хийнэ
+                note = (note or "Цуцлав") + f" (гадна систем {prov}-д буцаалтыг тусад нь хийнэ)"
         except Exception as e:  # noqa: BLE001
             errors.append(f"{prov}: {_ebarimt_err(e)}")
             continue
@@ -1042,6 +1064,52 @@ async def msgbill_webhook(request: Request, db: Session = Depends(get_db)):
         log.info("msgbill webhook %s receipt=%s → %d баримт шинэчлэв (%s)", event, rid, len(recs), scope)
         return {"ok": True, "matched": len(recs)}
     return {"ok": True, "ignored": event}
+
+
+@router.post("/{payment_id}/ebarimt")
+async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Depends(get_db),
+                                  user: User = Depends(require("cashier", "vat", "reports"))):
+    """ГАДНА системд (POS терминал, банкны PosLink, өөр e-Barimt API) үүссэн баримтыг
+    ТӨЛӨГДСӨН төлбөрт ХОЛБОНО — систем өөрөө баримт үүсгээгүй/амжилтгүй болсон үед.
+    body: {ebarimt_id (ДДТД, заавал), lottery_code?, qr_data?, ebarimt_provider? (≤20,
+    анхдагч TERMINAL), ebarimt_ref? (гадны системийн ID)}.
+    Идэвхтэй (SENT) баримт аль хэдийн байвал 409 — эхлээд «Цуцлах»."""
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(404, "Төлбөр олдсонгүй")
+    site = _site_of(payment)
+    enforce_site(user, site.id if site else None)
+    if payment.status != "PAID":
+        raise HTTPException(400, "Төлбөр PAID биш — баримт холбох боломжгүй")
+    ext = _external_receipt(body)
+    if not ext:
+        raise HTTPException(400, "ebarimt_id (ДДТД) заавал")
+    live = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+                                        VatReceipt.status.in_(["SENT", "CANCEL_PENDING"])).first())
+    if live and live.ebarimt_id == ext["billId"]:
+        return {"ok": True, "ebarimt_id": live.ebarimt_id, "duplicate": True}
+    if live:
+        raise HTTPException(409, f"Энэ төлбөрт идэвхтэй баримт ({live.ebarimt_id}, {live.provider or 'POSAPI'}) "
+                                 "аль хэдийн байна — давхар бүртгэхгүй. Эхлээд «Цуцлах» дарна уу")
+    receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
+    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+                                       VatReceipt.status == "FAILED")
+           .order_by(VatReceipt.created_at.desc()).first())
+    if rec is None:
+        rec = VatReceipt(payment_id=payment.id, session_id=payment.session_id,
+                         amount=payment.amount, vat_amount=payment.vat_amount,
+                         customer_tin=payment.customer_tin)
+        db.add(rec)
+    rec.ebarimt_id = ext["billId"]
+    rec.lottery_code = None if receiver_type == "COMPANY" else ext["lottery"]
+    rec.status, rec.receipt_url = "SENT", None
+    rec.provider, rec.provider_ref = ext["provider"], ext["msgbillId"]
+    ebarimt.cache_qr(payment.id, ext["qrData"])
+    db.add(AuditLog(username=user.username, action="EBARIMT_ATTACH", entity="payment",
+                    entity_id=payment_id, detail={"ebarimt_id": ext["billId"], "provider": ext["provider"]}))
+    db.commit()
+    return {"ok": True, "ebarimt_id": rec.ebarimt_id, "provider": rec.provider,
+            "lottery": rec.lottery_code}
 
 
 @router.post("/{payment_id}/cancel-ebarimt")

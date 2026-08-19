@@ -106,7 +106,7 @@ export default function Vat() {
             <td className="td font-mono text-xs">{fmtDate(r.created_at)}</td>
             <td className="td">
               <Badge value={r.status} />
-              {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : r.provider === 'TERMINAL' ? 'POS терминал' : 'PosAPI'}</div>}
+              {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : r.provider === 'TERMINAL' ? 'POS терминал' : r.provider === 'POSAPI' ? 'PosAPI' : r.provider}</div>}
             </td>
             <td className={`td text-[11px] max-w-[14rem] break-words ${r.status === 'CANCELLED' ? 'text-slate-400' : 'text-amber-400'}`}>
               {['FAILED', 'CANCELLED', 'CANCEL_PENDING'].includes(r.status) ? (r.receipt_url || '—') : ''}

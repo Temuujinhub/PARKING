@@ -26,6 +26,17 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — Гадна системийн e-Barimt (аль ч API) бүртгэх — API + баримт бичиг
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | `pos/confirm`, `cash`, `transfer` гурвуулаа гадна баримт хүлээн авна: `ebarimt_id, lottery_code, qr_data, ebarimt_provider (≤20, анхдагч TERMINAL), ebarimt_ref` → систем үүсгэхгүй, суваг = тэр нэр (`_external_receipt`) | ⏳ | ⏳ | ⏳ |
+| feat | **`POST /api/payments/{id}/ebarimt`** — төлөгдсөн төлбөрт гадна баримтыг ДАРАА нь холбох (FAILED баримтыг нөхнө; идэвхтэй байвал 409 → эхлээд Цуцлах); audit EBARIMT_ATTACH | ⏳ | ⏳ | ⏳ |
+| fix | Гадна сувгийн баримтыг «Цуцлах» → зөвхөн бүртгэл CANCELLED (тэмдэглэлд «гадна системд буцаалтыг тусад нь»); `cash` body `customer_tin` дэмжлэг | ⏳ | ⏳ | ⏳ |
+| docs | API_REFERENCE: pos/confirm, cash, transfer гадна баримтын талбар, `{id}/ebarimt`, `cancel-ebarimt`, `retry-ebarimt`; PAX_POS_APP_GUIDE §3.4 | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — POS терминалын өөрийн e-Barimt-ыг бүртгэх дэмжлэг
 
 PAX апп `pos/confirm`-д зөвхөн картын 7 талбар илгээдэг (raw_payload шалгав) —

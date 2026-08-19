@@ -139,7 +139,12 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 `print_data` + `qr_data`-г шууд хэвлэнэ (доор §11).
 
 ### POST /api/payments/cash  (OPERATOR+)
-`{"session_id": "uuid"}` — кассын бэлэн мөнгөний төлбөр. Хаалт автоматаар нээгдэнэ.
+`{"session_id": "uuid", "customer_tin"?: "ААН ТТД", + гадна баримтын талбарууд (доор)}` —
+кассын бэлэн мөнгөний төлбөр. Хаалт автоматаар нээгдэнэ, e-Barimt систем үүсгэнэ.
+
+### POST /api/payments/transfer  (pay_transfer эрхтэй)
+`{"session_id": "uuid", "customer_tin"?, + гадна баримтын талбарууд}` — дансаар (шилжүүлгээр)
+төлбөр баталгаажуулах (online operator). e-Barimt msgbill-ээр BANK_TRANSFER аргаар үүснэ.
 
 ### POST /api/payments/pos/confirm  (OPERATOR+, **PAX аппын гол endpoint**)
 Карт амжилттай уншигдсаны ДАРАА дуудна:
@@ -169,9 +174,38 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 ```
 
 e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г thermal printer дээр
-**QR код болгон хэвлэнэ** — хэрэглэгч ebarimt апп-аар уншуулна. Картаар (POS) болон бэлнээр
-төлсөн баримт нь локал **PosAPI 3.0**-аар, QR-аар (QPay) төлсөн баримт нь **QPay ebarimt_v3**-аар
-үүснэ (§11).
+**QR код болгон хэвлэнэ** — хэрэглэгч ebarimt апп-аар уншуулна. Картаар (POS), бэлнээр,
+дансаар төлсөн баримтыг систем **msgbill.mn eBarimt API**-аар (2026-08-19-өөс; тохируулаагүй
+зогсоолд локал PosAPI 3.0), QR-аар (QPay) төлсөн баримтыг **QPay ebarimt_v3**-аар үүсгэнэ (§11).
+
+**Гадна системд үүссэн баримт (сонголт):** терминал/банкны PosLink/өөр e-Barimt API
+баримтыг АЛЬ ХЭДИЙН гаргасан бол давхар баримт үүсгэхгүйн тулд хүсэлтэд нэмж өгнө —
+`pos/confirm`, `cash`, `transfer` гурвуулаа хүлээн авна:
+
+```json
+{
+  "...": "дээрх талбарууд",
+  "ebarimt_id": "0291002441060010972102300100459…",   // ДДТД (заавал — байвал систем үүсгэхгүй)
+  "lottery_code": "XA 66306294",                        // сонголт
+  "qr_data": "594649643…",                              // сонголт — ebarimt QR агуулга
+  "ebarimt_provider": "TDB-POSLINK"                     // сонголт, ≤20 тэмдэгт, анхдагч TERMINAL
+}
+```
+Хариунд ижил `ebarimt_id/lottery_code/qr_data` буцна; Ибаримт хуудсанд суваг = тухайн нэр.
+
+### POST /api/payments/{payment_id}/ebarimt  (OPERATOR+ / vat)
+Төлөгдсөн төлбөрт **гадна системд үүссэн баримтыг ДАРАА нь холбох** (систем баримт
+үүсгэж чадаагүй/амжилтгүй үед, эсвэл баримтыг өөр e-Barimt API-аар гаргасан үед):
+`{"ebarimt_id": "ДДТД", "lottery_code"?, "qr_data"?, "ebarimt_provider"?, "ebarimt_ref"?}`
+→ `{ok, ebarimt_id, provider, lottery}`. Идэвхтэй баримт аль хэдийн байвал **409** (эхлээд
+`POST /api/payments/{payment_id}/cancel-ebarimt`).
+
+### POST /api/payments/{payment_id}/cancel-ebarimt  (vat/reports)
+Баримтыг сувгаар нь буцаана (QPay / msgbill / PosAPI); гадна сувгийн баримтад зөвхөн
+манай бүртгэл CANCELLED болно. `{note?}` → `{ok, cancelled[], pending[], error}`.
+
+### POST /api/payments/{payment_id}/retry-ebarimt  (vat/reports)
+Амжилтгүй/цуцалсан баримтыг системээр дахин үүсгэнэ (мөнгө дахин авахгүй).
 
 ⚠️ `amount` нь системийн тооцсон дүнтэй таарахгүй бол `400` буцна — картаар авахын ӨМНӨ
 `GET /api/sessions/{id}`-ээс дүнг АВЧ баталгаажуулна.
