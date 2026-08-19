@@ -315,6 +315,13 @@ def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = D
     if "qpay_password" in body:
         # Хоосон илгээвэл цэвэрлэнэ, хөндөөгүй бол хэвээр
         t.qpay_password = encrypt_secret((body["qpay_password"] or "").strip() or None)
+    if "msgbill_api_key" in body:
+        # msgbill.mn e-Barimt API түлхүүр (bsk_…) — хоосон илгээвэл салгана
+        key = (body["msgbill_api_key"] or "").strip() or None
+        if key and not key.startswith("bsk_"):
+            raise HTTPException(400, "msgbill түлхүүр «bsk_»-ээр эхлэх ёстой (Dashboard → Developers)")
+        t.msgbill_api_key = encrypt_secret(key)
+        body["msgbill_api_key"] = "***" if key else None   # audit-д нууц бичихгүй
     _check_district(t.qpay_district_code)
     _assign_tenant_sites(db, t.id, body.get("site_ids"))
     _audit(db, user, "UPDATE", "tenant", tenant_id, body)
@@ -615,6 +622,8 @@ def payment_accounts(db: Session = Depends(get_db),
     ADMIN мөн харна, гэхдээ хамрах хүрээгээрээ: «Хариуцах зогсоолууд» эсвэл
     түрээслэгчээр хязгаарлагдсан админ зөвхөн өөрийн зогсоолууд болон тэдгээрийн
     түрээслэгчдийн дансыг харна (өөр түрээслэгчийн merchant задрахгүй)."""
+    from ..services import msgbill as _msgbill
+
     def _own_pair(obj) -> bool:
         return bool((getattr(obj, "qpay_username", None) or "").strip()
                     and (getattr(obj, "qpay_password", None) or "").strip())
@@ -714,7 +723,108 @@ def payment_accounts(db: Session = Depends(get_db),
             "merchant_tin": settings.ebarimt_merchant_tin or None,
             "posapi_url": settings.ebarimt_posapi_url,
         },
+        # msgbill.mn eBarimt API — глобал түлхүүр (.env) + түрээслэгч бүрийн түлхүүр
+        "msgbill": {
+            **_msgbill.status_info(db),
+            "tenants": [{
+                "id": t.id, "name": t.name, "code": t.code,
+                "key_set": bool(t.msgbill_api_key),
+                # Ямар түлхүүр АШИГЛАГДАХ вэ: өөрийн → глобал (өөрийн QPay данстай
+                # бол глобал руу унахгүй) → байхгүй
+                "effective": ("tenant" if t.msgbill_api_key else
+                              ("global" if _msgbill.global_config(db)["api_key"] and not _own_pair(t) else None)),
+                "sites": [_site_ref(s) for s in sites if s.tenant_id == t.id],
+            } for t in tenants.values()],
+            # Түрээслэгчгүй зогсоолууд — глобал түлхүүр (байвал)
+            "orphan_sites": [_site_ref(s) for s in sites if not s.tenant_id],
+        },
     }
+
+
+# ─────────── Холболт: msgbill.mn e-Barimt API туршилт ───────────
+@router.post("/msgbill/test")
+async def msgbill_test_receipt(body: dict, db: Session = Depends(get_db),
+                               user: User = Depends(require_role("SUPER_ADMIN"))):
+    """msgbill.mn түлхүүрийг шалгах — {tenant_id?, api_key?, amount?=10, dry?}.
+
+    api_key өгвөл түүгээр (хадгалахаас өмнө турших), үгүй бол tenant_id-ийн
+    хадгалсан түлхүүр, тэр ч байхгүй бол глобал .env түлхүүрээр туршина.
+    АНХААР: live (bsk_ live) түлхүүрээр ЖИНХЭНЭ баримт үүсэж сарын тоонд орно —
+    тиймээс дүн анхдагчаар 10₮; bsk_test_ түлхүүр симуляц буцаана (test=true)."""
+    from ..secretbox import decrypt_secret
+    from ..services import msgbill as _msgbill
+    key = (body.get("api_key") or "").strip()
+    scope = "body"
+    if not key and body.get("tenant_id"):
+        t = db.get(Tenant, body["tenant_id"])
+        if not t:
+            raise HTTPException(404, "Түрээслэгч олдсонгүй")
+        key = decrypt_secret((t.msgbill_api_key or "").strip())
+        scope = f"tenant:{t.code}"
+    if not key:
+        key = _msgbill.global_config(db)["api_key"]
+        scope = "global"
+    if not key:
+        raise HTTPException(400, "msgbill түлхүүр тохируулаагүй — .env PARKING_MSGBILL_API_KEY "
+                                 "эсвэл түрээслэгчийн түлхүүр оруулна уу")
+    acc = _msgbill.MsgbillAccount(api_key=key, base_url=settings.msgbill_base_url.rstrip("/"))
+    try:
+        amount = max(1, int(float(body.get("amount") or 10)))
+    except (TypeError, ValueError):
+        amount = 10
+    idem = f"test-{user.username}-{secrets.token_hex(5)}"
+    try:
+        raw = await _msgbill.create_receipt(
+            acc, amount, description=f"EasyParking туршилт ({user.username})",
+            payment_method=str(body.get("payment_method") or "BANK_TRANSFER").replace("BANK_", ""),
+            idempotency_key=idem, customer_tin=(body.get("customer_tin") or None))
+    except _msgbill.MsgbillError as e:
+        _audit(db, user, "MSGBILL_TEST", "msgbill", scope, {"ok": False, "error": str(e)})
+        db.commit()
+        return {"ok": False, "scope": scope, "error": str(e), "code": e.code, "status": e.status}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "scope": scope, "error": str(e)[:200]}
+    _audit(db, user, "MSGBILL_TEST", "msgbill", scope,
+           {"ok": bool(raw.get("billId")), "id": raw.get("msgbillId"), "amount": amount,
+            "test": raw.get("test")})
+    db.commit()
+    return {"ok": bool(raw.get("billId")), "scope": scope, "test": raw.get("test"),
+            "state": raw.get("state"), "receipt_no": raw.get("billId"),
+            "lottery": raw.get("lottery"), "qr_data": raw.get("qrData"),
+            "msgbill_id": raw.get("msgbillId"), "error": raw.get("error"), "amount": amount}
+
+
+@router.put("/msgbill/global")
+def msgbill_global_put(body: dict, db: Session = Depends(get_db),
+                       user: User = Depends(require_role("SUPER_ADMIN"))):
+    """msgbill.mn ГЛОБАЛ тохиргоо UI-аас: {api_key?, methods?}. Прод серверийн .env-д
+    SSH-гүй хүрэхэд зориулав — DB утга .env-г дарна; api_key='' → DB утгыг устгаж .env руу буцна.
+    methods: "TRANSFER" | "TRANSFER,CASH,CARD" | "ALL"."""
+    from ..secretbox import encrypt_secret
+    from ..services import msgbill as _msgbill
+    from ..services.app_settings import MSGBILL_STATE, get_state, set_state
+    st = get_state(db, MSGBILL_STATE)
+    if "api_key" in body:
+        key = (body.get("api_key") or "").strip()
+        if key and not key.startswith("bsk_"):
+            raise HTTPException(400, "msgbill түлхүүр «bsk_»-ээр эхлэх ёстой (Dashboard → Developers)")
+        if key:
+            st["api_key"] = encrypt_secret(key)
+        else:
+            st.pop("api_key", None)
+    if "methods" in body:
+        m = str(body.get("methods") or "").upper().replace(" ", "")
+        allowed = {"TRANSFER", "CASH", "CARD", "QR", "ALL"}
+        parts = [x for x in m.split(",") if x]
+        if any(x not in allowed for x in parts):
+            raise HTTPException(400, f"methods буруу — зөвшөөрөгдөх: {', '.join(sorted(allowed))}")
+        st["methods"] = ",".join(parts)
+    set_state(db, MSGBILL_STATE, st, user.username)
+    _msgbill.invalidate_cache()
+    _audit(db, user, "UPDATE", "msgbill_global", "-",
+           {"api_key": "***" if st.get("api_key") else None, "methods": st.get("methods")})
+    db.commit()
+    return _msgbill.status_info(db)
 
 
 # ─────────── Холболт: гадаад API-ийн партнер түлхүүрүүд ───────────

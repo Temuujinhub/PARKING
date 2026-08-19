@@ -69,6 +69,9 @@ class Tenant(Base):
     qpay_invoice_code = Column(String(80), nullable=True)
     qpay_branch_code = Column(String(40), nullable=True)
     qpay_district_code = Column(String(10), nullable=True)
+    # msgbill.mn Partner API түлхүүр (bsk_...) — дансаар/бэлэн/картын e-Barimt-ыг
+    # msgbill-ээр үүсгэхэд. Шифрлэгдэж хадгалагдана (secretbox), UI-д зөвхөн *_set.
+    msgbill_api_key = Column(String(160), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -372,6 +375,10 @@ class VatReceipt(Base):
     receipt_url = Column(Text, nullable=True)
     customer_tin = Column(String(20), nullable=True)  # байгууллагаар авах бол
     status = Column(String(30), nullable=False, default="PENDING")  # PENDING, SENT, FAILED
+    # Баримтыг АЛЬ сувгаар үүсгэсэн: POSAPI (локал), QPAY (ebarimt_v3), MSGBILL (msgbill.mn)
+    provider = Column(String(20), nullable=True)
+    # Сувгийн өөрийн ID (msgbill rcp_… г.м) — PENDING/FAILED-ийг дараа GET-ээр нөхөхөд
+    provider_ref = Column(String(80), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (

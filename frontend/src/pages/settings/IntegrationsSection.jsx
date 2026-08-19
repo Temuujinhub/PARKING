@@ -367,11 +367,17 @@ function PaymentAccountsPanel() {
             {data.ebarimt.qpay_ebarimt && <span className="text-slate-400 ml-2">· QPay төлбөрт QPay-ийн e-Barimt 3.0</span>}
           </div>
           <div>ТТД: <span className="font-mono">{data.ebarimt.merchant_tin || '—'}</span></div>
-          <div className="text-slate-500">Бэлэн/карт/шилжүүлгийн баримт локал PosAPI-аар
+          <div className="text-slate-500">Бэлэн/картын баримт локал PosAPI-аар
             (<span className="font-mono">{data.ebarimt.posapi_url}</span>) үүснэ.
             Серверийн .env-ээс тохируулна.</div>
         </div>
       </div>
+
+      {/* msgbill.mn eBarimt API — дансаар (online operator) төлбөрт PosAPI-гүйгээр
+          жинхэнэ баримт. Түлхүүр: түрээслэгч бүрийнх (энд) → глобал .env */}
+      {data.msgbill && (
+        <MsgbillPanel mb={data.msgbill} isSuper={isSuper} onChanged={load} />
+      )}
 
       {/* Bank modal-д зогсоол сонгуулах хувилбар (шинээр нэмэхэд) */}
       {bankModal?._pick && (
@@ -403,6 +409,231 @@ function PaymentAccountsPanel() {
       <AccountModal state={accModal} tenants={tenants} sites={sites} isSuper={isSuper}
         onClose={() => setAccModal(null)} onDone={load} />
       <QpayTestModal state={qpayTest} onClose={() => setQpayTest(null)} />
+    </div>
+  )
+}
+
+// ───────────────────────── msgbill.mn e-Barimt API ─────────────────────────
+// Үйлчилгээ 3 (eBarimt API): ДАНСААР (online operator) төлбөрт баримтыг msgbill.mn
+// үүсгэж өгнө — сервер бүр дээр ТЕГ PosAPI суулгах шаардлагагүй. Түлхүүрийн
+// шатлал backend services/msgbill.api_key_for-той ижил: түрээслэгч → глобал.
+function MsgbillKeyModal({ state, onClose, onDone }) {
+  // state: {id, name, code, key_set}
+  const toast = useToast()
+  const [key, setKey] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState(null)
+  useEffect(() => { setKey(''); setResult(null) }, [state])
+  if (!state) return null
+
+  const save = async (e) => {
+    e.preventDefault()
+    if (!key.trim()) return toast('bsk_… түлхүүрээ бичнэ үү', 'error')
+    try {
+      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body: { msgbill_api_key: key.trim() } })
+      toast('msgbill түлхүүр хадгалагдлаа'); onClose(); onDone()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const unlink = async () => {
+    if (!confirm(`${state.name} — msgbill түлхүүрийг салгах уу? Дансаар төлбөрийн баримт `
+      + 'глобал түлхүүр (байвал) эсвэл локал PosAPI руу буцна.')) return
+    try {
+      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body: { msgbill_api_key: '' } })
+      toast('Салгагдлаа'); onClose(); onDone()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  // Турших: бичсэн түлхүүрээр (хадгалахаас өмнө) эсвэл хадгалсан түлхүүрээр
+  const test = async () => {
+    setTesting(true); setResult(null)
+    try {
+      const body = key.trim() ? { api_key: key.trim() } : { tenant_id: state.id }
+      setResult(await api('/api/admin/msgbill/test', { method: 'POST', body }))
+    } catch (err) { setResult({ ok: false, error: err.message }) } finally { setTesting(false) }
+  }
+
+  return (
+    <Modal open title={`${state.name} — msgbill.mn түлхүүр`} onClose={onClose}>
+      <form onSubmit={save} className="space-y-3">
+        <Field label={state.key_set ? 'API түлхүүр (тохируулсан — солих бол бичнэ)' : 'API түлхүүр (bsk_…)'}>
+          <PasswordInput className="input font-mono text-xs" value={key}
+            placeholder={state.key_set ? '••••••••••••' : 'bsk_live_…'} onChange={(e) => setKey(e.target.value)} />
+        </Field>
+        <p className="text-[11px] text-slate-500">
+          msgbill.mn → Dashboard → Developers хуудаснаас <b>receipt</b> эрхтэй түлхүүр үүсгэнэ.
+          <span className="font-mono">bsk_test_</span> түлхүүр серверт юу ч бичихгүй симуляц буцаана;
+          live түлхүүрээр «Турших» дарвал 10₮-ийн ЖИНХЭНЭ баримт үүсэж сарын тоонд орно.
+        </p>
+        {result && (
+          <div className={`text-xs rounded-lg px-3 py-2 ${result.ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
+            {result.ok
+              ? <>✓ Баримт үүслээ{result.test ? ' (СИМУЛЯЦ — тест түлхүүр)' : ''} · ДДТД <span className="font-mono">{result.receipt_no}</span>
+                  {result.lottery && <> · сугалаа <span className="font-mono">{result.lottery}</span></>}</>
+              : <>✗ {result.error || `Төлөв ${result.state || '?'}`}
+                  {result.msgbill_id && <div className="font-mono text-[10px] opacity-70 mt-0.5">id {result.msgbill_id}</div>}</>}
+          </div>
+        )}
+        <div className="flex gap-2">
+          {state.key_set && (
+            <button type="button" className="btn-secondary text-red-400" onClick={unlink}>Салгах</button>
+          )}
+          <button type="button" className="btn-secondary" disabled={testing || (!key.trim() && !state.key_set)}
+            onClick={test}>{testing ? 'Турших…' : 'Турших'}</button>
+          <button className="btn-primary flex-1 justify-center" disabled={!key.trim()}>Хадгалах</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// Глобал түлхүүр/хамрах арга — DB-д (app_settings), .env-г дарна. Прод серверт
+// SSH-гүй тул .env засахын оронд эндээс тохируулна.
+const METHOD_OPTS = [['TRANSFER', 'Дансаар (online operator)'], ['CASH', 'Бэлэн'], ['CARD', 'Карт (POS)']]
+function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
+  const toast = useToast()
+  const [key, setKey] = useState('')
+  const [methods, setMethods] = useState([])
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    if (open) { setKey(''); setResult(null); setMethods(mb.methods || []) }
+  }, [open])
+  if (!open) return null
+  const toggle = (m) => setMethods(methods.includes(m) ? methods.filter((x) => x !== m) : [...methods, m])
+  const save = async (e) => {
+    e.preventDefault()
+    try {
+      const body = { methods: methods.join(',') }
+      if (key.trim()) body.api_key = key.trim()
+      await api('/api/admin/msgbill/global', { method: 'PUT', body })
+      toast('msgbill глобал тохиргоо хадгалагдлаа'); onClose(); onDone()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const clearKey = async () => {
+    if (!confirm('UI-аас тавьсан глобал түлхүүрийг устгах уу? (.env-ийн түлхүүр байвал түүн рүү буцна)')) return
+    try {
+      await api('/api/admin/msgbill/global', { method: 'PUT', body: { api_key: '' } })
+      toast('Устгагдлаа'); onClose(); onDone()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const test = async () => {
+    setTesting(true); setResult(null)
+    try {
+      setResult(await api('/api/admin/msgbill/test', { method: 'POST', body: key.trim() ? { api_key: key.trim() } : {} }))
+    } catch (err) { setResult({ ok: false, error: err.message }) } finally { setTesting(false) }
+  }
+  return (
+    <Modal open title="msgbill.mn — глобал тохиргоо" onClose={onClose}>
+      <form onSubmit={save} className="space-y-3">
+        <Field label={mb.configured ? `API түлхүүр (тохируулсан: ${mb.source === 'db' ? 'UI' : '.env'} ${mb.key_hint || ''} — солих бол бичнэ)` : 'API түлхүүр (bsk_…)'}>
+          <PasswordInput className="input font-mono text-xs" value={key}
+            placeholder={mb.configured ? '••••••••••••' : 'bsk_live_…'} onChange={(e) => setKey(e.target.value)} />
+        </Field>
+        <div>
+          <div className="label mb-1.5">Аль төлбөрийн аргад msgbill-ээр баримт үүсгэх</div>
+          <div className="flex flex-wrap gap-2">
+            {METHOD_OPTS.map(([v, l]) => (
+              <label key={v} className={`px-3 py-1.5 rounded-lg border text-sm cursor-pointer transition-colors
+                  ${methods.includes(v) ? 'border-accent bg-accent/10 text-accent' : 'border-surface-border text-slate-300 hover:border-accent/40'}`}>
+                <input type="checkbox" className="hidden" checked={methods.includes(v)} onChange={() => toggle(v)} />{l}
+              </label>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500 mt-1">
+            Сонгоогүй арга (ж: бэлэн/карт) локал PosAPI-аар хэвээр. QPay QR төлбөр үргэлж QPay-ийн e-Barimt-аар.
+          </p>
+        </div>
+        {result && (
+          <div className={`text-xs rounded-lg px-3 py-2 ${result.ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-red-500/10 text-red-300'}`}>
+            {result.ok
+              ? <>✓ Баримт үүслээ{result.test ? ' (СИМУЛЯЦ)' : ''} · ДДТД <span className="font-mono">{result.receipt_no}</span></>
+              : <>✗ {result.error || `Төлөв ${result.state || '?'}`}</>}
+          </div>
+        )}
+        <div className="flex gap-2">
+          {mb.source === 'db' && (
+            <button type="button" className="btn-secondary text-red-400" onClick={clearKey}>Түлхүүр устгах</button>
+          )}
+          <button type="button" className="btn-secondary" disabled={testing || (!key.trim() && !mb.configured)} onClick={test}>
+            {testing ? 'Турших…' : 'Турших (10₮)'}</button>
+          <button className="btn-primary flex-1 justify-center">Хадгалах</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function MsgbillPanel({ mb, isSuper, onChanged }) {
+  const toast = useToast()
+  const [modal, setModal] = useState(null)
+  const [gmodal, setGmodal] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const testGlobal = async () => {
+    if (!confirm('Глобал түлхүүрээр 10₮-ийн туршилтын баримт үүсгэх үү? (live түлхүүр бол ЖИНХЭНЭ баримт)')) return
+    setTesting(true)
+    try {
+      const r = await api('/api/admin/msgbill/test', { method: 'POST', body: {} })
+      toast(r.ok ? `✓ msgbill баримт үүслээ${r.test ? ' (симуляц)' : ''} — ДДТД ${r.receipt_no}`
+                 : `✗ ${r.error || r.state}`, r.ok ? undefined : 'error')
+    } catch (e) { toast(e.message, 'error') } finally { setTesting(false) }
+  }
+  const methods = (mb.methods || []).map((m) => ({ TRANSFER: 'Дансаар', CASH: 'Бэлэн', CARD: 'Карт', QR: 'QR' }[m] || m))
+  return (
+    <div className="card space-y-2 text-xs">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="font-semibold text-sm">e-Barimt API — msgbill.mn</h3>
+        <span className="text-slate-500">
+          Хамрах төлбөр: {methods.length ? methods.join(', ') : <span className="text-amber-400">байхгүй — «Засах»-аас сонгоно</span>}
+        </span>
+      </div>
+      <p className="text-slate-500">
+        Дансаар (online operator) төлбөрийн НӨАТ баримтыг msgbill.mn Partner API-аар үүсгэнэ —
+        локал PosAPI шаардлагагүй. Түлхүүрийн шатлал: түрээслэгчийн өөрийн → глобал (.env).
+        Өөрийн QPay данстай түрээслэгч глобал түлхүүр рүү УНАХГҮЙ (өөр ТТД-ээр баримт гарахаас сэргийлнэ).
+      </p>
+      <div className="flex items-center justify-between border-b border-surface-border/40 pb-1.5">
+        <div>
+          <span className="text-slate-400 mr-2">Глобал (EasyParking):</span>
+          {mb.configured
+            ? <><span className="text-accent">тохируулсан</span> <span className="font-mono text-slate-400">{mb.key_hint}</span>
+                <span className="text-slate-500 ml-1">({mb.source === 'db' ? 'UI-аас' : '.env'})</span>
+                {mb.test_key && <span className="text-amber-400 ml-1">· ТЕСТ түлхүүр (симуляц)</span>}</>
+            : <span className="text-amber-400">тохируулаагүй</span>}
+          {mb.orphan_sites?.length > 0 && (
+            <span className="text-slate-500 ml-2">· түрээслэгчгүй {mb.orphan_sites.length} зогсоол энэ түлхүүрийг ашиглана</span>
+          )}
+        </div>
+        {isSuper && (
+          <div className="flex gap-1.5">
+            {mb.configured && (
+              <button className="btn-secondary py-0.5 text-xs" disabled={testing} onClick={testGlobal}>Турших</button>
+            )}
+            <button className="btn-secondary py-0.5 text-xs" onClick={() => setGmodal(true)}>
+              {mb.configured ? 'Засах' : 'Түлхүүр тавих'}</button>
+          </div>
+        )}
+      </div>
+      {(mb.tenants || []).map((t) => (
+        <div key={t.id} className="flex items-center justify-between border-b border-surface-border/40 pb-1.5 gap-2">
+          <div className="min-w-0">
+            <span className="font-mono text-slate-400 mr-2">{t.code}</span>{t.name}
+            <span className="ml-2">
+              {t.key_set
+                ? <span className="text-accent">өөрийн түлхүүр</span>
+                : t.effective === 'global'
+                  ? <span className="text-slate-400">глобал түлхүүр</span>
+                  : <span className="text-amber-400">түлхүүргүй — локал PosAPI{mb.configured ? ' (өөрийн QPay данстай тул глобал руу унахгүй)' : ''}</span>}
+            </span>
+            {t.sites?.length > 0 && <SiteList sites={t.sites} />}
+          </div>
+          {isSuper && (
+            <button className="btn-secondary py-0.5 text-xs shrink-0" onClick={() => setModal(t)}>
+              {t.key_set ? 'Засах' : 'Түлхүүр'}
+            </button>
+          )}
+        </div>
+      ))}
+      <MsgbillKeyModal state={modal} onClose={() => setModal(null)} onDone={onChanged} />
+      <MsgbillGlobalModal open={gmodal} mb={mb} onClose={() => setGmodal(false)} onDone={onChanged} />
     </div>
   )
 }

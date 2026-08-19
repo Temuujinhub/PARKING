@@ -146,6 +146,18 @@ class Settings(BaseSettings):
     ebarimt_classification_code: str = "6743000"  # GS1: Автомашины зогсоолын үйлчилгээ
     ebarimt_mock: bool = True
 
+    # msgbill.mn Partner API — «Үйлчилгээ 3: eBarimt API» (services/msgbill.py).
+    # QPay-ээр төлөөгүй (дансаар/бэлэн/карт) төлбөрт локал PosAPI-ийн ОРОНД
+    # msgbill.mn-ээр ЖИНХЭНЭ e-Barimt үүсгэнэ — PosAPI суулгах шаардлагагүй.
+    # Түлхүүр: глобал (энд) эсвэл түрээслэгч бүрд (Тохиргоо → Холболт → e-Barimt).
+    # bsk_test_... түлхүүр серверт юу ч бичихгүй симуляц хариу буцаана.
+    msgbill_base_url: str = "https://msgbill.mn/api/v1"
+    msgbill_api_key: str = ""
+    # Аль төлбөрийн аргад msgbill ашиглах: таслалаар (TRANSFER,CASH,CARD) эсвэл ALL.
+    # Анхдагч = зөвхөн ДАНСААР (online operator) — карт/бэлэн PosAPI хэвээр.
+    msgbill_methods: str = "TRANSFER"
+    msgbill_timeout: float = 20
+
     # Ээлж солигдох цаг (0–23) — "ээлжээр" тайланд өдрийг энэ цагаар тасалж бүлэглэнэ
     # (жишээ: 9 = өглөө 9ц-аас маргааш 9ц хүртэл нэг ээлжийн өдөр). Шөнө дундаар биш.
     shift_change_hour: int = 9

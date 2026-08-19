@@ -16,6 +16,9 @@ CAMHEALTH_KEY = "camhealth_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
 CAMHEALTH_STATE = "camhealth_state"
+# msgbill.mn глобал тохиргоо (UI-аас): {api_key: шифрлэгдсэн, methods: "TRANSFER,..."}
+# — прод серверийн .env-д SSH-гүй хүрэхэд зориулав; .env нь fallback.
+MSGBILL_STATE = "msgbill_global"
 
 # Түлхүүр бүрийн default. Утгын ТӨРӨЛ нь валидацийн дүрэм болно (bool/int).
 DEFAULTS: dict[str, dict] = {

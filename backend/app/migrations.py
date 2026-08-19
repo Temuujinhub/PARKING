@@ -175,6 +175,10 @@ MIGRATIONS = [
     "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_invoice_code VARCHAR(80)",
     "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_branch_code VARCHAR(40)",
     "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS qpay_district_code VARCHAR(10)",
+    # 2026-08-19: msgbill.mn e-Barimt API — түрээслэгчийн түлхүүр + баримтын суваг/лавлагаа
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS msgbill_api_key VARCHAR(160)",
+    "ALTER TABLE vat_receipts ADD COLUMN IF NOT EXISTS provider VARCHAR(20)",
+    "ALTER TABLE vat_receipts ADD COLUMN IF NOT EXISTS provider_ref VARCHAR(80)",
     # Өгөгдлийн засвар (идемпотент): EB_ угтваргүй invoice code нь QPay-ийн ЭНГИЙН
     # гэрээ рүү зааж НӨАТ давхар нэмэгдэн илүү дүн авдаг + e-Barimt үүсдэггүй
     # (2026-08-01 Monnis: 10₮→10.91₮, EBARIMT_NOT_ENABLED) тул автоматаар залруулна.

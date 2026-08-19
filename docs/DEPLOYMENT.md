@@ -48,6 +48,7 @@ sudo nano /root/PARKING/backend/.env
 #   PARKING_QPAY_MOCK=false + QPay credentials
 #   PARKING_QPAY_WEBHOOK_SECRET=<санамсаргүй урт мөр>
 #   PARKING_EBARIMT_MOCK=false + PosAPI
+#   PARKING_MSGBILL_API_KEY=bsk_...  (дансаар төлбөрийн e-Barimt msgbill.mn-ээр — PosAPI-гүй)
 #   PARKING_BARRIER_MOCK=false (хэрэв сервер хаалт удирддаг бол)
 #   PARKING_PUBLIC_BASE_URL=http://172.16.100.21  (эсвэл домэйн)
 sudo systemctl restart parking-backend

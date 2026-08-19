@@ -17,7 +17,7 @@ from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Paym
                       User, VatReceipt)
 from ..ratelimit import throttle
 from ..serializers import to_dict
-from ..services import ebarimt, qpay
+from ..services import ebarimt, msgbill, qpay
 from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
 
 log = logging.getLogger("parking.payments")
@@ -56,6 +56,27 @@ def _site_of(payment: Payment):
     Session-гүй төлбөр практикт үүсдэггүй; тэр тохиолдолд глобал данс үйлчилнэ."""
     sess = getattr(payment, "session", None)
     return getattr(sess, "site", None) if sess is not None else None
+
+
+def _receipt_desc(payment: Payment, extra: str | None = None) -> str:
+    """msgbill баримтын тайлбар — дугаар + зогсоол (жолооч/санхүү танихад)."""
+    sess = getattr(payment, "session", None)
+    plate = getattr(sess, "plate_number", None) or ""
+    site = _site_of(payment)
+    site_name = getattr(site, "name", None) or ""
+    parts = ["Зогсоолын үйлчилгээ", plate, site_name, extra or ""]
+    return " · ".join(p for p in parts if p)[:200]
+
+
+def _ebarimt_err(e: Exception) -> str:
+    """e-Barimt/msgbill/QPay алдааг богино текст болгоно (VatReceipt.receipt_url-д)."""
+    import httpx as _httpx
+    if isinstance(e, _httpx.HTTPStatusError):
+        try:
+            return (e.response.json().get("message") or e.response.text[:200])
+        except Exception:  # noqa: BLE001
+            return e.response.text[:200]
+    return str(e)[:200]
 
 
 def _invoice_no(session: ParkingSession) -> str:
@@ -114,7 +135,13 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     # баримт үүсгэнэ — түрээслэгчийн ТТД-ээр. Өрүүд ижил баримтад холбогдоно.
     use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
                    and bool(payment.provider_payment_id))
-    if settings.ebarimt_mock and not use_qpay_eb:
+    # msgbill.mn (Үйлчилгээ 3 — eBarimt API): QPay-ээр төлөөгүй төлбөрт (анхдагчаар
+    # ДАНСААР = online operator) локал PosAPI-ийн оронд msgbill-ээр ЖИНХЭНЭ баримт.
+    # Түлхүүр: түрээслэгч → глобал (services/msgbill.api_key_for-ийн дүрмээр).
+    mb_acc = None if use_qpay_eb else msgbill.account_enabled_for(
+        _site_of(payment), payment.payment_method)
+    use_msgbill = mb_acc is not None
+    if settings.ebarimt_mock and not use_qpay_eb and not use_msgbill:
         log.warning("e-Barimt MOCK: payment=%s %s₮ — ХУУРАМЧ баримт үүслээ. "
                     "Production дээр PARKING_EBARIMT_MOCK=false байх ёстой.",
                     payment.id, float(payment.amount))
@@ -130,6 +157,18 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
                 # Зогсоолын өөрийн QPay данс — баримт нь тухайн түрээслэгчийн ТТД-ээр үүснэ
                 acc=qpay.account_for(_site_of(payment)),
             )
+        elif use_msgbill:
+            receipt_raw = await msgbill.create_receipt(
+                mb_acc, sess_amount,
+                description=_receipt_desc(payment),
+                payment_method=payment.payment_method,   # TRANSFER→BANK_TRANSFER, CASH, CARD
+                # Idempotency-Key = payment id: давхар finalize/retry-д давхар баримт үүсэхгүй
+                idempotency_key=f"pay-{payment.id}",
+                customer_tin=payment.customer_tin,       # ААН → ORGANIZATION + payer_reg_no
+            )
+            if not receipt_raw.get("billId"):
+                ebarimt_error = (receipt_raw.get("error")
+                                 or f"msgbill төлөв {receipt_raw.get('state') or '?'} — ДДТД ирээгүй")
         else:
             receipt_raw = await ebarimt.create_receipt(
                 sess_amount, sess_vat,
@@ -139,15 +178,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
                 customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
             )
     except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
-        import httpx as _httpx
-        if isinstance(e, _httpx.HTTPStatusError):
-            try:
-                ebarimt_error = e.response.json().get("message") or e.response.text[:200]
-            except Exception:
-                ebarimt_error = e.response.text[:200]
-        else:
-            ebarimt_error = str(e)[:200]
+        ebarimt_error = _ebarimt_err(e)
         log.error(f"e-Barimt амжилтгүй: payment={payment.id}: {ebarimt_error}")
+    rcpt_provider = "QPAY" if use_qpay_eb else ("MSGBILL" if use_msgbill else "POSAPI")
 
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
     ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
@@ -163,9 +196,11 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
         lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
         amount=head_amount, vat_amount=head_vat,
         customer_tin=payment.customer_tin,
-        # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа
+        # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа.
+        # msgbill FAILED/PENDING үед provider_ref (rcp_…) хадгалж дараа GET-ээр нөхнө.
         status="SENT" if receipt_raw.get("billId") else "FAILED",
         receipt_url=ebarimt_error,
+        provider=rcpt_provider, provider_ref=receipt_raw.get("msgbillId"),
     ))
 
     for comp in comps:
@@ -175,13 +210,24 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
             # нэхэмжлэлд тусдаа мөрөөр орсон) — давхар баримт үүсгэхгүй.
             ebarimt.cache_qr(comp.id, receipt_raw.get("qrData"))
         else:
-            # Локал PosAPI (бэлэн/карт): хэсэг тус бүрд тусдаа баримт
+            # Локал PosAPI / msgbill (бэлэн/карт/дансаар): хэсэг тус бүрд тусдаа баримт
             comp_receipt, comp_error = {}, None
             try:
-                comp_receipt = await ebarimt.create_receipt(
-                    comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
+                if use_msgbill:
+                    comp_receipt = await msgbill.create_receipt(
+                        mb_acc, comp_amount,
+                        description=_receipt_desc(payment, f"өр {comp.plate_number or ''}".strip()),
+                        payment_method=payment.payment_method,
+                        idempotency_key=f"pay-{payment.id}-comp-{comp.id}",
+                        customer_tin=payment.customer_tin)
+                    if not comp_receipt.get("billId"):
+                        comp_error = (comp_receipt.get("error")
+                                      or f"msgbill төлөв {comp_receipt.get('state') or '?'}")
+                else:
+                    comp_receipt = await ebarimt.create_receipt(
+                        comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
             except Exception as e:  # noqa: BLE001
-                comp_error = str(e)[:200]
+                comp_error = _ebarimt_err(e)
                 log.error(f"e-Barimt амжилтгүй: compensation={comp.id}: {comp_error}")
             ebarimt.cache_qr(comp.id, comp_receipt.get("qrData"))
             db.add(VatReceipt(
@@ -192,13 +238,14 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
                 amount=comp_amount, vat_amount=comp_vat, customer_tin=payment.customer_tin,
                 status="SENT" if comp_receipt.get("billId") else "FAILED",
                 receipt_url=comp_error,
+                provider=rcpt_provider, provider_ref=comp_receipt.get("msgbillId"),
             ))
         comp.status = "PAID"
         comp.paid_at = datetime.utcnow()
         comp.paid_by = f"{payment.provider}:QR"
         log.info(f"өр төлөгдөв: {comp.plate_number} {comp_amount:.0f}₮ "
               f"(comp {comp.id}, payment {payment.id}, "
-              f"баримт={'QPay нэгдсэн' if use_qpay_eb else 'локал'})")
+              f"баримт={rcpt_provider})")
 
     _t1 = _mark("ebarimt", _p0)
     session = db.get(ParkingSession, payment.session_id)
@@ -737,33 +784,66 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
 
     receiver_type = payment.ebarimt_receiver_type or (
         "COMPANY" if payment.customer_tin else "CITIZEN")
+    is_qpay = payment.provider == "QPAY" and bool(payment.provider_payment_id)
+    mb_acc = None if is_qpay else msgbill.account_enabled_for(
+        _site_of(payment), payment.payment_method)
+    rcpt_provider = "QPAY" if is_qpay else ("MSGBILL" if mb_acc else "POSAPI")
     try:
-        if payment.provider == "QPAY" and payment.provider_payment_id:
+        if is_qpay:
             raw = await qpay.create_ebarimt(
                 payment.provider_payment_id, receiver_type,
                 receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
                 acc=qpay.account_for(_site_of(payment)))
+        elif mb_acc:
+            raw = {}
+            # Өмнө msgbill-д илгээгдсэн (rcp_…) бол эхлээд төлөвийг нь асууна —
+            # msgbill FAILED-ийг өөрөө retry хийдэг тул CREATED болсон байж магадгүй
+            prev_ref = getattr(rec, "provider_ref", None) if rec else None
+            if prev_ref:
+                try:
+                    raw = await msgbill.get_receipt(mb_acc, prev_ref)
+                except msgbill.MsgbillError as e:
+                    if e.status != 404:
+                        raise
+                    raw = {}
+            if not raw.get("billId"):
+                if raw.get("state") and raw["state"] not in ("FAILED", "UNKNOWN"):
+                    # PENDING/QUEUED — msgbill боловсруулж байна, дахин POST хийхгүй
+                    err = f"msgbill боловсруулж байна (төлөв {raw['state']}) — түр хүлээгээд дахин шалгана уу"
+                    if rec:
+                        rec.receipt_url = err
+                        db.commit()
+                    return {"ok": False, "error": err, "pending": True}
+                # ШИНЭ Idempotency-Key — өмнөх FAILED хариуг msgbill буцааж өгөхөөс сэргийлнэ
+                raw = await msgbill.create_receipt(
+                    mb_acc, float(payment.amount),
+                    description=_receipt_desc(payment),
+                    payment_method=payment.payment_method,
+                    idempotency_key=f"pay-{payment.id}-retry-{int(datetime.utcnow().timestamp())}",
+                    customer_tin=payment.customer_tin)
+                if rec is not None:
+                    rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
+                    rec.provider = "MSGBILL"
+                if not raw.get("billId"):
+                    err = raw.get("error") or f"msgbill төлөв {raw.get('state') or '?'} — ДДТД ирээгүй"
+                    if rec:
+                        rec.receipt_url = err
+                    db.commit()
+                    return {"ok": False, "error": err}
         else:
             raw = await ebarimt.create_receipt(
                 float(payment.amount), float(payment.vat_amount),
-                "CASH" if payment.payment_method == "CASH" else "CARD",
+                "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
                 customer_tin=payment.customer_tin)
     except Exception as e:  # noqa: BLE001
-        import httpx as _httpx
-        if isinstance(e, _httpx.HTTPStatusError):
-            try:
-                err = e.response.json().get("message") or e.response.text[:200]
-            except Exception:  # noqa: BLE001
-                err = e.response.text[:200]
-        else:
-            err = str(e)[:200]
+        err = _ebarimt_err(e)
         if rec:
             rec.receipt_url = err
             db.commit()
         return {"ok": False, "error": err}
 
     if not raw.get("billId"):
-        return {"ok": False, "error": "QPay баримтын дугаар буцаасангүй"}
+        return {"ok": False, "error": "Баримтын дугаар (ДДТД) буцаасангүй"}
 
     ebarimt.cache_qr(payment.id, raw.get("qrData"))
     if rec:
@@ -771,13 +851,16 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
         rec.lottery_code = None if receiver_type == "COMPANY" else raw.get("lottery")
         rec.status = "SENT"
         rec.receipt_url = None
+        rec.provider = rcpt_provider
+        rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
     else:
         db.add(VatReceipt(
             payment_id=payment.id, session_id=payment.session_id,
             ebarimt_id=raw.get("billId"),
             lottery_code=None if receiver_type == "COMPANY" else raw.get("lottery"),
             amount=payment.amount, vat_amount=payment.vat_amount,
-            customer_tin=payment.customer_tin, status="SENT"))
+            customer_tin=payment.customer_tin, status="SENT",
+            provider=rcpt_provider, provider_ref=raw.get("msgbillId")))
     db.commit()
     return {"ok": True, "ebarimt_id": raw.get("billId"), "lottery": raw.get("lottery")}
 
