@@ -26,6 +26,14 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — Тохиргоо → Холболт: e-Barimt карт сувгуудаар
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | «e-Barimt» карт хуучин «Горим: MOCK · PosAPI localhost:7080» биш, **сувгаар**: QR → QPay e-Barimt 3.0 (бодит/QPay MOCK); бэлэн/карт/дансаар → msgbill (түлхүүртэй зогсоол) / PosAPI / суваг байхгүй → FAILED. payment-accounts `ebarimt.local_channel`, `qpay_mock`, `mock_receipts` | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — msgbill цуцлах API + webhook холболт
 
 msgbill.mn-д `POST /partner/receipts/:id/cancel` ба webhook (`receipt.created` /

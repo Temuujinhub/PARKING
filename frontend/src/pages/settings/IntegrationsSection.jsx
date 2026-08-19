@@ -360,16 +360,30 @@ function PaymentAccountsPanel() {
             ))}
         </div>
         <div className="card space-y-1.5 text-xs">
-          <h3 className="font-semibold text-sm mb-1">e-Barimt</h3>
-          <div>Горим: {data.ebarimt.mock
-            ? <span className="text-amber-400">MOCK — бодит баримт үүсэхгүй</span>
-            : <span className="text-accent">Бодит</span>}
-            {data.ebarimt.qpay_ebarimt && <span className="text-slate-400 ml-2">· QPay төлбөрт QPay-ийн e-Barimt 3.0</span>}
+          <h3 className="font-semibold text-sm mb-1">e-Barimt — сувгууд</h3>
+          {/* Суваг бүрийн бодит байдал: QR → QPay; бэлэн/карт/дансаар → msgbill (түлхүүртэй
+              зогсоол) эсвэл PosAPI; аль нь ч байхгүй бол баримт FAILED бүртгэгдэнэ */}
+          <div>
+            <span className="text-slate-400">QPay QR төлбөр:</span>{' '}
+            {data.ebarimt.qpay_ebarimt
+              ? <span className={data.ebarimt.qpay_mock ? 'text-amber-400' : 'text-accent'}>
+                  QPay e-Barimt 3.0{data.ebarimt.qpay_mock ? ' (QPay MOCK — бодит биш)' : ' — бодит'}</span>
+              : <span className="text-amber-400">унтраалттай</span>}
           </div>
-          <div>ТТД: <span className="font-mono">{data.ebarimt.merchant_tin || '—'}</span></div>
-          <div className="text-slate-500">Бэлэн/картын баримт локал PosAPI-аар
-            (<span className="font-mono">{data.ebarimt.posapi_url}</span>) үүснэ.
-            Серверийн .env-ээс тохируулна.</div>
+          <div>
+            <span className="text-slate-400">Бэлэн / карт / дансаар:</span>{' '}
+            {(data.msgbill?.configured || (data.msgbill?.tenants || []).some((t) => t.key_set))
+              ? <span className="text-accent">msgbill.mn — бодит (түлхүүртэй зогсоолууд, доор)</span>
+              : null}
+            {data.ebarimt.local_channel === 'posapi' && (
+              <span className="text-accent ml-1">· PosAPI бодит (<span className="font-mono">{data.ebarimt.posapi_url}</span>, ТТД {data.ebarimt.merchant_tin || '—'})</span>)}
+            {data.ebarimt.local_channel === 'mock' && (
+              <span className="text-amber-400 ml-1">· msgbill түлхүүргүй зогсоолд PosAPI MOCK (хуурамч баримт!)</span>)}
+            {data.ebarimt.local_channel === 'none' && (
+              <span className="text-slate-400 ml-1">· msgbill түлхүүргүй зогсоолд суваг байхгүй → баримт «Амжилтгүй» бүртгэгдэж, түлхүүр тавьсны дараа «Дахин үүсгэх»-ээр нөхөгдөнө</span>)}
+          </div>
+          <div className="text-slate-500">Локал PosAPI (.env): {data.ebarimt.mock ? 'суугаагүй/MOCK' : 'бодит'}
+            {data.ebarimt.mock && !data.ebarimt.mock_receipts && ' — хуурамч баримт үүсгэхгүй (EBARIMT_MOCK_RECEIPTS=false)'}</div>
         </div>
       </div>
 

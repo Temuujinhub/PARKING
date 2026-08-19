@@ -723,11 +723,20 @@ def payment_accounts(db: Session = Depends(get_db),
         # Гадаад API-ийн партнерууд — зөвхөн НЭРС. АНХААР: partner_map нь
         # {api_key: нэр} тул .keys() нь ТҮЛХҮҮРИЙГ задлана — заавал .values()!
         "partners": sorted(set(settings.partner_map().values())),
+        # e-Barimt сувгуудын бодит байдал (карт дээр харуулна):
+        #   QR (QPay) → QPay e-Barimt 3.0 (qpay_mock бол mock)
+        #   бэлэн/карт/дансаар → msgbill (түлхүүртэй зогсоол) → PosAPI (mock=false үед) → суваг байхгүй
         "ebarimt": {
             "mock": settings.ebarimt_mock,
+            "mock_receipts": settings.ebarimt_mock_receipts,
             "qpay_ebarimt": settings.qpay_ebarimt,
+            "qpay_mock": settings.qpay_mock,
             "merchant_tin": settings.ebarimt_merchant_tin or None,
             "posapi_url": settings.ebarimt_posapi_url,
+            # Бэлэн/карт/дансаарын баримт АЛЬ сувгаар: msgbill (тохируулсан зогсоолд) /
+            # posapi (бодит PosAPI) / none (суваг байхгүй → FAILED бүртгэгдэнэ)
+            "local_channel": ("posapi" if not settings.ebarimt_mock
+                              else ("mock" if settings.ebarimt_mock_receipts else "none")),
         },
         # msgbill.mn eBarimt API — глобал түлхүүр (.env) + түрээслэгч бүрийн түлхүүр
         "msgbill": {
