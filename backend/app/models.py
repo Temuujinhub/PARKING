@@ -72,6 +72,7 @@ class Tenant(Base):
     # msgbill.mn Partner API түлхүүр (bsk_...) — дансаар/бэлэн/картын e-Barimt-ыг
     # msgbill-ээр үүсгэхэд. Шифрлэгдэж хадгалагдана (secretbox), UI-д зөвхөн *_set.
     msgbill_api_key = Column(String(160), nullable=True)
+    msgbill_webhook_secret = Column(String(160), nullable=True)  # whsec_… (шифрлэгдсэн)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

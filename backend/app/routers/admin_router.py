@@ -322,6 +322,12 @@ def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = D
             raise HTTPException(400, "msgbill түлхүүр «bsk_»-ээр эхлэх ёстой (Dashboard → Developers)")
         t.msgbill_api_key = encrypt_secret(key)
         body["msgbill_api_key"] = "***" if key else None   # audit-д нууц бичихгүй
+    if "msgbill_webhook_secret" in body:
+        sec = (body["msgbill_webhook_secret"] or "").strip() or None
+        if sec and not sec.startswith("whsec_"):
+            raise HTTPException(400, "Webhook нууц «whsec_»-ээр эхлэх ёстой")
+        t.msgbill_webhook_secret = encrypt_secret(sec)
+        body["msgbill_webhook_secret"] = "***" if sec else None
     _check_district(t.qpay_district_code)
     _assign_tenant_sites(db, t.id, body.get("site_ids"))
     _audit(db, user, "UPDATE", "tenant", tenant_id, body)
@@ -729,6 +735,7 @@ def payment_accounts(db: Session = Depends(get_db),
             "tenants": [{
                 "id": t.id, "name": t.name, "code": t.code,
                 "key_set": bool(t.msgbill_api_key),
+                "webhook_secret_set": bool(getattr(t, "msgbill_webhook_secret", None)),
                 # Ямар түлхүүр АШИГЛАГДАХ вэ: өөрийн → глобал (өөрийн QPay данстай
                 # бол глобал руу унахгүй) → байхгүй
                 "effective": ("tenant" if t.msgbill_api_key else
@@ -812,6 +819,14 @@ def msgbill_global_put(body: dict, db: Session = Depends(get_db),
             st["api_key"] = encrypt_secret(key)
         else:
             st.pop("api_key", None)
+    if "webhook_secret" in body:
+        sec = (body.get("webhook_secret") or "").strip()
+        if sec and not sec.startswith("whsec_"):
+            raise HTTPException(400, "Webhook нууц «whsec_»-ээр эхлэх ёстой")
+        if sec:
+            st["webhook_secret"] = encrypt_secret(sec)
+        else:
+            st.pop("webhook_secret", None)
     if "methods" in body:
         m = str(body.get("methods") or "").upper().replace(" ", "")
         allowed = {"TRANSFER", "CASH", "CARD", "QR", "ALL"}
@@ -822,7 +837,8 @@ def msgbill_global_put(body: dict, db: Session = Depends(get_db),
     set_state(db, MSGBILL_STATE, st, user.username)
     _msgbill.invalidate_cache()
     _audit(db, user, "UPDATE", "msgbill_global", "-",
-           {"api_key": "***" if st.get("api_key") else None, "methods": st.get("methods")})
+           {"api_key": "***" if st.get("api_key") else None, "methods": st.get("methods"),
+            "webhook_secret": "***" if st.get("webhook_secret") else None})
     db.commit()
     return _msgbill.status_info(db)
 

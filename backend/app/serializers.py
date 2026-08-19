@@ -16,7 +16,7 @@ def site_pay_url(site) -> str:
 
 
 # API-аар ХЭЗЭЭ Ч буцаахгүй багана (нууц үг/түлхүүр). Оронд нь <нэр>_set: bool өгнө.
-SECRET_COLUMNS = frozenset({"password_hash", "password", "qpay_password", "msgbill_api_key"})
+SECRET_COLUMNS = frozenset({"password_hash", "password", "qpay_password", "msgbill_api_key", "msgbill_webhook_secret"})
 
 
 def to_dict(obj, *, exclude: set[str] = frozenset(), extra: dict | None = None) -> dict:

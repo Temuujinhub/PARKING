@@ -421,16 +421,20 @@ function MsgbillKeyModal({ state, onClose, onDone }) {
   // state: {id, name, code, key_set}
   const toast = useToast()
   const [key, setKey] = useState('')
+  const [whsec, setWhsec] = useState('')
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState(null)
-  useEffect(() => { setKey(''); setResult(null) }, [state])
+  useEffect(() => { setKey(''); setWhsec(''); setResult(null) }, [state])
   if (!state) return null
 
   const save = async (e) => {
     e.preventDefault()
-    if (!key.trim()) return toast('bsk_… түлхүүрээ бичнэ үү', 'error')
+    if (!key.trim() && !whsec.trim()) return toast('bsk_… түлхүүр эсвэл whsec_ нууцаа бичнэ үү', 'error')
     try {
-      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body: { msgbill_api_key: key.trim() } })
+      const body = {}
+      if (key.trim()) body.msgbill_api_key = key.trim()
+      if (whsec.trim()) body.msgbill_webhook_secret = whsec.trim()
+      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body })
       toast('msgbill түлхүүр хадгалагдлаа'); onClose(); onDone()
     } catch (err) { toast(err.message, 'error') }
   }
@@ -438,7 +442,7 @@ function MsgbillKeyModal({ state, onClose, onDone }) {
     if (!confirm(`${state.name} — msgbill түлхүүрийг салгах уу? Дансаар төлбөрийн баримт `
       + 'глобал түлхүүр (байвал) эсвэл локал PosAPI руу буцна.')) return
     try {
-      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body: { msgbill_api_key: '' } })
+      await api(`/api/admin/tenants/${state.id}`, { method: 'PUT', body: { msgbill_api_key: '', msgbill_webhook_secret: '' } })
       toast('Салгагдлаа'); onClose(); onDone()
     } catch (err) { toast(err.message, 'error') }
   }
@@ -457,6 +461,13 @@ function MsgbillKeyModal({ state, onClose, onDone }) {
         <Field label={state.key_set ? 'API түлхүүр (тохируулсан — солих бол бичнэ)' : 'API түлхүүр (bsk_…)'}>
           <PasswordInput className="input font-mono text-xs" value={key}
             placeholder={state.key_set ? '••••••••••••' : 'bsk_live_…'} onChange={(e) => setKey(e.target.value)} />
+        </Field>
+        <Field label={state.webhook_secret_set ? 'Webhook нууц (whsec_… — тохируулсан)' : 'Webhook нууц (whsec_…, заавал биш)'}>
+          <PasswordInput className="input font-mono text-xs" value={whsec}
+            placeholder={state.webhook_secret_set ? '••••••••••••' : 'whsec_…'} onChange={(e) => setWhsec(e.target.value)} />
+          <div className="text-[11px] text-slate-500 mt-1">
+            Webhook URL: <span className="font-mono select-all">{window.location.origin}/api/payments/msgbill/webhook</span>
+          </div>
         </Field>
         <p className="text-[11px] text-slate-500">
           msgbill.mn → Dashboard → Developers хуудаснаас <b>receipt</b> эрхтэй түлхүүр үүсгэнэ.
@@ -478,7 +489,7 @@ function MsgbillKeyModal({ state, onClose, onDone }) {
           )}
           <button type="button" className="btn-secondary" disabled={testing || (!key.trim() && !state.key_set)}
             onClick={test}>{testing ? 'Турших…' : 'Турших'}</button>
-          <button className="btn-primary flex-1 justify-center" disabled={!key.trim()}>Хадгалах</button>
+          <button className="btn-primary flex-1 justify-center" disabled={!key.trim() && !whsec.trim()}>Хадгалах</button>
         </div>
       </form>
     </Modal>
@@ -491,12 +502,14 @@ const METHOD_OPTS = [['TRANSFER', 'Дансаар (online operator)'], ['CASH', 
 function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
   const toast = useToast()
   const [key, setKey] = useState('')
+  const [whsec, setWhsec] = useState('')
   const [methods, setMethods] = useState([])
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState(null)
   useEffect(() => {
-    if (open) { setKey(''); setResult(null); setMethods(mb.methods || []) }
+    if (open) { setKey(''); setWhsec(''); setResult(null); setMethods(mb.methods || []) }
   }, [open])
+  const webhookUrl = `${window.location.origin}${mb.webhook_path || '/api/payments/msgbill/webhook'}`
   if (!open) return null
   const toggle = (m) => setMethods(methods.includes(m) ? methods.filter((x) => x !== m) : [...methods, m])
   const save = async (e) => {
@@ -504,6 +517,7 @@ function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
     try {
       const body = { methods: methods.join(',') }
       if (key.trim()) body.api_key = key.trim()
+      if (whsec.trim()) body.webhook_secret = whsec.trim()
       await api('/api/admin/msgbill/global', { method: 'PUT', body })
       toast('msgbill глобал тохиргоо хадгалагдлаа'); onClose(); onDone()
     } catch (err) { toast(err.message, 'error') }
@@ -527,6 +541,16 @@ function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
         <Field label={mb.configured ? `API түлхүүр (тохируулсан: ${mb.source === 'db' ? 'UI' : '.env'} ${mb.key_hint || ''} — солих бол бичнэ)` : 'API түлхүүр (bsk_…)'}>
           <PasswordInput className="input font-mono text-xs" value={key}
             placeholder={mb.configured ? '••••••••••••' : 'bsk_live_…'} onChange={(e) => setKey(e.target.value)} />
+        </Field>
+        <Field label={mb.webhook_secret_set ? 'Webhook нууц (whsec_… — тохируулсан, солих бол бичнэ)' : 'Webhook нууц (whsec_…)'}>
+          <PasswordInput className="input font-mono text-xs" value={whsec}
+            placeholder={mb.webhook_secret_set ? '••••••••••••' : 'whsec_…'} onChange={(e) => setWhsec(e.target.value)} />
+          <div className="text-[11px] text-slate-500 mt-1">
+            msgbill → Developers → «Webhook endpoint нэмэх» дээр URL:{' '}
+            <span className="font-mono text-slate-300 select-all">{webhookUrl}</span>{' '}
+            <button type="button" className="text-accent" onClick={() => navigator.clipboard.writeText(webhookUrl)}>хуулах</button>
+            {' '}· events: receipt.created, receipt.cancelled. Нэмэхэд нэг удаа харуулах whsec_ нууцыг энд тавина.
+          </div>
         </Field>
         <div>
           <div className="label mb-1.5">Аль төлбөрийн аргад msgbill-ээр баримт үүсгэх</div>
@@ -557,6 +581,9 @@ function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
             {testing ? 'Турших…' : 'Турших (10₮)'}</button>
           <button className="btn-primary flex-1 justify-center">Хадгалах</button>
         </div>
+        <p className="text-[11px] text-slate-500">
+          Глобал тохиргоо .env-г дарна (прод серверт SSH-гүй тул эндээс удирдана).
+        </p>
       </form>
     </Modal>
   )

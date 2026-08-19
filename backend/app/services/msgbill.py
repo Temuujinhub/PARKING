@@ -272,36 +272,82 @@ async def get_receipt(acc: MsgbillAccount, msgbill_id: str) -> dict:
 
 
 async def cancel_receipt(acc: MsgbillAccount, msgbill_id: str, note: str = "") -> dict:
-    """Баримт цуцлах (буцаалт) — `DELETE {base}/partner/receipts/{id}`.
+    """Баримт цуцлах — `POST {base}/partner/receipts/{id}/cancel` (2026-08-19 msgbill-д нэмэгдэв).
 
-    2026-08-19 байдлаар msgbill Partner API-д цуцлах endpoint БАЙХГҮЙ (DELETE /
-    cancel / void / refund бүгд 404 «Cannot DELETE …»). msgbill талд нэмэгдмэгц
-    энэ функц шууд ажиллана; тэр хүртэл MsgbillError(code=NOT_SUPPORTED) өгнө —
-    дуудагч операторт «msgbill-ээс цуцлах боломж хараахан алга» гэж хэлнэ.
-    msgbill талын хэрэгжилт: PosAPI 3.0 `DELETE /rest/receipt {id: billId, date}`."""
+    Хариу: state=CANCELLED (шууд) эсвэл CANCEL_PENDING + error (ТЕГ түр амжилтгүй —
+    msgbill 10 мин тутам дахин оролдоно; эцсийн үр дүн GET эсвэл `receipt.cancelled`
+    webhook-оор). Идемпотент: аль хэдийн цуцалсан баримтад дахин дуудахад CANCELLED."""
     async with httpx.AsyncClient(timeout=settings.msgbill_timeout) as client:
-        resp = await client.request("DELETE", f"{acc.base_url}/partner/receipts/{msgbill_id}",
-                                    json={"note": note} if note else None, headers=_headers(acc))
+        resp = await client.post(f"{acc.base_url}/partner/receipts/{msgbill_id}/cancel",
+                                 json={"note": note} if note else None, headers=_headers(acc))
     if resp.status_code == 404:
         err = _err_from_response(resp)
-        if "Cannot DELETE" in str(err) or err.code == "NOT_FOUND":
-            raise MsgbillError("msgbill.mn Partner API-д баримт цуцлах endpoint хараахан байхгүй "
-                               "(DELETE /partner/receipts/{id} → 404). msgbill талд нэмэгдсэний "
-                               "дараа энэ товч ажиллана.", code="NOT_SUPPORTED", status=404)
+        if "Cannot POST" in str(err):
+            raise MsgbillError("msgbill.mn Partner API-д баримт цуцлах endpoint олдсонгүй "
+                               "(POST /partner/receipts/{id}/cancel → 404)", code="NOT_SUPPORTED", status=404)
         raise err
     if resp.status_code >= 400:
         raise _err_from_response(resp)
     data = resp.json() if resp.content else {}
-    return normalize(data if isinstance(data, dict) else {"state": "CANCELLED"})
+    return normalize(data if isinstance(data, dict) else {})
+
+
+# ── Webhook (msgbill → бид): X-Billing-Event, X-Billing-Signature = HMAC-SHA256(raw body, whsec_)
+def webhook_secrets(db) -> list[tuple[str, str]]:
+    """Мэдэгдэж буй бүх webhook нууц [(scope, whsec_…)] — глобал (DB → .env) + түрээслэгч бүр.
+    msgbill данс бүр өөрийн нууцтай тул ирсэн гарын үсгийг бүгдээр нь шалгана."""
+    from ..secretbox import decrypt_secret
+    out: list[tuple[str, str]] = []
+    try:
+        from .app_settings import MSGBILL_STATE, get_state
+        st = get_state(db, MSGBILL_STATE)
+        g = decrypt_secret((st.get("webhook_secret") or "").strip()) if st.get("webhook_secret") else ""
+    except Exception:  # noqa: BLE001
+        g = ""
+    g = g or (settings.msgbill_webhook_secret or "").strip()
+    if g:
+        out.append(("global", g))
+    try:
+        from ..models import Tenant
+        for t in db.query(Tenant).all():
+            sec = decrypt_secret((getattr(t, "msgbill_webhook_secret", None) or "").strip())
+            if sec:
+                out.append((f"tenant:{t.code}", sec))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def verify_signature(raw_body: bytes, signature: str | None, secrets_: list[tuple[str, str]]) -> str | None:
+    """Гарын үсэг таарсан нууцын scope-ийг буцаана, таарахгүй бол None."""
+    import hashlib
+    import hmac
+    sig = (signature or "").strip().lower()
+    if sig.startswith("sha256="):
+        sig = sig[7:]
+    if not sig:
+        return None
+    for scope, sec in secrets_:
+        calc = hmac.new(sec.encode(), raw_body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc, sig):
+            return scope
+    return None
 
 
 def status_info(db=None) -> dict:
     """Тохиргоо → Холболт → e-Barimt хэсэгт харуулах глобал төлөв (нууц задлахгүй)."""
     cfg = global_config(db)
     key = cfg["api_key"]
+    try:
+        from .app_settings import MSGBILL_STATE, get_state
+        _st = get_state(db, MSGBILL_STATE) if db is not None else {}
+    except Exception:  # noqa: BLE001
+        _st = {}
     return {
         "configured": bool(key),
         "source": cfg["source"],            # db = UI-аас, env = .env
+        "webhook_secret_set": bool(_st.get("webhook_secret") or (settings.msgbill_webhook_secret or "").strip()),
+        "webhook_path": "/api/payments/msgbill/webhook",
         "env_configured": bool((settings.msgbill_api_key or "").strip()),
         "test_key": key.startswith("bsk_test_"),
         "key_hint": (key[:9] + "…" + key[-4:]) if len(key) > 16 else ("тохируулсан" if key else None),

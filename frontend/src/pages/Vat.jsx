@@ -43,7 +43,9 @@ export default function Vat() {
     setCancelling(r.id)
     try {
       const res = await api(`/api/payments/${r.payment_id}/cancel-ebarimt`, { method: 'POST', body: { note } })
-      toast(`Баримт цуцлагдлаа (${(res.cancelled || []).length}) — шаардлагатай бол «Дахин үүсгэх» дарна уу`)
+      toast(res.ok
+        ? `Баримт цуцлагдлаа (${(res.cancelled || []).length}) — шаардлагатай бол «Дахин үүсгэх» дарна уу`
+        : (res.error || 'Цуцлалт хүлээгдэж байна'), res.ok ? undefined : 'error')
       reloadRows()
     } catch (e) { toast(e.message, 'error') } finally { setCancelling(null) }
   }
@@ -107,7 +109,7 @@ export default function Vat() {
               {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : 'PosAPI'}</div>}
             </td>
             <td className={`td text-[11px] max-w-[14rem] break-words ${r.status === 'CANCELLED' ? 'text-slate-400' : 'text-amber-400'}`}>
-              {r.status === 'FAILED' || r.status === 'CANCELLED' ? (r.receipt_url || '—') : ''}
+              {['FAILED', 'CANCELLED', 'CANCEL_PENDING'].includes(r.status) ? (r.receipt_url || '—') : ''}
             </td>
             <td className="td whitespace-nowrap">
               <div className="flex items-center gap-1">
@@ -125,11 +127,11 @@ export default function Vat() {
                     {retrying === r.id ? '…' : 'Дахин үүсгэх'}
                   </button>
                 )}
-                {r.status === 'SENT' && r.ebarimt_id && (
+                {(r.status === 'SENT' || r.status === 'CANCEL_PENDING') && r.ebarimt_id && (
                   <button className="btn-secondary py-1 px-2 text-xs text-red-400" disabled={cancelling === r.id}
                     onClick={() => cancel(r)}
-                    title="Баримтыг ТЕГ-т буцааж (цуцалж) CANCELLED болгоно — мөнгө буцаахгүй">
-                    <Ban size={12} /> {cancelling === r.id ? '…' : 'Цуцлах'}
+                    title={r.status === 'CANCEL_PENDING' ? 'msgbill дээр хүлээгдэж буй цуцлалтын төлөвийг шалгана' : 'Баримтыг ТЕГ-т буцааж (цуцалж) CANCELLED болгоно — мөнгө буцаахгүй'}>
+                    <Ban size={12} /> {cancelling === r.id ? '…' : r.status === 'CANCEL_PENDING' ? 'Шалгах' : 'Цуцлах'}
                   </button>
                 )}
               </div>

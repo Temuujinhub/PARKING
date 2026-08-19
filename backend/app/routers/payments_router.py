@@ -1,4 +1,5 @@
 """Төлбөр: QPay invoice/webhook, e-Barimt 3.0, кассын бэлэн мөнгө, PAX POS баталгаажуулалт."""
+import json
 import logging
 import hmac
 import re
@@ -913,13 +914,28 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
     (мөнгө) хөндөгдөхгүй — зөвхөн татварын баримт. Дараа нь «Дахин үүсгэх»
     шинэ баримт гаргана (retry_ebarimt CANCELLED-ийг алгасдаг)."""
     recs = (db.query(VatReceipt)
-            .filter(VatReceipt.payment_id == payment.id, VatReceipt.status == "SENT",
+            .filter(VatReceipt.payment_id == payment.id,
+                    VatReceipt.status.in_(["SENT", "CANCEL_PENDING"]),
                     VatReceipt.ebarimt_id.isnot(None)).all())
     if not recs:
         return {"ok": False, "error": "Цуцлах ИЛГЭЭГДСЭН баримт олдсонгүй"}
     site = _site_of(payment)
-    cancelled, errors = [], []
+    cancelled, errors, pending = [], [], []
     for rec in recs:
+        if rec.status == "CANCEL_PENDING" and rec.provider == "MSGBILL" and rec.provider_ref:
+            # Хүлээгдэж буй цуцлалтын төлөвийг GET-ээр шалгана (дахин cancel илгээхгүй)
+            try:
+                g = await msgbill.get_receipt(msgbill.api_key_for(site), rec.provider_ref)
+                if g.get("state") == "CANCELLED":
+                    rec.status = "CANCELLED"
+                    rec.receipt_url = (note or "Цуцлав")[:200]
+                    cancelled.append(rec.ebarimt_id)
+                else:
+                    pending.append(rec.ebarimt_id)
+                    rec.receipt_url = (f"Цуцлалт хүлээгдэж байна (msgbill {g.get('state')}): {g.get('error') or ''}")[:200]
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"MSGBILL: {_ebarimt_err(e)}")
+            continue
         prov = rec.provider or ("QPAY" if payment.provider == "QPAY" and payment.provider_payment_id
                                 else "POSAPI")
         try:
@@ -934,7 +950,16 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
                     raise RuntimeError("msgbill түлхүүр тохируулаагүй")
                 if not rec.provider_ref:
                     raise RuntimeError("msgbill баримтын ID (provider_ref) алга")
-                await msgbill.cancel_receipt(acc, rec.provider_ref, note)
+                r = await msgbill.cancel_receipt(acc, rec.provider_ref, note)
+                if r.get("state") == "CANCEL_PENDING":
+                    # ТЕГ түр амжилтгүй — msgbill 10 мин тутам дахин оролдоно;
+                    # receipt.cancelled webhook эсвэл дараагийн «Цуцлах» дарахад GET-ээр эцэслэнэ
+                    rec.status = "CANCEL_PENDING"
+                    rec.receipt_url = (f"Цуцлалт хүлээгдэж байна (msgbill): {r.get('error') or ''}")[:200]
+                    pending.append(rec.ebarimt_id)
+                    continue
+                if r.get("state") not in ("CANCELLED", ""):
+                    raise RuntimeError(f"msgbill төлөв {r.get('state')}: {r.get('error') or ''}")
             else:
                 date = (rec.created_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S")
                 if not await ebarimt.delete_receipt(rec.ebarimt_id, date):
@@ -947,8 +972,61 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
         ebarimt.cache_qr(payment.id, None)
         cancelled.append(rec.ebarimt_id)
     db.commit()
-    return {"ok": bool(cancelled) and not errors, "cancelled": cancelled,
-            "error": "; ".join(errors) or None}
+    err = "; ".join(errors) or None
+    if pending and not err:
+        err = ("ТЕГ түр хариу өгсөнгүй — цуцлалт msgbill дээр хүлээгдэж байна (10 мин тутам "
+               "автоматаар дахин оролдоно); дараа нь «Цуцлах» дахин дарж шалгана уу")
+    return {"ok": bool(cancelled) and not errors and not pending, "cancelled": cancelled,
+            "pending": pending, "error": err}
+
+
+@router.post("/msgbill/webhook")
+async def msgbill_webhook(request: Request, db: Session = Depends(get_db)):
+    """msgbill.mn webhook — `receipt.created` / `receipt.cancelled` / `payment.succeeded`.
+
+    Толгой: X-Billing-Event, X-Billing-Signature = HMAC-SHA256(түүхий биет, whsec_) hex.
+    Нууц: глобал (Тохиргоо → Холболт → msgbill / .env) + түрээслэгч бүрийнх — бүгдээр
+    нь шалгана; таарахгүй бол 401. 10 сек дотор 2xx буцаах ёстой (msgbill амжилтгүй
+    бол 1 удаа дахин илгээнэ — at-least-once тул идемпотент).
+      receipt.created   → provider_ref=receipt_id баримт: ebarimt_id/lottery/SENT
+      receipt.cancelled → CANCELLED
+      payment.succeeded → (нэхэмжлэхийн үйлчилгээ — бидэнд хамаагүй) 200"""
+    raw = await request.body()
+    scope = msgbill.verify_signature(raw, request.headers.get("X-Billing-Signature"),
+                                     msgbill.webhook_secrets(db))
+    if scope is None:
+        log.warning("msgbill webhook: гарын үсэг таарсангүй (event=%s)",
+                    request.headers.get("X-Billing-Event"))
+        raise HTTPException(401, "Webhook гарын үсэг буруу — whsec_ нууцыг Тохиргоо → Холболт → msgbill-д тавина уу")
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(400, "JSON биш")
+    event = str(body.get("event") or request.headers.get("X-Billing-Event") or "")
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    rid = str(data.get("receipt_id") or "")
+    if event in ("receipt.created", "receipt.cancelled") and rid:
+        recs = db.query(VatReceipt).filter(VatReceipt.provider_ref == rid).all()
+        for rec in recs:
+            if event == "receipt.created":
+                if rec.status == "CANCELLED":
+                    continue   # аль хэдийн цуцалсан — хуучирсан мэдэгдэл
+                rec.ebarimt_id = data.get("receipt_no") or rec.ebarimt_id
+                if not rec.customer_tin and data.get("lottery"):
+                    rec.lottery_code = data.get("lottery")
+                if rec.ebarimt_id:
+                    rec.status, rec.receipt_url, rec.provider = "SENT", None, "MSGBILL"
+            else:
+                rec.status = "CANCELLED"
+                rec.receipt_url = "msgbill webhook: receipt.cancelled"
+                ebarimt.cache_qr(rec.payment_id, None)
+        db.add(AuditLog(username="msgbill-webhook", action="MSGBILL_WEBHOOK", entity="vat_receipt",
+                        entity_id=rid, detail={"event": event, "scope": scope,
+                                               "matched": len(recs), "receipt_no": data.get("receipt_no")}))
+        db.commit()
+        log.info("msgbill webhook %s receipt=%s → %d баримт шинэчлэв (%s)", event, rid, len(recs), scope)
+        return {"ok": True, "matched": len(recs)}
+    return {"ok": True, "ignored": event}
 
 
 @router.post("/{payment_id}/cancel-ebarimt")

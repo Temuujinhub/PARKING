@@ -26,6 +26,21 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — msgbill цуцлах API + webhook холболт
+
+msgbill.mn-д `POST /partner/receipts/:id/cancel` ба webhook (`receipt.created` /
+`receipt.cancelled` / `payment.succeeded`, `X-Billing-Signature` HMAC-SHA256) нэмэгдэв.
+Бодит туршилт: тест баримт #5 (10₮ CARD) cancel → `CANCELLED` (идемпотент, GET ч CANCELLED).
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | `msgbill.cancel_receipt` → `POST …/cancel`; `CANCELLED` → баримт CANCELLED, `CANCEL_PENDING` (ТЕГ түр амжилтгүй) → баримт CANCEL_PENDING, дараагийн «Шалгах» дарахад GET-ээр эцэслэнэ (msgbill 10 мин тутам өөрөө retry) | ⏳ | ⏳ | ⏳ |
+| feat | **`POST /api/payments/msgbill/webhook`** — гарын үсгийг глобал + түрээслэгч бүрийн whsec_-ээр шалгана (401 таарахгүй бол); `receipt.created` → provider_ref-ээр VatReceipt SENT/ДДТД/сугалаа; `receipt.cancelled` → CANCELLED; идемпотент, audit MSGBILL_WEBHOOK | ⏳ | ⏳ | ⏳ |
+| feat | Webhook нууц: глобал (`PUT /admin/msgbill/global {webhook_secret}`, .env `PARKING_MSGBILL_WEBHOOK_SECRET`) + `tenants.msgbill_webhook_secret`; UI модалуудад whsec_ талбар + webhook URL хуулах | ⏳ | ⏳ | ⏳ |
+| test | `test_ebarimt_cancel.py` 16 (cancel POST, CANCEL_PENDING→GET, NOT_SUPPORTED, гарын үсэг); дев DB дээр webhook e2e (401/200/created/cancelled) | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — PosAPI MOCK хуурамч баримтыг зогсоов; msgbill бүх аргад; бодит туршилт
 
 Прод дээр бэлэн/картын (Хангарьд г.м) баримтууд «Илгээсэн» + 40 оронтой ДДТД-тэй

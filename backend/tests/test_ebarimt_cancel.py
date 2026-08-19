@@ -87,20 +87,38 @@ async def run():
     check("ok", res["ok"] and rec.status == "CANCELLED")
     check("delete_receipt(billId, date)", seen["posapi"] == ("BILL2", "2026-08-19 10:00:00"))
 
-    print("\nMSGBILL баримт — цуцлах API байхгүй (404 Cannot DELETE):")
-    FakeClient.responses = [FakeResp(404, {"code":"NOT_FOUND","message_mn":"Cannot DELETE /api/v1/partner/receipts/abc"})]
+    print("\nMSGBILL баримт — POST /cancel → CANCELLED:")
+    FakeClient.responses = [FakeResp(200, {"id":"abc","state":"CANCELLED","receipt_no":"BILL3","error":None})]
     rec = Rec(id="R3", payment_id="P1", ebarimt_id="BILL3", status="SENT", provider="MSGBILL", provider_ref="abc",
               receipt_url=None, created_at=datetime(2026,8,19,10,0), lottery_code=None)
     db = FakeDB([rec]); res = await pr.cancel_ebarimt(db, pay(provider="TRANSFER", payment_method="TRANSFER", provider_payment_id=None), "x")
-    check("ok=False, SENT хэвээр", not res["ok"] and rec.status == "SENT")
-    check("алдаанд «хараахан байхгүй»", "хараахан байхгүй" in (res["error"] or ""))
-    check("DELETE /partner/receipts/abc дуудсан", FakeClient.calls[-1] == ("DELETE", "https://msgbill.mn/api/v1/partner/receipts/abc"))
+    check("ok + CANCELLED", res["ok"] and rec.status == "CANCELLED")
+    check("POST /partner/receipts/abc/cancel дуудсан", FakeClient.calls[-1] == ("POST", "https://msgbill.mn/api/v1/partner/receipts/abc/cancel"))
 
-    print("\nMSGBILL — msgbill цуцлах нэмэгдсэн үед (200):")
-    FakeClient.responses = [FakeResp(200, {"id":"abc","state":"CANCELLED"})]
+    print("\nMSGBILL — CANCEL_PENDING (ТЕГ түр амжилтгүй) → хүлээгдэнэ, дараа GET-ээр эцэслэнэ:")
+    FakeClient.responses = [FakeResp(200, {"id":"abc","state":"CANCEL_PENDING","receipt_no":"BILL3","error":"ТЕГ timeout"})]
     rec.status = "SENT"; db = FakeDB([rec])
     res = await pr.cancel_ebarimt(db, pay(provider="TRANSFER", payment_method="TRANSFER", provider_payment_id=None), "x")
-    check("ok + CANCELLED", res["ok"] and rec.status == "CANCELLED")
+    check("ok=False, CANCEL_PENDING, pending жагсаалт", not res["ok"] and rec.status == "CANCEL_PENDING" and res["pending"] == ["BILL3"])
+    FakeClient.responses = [FakeResp(200, {"id":"abc","state":"CANCELLED","receipt_no":"BILL3"})]
+    FakeQuery.all = lambda self: [r for r in self.rows if r.status in ("SENT","CANCEL_PENDING") and r.ebarimt_id]
+    res = await pr.cancel_ebarimt(db, pay(provider="TRANSFER", payment_method="TRANSFER", provider_payment_id=None), "x")
+    check("дахин дарахад GET → CANCELLED", res["ok"] and rec.status == "CANCELLED" and FakeClient.calls[-1][0] == "GET")
+
+    print("\nMSGBILL — cancel endpoint байхгүй (404 Cannot POST) → NOT_SUPPORTED:")
+    FakeClient.responses = [FakeResp(404, {"code":"NOT_FOUND","message_mn":"Cannot POST /api/v1/partner/receipts/abc/cancel"})]
+    rec.status = "SENT"; db = FakeDB([rec])
+    res = await pr.cancel_ebarimt(db, pay(provider="TRANSFER", payment_method="TRANSFER", provider_payment_id=None), "x")
+    check("ok=False, SENT хэвээр, олдсонгүй мессеж", not res["ok"] and rec.status == "SENT" and "олдсонгүй" in (res["error"] or ""))
+
+    print("\nWebhook гарын үсэг + receipt.created/cancelled:")
+    import hashlib, hmac, json as _json
+    body = _json.dumps({"event":"receipt.created","created_at":"x","data":{"receipt_id":"abc","receipt_no":"NEWBILL","lottery":"AB 1"}}).encode()
+    sig = hmac.new(b"whsec_TEST", body, hashlib.sha256).hexdigest()
+    check("зөв нууц → scope", msgbill.verify_signature(body, sig, [("global","whsec_TEST")]) == "global")
+    check("sha256= угтвартай ч таарна", msgbill.verify_signature(body, "sha256="+sig, [("t:X","whsec_other"),("global","whsec_TEST")]) == "global")
+    check("буруу нууц → None", msgbill.verify_signature(body, sig, [("global","whsec_WRONG")]) is None)
+    check("хоосон гарын үсэг → None", msgbill.verify_signature(body, None, [("global","whsec_TEST")]) is None)
 
     print("\nSENT баримтгүй:")
     db = FakeDB([Rec(id="R4", payment_id="P1", ebarimt_id=None, status="FAILED", provider="QPAY", provider_ref=None, receipt_url="e", created_at=None, lottery_code=None)])

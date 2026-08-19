@@ -43,7 +43,7 @@ const badgeLabels = {
   OPEN: 'Зогсож байна', AWAITING_PAYMENT: 'Төлбөр хүлээж буй', PAID: 'Төлсөн',
   CLOSED: 'Гарсан', FREE: 'Үнэгүй гарсан', MANUAL_CLOSED: 'Гарах уншилтгүй',
   PENDING: 'Хүлээгдэж буй', FAILED: 'Амжилтгүй', SUCCESS: 'Амжилттай', SENT: 'Илгээсэн',
-  REVIEW: 'Шалгах шаардлагатай', active: 'Идэвхтэй', CANCELLED: 'Цуцалсан',
+  REVIEW: 'Шалгах шаардлагатай', active: 'Идэвхтэй', CANCELLED: 'Цуцалсан', CANCEL_PENDING: 'Цуцлалт хүлээгдэж буй',
 }
 
 export function Badge({ value }) {

@@ -163,6 +163,10 @@ class Settings(BaseSettings):
     # Анхдагч = ALL (дансаар/бэлэн/карт бүгд msgbill — PosAPI суугаагүй тул).
     msgbill_methods: str = "ALL"
     msgbill_timeout: float = 20
+    # msgbill webhook нууц (whsec_…) — Dashboard → Developers → Webhook endpoint нэмэхэд
+    # НЭГ удаа харуулна. Endpoint: {public_base_url}/api/payments/msgbill/webhook.
+    # UI-аас (Тохиргоо → Холболт → msgbill) тавьж болно — DB утга .env-г дарна.
+    msgbill_webhook_secret: str = ""
 
     # Ээлж солигдох цаг (0–23) — "ээлжээр" тайланд өдрийг энэ цагаар тасалж бүлэглэнэ
     # (жишээ: 9 = өглөө 9ц-аас маргааш 9ц хүртэл нэг ээлжийн өдөр). Шөнө дундаар биш.

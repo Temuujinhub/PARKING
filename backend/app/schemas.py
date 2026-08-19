@@ -209,3 +209,4 @@ class TenantUpdate(_In):
     qpay_branch_code: str | None = None
     qpay_district_code: str | None = None
     msgbill_api_key: str | None = None
+    msgbill_webhook_secret: str | None = None
