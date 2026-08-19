@@ -42,12 +42,12 @@ API (`POST /api/v1/partner/receipts`, X-Api-Key + Idempotency-Key) нь ДДТД
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| feat | **`services/msgbill.py`** — Partner API client (create/get receipt, алдааны `{code,message_mn}` формат, normalize→`billId/lottery/qrData/msgbillId/state`). Түлхүүрийн шатлал `api_key_for`: түрээслэгч → глобал .env; **өөрийн QPay данстай түрээслэгч глобал руу УНАХГҮЙ** (өөр ТТД-ээр баримт гарахаас сэргийлнэ) | ⏳ | ⏳ | ⏳ |
-| feat | `_finalize_paid`/`retry_ebarimt`: QPay-ээр төлөөгүй төлбөрт `PARKING_MSGBILL_METHODS` (анхдагч **TRANSFER** = дансаар/online operator) багтсан бол msgbill-ээр — `TRANSFER→BANK_TRANSFER`, ААН ТТД→`ORGANIZATION+payer_reg_no`, Idempotency-Key=`pay-<payment_id>`. Өр багтсан үед өр бүрд тусдаа баримт | ⏳ | ⏳ | ⏳ |
-| feat | `vat_receipts.provider` (POSAPI/QPAY/MSGBILL) + `provider_ref` (msgbill id); `tenants.msgbill_api_key` (шифрлэгдсэн, serializer нууцална); миграци автомат | ⏳ | ⏳ | ⏳ |
-| feat | **Тохиргоо → Холболт → «e-Barimt API — msgbill.mn»** панел: глобал түлхүүрийн төлөв, түрээслэгч бүрийн түлхүүр (Түлхүүр/Засах/Салгах), «Турших» (`POST /api/admin/msgbill/test`, 10₮; тест түлхүүр симуляц). `PUT /api/admin/tenants/{id}` `msgbill_api_key` хүлээн авна (bsk_ шалгалт) | ⏳ | ⏳ | ⏳ |
-| ops | `.env.example`: `PARKING_MSGBILL_API_KEY`, `PARKING_MSGBILL_METHODS`. Прод .env-д түлхүүр тавьж restart хийх ХЭРЭГТЭЙ (эсвэл UI-аас түрээслэгчид тавина — restart шаардлагагүй) | ⏳ | ⏳ | ⏳ |
-| test | `tests/test_msgbill_ebarimt.py` (35) — normalize, шатлал, TRANSFER→msgbill, CASH/QPay хуучин зам, FAILED/429 үед PAID хэвээр, retry GET→POST | ⏳ | ⏳ | ⏳ |
+| feat | **`services/msgbill.py`** — Partner API client (create/get receipt, алдааны `{code,message_mn}` формат, normalize→`billId/lottery/qrData/msgbillId/state`). Түлхүүрийн шатлал `api_key_for`: түрээслэгч → глобал .env; **өөрийн QPay данстай түрээслэгч глобал руу УНАХГҮЙ** (өөр ТТД-ээр баримт гарахаас сэргийлнэ) | `b862ede` | ✅ 08-19 | ⏳ |
+| feat | `_finalize_paid`/`retry_ebarimt`: QPay-ээр төлөөгүй төлбөрт `PARKING_MSGBILL_METHODS` (анхдагч **TRANSFER** = дансаар/online operator) багтсан бол msgbill-ээр — `TRANSFER→BANK_TRANSFER`, ААН ТТД→`ORGANIZATION+payer_reg_no`, Idempotency-Key=`pay-<payment_id>`. Өр багтсан үед өр бүрд тусдаа баримт | `b862ede` | ✅ 08-19 | ⏳ |
+| feat | `vat_receipts.provider` (POSAPI/QPAY/MSGBILL) + `provider_ref` (msgbill id); `tenants.msgbill_api_key` (шифрлэгдсэн, serializer нууцална); миграци автомат | `b862ede` | ✅ 08-19 | ⏳ |
+| feat | **Тохиргоо → Холболт → «e-Barimt API — msgbill.mn»** панел: глобал түлхүүрийн төлөв, түрээслэгч бүрийн түлхүүр (Түлхүүр/Засах/Салгах), «Турших» (`POST /api/admin/msgbill/test`, 10₮; тест түлхүүр симуляц). `PUT /api/admin/tenants/{id}` `msgbill_api_key` хүлээн авна (bsk_ шалгалт) | `b862ede` | ✅ 08-19 | ⏳ |
+| ops | `.env.example`: `PARKING_MSGBILL_API_KEY`, `PARKING_MSGBILL_METHODS`. Прод .env-д түлхүүр тавьж restart хийх ХЭРЭГТЭЙ (эсвэл UI-аас түрээслэгчид тавина — restart шаардлагагүй) | `b862ede` | ✅ 08-19 | ⏳ |
+| test | `tests/test_msgbill_ebarimt.py` (35) — normalize, шатлал, TRANSFER→msgbill, CASH/QPay хуучин зам, FAILED/429 үед PAID хэвээр, retry GET→POST | `b862ede` | ✅ 08-19 | ⏳ |
 
 ---
 
