@@ -26,6 +26,23 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — PosAPI MOCK хуурамч баримтыг зогсоов; msgbill бүх аргад; бодит туршилт
+
+Прод дээр бэлэн/картын (Хангарьд г.м) баримтууд «Илгээсэн» + 40 оронтой ДДТД-тэй
+харагдаж байсан нь PosAPI суугаагүй үеийн **MOCK хуурамч баримт** байв. msgbill.mn
+merchant бүртгэл (ТТД 15200020090) хийгдсэнээр бодит туршилт: CASH/CARD/BANK_TRANSFER
+бүгд **CREATED** (ДДТД 0291002441…, сугалаа XA…, QR). Өмнө FAILED байсан баримтыг
+msgbill авто retry хийж CREATED болгосон — «Дахин үүсгэх» GET-ээр нөхнө.
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | **`PARKING_EBARIMT_MOCK_RECEIPTS=false` (шинэ, анхдагч)** — PosAPI MOCK + msgbill түлхүүргүй үед хуурамч SENT баримт ҮҮСГЭХГҮЙ; VatReceipt FAILED «суваг байхгүй…» (дараа msgbill тохируулаад «Дахин үүсгэх»). Тест/демо серверт л true | ⏳ | ⏳ | ⏳ |
+| feat | `PARKING_MSGBILL_METHODS` анхдагч **ALL** (бэлэн/карт/дансаар бүгд msgbill). UI-д «TRANSFER» гэж хадгалсан бол Тохиргоо → Холболт → msgbill → Засах-аас бүгдийг сонгоно | ⏳ | ⏳ | ⏳ |
+| fix | Нөхөн төлбөр (өр) кассаар төлөх `/compensations/{id}/pay`: msgbill → PosAPI → суваггүй; **VatReceipt бүртгэдэг болов** (өмнө нь Ибаримт хуудсанд огт харагддаггүй байв) | ⏳ | ⏳ | ⏳ |
+| test | msgbill 38, finalize 15, cancel 11 PASS; бодит 10₮ × 3 арга CREATED | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — Ибаримт хуудас: «Цуцлах» + цуцалсны дараа «Дахин үүсгэх»
 
 msgbill.mn Partner API-д баримт цуцлах endpoint **байхгүй** (DELETE / cancel /

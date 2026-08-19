@@ -23,6 +23,7 @@ from app.config import settings
 settings.barrier_mock = True
 settings.qpay_mock = True
 settings.ebarimt_mock = True
+settings.ebarimt_mock_receipts = True  # тестэд MOCK баримт (SENT) хэрэгтэй
 
 from fastapi.testclient import TestClient  # noqa: E402
 

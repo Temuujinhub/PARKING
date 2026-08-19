@@ -24,6 +24,7 @@ settings.partner_keys = "toki:TESTKEY1,easywallet:TESTKEY2"
 settings.barrier_mock = True  # хаалт руу бодит команд явуулахгүй
 settings.qpay_mock = True
 settings.ebarimt_mock = True
+settings.ebarimt_mock_receipts = True  # тестэд MOCK баримт (SENT) хэрэгтэй
 
 from fastapi.testclient import TestClient  # noqa: E402
 

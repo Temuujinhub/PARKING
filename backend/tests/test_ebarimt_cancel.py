@@ -65,7 +65,7 @@ class FakeClient:
         FakeClient.calls.append(("GET", url)); return FakeClient.responses.pop(0)
 
 async def run():
-    settings.qpay_mock = True; settings.ebarimt_mock = True
+    settings.qpay_mock = True; settings.ebarimt_mock = True; settings.ebarimt_mock_receipts = True
     settings.msgbill_api_key = "bsk_live_X"; settings.msgbill_methods = "TRANSFER"; settings.secret_enc_key = ""
     msgbill.httpx.AsyncClient = FakeClient
     seen = {}

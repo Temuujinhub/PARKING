@@ -71,6 +71,9 @@ class FakeDB:
 async def run():
     settings.qpay_mock = True   # qpay.create_ebarimt / ebarimt.create_receipt mock буцаана
     settings.qpay_ebarimt = True
+    settings.ebarimt_mock = True
+    settings.ebarimt_mock_receipts = True  # тестэд локал MOCK баримт хэрэгтэй
+    settings.msgbill_api_key = ""          # msgbill-гүй → локал PosAPI зам
 
     # mark_paid_and_open-ыг хаалт руу хүрэхээс сэргийлж fake болгоно
     called = {"barrier": 0}

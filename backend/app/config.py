@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     ebarimt_district_code: str = "3420"
     ebarimt_classification_code: str = "6743000"  # GS1: Автомашины зогсоолын үйлчилгээ
     ebarimt_mock: bool = True
+    # MOCK үед ХУУРАМЧ (SENT харагдах) баримт үүсгэх үү? Анхдагч FALSE (2026-08-19):
+    # прод дээр PosAPI суугаагүй атлаа кассын/картын баримт «Илгээсэн» гэж хуурамч
+    # ДДТД-тэй гарч байв. Одоо тийм нөхцөлд баримт FAILED («суваг байхгүй») болж,
+    # msgbill түлхүүр тохируулсны дараа «Дахин үүсгэх»-ээр нөхөгдөнө. Зөвхөн
+    # демо/тест серверт true болгоно.
+    ebarimt_mock_receipts: bool = False
 
     # msgbill.mn Partner API — «Үйлчилгээ 3: eBarimt API» (services/msgbill.py).
     # QPay-ээр төлөөгүй (дансаар/бэлэн/карт) төлбөрт локал PosAPI-ийн ОРОНД
@@ -154,8 +160,8 @@ class Settings(BaseSettings):
     msgbill_base_url: str = "https://msgbill.mn/api/v1"
     msgbill_api_key: str = ""
     # Аль төлбөрийн аргад msgbill ашиглах: таслалаар (TRANSFER,CASH,CARD) эсвэл ALL.
-    # Анхдагч = зөвхөн ДАНСААР (online operator) — карт/бэлэн PosAPI хэвээр.
-    msgbill_methods: str = "TRANSFER"
+    # Анхдагч = ALL (дансаар/бэлэн/карт бүгд msgbill — PosAPI суугаагүй тул).
+    msgbill_methods: str = "ALL"
     msgbill_timeout: float = 20
 
     # Ээлж солигдох цаг (0–23) — "ээлжээр" тайланд өдрийг энэ цагаар тасалж бүлэглэнэ

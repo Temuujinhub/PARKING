@@ -141,21 +141,15 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
     comp.status = "PAID"
     comp.paid_at = datetime.utcnow()
     comp.paid_by = user.username
-    # e-Barimt (амжилтгүй байсан ч төлбөрийг хаана) — локал PosAPI, НӨАТ үнэд багтсан
     amount = float(comp.amount)
     vat = round(amount * settings.vat_rate / (1 + settings.vat_rate))
     tin = str(body.get("customer_tin") or "").strip()[:20] or None
-    receipt = {}
-    try:
-        receipt = await ebarimt.create_receipt(amount, vat, "CASH" if method == "CASH" else "CARD",
-                                                customer_tin=tin)
-        ebarimt.cache_qr(comp.id, receipt.get("qrData"))
-    except Exception as e:  # noqa: BLE001
-        log.error(f"нөхөн төлбөрийн e-Barimt амжилтгүй: {comp_id}: {e}")
+    pm = "CASH" if method == "CASH" else "CARD"
     # ТӨЛБӨРИЙН БИЧИЛТ — өмнө нь энд Payment мөр үүсгэдэггүй байсан тул кассчны
     # цуглуулсан өрийн БЭЛЭН МӨНГӨ орлогын тайлан, ээлжийн тооцоо, мөнгөн
     # тооцоонд ОГТ харагддаггүй байв (2026-08-09-нд илрүүлэв). Одоо ердийн
     # төлбөртэй адил бүртгэгдэж, ээлжид холбогдоно.
+    pay = None
     if comp.session_id:
         shift = (db.query(CashierShift)
                  .filter(CashierShift.user_id == user.id,
@@ -163,18 +157,56 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
         pay = Payment(
             session_id=comp.session_id,
             provider="CASH" if method == "CASH" else "POS",
-            payment_method="CASH" if method == "CASH" else "CARD",
+            payment_method=pm,
             source="POS",
             sender_invoice_no=f"DEBT-{comp.id[:8].upper()}-{datetime.utcnow():%Y%m%d%H%M%S}",
             amount=amount, vat_amount=vat, status="PAID", paid_at=comp.paid_at,
             cashier_id=user.id, shift_id=shift.id if shift else None,
-            customer_tin=tin,
+            customer_tin=tin, ebarimt_receiver_type="COMPANY" if tin else "CITIZEN",
         )
         db.add(pay)
         db.flush()
         comp.payment_id = pay.id
     else:
         log.warning(f"нөхөн төлбөр {comp_id} session-гүй — Payment бичилт үүсгэсэнгүй")
+
+    # e-Barimt (амжилтгүй байсан ч төлбөрийг хаана) — 2026-08-19: msgbill.mn
+    # (зогсоол/түрээслэгчийн түлхүүр) → локал PosAPI → суваг байхгүй бол FAILED
+    # (хуурамч MOCK баримт үүсгэхгүй). VatReceipt-д бүртгэж Ибаримт хуудсанд
+    # харагдуулна (өмнө нь огт бүртгэдэггүй байв).
+    from ..models import ParkingSite, VatReceipt
+    from ..services import msgbill
+    site = db.get(ParkingSite, comp.site_id) if comp.site_id else None
+    mb_acc = msgbill.account_enabled_for(site, pm)
+    receipt, rec_err, rec_provider = {}, None, "POSAPI"
+    try:
+        if mb_acc is not None:
+            rec_provider = "MSGBILL"
+            receipt = await msgbill.create_receipt(
+                mb_acc, amount, description=f"Зогсоолын өр · {comp.plate_number or ''} · "
+                                            f"{getattr(site, 'name', '') or ''}",
+                payment_method=pm, idempotency_key=f"comp-{comp.id}", customer_tin=tin)
+            if not receipt.get("billId"):
+                rec_err = receipt.get("error") or f"msgbill төлөв {receipt.get('state') or '?'}"
+        elif settings.ebarimt_mock and not settings.ebarimt_mock_receipts:
+            rec_err = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), msgbill түлхүүр "
+                       "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API")
+        else:
+            receipt = await ebarimt.create_receipt(amount, vat, pm, customer_tin=tin)
+        ebarimt.cache_qr(comp.id, receipt.get("qrData"))
+        if pay is not None:
+            ebarimt.cache_qr(pay.id, receipt.get("qrData"))
+    except Exception as e:  # noqa: BLE001
+        rec_err = str(e)[:200]
+        log.error(f"нөхөн төлбөрийн e-Barimt амжилтгүй: {comp_id}: {e}")
+    if pay is not None:
+        db.add(VatReceipt(
+            payment_id=pay.id, session_id=comp.session_id,
+            ebarimt_id=receipt.get("billId"),
+            lottery_code=None if tin else receipt.get("lottery"),
+            amount=amount, vat_amount=vat, customer_tin=tin,
+            status="SENT" if receipt.get("billId") else "FAILED",
+            receipt_url=rec_err, provider=rec_provider, provider_ref=receipt.get("msgbillId")))
     db.add(AuditLog(username=user.username, action="COMPENSATION_PAID", entity="compensation",
                     entity_id=comp_id,
                     detail={"plate": comp.plate_number, "amount": amount, "method": method}))

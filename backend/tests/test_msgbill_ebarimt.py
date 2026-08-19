@@ -108,6 +108,7 @@ async def run():
     settings.qpay_mock = True
     settings.qpay_ebarimt = True
     settings.ebarimt_mock = True
+    settings.ebarimt_mock_receipts = True  # тестэд MOCK баримт (SENT) хэрэгтэй
     settings.msgbill_api_key = "bsk_live_TEST"
     settings.msgbill_methods = "TRANSFER"
     settings.secret_enc_key = ""   # decrypt plaintext-ийг байгаагаар нь
@@ -240,6 +241,19 @@ async def run():
     db = FakeDB(); p = FakePayment(id="PAY_NOKEY", site=site_plain)
     await pr._finalize_paid(db, p)
     check("локал зам", seen["local"] == 1 and len(FakeClient.calls) == 0)
+
+    print("\nmsgbill түлхүүргүй + PosAPI MOCK (mock_receipts=False) → ХУУРАМЧ баримт ҮҮСГЭХГҮЙ, FAILED:")
+    settings.ebarimt_mock_receipts = False
+    seen["local"] = 0
+    db = FakeDB(); p = FakePayment(id="PAY_NOCH", provider="CASH", payment_method="CASH", site=site_plain)
+    await pr._finalize_paid(db, p)
+    rec = db.store["receipt"]
+    check("PAID хэвээр (хаалт нээгдэнэ)", p.status == "PAID")
+    check("VatReceipt FAILED + «суваг байхгүй», ДДТД байхгүй, локал дуудаагүй",
+          rec.status == "FAILED" and "суваг байхгүй" in (rec.receipt_url or "") and not rec.ebarimt_id and seen["local"] == 0)
+    res = await pr.retry_ebarimt(db, FakePayment(id="PAY_NOCH", provider="CASH", payment_method="CASH", status="PAID", site=site_plain))
+    check("retry ч суваг байхгүй гэж FAILED", not res.get("ok") and "суваг байхгүй" in res.get("error", ""))
+    settings.ebarimt_mock_receipts = True
 
     ebarimt.create_receipt, qpay.create_ebarimt = orig_local, orig_qpay
     msgbill._tenant_of = orig_tenant_of

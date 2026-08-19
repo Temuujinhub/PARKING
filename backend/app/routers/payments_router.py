@@ -141,15 +141,27 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     mb_acc = None if use_qpay_eb else msgbill.account_enabled_for(
         _site_of(payment), payment.payment_method)
     use_msgbill = mb_acc is not None
-    if settings.ebarimt_mock and not use_qpay_eb and not use_msgbill:
+    # PosAPI суугаагүй (MOCK) + msgbill түлхүүргүй → хуурамч баримт ҮҮСГЭХГҮЙ,
+    # FAILED гэж бүртгээд шалтгааныг бичнэ (дараа msgbill тохируулаад «Дахин үүсгэх»)
+    no_channel = (settings.ebarimt_mock and not settings.ebarimt_mock_receipts
+                  and not use_qpay_eb and not use_msgbill)
+    if no_channel:
+        log.warning("e-Barimt: payment=%s %s₮ — бодит баримтын суваг байхгүй (PosAPI MOCK, "
+                    "msgbill түлхүүргүй) → FAILED гэж бүртгэв", payment.id, float(payment.amount))
+    elif settings.ebarimt_mock and not use_qpay_eb and not use_msgbill:
         log.warning("e-Barimt MOCK: payment=%s %s₮ — ХУУРАМЧ баримт үүслээ. "
                     "Production дээр PARKING_EBARIMT_MOCK=false байх ёстой.",
                     payment.id, float(payment.amount))
     # ВАЖНО: e-Barimt амжилтгүй болсон ч төлбөрийг PAID болгож ХААЛТЫГ НЭЭНЭ —
     # жолооч төлсөн атлаа гацахгүй. Баримтыг FAILED болгож дараа дахин үүсгэж болно.
     receipt_raw, ebarimt_error = {}, None
+    _NO_CHANNEL_MSG = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), msgbill түлхүүр "
+                       "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API-д түлхүүр тавиад "
+                       "«Дахин үүсгэх» дарна уу")
     try:
-        if use_qpay_eb:
+        if no_channel:
+            ebarimt_error = _NO_CHANNEL_MSG
+        elif use_qpay_eb:
             receipt_raw = await qpay.create_ebarimt(
                 payment.provider_payment_id, receiver_type,
                 # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
@@ -213,7 +225,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
             # Локал PosAPI / msgbill (бэлэн/карт/дансаар): хэсэг тус бүрд тусдаа баримт
             comp_receipt, comp_error = {}, None
             try:
-                if use_msgbill:
+                if no_channel:
+                    comp_error = _NO_CHANNEL_MSG
+                elif use_msgbill:
                     comp_receipt = await msgbill.create_receipt(
                         mb_acc, comp_amount,
                         description=_receipt_desc(payment, f"өр {comp.plate_number or ''}".strip()),
@@ -846,6 +860,13 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
                     db.commit()
                     return {"ok": False, "error": err}
         else:
+            if settings.ebarimt_mock and not settings.ebarimt_mock_receipts:
+                err = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), энэ зогсоолд msgbill "
+                       "түлхүүр тохируулаагүй (Тохиргоо → Холболт → e-Barimt API)")
+                if rec:
+                    rec.receipt_url = err
+                    db.commit()
+                return {"ok": False, "error": err}
             raw = await ebarimt.create_receipt(
                 float(payment.amount), float(payment.vat_amount),
                 "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",

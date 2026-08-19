@@ -74,6 +74,7 @@ async def run():
     settings.qpay_mock = True
     settings.qpay_ebarimt = True
     settings.ebarimt_mock = True
+    settings.ebarimt_mock_receipts = True  # тестэд MOCK баримт (SENT) хэрэгтэй
 
     async def _fake_mark(db, session, grace_minutes=None): pass
     pr.mark_paid_and_open = _fake_mark
