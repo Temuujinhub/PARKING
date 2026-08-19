@@ -26,6 +26,18 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — POS терминалын өөрийн e-Barimt-ыг бүртгэх дэмжлэг
+
+PAX апп `pos/confirm`-д зөвхөн картын 7 талбар илгээдэг (raw_payload шалгав) —
+баримтыг систем үүсгэдэг. Банкны терминал өөрөө Ибаримт гаргадаг бол давхар баримт
+үүсэх эрсдэлтэй тул аппаас ДДТД дамжуулах боломж нэмэв.
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | `pos/confirm` body `ebarimt_id`, `lottery_code`, `qr_data` өгвөл `_finalize_paid(external_receipt)` — шинээр үүсгэхгүй, VatReceipt provider=**TERMINAL**; Ибаримт хуудсанд «POS терминал»; PAX_POS_APP_GUIDE §3.4 | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — Тохиргоо → Холболт: e-Barimt карт сувгуудаар
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |

@@ -88,7 +88,8 @@ def _invoice_no(session: ParkingSession) -> str:
     return f"{site_code}-{plate}-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
 
 
-async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None):
+async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
+                         external_receipt: dict | None = None):
     """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
 
     Нэгдсэн (өр багтсан) төлбөрт: session-ий хэсэгт нэг баримт, холбогдсон ӨР ТУС
@@ -139,13 +140,17 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     # msgbill.mn (Үйлчилгээ 3 — eBarimt API): QPay-ээр төлөөгүй төлбөрт (анхдагчаар
     # ДАНСААР = online operator) локал PosAPI-ийн оронд msgbill-ээр ЖИНХЭНЭ баримт.
     # Түлхүүр: түрээслэгч → глобал (services/msgbill.api_key_for-ийн дүрмээр).
-    mb_acc = None if use_qpay_eb else msgbill.account_enabled_for(
+    # ТЕРМИНАЛ дээр аль хэдийн үүссэн баримт (PAX/банкны POS өөрөө e-Barimt гаргадаг
+    # тохиргоотой бол апп pos/confirm-д ebarimt_id-г дамжуулна) — давхар баримт
+    # үүсгэхгүй, терминалынхыг бүртгэнэ
+    use_external = bool(external_receipt and external_receipt.get("billId"))
+    mb_acc = None if (use_qpay_eb or use_external) else msgbill.account_enabled_for(
         _site_of(payment), payment.payment_method)
     use_msgbill = mb_acc is not None
     # PosAPI суугаагүй (MOCK) + msgbill түлхүүргүй → хуурамч баримт ҮҮСГЭХГҮЙ,
     # FAILED гэж бүртгээд шалтгааныг бичнэ (дараа msgbill тохируулаад «Дахин үүсгэх»)
     no_channel = (settings.ebarimt_mock and not settings.ebarimt_mock_receipts
-                  and not use_qpay_eb and not use_msgbill)
+                  and not use_qpay_eb and not use_msgbill and not use_external)
     if no_channel:
         log.warning("e-Barimt: payment=%s %s₮ — бодит баримтын суваг байхгүй (PosAPI MOCK, "
                     "msgbill түлхүүргүй) → FAILED гэж бүртгэв", payment.id, float(payment.amount))
@@ -160,7 +165,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
                        "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API-д түлхүүр тавиад "
                        "«Дахин үүсгэх» дарна уу")
     try:
-        if no_channel:
+        if use_external:
+            receipt_raw = dict(external_receipt)
+        elif no_channel:
             ebarimt_error = _NO_CHANNEL_MSG
         elif use_qpay_eb:
             receipt_raw = await qpay.create_ebarimt(
@@ -193,7 +200,8 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None)
     except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
         ebarimt_error = _ebarimt_err(e)
         log.error(f"e-Barimt амжилтгүй: payment={payment.id}: {ebarimt_error}")
-    rcpt_provider = "QPAY" if use_qpay_eb else ("MSGBILL" if use_msgbill else "POSAPI")
+    rcpt_provider = ("TERMINAL" if use_external else
+                     "QPAY" if use_qpay_eb else ("MSGBILL" if use_msgbill else "POSAPI"))
 
     # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
     ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
@@ -748,7 +756,14 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
         payment.ebarimt_receiver_type = "CITIZEN"
     import time as _t
     _c0 = _t.monotonic()
-    await _finalize_paid(db, payment, raw=body)
+    # Терминал өөрөө e-Barimt гаргасан бол (банкны PosLink-ийн Ибаримт үйлчилгээ)
+    # апп ДДТД-г дамжуулна → систем давхар баримт үүсгэхгүй, терминалынхыг бүртгэнэ
+    ext = None
+    if body.get("ebarimt_id"):
+        ext = {"billId": str(body["ebarimt_id"])[:120],
+               "lottery": (str(body.get("lottery_code") or body.get("lottery") or "")[:60] or None),
+               "qrData": body.get("qr_data") or None}
+    await _finalize_paid(db, payment, raw=body, external_receipt=ext)
     db.commit()
     out = {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
            **_print_payload(db, payment)}

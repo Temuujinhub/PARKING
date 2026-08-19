@@ -255,6 +255,16 @@ async def run():
     check("retry ч суваг байхгүй гэж FAILED", not res.get("ok") and "суваг байхгүй" in res.get("error", ""))
     settings.ebarimt_mock_receipts = True
 
+    print("\nТЕРМИНАЛ дээр үүссэн баримт (external_receipt) → давхар үүсгэхгүй, TERMINAL бүртгэнэ:")
+    FakeClient.calls = []; seen["local"] = 0
+    settings.msgbill_methods = "ALL"
+    db = FakeDB(); p = FakePayment(id="PAY_EXT", provider="POS", payment_method="CARD", site=site_plain)
+    await pr._finalize_paid(db, p, external_receipt={"billId": "TERM123", "lottery": "TL 1", "qrData": "Q"})
+    rec = db.store["receipt"]
+    check("provider=TERMINAL, ДДТД=TERM123, SENT", rec.provider == "TERMINAL" and rec.ebarimt_id == "TERM123" and rec.status == "SENT")
+    check("msgbill/локал дуудаагүй", len(FakeClient.calls) == 0 and seen["local"] == 0)
+    settings.msgbill_methods = "TRANSFER"
+
     ebarimt.create_receipt, qpay.create_ebarimt = orig_local, orig_qpay
     msgbill._tenant_of = orig_tenant_of
     print(f"\n{'='*40}\nҮР ДҮН: {PASS} passed, {FAIL} failed")
