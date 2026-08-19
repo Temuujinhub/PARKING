@@ -387,7 +387,10 @@ def _throttle_qpay(request: Request, name: str, limit: int = 30):
 @router.post("/qpay/invoice")
 async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_db)):
     """QPay invoice үүсгэх. body: {session_id}. Public pay page + касс хоёулаа ашиглана."""
-    _throttle_qpay(request, "invoice", limit=20)
+    # 2026-08-19: 20 → 60/мин. Утасны операторын CGNAT-аар олон жолооч НЭГ IP-ээр
+    # ирдэг тул ачаалалтай зогсоолд 20 нь хүрэлцэхгүй, «товч анивчаад юу ч
+    # болохгүй» (429 чимээгүй) гомдол гарч байв.
+    _throttle_qpay(request, "invoice", limit=60)
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
@@ -412,10 +415,14 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             # qr_image-ыг заавал буцаана: өмнө нь энэ (ДАВТАН хүсэлтийн) зам
             # түүнийг огт өгдөггүй байсан тул хуудсаа сэргээсэн жолоочид QR-ийн
             # оронд түүхий текст гарч, төлж чаддаггүй байв (2026-08-14 гомдол)
+            # Банкны deeplink жагсаалтыг ч буцаана — үүсгэх үед raw_payload-д
+            # хадгалсан (өмнө нь [] буцаадаг байсан тул буцаж орсон жолоочид
+            # банк сонгох товчнууд алга болдог байв)
+            _raw = existing.raw_payload if isinstance(existing.raw_payload, dict) else {}
             return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
                     "qr_text": existing.qr_text,
                     "qr_image": qpay.qr_png_b64(existing.qr_text or ""),
-                    "deep_link": existing.deep_link, "urls": [],
+                    "deep_link": existing.deep_link, "urls": _raw.get("invoice_urls") or [],
                     "amount": float(existing.amount), "mock": settings.qpay_mock}
         existing.status = "CANCELLED"  # дүн зөрсөн — шинэ invoice үүсгэнэ
         db.flush()
@@ -479,6 +486,10 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     payment.provider_invoice_id = inv["invoice_id"]
     payment.qr_text = inv["qr_text"]
     payment.deep_link = inv["deep_link"]
+    # Банкны deeplink-үүдийг хадгална — давтан хүсэлт (хуудас сэргээх/буцаж орох)
+    # ижил нэхэмжлэлийг бүрэн (QR + банкны товчнууд) буцаахад хэрэгтэй.
+    # finalize үед raw_payload QPay-ийн төлбөрийн хариугаар дарагдана — зүгээр.
+    payment.raw_payload = {"invoice_urls": inv.get("urls", [])[:40]}
     db.commit()
     return {"payment_id": payment.id, "invoice_id": inv["invoice_id"],
             "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
@@ -543,7 +554,8 @@ async def qpay_webhook_post(request: Request, payment_id: str = "", token: str =
 async def qpay_check(payment_id: str, request: Request, db: Session = Depends(get_db)):
     """Webhook ирээгүй үед polling шалгалт (pay page/POS 5 сек тутам дуудна).
     PAID болмогц e-Barimt-ийн хэвлэх мэдээллийг (POS терминалд) хамт буцаана."""
-    _throttle_qpay(request, "check", limit=60)  # 5 сек тутам poll = 12/мин — 60 хангалттай
+    # 5 сек тутам poll = 12/мин/утас; CGNAT-аар нэг IP-д олон жолооч → 300
+    _throttle_qpay(request, "check", limit=300)
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")

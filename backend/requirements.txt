@@ -10,3 +10,5 @@ alembic
 openpyxl
 psutil
 python-multipart
+# QPay QR зургийг сервер дээр зурах (QPay qr_image хоосон/давтан хүсэлтэд) — qpay.qr_png_b64
+qrcode[pil]

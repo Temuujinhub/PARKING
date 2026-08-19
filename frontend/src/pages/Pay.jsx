@@ -21,6 +21,13 @@ async function publicApi(path, opts = {}) {
   return data
 }
 
+// Алдааны мөр — БҮХ дэлгэцэд нэг загвараар. Өмнө нь зөвхөн хайлтын дэлгэцэд
+// харагддаг байсан тул «QPay-ээр төлөх» дарахад нэхэмжлэл үүсэхгүй (429/502/400)
+// бол товч анивчаад л юу ч болдоггүй мэт харагдаж байв (2026-08-19 гомдол).
+const ErrorBox = ({ error }) => error
+  ? <div role="alert" className="text-sm text-red-400 bg-red-500/10 rounded-xl px-4 py-3">{error}</div>
+  : null
+
 const fmtTime = (s) => new Date(s + 'Z').toLocaleString('mn-MN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 
 export default function Pay() {
@@ -204,17 +211,24 @@ export default function Pay() {
   if (payment) {
     return (
       <Shell site={site}>
-        <button onClick={() => { setPayment(null); clearInterval(pollRef.current) }}
+        <button onClick={() => { setPayment(null); setError(''); clearInterval(pollRef.current) }}
           className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer"><ArrowLeft size={15} /> Буцах</button>
         <div className="text-center space-y-4">
           <div className="text-sm text-slate-400">Төлөх дүн</div>
           <div className="text-4xl font-bold font-mono text-accent">{fmt(payment.amount)}₮</div>
           {payment.qr_image ? (
-            <img src={`data:image/png;base64,${payment.qr_image}`} alt="QPay QR код" className="mx-auto w-56 h-56 bg-white rounded-2xl p-3" />
+            <>
+              <img src={`data:image/png;base64,${payment.qr_image}`} alt="QPay QR код" className="mx-auto w-56 h-56 bg-white rounded-2xl p-3" />
+              <div className="text-sm text-slate-400">QR-ийг банкны апп-аараа уншуулна уу</div>
+            </>
           ) : (
-            <div className="text-xs bg-surface-muted rounded-xl p-4 font-mono break-all">{payment.qr_text}</div>
+            /* QR зураг ирээгүй (сервер дээр qrcode сан суугаагүй / QPay хоосон өгсөн) —
+               жолоочид ойлгомжгүй урт тоо харуулахын оронд апп/банк сонгуулна */
+            <div className="text-sm text-amber-300 bg-amber-500/10 rounded-xl px-4 py-3">
+              QR зураг ачаалагдсангүй — доорх «QPay апп нээх» эсвэл банкаа сонгож төлнө үү.
+            </div>
           )}
-          <div className="text-sm text-slate-400">QR-ийг банкны апп-аараа уншуулна уу</div>
+          <ErrorBox error={error} />
           {payment.deep_link && (
             <a href={payment.deep_link} className="btn-primary w-full justify-center text-base py-3">
               <CreditCard size={18} /> QPay апп нээх
@@ -263,7 +277,7 @@ export default function Pay() {
   if (session) {
     return (
       <Shell site={site}>
-        <button onClick={() => setSession(null)} className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer">
+        <button onClick={() => { setSession(null); setError('') }} className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer">
           <ArrowLeft size={15} /> Буцах
         </button>
         <div className="space-y-4">
@@ -281,12 +295,13 @@ export default function Pay() {
               <span className="text-slate-400">Хөнгөлөлт</span>
               <span className="font-mono text-right text-cyan-400">-{fmt(session.discount_amount)}₮</span>
             </>)}
-            <span className="text-slate-400">НӨАТ (10%)</span>
-            <span className="font-mono text-right">{fmt(session.vat_amount)}₮</span>
             {session.debt_amount > 0 && (<>
               <span className="text-red-400">Өмнөх өр</span>
               <span className="font-mono text-right text-red-400 font-semibold">+{fmt(session.debt_amount)}₮</span>
             </>)}
+            {/* Өртэй үед нийт НӨАТ (өрийн НӨАТ багтсан) — нэг баримтад бүгд орно */}
+            <span className="text-slate-400">НӨАТ (10%){session.debt_amount > 0 ? ' — өр багтсан' : ''}</span>
+            <span className="font-mono text-right">{fmt(session.vat_total ?? session.vat_amount)}₮</span>
             <span className="font-semibold text-base pt-1 border-t border-surface-border/50">Нийт дүн</span>
             <span className="font-mono text-right text-2xl font-bold text-accent pt-1 border-t border-surface-border/50">{fmt(session.amount_total ?? session.total_fee)}₮</span>
           </div>
@@ -338,8 +353,10 @@ export default function Pay() {
                   </>
                 )}
               </div>
+              <ErrorBox error={error} />
               <button onClick={payQpay} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">
-                {busy ? <Loader2 className="animate-spin" size={18} /> : <CreditCard size={18} />} QPay-ээр төлөх
+                {busy ? <Loader2 className="animate-spin" size={18} /> : <CreditCard size={18} />}
+                {busy ? 'QR үүсгэж байна…' : 'QPay-ээр төлөх'}
               </button>
             </>
           )}
@@ -389,7 +406,7 @@ export default function Pay() {
             ))}
           </div>
         )}
-        {error && <div role="alert" className="text-sm text-red-400 bg-red-500/10 rounded-xl px-4 py-3">{error}</div>}
+        <ErrorBox error={error} />
         <button onClick={() => search()} disabled={busy || !plate.trim()} className="btn-primary w-full justify-center text-base py-3.5">
           {busy ? <Loader2 className="animate-spin" size={18} /> : <Car size={18} />} Төлбөр шалгах
         </button>

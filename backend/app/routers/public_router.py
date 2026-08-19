@@ -278,6 +278,7 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
     debt = float(db.query(_f.coalesce(_f.sum(Compensation.amount), 0))
                  .filter(Compensation.plate_number == plate,
                          Compensation.status == "PENDING").scalar() or 0)
+    vr = settings.vat_rate
     return {
         "session_id": s.id, "plate_number": s.plate_number,
         "entry_time": s.entry_time.isoformat(),
@@ -288,6 +289,11 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
         "amount_due": due,
         # Өмнөх өр + QR-аар төлөгдөх нийт дүн
         "debt_amount": debt,
+        # Өр нь НӨАТ багтсан дүн — QR-ийн нэгдсэн баримтад өрийн НӨАТ ч орно.
+        # Хуудсан дээр «НӨАТ 91₮ / Нийт 3,000₮» гэж харагдаад «өрийн НӨАТ
+        # үүсээгүй» гэсэн ойлголт төрүүлж байсан тул нийт НӨАТ-ыг тусад нь өгнө.
+        "debt_vat": round(debt * vr / (1 + vr)) if debt else 0,
+        "vat_total": fee["vat_amount"] + (round(debt * vr / (1 + vr)) if debt else 0),
         "amount_total": due + debt,
         "is_free": fee["is_free"], "free_reason": fee["reason"],
         "status": s.status,
