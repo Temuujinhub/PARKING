@@ -1,5 +1,5 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, QrCode, Send } from 'lucide-react'
+import { AlertTriangle, Ban, QrCode, RefreshCw, Send } from 'lucide-react'
 import { useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
@@ -12,6 +12,7 @@ export default function Vat() {
   const [to, setTo] = useState(today)
   const [qrReceipt, setQrReceipt] = useState(null)
   const [retrying, setRetrying] = useState(null)
+  const [cancelling, setCancelling] = useState(null)
 
   const [sending, setSending] = useState(false)
   const toast = useToast()
@@ -28,6 +29,23 @@ export default function Vat() {
       toast(`Баримт үүслээ — ДДТД ${res.ebarimt_id}`)
       reloadRows()
     } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
+  }
+
+  // Баримт ЦУЦЛАХ (буцаалт) — мөнгө буцаахгүй, зөвхөн татварын баримт.
+  // Суваг бүрээр: QPay → DELETE ebarimt_v3, PosAPI → DELETE /rest/receipt,
+  // msgbill → DELETE /partner/receipts/{id} (msgbill талд нэмэгдэх хүртэл
+  // «дэмжигдээгүй» гэж буцна). Цуцалсны дараа «Дахин үүсгэх» ШИНЭ баримт гаргана
+  // (буруу ТТД/дүнтэй баримтыг засах урсгал).
+  const cancel = async (r) => {
+    const note = prompt(`${r.plate_number || ''} — ${fmt(r.amount)}₮ баримтыг ЦУЦЛАХ уу?\n`
+      + 'Мөнгө буцаагдахгүй, зөвхөн НӨАТ баримт буцаагдана. Шалтгаан:', 'Буруу баримт — дахин үүсгэнэ')
+    if (note === null) return
+    setCancelling(r.id)
+    try {
+      const res = await api(`/api/payments/${r.payment_id}/cancel-ebarimt`, { method: 'POST', body: { note } })
+      toast(`Баримт цуцлагдлаа (${(res.cancelled || []).length}) — шаардлагатай бол «Дахин үүсгэх» дарна уу`)
+      reloadRows()
+    } catch (e) { toast(e.message, 'error') } finally { setCancelling(null) }
   }
 
   const sendData = async () => {
@@ -74,7 +92,7 @@ export default function Vat() {
           {info.mock && <span className="text-amber-400 text-xs">MOCK горим</span>}
         </div>
       )}
-      <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'QR']} empty={rows.length === 0}>
+      <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'Үйлдэл']} empty={rows.length === 0}>
         {rows.map((r) => (
           <tr key={r.id}>
             <td className="td font-mono font-bold">{r.plate_number || '—'}</td>
@@ -84,24 +102,37 @@ export default function Vat() {
             <td className="td font-mono">{fmt(r.amount)}₮</td>
             <td className="td font-mono">{fmt(r.vat_amount)}₮</td>
             <td className="td font-mono text-xs">{fmtDate(r.created_at)}</td>
-            <td className="td"><Badge value={r.status} /></td>
-            <td className="td text-[11px] text-amber-400 max-w-[14rem] break-words">
-              {r.status === 'FAILED' ? (r.receipt_url || '—') : ''}
+            <td className="td">
+              <Badge value={r.status} />
+              {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : 'PosAPI'}</div>}
+            </td>
+            <td className={`td text-[11px] max-w-[14rem] break-words ${r.status === 'CANCELLED' ? 'text-slate-400' : 'text-amber-400'}`}>
+              {r.status === 'FAILED' || r.status === 'CANCELLED' ? (r.receipt_url || '—') : ''}
             </td>
             <td className="td whitespace-nowrap">
-              {r.status === 'SENT' && (
-                <button className="btn-secondary py-1 px-2" onClick={() => setQrReceipt(r)}
-                  aria-label="Баримтын QR харах" title="QR аюулгүй байдлын үүднээс 1 цаг л хадгалагдана">
-                  <QrCode size={14} />
-                </button>
-              )}
-              {!r.ebarimt_id && (
-                <button className="btn-secondary py-1 px-2 text-xs" disabled={retrying === r.id}
-                  onClick={() => retry(r)}
-                  title="Мөнгө дахин авахгүй — зөвхөн НӨАТ баримтыг дахин үүсгэнэ">
-                  {retrying === r.id ? '…' : 'Дахин үүсгэх'}
-                </button>
-              )}
+              <div className="flex items-center gap-1">
+                {r.status === 'SENT' && (
+                  <button className="btn-secondary py-1 px-2" onClick={() => setQrReceipt(r)}
+                    aria-label="Баримтын QR харах" title="QR аюулгүй байдлын үүднээс 1 цаг л хадгалагдана">
+                    <QrCode size={14} />
+                  </button>
+                )}
+                {(r.status === 'FAILED' || r.status === 'CANCELLED' || !r.ebarimt_id) && (
+                  <button className="btn-secondary py-1 px-2 text-xs" disabled={retrying === r.id}
+                    onClick={() => retry(r)}
+                    title="Мөнгө дахин авахгүй — зөвхөн НӨАТ баримтыг (шинээр) үүсгэнэ">
+                    <RefreshCw size={12} className={retrying === r.id ? 'animate-spin' : ''} />
+                    {retrying === r.id ? '…' : 'Дахин үүсгэх'}
+                  </button>
+                )}
+                {r.status === 'SENT' && r.ebarimt_id && (
+                  <button className="btn-secondary py-1 px-2 text-xs text-red-400" disabled={cancelling === r.id}
+                    onClick={() => cancel(r)}
+                    title="Баримтыг ТЕГ-т буцааж (цуцалж) CANCELLED болгоно — мөнгө буцаахгүй">
+                    <Ban size={12} /> {cancelling === r.id ? '…' : 'Цуцлах'}
+                  </button>
+                )}
+              </div>
             </td>
           </tr>
         ))}

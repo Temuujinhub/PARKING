@@ -26,6 +26,22 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-19 — Ибаримт хуудас: «Цуцлах» + цуцалсны дараа «Дахин үүсгэх»
+
+msgbill.mn Partner API-д баримт цуцлах endpoint **байхгүй** (DELETE / cancel /
+void / refund бүгд 404 «Cannot DELETE …» — 2026-08-19 шалгав; Postman collection-д
+ч зөвхөн POST/GET). Тиймээс цуцлах логикийг суваг бүрээр хэрэгжүүлэв; msgbill
+талд `DELETE /partner/receipts/{id}` нэмэгдмэгц манай тал өөрчлөлтгүй ажиллана.
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | `POST /api/payments/{id}/cancel-ebarimt` — SENT баримтыг сувгаар нь буцаана: QPAY `DELETE /v2/ebarimt_v3/{payment_id}`, POSAPI `DELETE /rest/receipt {id,date}`, MSGBILL `DELETE /partner/receipts/{id}` (одоогоор NOT_SUPPORTED). VatReceipt → CANCELLED, мөнгө хөндөгдөхгүй, audit EBARIMT_CANCEL | ⏳ | ⏳ | ⏳ |
+| feat | `retry_ebarimt` CANCELLED баримтыг алгасаж ШИНЭ VatReceipt мөрөөр үүсгэнэ (түүх хадгалагдана) | ⏳ | ⏳ | ⏳ |
+| feat | Ибаримт хуудас: QR багана → «Үйлдэл» (QR · Дахин үүсгэх · Цуцлах), Төлөвт суваг (QPay/PosAPI/msgbill.mn), CANCELLED=«Цуцалсан» | ⏳ | ⏳ | ⏳ |
+| test | `tests/test_ebarimt_cancel.py` (11) | ⏳ | ⏳ | ⏳ |
+
+---
+
 ## 2026-08-19 — Утасны QPay хуудас: «товч анивчаад дарагдахгүй», «QR-ийн оронд урт тоо»
 
 Прод (site.easy-parking.mn, ялалт А бүс, 2073УНТ видео) гомдлын шинжилгээ:

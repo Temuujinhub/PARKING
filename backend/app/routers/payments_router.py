@@ -788,8 +788,11 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
     if payment.status != "PAID":
         return {"ok": False, "error": "Төлбөр PAID биш — эхлээд төлбөрөө баталгаажуулна уу"}
 
-    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id)
-           .order_by(VatReceipt.created_at).first())
+    # ЦУЦЛАГДСАН баримтыг тооцохгүй — цуцалсны дараа «Дахин үүсгэх» ШИНЭ баримт
+    # үүсгэж тусдаа мөрөөр бүртгэнэ (түүх хадгалагдана)
+    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+                                       VatReceipt.status != "CANCELLED")
+           .order_by(VatReceipt.created_at.desc()).first())
     if rec and rec.ebarimt_id:
         return {"ok": True, "ebarimt_id": rec.ebarimt_id, "lottery": rec.lottery_code,
                 "error": "Баримт аль хэдийн үүссэн байна"}
@@ -875,6 +878,80 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
             provider=rcpt_provider, provider_ref=raw.get("msgbillId")))
     db.commit()
     return {"ok": True, "ebarimt_id": raw.get("billId"), "lottery": raw.get("lottery")}
+
+
+async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
+    """ИЛГЭЭГДСЭН (SENT) e-Barimt баримтыг сувгаар нь цуцална (буцаалт).
+
+    Суваг бүрийн цуцлах зам:
+      • QPAY    — `DELETE /v2/ebarimt_v3/{payment_id}` (qpay.cancel_ebarimt), note заавал
+      • POSAPI  — локал PosAPI `DELETE /rest/receipt {id: billId, date}` (ebarimt.delete_receipt)
+      • MSGBILL — `DELETE /partner/receipts/{id}` (msgbill.cancel_receipt) — msgbill
+                  талд одоогоор БАЙХГҮЙ → NOT_SUPPORTED алдаа буцна
+    Амжилттай бол VatReceipt.status=CANCELLED, receipt_url=тэмдэглэл. Төлбөр
+    (мөнгө) хөндөгдөхгүй — зөвхөн татварын баримт. Дараа нь «Дахин үүсгэх»
+    шинэ баримт гаргана (retry_ebarimt CANCELLED-ийг алгасдаг)."""
+    recs = (db.query(VatReceipt)
+            .filter(VatReceipt.payment_id == payment.id, VatReceipt.status == "SENT",
+                    VatReceipt.ebarimt_id.isnot(None)).all())
+    if not recs:
+        return {"ok": False, "error": "Цуцлах ИЛГЭЭГДСЭН баримт олдсонгүй"}
+    site = _site_of(payment)
+    cancelled, errors = [], []
+    for rec in recs:
+        prov = rec.provider or ("QPAY" if payment.provider == "QPAY" and payment.provider_payment_id
+                                else "POSAPI")
+        try:
+            if prov == "QPAY":
+                ok = await qpay.cancel_ebarimt(payment.provider_payment_id, note or "Гүйлгээ буцаав",
+                                               acc=qpay.account_for(site))
+                if not ok:
+                    raise RuntimeError("QPay баримт цуцлахыг зөвшөөрсөнгүй")
+            elif prov == "MSGBILL":
+                acc = msgbill.api_key_for(site)
+                if not acc.enabled:
+                    raise RuntimeError("msgbill түлхүүр тохируулаагүй")
+                if not rec.provider_ref:
+                    raise RuntimeError("msgbill баримтын ID (provider_ref) алга")
+                await msgbill.cancel_receipt(acc, rec.provider_ref, note)
+            else:
+                date = (rec.created_at or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S")
+                if not await ebarimt.delete_receipt(rec.ebarimt_id, date):
+                    raise RuntimeError("PosAPI баримт буцаахыг зөвшөөрсөнгүй")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{prov}: {_ebarimt_err(e)}")
+            continue
+        rec.status = "CANCELLED"
+        rec.receipt_url = (note or "Цуцлав")[:200]
+        ebarimt.cache_qr(payment.id, None)
+        cancelled.append(rec.ebarimt_id)
+    db.commit()
+    return {"ok": bool(cancelled) and not errors, "cancelled": cancelled,
+            "error": "; ".join(errors) or None}
+
+
+@router.post("/{payment_id}/cancel-ebarimt")
+async def cancel_ebarimt_endpoint(payment_id: str, body: dict | None = None,
+                                  db: Session = Depends(get_db),
+                                  user: User = Depends(require("vat", "reports"))):
+    """Ибаримт хуудасны «Цуцлах» — баримтыг сувгаар нь буцааж CANCELLED болгоно.
+    body: {note?}. Мөнгө буцаахгүй. Дараа нь «Дахин үүсгэх»-ээр шинэ баримт."""
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(404, "Төлбөр олдсонгүй")
+    site = _site_of(payment)
+    enforce_site(user, site.id if site else None)
+    note = str((body or {}).get("note") or "").strip()[:120] or f"Цуцлав ({user.username})"
+    payment = _lock_payment(db, payment_id)
+    if payment is None:
+        raise HTTPException(409, "Баримтын ажиллагаа явагдаж байна — түр хүлээнэ үү")
+    res = await cancel_ebarimt(db, payment, note)
+    db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL", entity="payment",
+                    entity_id=payment_id, detail={**res, "note": note}))
+    db.commit()
+    if not res.get("ok"):
+        raise HTTPException(400, f"Баримт цуцалж чадсангүй: {res.get('error')}")
+    return res
 
 
 @router.post("/{payment_id}/retry-ebarimt")

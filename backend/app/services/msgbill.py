@@ -271,6 +271,30 @@ async def get_receipt(acc: MsgbillAccount, msgbill_id: str) -> dict:
     return normalize(data if isinstance(data, dict) else {})
 
 
+async def cancel_receipt(acc: MsgbillAccount, msgbill_id: str, note: str = "") -> dict:
+    """Баримт цуцлах (буцаалт) — `DELETE {base}/partner/receipts/{id}`.
+
+    2026-08-19 байдлаар msgbill Partner API-д цуцлах endpoint БАЙХГҮЙ (DELETE /
+    cancel / void / refund бүгд 404 «Cannot DELETE …»). msgbill талд нэмэгдмэгц
+    энэ функц шууд ажиллана; тэр хүртэл MsgbillError(code=NOT_SUPPORTED) өгнө —
+    дуудагч операторт «msgbill-ээс цуцлах боломж хараахан алга» гэж хэлнэ.
+    msgbill талын хэрэгжилт: PosAPI 3.0 `DELETE /rest/receipt {id: billId, date}`."""
+    async with httpx.AsyncClient(timeout=settings.msgbill_timeout) as client:
+        resp = await client.request("DELETE", f"{acc.base_url}/partner/receipts/{msgbill_id}",
+                                    json={"note": note} if note else None, headers=_headers(acc))
+    if resp.status_code == 404:
+        err = _err_from_response(resp)
+        if "Cannot DELETE" in str(err) or err.code == "NOT_FOUND":
+            raise MsgbillError("msgbill.mn Partner API-д баримт цуцлах endpoint хараахан байхгүй "
+                               "(DELETE /partner/receipts/{id} → 404). msgbill талд нэмэгдсэний "
+                               "дараа энэ товч ажиллана.", code="NOT_SUPPORTED", status=404)
+        raise err
+    if resp.status_code >= 400:
+        raise _err_from_response(resp)
+    data = resp.json() if resp.content else {}
+    return normalize(data if isinstance(data, dict) else {"state": "CANCELLED"})
+
+
 def status_info(db=None) -> dict:
     """Тохиргоо → Холболт → e-Barimt хэсэгт харуулах глобал төлөв (нууц задлахгүй)."""
     cfg = global_config(db)
