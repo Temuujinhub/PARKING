@@ -26,6 +26,49 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-20 — 🔒 Аюулгүй байдлын хатууруулалт: хуурамч LPR-ээр хаалт нээх нүх + OWASP/CIS багц
+
+**CRITICAL — нэвтрэлтгүйгээр хаалт нээх зам (батлагдсан, засагдсан).**
+`lpr_router._client_ip` нь `X-Forwarded-For`-ийн ЭХНИЙ утгыг жинхэнэ эх IP гэж
+авдаг байв. nginx нь `$proxy_add_x_forwarded_for`-оор хэрэглэгчийн илгээсэн
+утгын АРД жинхэнэ IP-г залгадаг тул эхний утга нь бүхэлдээ халдагчийн мэдэлд
+байсан. `device_key` өгөхгүй бол код IP-ээр таних салбар руу уначихдаг тул
+интернэтээс `X-Forwarded-For: <камерын дотоод IP>` гэж илгээхэд систем үүнийг
+жинхэнэ event гэж үзэн `handle_entry` → `ensure_entry_barrier` дуудаж хаалтыг
+физикээр нээх боломжтой байв. Туршилтаар батлав (`ip=203.0.113.77` логонд орсон).
+Гурван давхар засвар: (1) код нь `request.client.host` уншина — uvicorn-ий
+ProxyHeadersMiddleware нь XFF-ийг урвуугаар шалгаж итгэмжлэгдээгүй эхний хостыг
+тавьдаг тул хуурагдахгүй; (2) nginx `/api/lpr/` дээр `$remote_addr` + allow/deny;
+(3) `PARKING_LPR_REQUIRE_KEY` шилжилтийн туг — түлхүүргүй камерыг `LPR_NO_KEY`
+гэж логлож, бэлэн болмогц `true` болгоно.
+
+**Хэмжсэн баримт:** TEST дээр гаднаас 10 хоногт LPR push 0 (comet сувгаар ирдэг)
+→ хаах нь эрсдэлгүй. Оператор 38 хүсэлт/мин, сканнер бот 217/мин → rate limit-ийн
+суурь. `/assets/` нь nginx `add_header` удамшдаггүйгээс бүх хамгаалалтын header-ээ
+алддаг байв. 61 git bundle вэбээс татагдаж байсан (нууц үг дотор нь байгаагүй).
+Картын дата талбар 0 → PCI-DSS Req.3 хамаарахгүй.
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| sec | **LPR IP хуурах нүх** — `_client_ip` нь XFF/X-Real-IP уншихаа болив; `PARKING_LPR_REQUIRE_KEY` туг + `LPR_NO_KEY` анхааруулга; regression тест `tests/unit/test_lpr_ip_spoof.py` | ⏳ | ⏳ | ⏳ |
+| sec | **`GET /admin/devices` эрхээр хаагдав** (`devices`/`settings`/`barriers`) — хариу нь камерын `device_key`-г агуулдаг тул OPERATOR/HR уншиж, хуурамч LPR event илгээх боломжтой байв | ⏳ | ⏳ | ⏳ |
+| sec | **`night-close` хамрах хүрээ** — `site_id` өгөхгүй бол БҮХ түрээслэгчийн машиныг хааж өр үүсгэдэг байсныг `operator_sites`-ээр хязгаарлав | ⏳ | ⏳ | ⏳ |
+| sec | **`bulk-remove` IDOR** — давталтад зогсоолын шалгалт нэмэв (session_id нь public API-аас нэвтрэлтгүй авагддаг) | ⏳ | ⏳ | ⏳ |
+| sec | **`compensations/{id}/cancel` IDOR** — өөр түрээслэгчийн авлага цуцлах боломжийг хаав (`pay`-д байсан шалгалт энд дутуу байв) | ⏳ | ⏳ | ⏳ |
+| sec | **Өөрийн эрх ахиулах зам** — админ өөрийгөө засаж `site_ids: []` илгээн бүх түрээслэгч рүү гарах боломжийг хаав; УТГА өөрчлөгдсөн эсэхээр шалгана (UI бүтэн объект илгээдэг тул профайл хадгалах эвдрэхгүй) | ⏳ | ⏳ | ⏳ |
+| sec | **Хамаарлын пин** — `requirements*.txt` бүгд `==`; `cryptography 49.0.0 → 50.0.0` (PYSEC-2026-3552). pip-audit: 0 эмзэг байдал | ⏳ | ⏳ | ⏳ |
+| sec | **CI-д аюулгүй байдлын job** — pip-audit + bandit + gitleaks + npm audit (эхлээд `continue-on-error`) | ⏳ | ⏳ | ⏳ |
+| sec | `barrier._md5u` — Dahua RPC2 протоколын MD5-д `usedforsecurity=False` (bandit HIGH 1→0) | ⏳ | ⏳ | ⏳ |
+| ops | **nginx (гараар, сервер бүрд)** — security snippet бүх location-д `include`; `server_tokens off`; CSP Report-Only; login 10r/m + api 600r/m; `.php`/`.env` → 444; 8080/8443 bundle блок устгав | — | гараар | гараар |
+| ops | **UFW идэвхжив** (22/80/443) — өмнө нь `inactive`, iptables policy ACCEPT байв | — | ✅ 08-20 | гараар |
+| ops | `.env` — `PARKING_CORS_ORIGINS` тохируулав (өмнө default `*`), `PARKING_LPR_REQUIRE_KEY=false` | — | ✅ 08-20 | гараар |
+
+**PROD дээр ГАРААР хийх (autodeploy зөвхөн кодыг тараана, nginx.conf-ыг ХУУЛДАГГҮЙ):**
+nginx snippet + rate limit + `/api/lpr/` allow-list (камерын БОДИТ дэд сүлжээг
+`journalctl | grep lpr_push: ip=`-ээс гаргаж бичнэ), UFW, `.env`-д CORS.
+
+---
+
 ## 2026-08-20 — ТЕГ тулгалт: ДДТД зөрүүний шалтгаан + тулгалтын хэрэгсэл; Ибаримт толгойн MOCK badge засвар
 
 **ДДТД зөрүү (docs/20260819.xlsx-ээр нотлогдсон):** суваг бүр операторын кодтой билл

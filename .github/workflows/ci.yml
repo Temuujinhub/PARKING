@@ -55,3 +55,50 @@ jobs:
         run: npm ci --no-audit --no-fund
       - working-directory: frontend
         run: npm run build
+
+  security:
+    name: Аюулгүй байдлын шалгалт
+    runs-on: ubuntu-latest
+    # 2026-08-20-нд нэмэв. ЭХЛЭЭД ЗӨВХӨН МЭДЭЭЛНЭ (continue-on-error) — CI
+    # шууд улаан болж deploy зогсоохгүйн тулд. Гаралт нь цэвэр байхад
+    # continue-on-error мөрүүдийг устгаж ЗААВАЛ болгоно.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Python хамаарлын мэдэгдэж буй CVE (2026-08-20-нд: 0)
+      - name: pip-audit
+        run: |
+          python -m pip install -q pip-audit
+          pip-audit -r backend/requirements.txt -r backend/requirements-optional.txt
+
+      # Кодын статик шинжилгээ. -ll = зөвхөн MEDIUM+ хүндрэлтэй.
+      - name: bandit
+        run: |
+          python -m pip install -q bandit
+          bandit -r backend/app -ll
+
+      # Нээлттэй repo тул нууц задрахаас сэргийлнэ. seed.py-ийн нууц үг
+      # 2026-07-28-нд ийм байдлаар задарсан түүхтэй.
+      - name: gitleaks (нууц задралын хайлт)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # npm audit нь build job-д --no-audit-аар зориудаар унтраасан тул энд
+      # тусад нь ажиллуулна. --audit-level=high: одоо байгаа 2 moderate
+      # (react-router open-redirect) нь энэ кодод АШИГЛАГДАХГҮЙ болохыг
+      # шалгасан — засвар нь router v7 руу шилжих эвдэрсэн өөрчлөлт шаардана.
+      - name: npm audit
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --omit=dev --audit-level=high

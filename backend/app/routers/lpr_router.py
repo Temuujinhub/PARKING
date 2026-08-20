@@ -54,11 +54,20 @@ async def _parse_push(request: Request) -> tuple[dict, bytes | None]:
 
 
 def _client_ip(request: Request) -> str:
-    """nginx-ийн ард жинхэнэ эх IP-г уншина (X-Forwarded-For / X-Real-IP)."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+    """Жинхэнэ эх IP.
+
+    X-Forwarded-For-ыг ӨӨРӨӨ БҮҮ УНШ. nginx нь `$proxy_add_x_forwarded_for`-оор
+    хэрэглэгчийн илгээсэн утгын АРД жинхэнэ IP-г залгадаг тул толгойн ЭХНИЙ утга
+    нь бүхэлдээ халдагчийн мэдэлд байдаг. Өмнө нь энд `xff.split(",")[0]` байсан
+    бөгөөд түүгээр интернэтээс камер болж дүр эсгэн, нэвтрэлтгүйгээр хаалт
+    нээх боломжтой байв (2026-08-20-нд туршилтаар батлагдсан).
+
+    uvicorn-ий ProxyHeadersMiddleware нь `forwarded_allow_ips` (default 127.0.0.1)
+    -д багтсан proxy-гоос ирсэн үед л XFF-ийг уншиж, жагсаалтыг УРВУУГААР шалгаж
+    итгэмжлэгдээгүй ЭХНИЙ хостыг `scope["client"]`-д тавьдаг. Тиймээс
+    `request.client.host` нь nginx-ийн ард ч зөв, хуурагдахгүй утга өгнө.
+    """
+    return request.client.host if request.client else ""
 
 
 def _extract_events(payload: dict) -> list[dict]:
@@ -107,11 +116,21 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         device = db.query(Device).filter(Device.device_key == device_key,
                                          Device.device_type == "camera",
                                          Device.status != "deleted").first()
-    if not device:
-        # device_key байхгүй бол эх IP-ээр таних (nginx-ийн ард X-Forwarded-For)
+    if not device and not settings.lpr_require_key:
+        # ШИЛЖИЛТИЙН ЗАМ — device_key байхгүй бол эх IP-ээр таана.
+        # Энэ нь НЭВТРЭЛТ БИШ: камерын IP нь нууц утга биш бөгөөд дотоод
+        # диапазон нь амархан тааварлагддаг. Камер бүрийн push URL-д
+        # `?device_key=...` нэмж дуусмагц PARKING_LPR_REQUIRE_KEY=true болгож
+        # энэ замыг бүрмөсөн хаана.
         device = db.query(Device).filter(Device.ip_address == client_ip,
                                          Device.device_type == "camera",
                                          Device.status != "deleted").first()
+        if device:
+            log.warning(
+                "LPR_NO_KEY: '%s' (%s) түлхүүргүй ирж, зөвхөн IP-ээр танигдав. "
+                "Камерын ITSAPI URL-д ?device_key=%s нэмнэ үү — эс бөгөөс "
+                "PARKING_LPR_REQUIRE_KEY=true болгоход энэ камер тасарна.",
+                device.name, client_ip, device.device_key)
 
     events = _extract_events(payload)
     _p0 = _extract_plate(events[0])[0] if events and isinstance(events[0], dict) else ""

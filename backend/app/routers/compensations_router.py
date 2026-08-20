@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..auth import operator_sites, require
+from ..auth import enforce_site, operator_sites, require
 from ..database import get_db
 from ..models import (AuditLog, BlacklistEntry, CashierShift, Compensation, ParkingSession,
                       Payment, User)
@@ -223,6 +223,11 @@ def cancel_compensation(comp_id: str, body: dict, db: Session = Depends(get_db),
     comp = db.get(Compensation, comp_id)
     if not comp or comp.status != "PENDING":
         raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
+    # pay_compensation дээр байдаг шалгалт энд дутуу байсан — өөр түрээслэгчийн
+    # авлагыг comp_id мэдэхэд л цуцлах боломжтой байв (санхүүгийн IDOR).
+    allowed = operator_sites(user)
+    if allowed and comp.site_id not in allowed:
+        raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
     comp.status = "CANCELLED"
     db.add(AuditLog(username=user.username, action="COMPENSATION_CANCELLED", entity="compensation",
                     entity_id=comp_id, detail={"reason": body.get("reason", ""), "plate": comp.plate_number}))
@@ -236,8 +241,15 @@ async def night_close(body: dict, db: Session = Depends(get_db),
     """Шөнийн хаалт (JGA спек): зогсож буй БҮХ машиныг гаргаж нөхөн төлбөр үүсгэнэ.
     body: {site_id?} — заавал биш, өгөхгүй бол бүх зогсоол. Болгоомжтой — буцаахгүй үйлдэл!"""
     q = db.query(ParkingSession).filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"]))
+    # Хамрах хүрээ: өмнө нь site_id өгөхгүй бол БҮХ ТҮРЭЭСЛЭГЧИЙН машиныг хааж,
+    # тус бүрд нь өр үүсгэдэг байв (буцаах боломжгүй). Нэг зогсоолын админ нөгөө
+    # компанийн бүх машиныг нэг хүсэлтээр хаах боломжтой байсан.
+    allowed = operator_sites(user)
     if body.get("site_id"):
+        enforce_site(user, body["site_id"])
         q = q.filter(ParkingSession.site_id == body["site_id"])
+    elif allowed is not None:
+        q = q.filter(ParkingSession.site_id.in_(allowed))
     sessions = q.all()
     now = datetime.utcnow()
     created = 0

@@ -136,6 +136,17 @@ class Settings(BaseSettings):
     allow_simulate: bool = False
     # CORS: production-д домэйноо зааж өгнө (жишээ: "https://test.easy-parking.mn")
     cors_origins: str = "*"
+    # LPR callback дээр device_key-г ЗААВАЛ болгох.
+    #
+    # False (default) = шилжилтийн үе: түлхүүргүй ирсэн камерыг эх IP-ээр таасаар
+    #   байна, гэхдээ бүрд нь "LPR_NO_KEY" WARNING логлоно. Камерын IP нь нууц утга
+    #   БИШ тул энэ зам нь жинхэнэ нэвтрэлт болохгүй.
+    # True = зөвхөн зөв device_key-тэй push хүлээж авна (зөв хувилбар).
+    #
+    # Асаахын өмнө ЗААВАЛ: журналд LPR_NO_KEY анхааруулга огт байхгүй болсныг
+    # хэдэн өдөр ажиглана — эс бөгөөс тэр камерууд тасарч, хаалт нээгдэхгүй болно.
+    #   journalctl -u parking-backend --since '-7 days' | grep LPR_NO_KEY
+    lpr_require_key: bool = False
 
     # e-Barimt — POS API 3.0 (татварын PosAPI сервис локал дээр суусан байна)
     ebarimt_posapi_url: str = "http://localhost:7080/rest"

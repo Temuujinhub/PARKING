@@ -7,4 +7,4 @@
 #
 # Суулгах (интернэттэй сервер дээр):
 #   venv/bin/pip install -r requirements-optional.txt
-cryptography
+cryptography==50.0.0   # PYSEC-2026-3552 засагдсан (49.0.0 эмзэг байсан)

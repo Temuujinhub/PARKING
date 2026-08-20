@@ -175,7 +175,12 @@ class DahuaRpc:
 
     @staticmethod
     def _md5u(text: str) -> str:
-        return hashlib.md5(text.encode("utf-8")).hexdigest().upper()
+        # MD5-ыг Dahua RPC2-ийн challenge/response ПРОТОКОЛ шаарддаг (realm+random
+        # -аар hash хийж буцаана). Өөр алгоритм сонгох боломжгүй — солих нь
+        # төхөөрөмжтэй холбогдохоо болино. Нууц үг hash хийхэд ХЭРЭГЛЭДЭГГҮЙ
+        # (тэнд bcrypt — auth.py). usedforsecurity=False нь FIPS горимд ажиллах
+        # боломж олгож, bandit B324-ийг зөв чимээгүй болгоно.
+        return hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
 
     async def login(self):
         # 1-р алхам: challenge — result:false + realm/random буцаана (энэ нь хэвийн)

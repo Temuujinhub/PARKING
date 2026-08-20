@@ -941,7 +941,14 @@ def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
 # ─────────────────────────── Төхөөрөмж ───────────────────────────
 @router.get("/devices")
 def list_devices(site_id: str | None = None, include_deleted: bool = False,
-                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require("devices", "settings", "barriers"))):
+    # Эрх нэмэгдсэн шалтгаан: хариу нь камерын `device_key`-г агуулдаг бөгөөд тэр
+    # түлхүүрээр /api/lpr/callback руу НЭВТРЭЛТГҮЙГЭЭР хуурамч event илгээж хаалт
+    # нээх боломжтой. Өмнө нь зөвхөн get_current_user байсан тул OPERATOR (зориудаар
+    # free_exit-гүй болгосон) болон HR хүртэл түлхүүрийг уншиж чаддаг байв.
+    # Талбарыг нуухын оронд endpoint-ийг хаасан учир нь: камер тохируулах
+    # ажлын урсгал (SiteWizardModal → callback URL) device_key-г ХАРУУЛАХ ёстой.
     from datetime import timedelta
     q = db.query(Device)
     if not include_deleted:  # устгасан төхөөрөмж UI-д харагдахгүй (Хаалт/Тохиргоо/Камер)
@@ -1891,6 +1898,41 @@ def _enforce_user_scope(user: User, target_sites: set, action: str):
         raise HTTPException(403, f"Зөвхөн өөрийн хариуцах зогсоолын ажилтныг {action} эрхтэй.")
 
 
+def _guard_self_privileges(u: User, body: dict):
+    """Хэрэглэгч ӨӨРИЙНХӨӨ эрх/хамрах хүрээг өөрчлөхийг хориглоно.
+
+    Өмнө нь өөрийгөө засахад ямар ч шалгалт байгаагүй тул нэг зогсоолоор
+    хязгаарлагдсан админ `{"site_ids": [], "site_id": null}` илгээхэд
+    _clean_site_ids нь None буцааж, operator_sites() «бүх зогсоол» гэж үзэн,
+    тэр админ БҮХ түрээслэгчийн дата руу хандах эрхтэй болдог байв.
+
+    Талбар байгаа эсэхээр биш, УТГА нь өөрчлөгдсөн эсэхээр шалгана: Users.jsx
+    нь профайл хадгалахад бүтэн объектыг (role/site_ids/permissions хамт)
+    буцааж илгээдэг тул зүгээр л түлхүүр байгаад 403 өгвөл өөрийн нэр/утас/
+    нууц үгээ шинэчлэх хэвийн үйлдэл эвдэрнэ.
+    """
+    changed = []
+    if "role" in body and body["role"] != u.role:
+        changed.append("role")
+    if "is_active" in body and bool(body["is_active"]) != bool(u.is_active):
+        changed.append("is_active")
+    if "tenant_id" in body and (body["tenant_id"] or None) != (u.tenant_id or None):
+        changed.append("tenant_id")
+    if "permissions" in body:
+        new_perms = _clean_permissions(body["permissions"], body.get("role", u.role))
+        if set(new_perms or []) != set(u.permissions or []):
+            changed.append("permissions")
+    if "site_ids" in body or "site_id" in body:
+        new_sites = _clean_site_ids(body.get("site_ids", u.site_ids),
+                                    body.get("site_id", u.site_id))
+        if set(new_sites or []) != set(u.site_ids or []):
+            changed.append("site_ids")
+    if changed:
+        raise HTTPException(
+            403, "Өөрийн эрх/хамрах хүрээг өөрчлөх боломжгүй "
+                 f"({', '.join(changed)}) — SUPER_ADMIN-д хандана уу.")
+
+
 @router.get("/users")
 def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     users = db.query(User).order_by(User.created_at).all()
@@ -1946,6 +1988,8 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
         raise HTTPException(400, "role буруу байна")
     if u.id != user.id:
         _enforce_user_scope(user, _user_sites(u), "засах")
+    elif user.role != "SUPER_ADMIN":
+        _guard_self_privileges(u, body)
     if "site_ids" in body or "site_id" in body:
         new_sites = {s for s in (body.get("site_ids") or []) if s} or (
             {body["site_id"]} if body.get("site_id") else set())

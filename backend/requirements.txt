@@ -1,14 +1,25 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-psycopg2-binary
-pydantic-settings
-pyjwt
-bcrypt
-httpx
-alembic
-openpyxl
-psutil
-python-multipart
+# ⚠ ХУВИЛБАРЫГ ЗААВАЛ ПИНДЭНЭ (2026-08-20).
+#
+# Яагаад: deploy/update.sh нь deploy БҮРД `pip install -r requirements.txt`
+# дуудна, autodeploy нь 2 минут тутам ажилладаг. Пингүй үед PyPI дээрх шинэ
+# (эсвэл эвдэрсэн/хортой) хувилбар ямар ч шалгалтгүйгээр production руу орж,
+# нөхөн сэргээх боломжгүй build үүсгэдэг байв — нийлүүлэлтийн сүлжээний эрсдэл.
+#
+# Шинэчлэх журам: гараар хувилбарыг өсгө → TEST дээр `pytest` ногоон →
+# CI-ийн pip-audit ногоон → дараа нь main руу.
+# Одоогийн багц дээр мэдэгдэж буй CVE: 0 (pip-audit, 2026-08-20).
+
+fastapi==0.139.0
+uvicorn[standard]==0.50.1
+sqlalchemy==2.0.51
+psycopg2-binary==2.9.12
+pydantic-settings==2.14.2
+pyjwt==2.13.0
+bcrypt==4.0.1
+httpx==0.28.1
+alembic==1.18.5
+openpyxl==3.1.5
+psutil==7.2.2
+python-multipart==0.0.32
 # QPay QR зургийг сервер дээр зурах (QPay qr_image хоосон/давтан хүсэлтэд) — qpay.qr_png_b64
-qrcode[pil]
+qrcode[pil]==8.2

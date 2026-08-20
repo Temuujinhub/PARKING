@@ -585,9 +585,17 @@ async def bulk_remove(body: dict, db: Session = Depends(get_db),
     create_comp = bool(body.get("create_compensation", False))
     note = (body.get("reason") or "").strip()[:300]
     removed, skipped, debt_total = [], 0, 0.0
+    # Хамрах хүрээ: энэ файлын бусад бүх мутаци дээр enforce_site байдаг ч энд
+    # дутуу байв. session_id нь /api/public/sessions-оос НЭВТРЭЛТГҮЙГЭЭР авагддаг
+    # тул өөр түрээслэгчийн машиныг 200-гаар нь албадан хааж, хуурамч өр үүсгэх
+    # боломжтой байсан (IDOR).
+    allowed = operator_sites(user)
     for sid in ids[:200]:
         s = db.get(ParkingSession, sid)
         if not s or s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+            skipped += 1
+            continue
+        if allowed is not None and s.site_id not in allowed:
             skipped += 1
             continue
         debt = close_session_forced(db, s, "admin_remove", user.username, create_comp)
