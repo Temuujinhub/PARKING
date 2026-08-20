@@ -1,6 +1,7 @@
 // Ээлж хаах — мөнгөн тооцооны дэлгэц (бэлэн тушаах, үлдсэн машин хаах)
 import { fmt } from '../../api'
 import { Field, Modal } from '../../components/ui'
+import { clampNum } from '../../validation'
 
 export default function ShiftCloseModal({ closeModal, setCloseModal, shift, busy, onConfirm }) {
   return (
@@ -30,8 +31,13 @@ export default function ShiftCloseModal({ closeModal, setCloseModal, shift, busy
               Тушаасан дүнгээ баталгаажуулна уу:
             </div>
             <div className="flex items-center gap-2">
-              <input className="input font-mono text-lg" type="number" min="0" value={closeModal.confirmed_cash}
-                onChange={(e) => setCloseModal({ ...closeModal, confirmed_cash: e.target.value })} aria-label="Тушаах бэлэн" />
+              {/* Сөрөг/утгагүй тушаалт мөнгөн тооцоог гажуудуулна — оруулах үедээ шахна */}
+              <input className="input font-mono text-lg" type="number" min="0" max="1000000000" step="100"
+                value={closeModal.confirmed_cash} aria-label="Тушаах бэлэн"
+                onChange={(e) => setCloseModal({
+                  ...closeModal,
+                  confirmed_cash: e.target.value === '' ? '' : clampNum(e.target.value, { min: 0, max: 1_000_000_000 }),
+                })} />
               <span className="text-slate-400">₮</span>
             </div>
             {Math.abs((+closeModal.confirmed_cash || 0) - (shift.by_provider?.CASH?.amount || 0)) > 0 && (

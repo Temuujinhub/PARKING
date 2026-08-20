@@ -2,6 +2,7 @@
 import { Check, Copy, Download } from 'lucide-react'
 import { api } from '../../api'
 import { Field, Modal, useToast } from '../../components/ui'
+import { IP_HINT, clampNum, isIp, normalizeCode, normalizeIp } from '../../validation'
 import { enterToNext, genDevices, payUrl, qrUrl, QrImage } from './shared'
 
 export default function SiteWizardModal({ wizard, setWizard, templates, reload }) {
@@ -24,7 +25,11 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
       const s = wizard.site
       const created = await api('/api/admin/sites', {
         method: 'POST',
-        body: { ...s, capacity: wizard.unlimited ? 0 : +s.capacity, tariff_template_id: s.tariff_template_id || null },
+        body: {
+          ...s,
+          capacity: wizard.unlimited ? 0 : clampNum(s.capacity, { min: 0, max: 100000, fallback: 0 }),
+          tariff_template_id: s.tariff_template_id || null,
+        },
       })
       setWizard({ ...wizard, step: 2, created })
       reload()
@@ -35,6 +40,10 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
   const wizardCreateDevices = async (e) => {
     e.preventDefault()
     try {
+      // Буруу IP-тэй төхөөрөмж үүсгэвэл хожим «холбогдохгүй» болж чимээгүй унана
+      const badIp = genDevices(wizard.entryLanes, wizard.exitLanes)
+        .find((t) => wizard.devices[t.key]?.enabled && !isIp(wizard.devices[t.key].ip_address))
+      if (badIp) { toast(`${badIp.name}: IP хаяг буруу — ${IP_HINT}`, 'error'); return }
       const createdDevices = []
       for (const tpl of genDevices(wizard.entryLanes, wizard.exitLanes)) {
         const cfg = wizard.devices[tpl.key]
@@ -85,7 +94,8 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
                 </Field>
                 <Field label="Код (QR URL-д, жишээ: SITE02)" required>
                   <input className="input font-mono" value={wizard.site.site_code} required onKeyDown={enterToNext}
-                    onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, site_code: e.target.value.toUpperCase().replace(/\s/g, '') } })} />
+                    maxLength={30}
+                    onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, site_code: normalizeCode(e.target.value) } })} />
                 </Field>
                 <Field label="Бүс">
                   <select className="input" value={wizard.site.zone_code} onKeyDown={enterToNext}
@@ -94,7 +104,7 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
                   </select>
                 </Field>
                 <Field label="Багтаамж">
-                  <input className="input" type="number" min="1" value={wizard.unlimited ? '' : wizard.site.capacity}
+                  <input className="input" type="number" min="1" max="100000" step="1" value={wizard.unlimited ? '' : wizard.site.capacity}
                     disabled={wizard.unlimited} placeholder={wizard.unlimited ? 'Хязгааргүй' : ''} onKeyDown={enterToNext}
                     onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, capacity: e.target.value } })} />
                   <label className="flex items-center gap-2 mt-1.5 text-xs text-slate-400 cursor-pointer">
@@ -154,9 +164,10 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
                       <span className="text-sm font-medium">{tpl.name}</span>
                     </label>
                     <span className="text-xs text-slate-500 w-14">Эгнээ {tpl.lane_no}</span>
-                    <input className="input flex-1 font-mono text-xs" placeholder="IP хаяг (заавал биш)" value={cfg.ip_address}
+                    <input className={`input flex-1 font-mono text-xs${isIp(cfg.ip_address) ? '' : ' input-error'}`}
+                      placeholder="IP хаяг (заавал биш)" value={cfg.ip_address} inputMode="decimal" maxLength={15}
                       disabled={!cfg.enabled} onKeyDown={enterToNext}
-                      onChange={(e) => setWizard({ ...wizard, devices: { ...wizard.devices, [tpl.key]: { ...cfg, ip_address: e.target.value } } })} />
+                      onChange={(e) => setWizard({ ...wizard, devices: { ...wizard.devices, [tpl.key]: { ...cfg, ip_address: normalizeIp(e.target.value) } } })} />
                   </div>
                 )
               })}

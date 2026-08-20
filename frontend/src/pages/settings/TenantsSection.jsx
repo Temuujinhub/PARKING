@@ -6,6 +6,10 @@ import { Building2, Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, PasswordInput, Table, useToast } from '../../components/ui'
+import {
+  PASSWORD_HINT, PHONE_HINT, REGISTER_HINT, USERNAME_HINT, isEmail, isPassword, isPhone,
+  isRegister, isUsername, normalizeCode, normalizePhone, normalizeRegister, normalizeUsername,
+} from '../../validation'
 import QpayTestModal from './QpayTestModal'
 
 const EMPTY = {
@@ -19,7 +23,8 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
   const isNew = state === 'new'
   useEffect(() => {
     if (state && state !== 'new') {
-      setF({ ...EMPTY, ...state, qpay_password: '', site_ids: (state.sites || []).map((s) => s.id) })
+      setF({ ...EMPTY, ...state, qpay_password: '', phone: normalizePhone(state.phone),
+             register: normalizeRegister(state.register), site_ids: (state.sites || []).map((s) => s.id) })
     } else setF(EMPTY)
   }, [state])
   if (!state) return null
@@ -28,8 +33,20 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
   const toggleSite = (id) => setF({
     ...f, site_ids: f.site_ids.includes(id) ? f.site_ids.filter((x) => x !== id) : [...f.site_ids, id],
   })
+  // Хадгалахын өмнөх формат шалгалт — бүгд заавал биш талбар тул зөвхөн
+  // бөглөсөн үед нь шалгана (хоосон = алдаа биш).
+  const errors = [
+    !normalizeCode(f.code) && 'Богино код — латин үсэг/тоо (жишээ: MONNIS)',
+    !isRegister(f.register) && `ТТД/Регистр — ${REGISTER_HINT}`,
+    !isPhone(f.phone) && `Утас — ${PHONE_HINT}`,
+    !isEmail(f.email) && 'И-мэйл формат буруу',
+    isNew && f.admin_username && !isUsername(f.admin_username) && `Админы нэвтрэх нэр — ${USERNAME_HINT}`,
+    isNew && f.admin_username && !isPassword(f.admin_password) && `Админы нууц үг — ${PASSWORD_HINT}`,
+  ].filter(Boolean)
+
   const save = async (e) => {
     e.preventDefault()
+    if (errors.length) { toast(errors[0], 'error'); return }
     try {
       if (isNew) {
         const body = { ...f }
@@ -54,16 +71,22 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
           <Field label="Байгууллагын нэр" required>
             <input className="input" value={f.name} onChange={set('name')} required /></Field>
           <Field label="Богино код (латин)" required>
-            <input className="input font-mono uppercase" value={f.code} onChange={set('code')}
-              placeholder="MONNIS" required /></Field>
+            <input className="input font-mono" value={f.code} placeholder="MONNIS" required maxLength={30}
+              onChange={(e) => setF({ ...f, code: normalizeCode(e.target.value) })} /></Field>
           <Field label="ТТД / Регистр">
-            <input className="input font-mono" value={f.register} onChange={set('register')} /></Field>
+            <input className={`input font-mono${isRegister(f.register) ? '' : ' input-error'}`} value={f.register}
+              placeholder="1234567" maxLength={14} aria-invalid={!isRegister(f.register)}
+              onChange={(e) => setF({ ...f, register: normalizeRegister(e.target.value) })} />
+            <div className={isRegister(f.register) ? 'hint' : 'hint-error'}>{REGISTER_HINT}</div></Field>
           <Field label="Холбоо барих хүн">
             <input className="input" value={f.contact_name} onChange={set('contact_name')} /></Field>
           <Field label="Утас">
-            <input className="input" value={f.phone} onChange={set('phone')} /></Field>
+            <input className={`input${isPhone(f.phone) ? '' : ' input-error'}`} type="tel" inputMode="numeric"
+              maxLength={8} placeholder="99112233" value={f.phone} aria-invalid={!isPhone(f.phone)}
+              onChange={(e) => setF({ ...f, phone: normalizePhone(e.target.value) })} /></Field>
           <Field label="И-мэйл (нэхэмжлэл илгээхэд ашиглагдана)">
-            <input className="input" type="email" value={f.email} onChange={set('email')} /></Field>
+            <input className={`input${isEmail(f.email) ? '' : ' input-error'}`} type="email"
+              value={f.email} aria-invalid={!isEmail(f.email)} onChange={set('email')} /></Field>
         </div>
         <Field label="Тэмдэглэл">
           <input className="input" value={f.note} onChange={set('note')} /></Field>
@@ -110,9 +133,14 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
             <div className="text-sm font-medium">Түрээслэгчийн админ хэрэглэгч (заавал биш)</div>
             <div className="grid sm:grid-cols-3 gap-3">
               <Field label="Нэвтрэх нэр">
-                <input className="input" value={f.admin_username} onChange={set('admin_username')} /></Field>
-              <Field label="Нууц үг (8+ тэмдэгт)">
-                <PasswordInput className="input" value={f.admin_password} onChange={set('admin_password')} /></Field>
+                <input className={`input font-mono${!f.admin_username || isUsername(f.admin_username) ? '' : ' input-error'}`}
+                  value={f.admin_username} maxLength={60}
+                  onChange={(e) => setF({ ...f, admin_username: normalizeUsername(e.target.value) })} />
+                <div className="hint">{USERNAME_HINT}</div></Field>
+              <Field label="Нууц үг">
+                <PasswordInput minLength={8} value={f.admin_password} onChange={set('admin_password')}
+                  className={`input${!f.admin_password || isPassword(f.admin_password) ? '' : ' input-error'}`} />
+                <div className={f.admin_password && !isPassword(f.admin_password) ? 'hint-error' : 'hint'}>{PASSWORD_HINT}</div></Field>
               <Field label="Бүтэн нэр">
                 <input className="input" value={f.admin_full_name} onChange={set('admin_full_name')} /></Field>
             </div>

@@ -2,6 +2,7 @@ import { Plus, Save, Settings2, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import { PLATE_HINT, clampNum, isPlate, normalizePlate } from '../validation'
 
 // Хар жагсаалтад ЯМАР нөхцөлд машин ордог, орсон машиныг ХЭРХЭН харьцах дүрэм.
 // Backend-ийн app_settings-д хадгалагдана — deploy шаардахгүй, админ өөрөө өөрчилнө.
@@ -47,14 +48,14 @@ function RulesCard({ toast }) {
 
           <div className="grid sm:grid-cols-2 gap-3">
             <Field label="Хэдэн удаагийн өр хуримтлагдсан үед (0 = хэрэглэхгүй)">
-              <input className="input font-mono" type="number" min="0" value={rules.debt_count}
+              <input className="input font-mono" type="number" min="0" max="100" step="1" value={rules.debt_count}
                 disabled={!rules.auto_enabled}
-                onChange={(e) => set('debt_count', Number(e.target.value))} />
+                onChange={(e) => set('debt_count', clampNum(e.target.value, { min: 0, max: 100 }))} />
             </Field>
             <Field label="Эсвэл нийт өр энэ дүнд хүрвэл (₮, 0 = хэрэглэхгүй)">
-              <input className="input font-mono" type="number" min="0" step="1000" value={rules.debt_amount}
+              <input className="input font-mono" type="number" min="0" max="100000000" step="1000" value={rules.debt_amount}
                 disabled={!rules.auto_enabled}
-                onChange={(e) => set('debt_amount', Number(e.target.value))} />
+                onChange={(e) => set('debt_amount', clampNum(e.target.value, { min: 0, max: 100_000_000 }))} />
             </Field>
           </div>
 
@@ -70,9 +71,9 @@ function RulesCard({ toast }) {
               </span>
             </label>
             <Field label="Гарахад саатуулах: хэдэн өртэй бол хаалт автоматаар нээхгүй вэ (0 = саатуулахгүй)">
-              <input className="input font-mono w-40" type="number" min="0"
+              <input className="input font-mono w-40" type="number" min="0" max="100" step="1"
                 value={rules.block_exit_debt_count}
-                onChange={(e) => set('block_exit_debt_count', Number(e.target.value))} />
+                onChange={(e) => set('block_exit_debt_count', clampNum(e.target.value, { min: 0, max: 100 }))} />
             </Field>
           </div>
 
@@ -94,6 +95,10 @@ export default function Blacklist() {
 
   const save = async (e) => {
     e.preventDefault()
+    // Стандарт бус дугаарыг (дипломат/тусгай) операторын баталгаажуулалттайгаар л оруулна —
+    // алдаатай бичсэн дугаар хар жагсаалтад орвол огт хамаагүй машин хоригдоно.
+    if (!isPlate(editing.plate_number)
+      && !confirm(`«${editing.plate_number}» стандарт форматад тохирохгүй байна.\n${PLATE_HINT}\n\nТусгай дугаар мөн бол OK дарна уу.`)) return
     try {
       await api('/api/admin/blacklist', { method: 'POST', body: editing })
       toast('Нэмэгдлээ'); setEditing(null); load()
@@ -161,8 +166,13 @@ export default function Blacklist() {
         {editing && (
           <form onSubmit={save} className="space-y-3">
             <Field label="Улсын дугаар" required>
-              <input className="input font-mono" value={editing.plate_number} required
-                onChange={(e) => setEditing({ ...editing, plate_number: e.target.value.toUpperCase() })} />
+              <input className={`input font-mono uppercase${isPlate(editing.plate_number) || !editing.plate_number ? '' : ' input-error'}`}
+                value={editing.plate_number} required maxLength={7} placeholder="1234УБА"
+                aria-invalid={!!editing.plate_number && !isPlate(editing.plate_number)}
+                onChange={(e) => setEditing({ ...editing, plate_number: normalizePlate(e.target.value) })} />
+              <div className={editing.plate_number && !isPlate(editing.plate_number) ? 'hint-error' : 'hint'}>
+                {editing.plate_number && !isPlate(editing.plate_number) ? `Формат буруу — ${PLATE_HINT}` : PLATE_HINT}
+              </div>
             </Field>
             <Field label="Шалтгаан">
               <textarea className="input" rows="3" value={editing.reason}

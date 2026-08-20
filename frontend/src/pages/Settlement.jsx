@@ -3,12 +3,14 @@ import { Download, Lock, Unlock } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import { useFetch } from '../hooks/useFetch'
-import { Badge, Table, useToast } from '../components/ui'
+import { Badge, DateRange, Table, useToast } from '../components/ui'
+import { clampNum, toDateInput } from '../validation'
 
 export default function Settlement() {
   const toast = useToast()
-  const today = new Date().toISOString().slice(0, 10)
-  const weekAgo = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10)
+  // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
+  const today = toDateInput()
+  const weekAgo = toDateInput(new Date(Date.now() - 14 * 864e5))
   const [siteId, setSiteId] = useState('')
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
@@ -30,7 +32,10 @@ export default function Settlement() {
       await api('/api/reports/settlement', {
         method: 'PUT',
         body: { site_id: siteId, date: r.date, status,
-                confirmed_cash: +cashVal(r) || 0, confirmed_transfer: +trVal(r) || 0 },
+                // Баталгаажсан дүн сөрөг байж болохгүй — зөрүүг эсрэг тэмдэгтэй харуулж
+                // тооцоог «хаасан» мэт харагдуулах эрсдэлээс сэргийлнэ
+                confirmed_cash: clampNum(cashVal(r), { min: 0, max: 1_000_000_000, int: false }),
+                confirmed_transfer: clampNum(trVal(r), { min: 0, max: 1_000_000_000, int: false }) },
       })
       toast(status === 'CLOSED' ? 'Тооцоо хаагдлаа' : 'Хадгалагдлаа'); load()
     } catch (e) { toast(e.message, 'error') }
@@ -56,9 +61,7 @@ export default function Settlement() {
           <select className="input w-auto" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх" />
-          <span className="text-slate-500">—</span>
-          <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах" />
+          <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
           <button className="btn-primary" onClick={download}><Download size={16} /> Excel</button>
         </div>
       </div>
@@ -83,13 +86,13 @@ export default function Settlement() {
                 <td className="td font-mono text-slate-300">{fmt(r.qr_qpay)}₮</td>
                 <td className="td font-mono">{fmt(r.cash)}₮</td>
                 <td className="td">
-                  <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
+                  <input type="number" min="0" step="100" className="input w-24 py-1 text-sm font-mono" disabled={closed}
                     value={cashVal(r)} placeholder={fmt(r.cash)}
                     onChange={(e) => setEdit((x) => ({ ...x, [r.date]: { ...x[r.date], cash: e.target.value } }))} />
                 </td>
                 <td className="td font-mono">{fmt(r.transfer)}₮</td>
                 <td className="td">
-                  <input type="number" className="input w-24 py-1 text-sm font-mono" disabled={closed}
+                  <input type="number" min="0" step="100" className="input w-24 py-1 text-sm font-mono" disabled={closed}
                     value={trVal(r)} placeholder={fmt(r.transfer)}
                     onChange={(e) => setEdit((x) => ({ ...x, [r.date]: { ...x[r.date], transfer: e.target.value } }))} />
                 </td>

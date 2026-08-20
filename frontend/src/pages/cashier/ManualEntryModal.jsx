@@ -1,24 +1,29 @@
 // Гараар бүртгэх modal — уншигдалгүй орсон машин (эргүүлийн шалгалт)
 import { api } from '../../api'
 import { Field, Modal, useToast } from '../../components/ui'
+import { PLATE_HINT, isPlate, normalizePlate, toDateTimeInput } from '../../validation'
 
-// Монгол дугаарын формат: 4 орон + 3 кирилл үсэг (жишээ: 1234УБА)
-// Энгийн (1234УБА) эсвэл дипломат/тусгай (ДК1234)
-const PLATE_RE = /^\d{4}[А-ЯЁӨҮ]{3}$|^[А-ЯЁӨҮ]{2}\d{4}$/
+// Гараар бүртгэх боломжтой хамгийн эртний цаг — 7 хоног.
+// Үүнээс хол цаг оруулбал тарифын тооцоо утгагүй том дүн гаргана.
+const MAX_BACKDATE_DAYS = 7
 
-// datetime-local input-д зориулсан локал цагийн формат (YYYY-MM-DDTHH:MM)
-const toLocalInput = (d) => {
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
-}
-export const minutesAgo = (mins) => toLocalInput(new Date(Date.now() - mins * 60000))
+// datetime-local талбарт тохирох локал цаг (YYYY-MM-DDTHH:MM)
+export const minutesAgo = (mins) => toDateTimeInput(new Date(Date.now() - mins * 60000))
 
 export default function ManualEntryModal({ manualEntry, setManualEntry, siteId }) {
   const toast = useToast()
-  const plateValid = manualEntry ? PLATE_RE.test(manualEntry.plate_number) : false
+  const plateValid = manualEntry ? isPlate(manualEntry.plate_number) : false
+  // Ирээдүйн цаг бүртгэхийг хориглоно; хамгийн эрт нь MAX_BACKDATE_DAYS хоногийн өмнө
+  const nowInput = toDateTimeInput()
+  const minInput = toDateTimeInput(new Date(Date.now() - MAX_BACKDATE_DAYS * 86400000))
+  const timeErr = !manualEntry?.entry_time ? null
+    : manualEntry.entry_time > nowInput ? 'Ирээдүйн цаг оруулах боломжгүй'
+      : manualEntry.entry_time < minInput ? `${MAX_BACKDATE_DAYS} хоногоос хэтэрсэн цаг оруулах боломжгүй`
+        : null
 
   const saveManualEntry = async (e) => {
     e.preventDefault()
+    if (timeErr) { toast(timeErr, 'error'); return }
     try {
       const body = { site_id: siteId, plate_number: manualEntry.plate_number }
       // Стандарт бус (дипломат/тусгай) дугаарыг оператор баталгаажуулж бүртгэнэ
@@ -50,7 +55,7 @@ export default function ManualEntryModal({ manualEntry, setManualEntry, siteId }
               onChange={(e) => setManualEntry({
                 ...manualEntry,
                 // Зөвхөн тоо + кирилл үсэг үлдээж, урд нь 4 тоо, ард нь 3 үсэг гэсэн дарааллаар шүүнэ
-                plate_number: e.target.value.toUpperCase().replace(/[^0-9А-ЯЁӨҮ]/g, '').slice(0, 7),
+                plate_number: normalizePlate(e.target.value),
               })} />
             <div id="plate-hint" aria-live="polite"
               className={`text-xs mt-1 ${!manualEntry.plate_number ? 'text-slate-500' : plateValid ? 'text-accent' : 'text-red-400'}`}>
@@ -58,7 +63,7 @@ export default function ManualEntryModal({ manualEntry, setManualEntry, siteId }
                 ? 'Жишээ: 1234УБА'
                 : plateValid
                   ? '✓ Дугаарын формат зөв'
-                  : 'Формат буруу — эхлээд 4 тоо, дараа нь 3 кирилл үсэг (жишээ: 1234УБА)'}
+                  : `Формат буруу — ${PLATE_HINT}`}
             </div>
           </Field>
           <Field label="Хэдий хугацааны өмнө орсон бэ?">
@@ -74,11 +79,15 @@ export default function ManualEntryModal({ manualEntry, setManualEntry, siteId }
                 </button>
               ))}
             </div>
-            <input className="input" type="datetime-local" value={manualEntry.entry_time} aria-label="Орсон цаг гараар засах"
+            <input className={`input${timeErr ? ' input-error' : ''}`} type="datetime-local"
+              value={manualEntry.entry_time} aria-label="Орсон цаг гараар засах"
+              min={minInput} max={nowInput} aria-invalid={!!timeErr}
               onChange={(e) => setManualEntry({ ...manualEntry, entry_time: e.target.value, offset: -1 })} />
-            <div className="text-xs text-slate-500 mt-1">3 цагаас дээш бол дээрх талбараас гараар засна.</div>
+            <div className={timeErr ? 'hint-error' : 'hint'} aria-live="polite">
+              {timeErr || `3 цагаас дээш бол дээрх талбараас гараар засна (${MAX_BACKDATE_DAYS} хоног хүртэл).`}
+            </div>
           </Field>
-          <button className="btn-primary w-full justify-center" disabled={!manualEntry.plate_number}>
+          <button className="btn-primary w-full justify-center" disabled={!manualEntry.plate_number || !!timeErr}>
             {plateValid ? 'Бүртгэх' : 'Тусгай дугаараар бүртгэх'}
           </button>
         </form>

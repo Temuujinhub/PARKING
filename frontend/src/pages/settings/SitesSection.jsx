@@ -6,6 +6,7 @@ import { api } from '../../api'
 import { useAuth } from '../../auth'
 import { Table, useToast } from '../../components/ui'
 import { genDevices } from './shared'
+import { clampNum, clampOrNull } from '../../validation'
 import SiteEditModal from './SiteEditModal'
 import SiteQrModal from './SiteQrModal'
 import SiteWizardModal from './SiteWizardModal'
@@ -32,16 +33,15 @@ export default function SitesSection({ onGotoIntegrations }) {
     try {
       const body = {
         ...editing,
-        capacity: editing.unlimited ? 0 : +editing.capacity,
+        // Багтаамж 0 = хязгааргүй; сөрөг/утгагүй тоо ороход «сул зай» тооцоо эвдэрдэг
+        capacity: editing.unlimited ? 0 : clampNum(editing.capacity, { min: 0, max: 100000, fallback: 0 }),
         tariff_template_id: editing.tariff_template_id || null,
         // '' = глобал default (72ц), 0 = унтраах, N = тухайн зогсоолын босго
-        auto_close_hours: editing.auto_close_hours === '' || editing.auto_close_hours == null
-          ? null : +editing.auto_close_hours,
-        entry_only_free_hours: editing.entry_only_free_hours === '' || editing.entry_only_free_hours == null
-          ? null : +editing.entry_only_free_hours,
+        auto_close_hours: clampOrNull(editing.auto_close_hours, { min: 0, max: 720 }),
+        entry_only_free_hours: clampOrNull(editing.entry_only_free_hours, { min: 0, max: 720 }),
         // '' = глобал default (унтраалттай), 0 = унтраах, N = N минут тутам хаах
-        barrier_close_sweep_min: editing.barrier_close_sweep_min === '' || editing.barrier_close_sweep_min == null
-          ? null : +editing.barrier_close_sweep_min,
+        barrier_close_sweep_min: clampOrNull(editing.barrier_close_sweep_min, { min: 0, max: 1440 }),
+        transit_max_hours: clampOrNull(editing.transit_max_hours, { min: 0, max: 720 }),
       }
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()

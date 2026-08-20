@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, Table, useToast } from '../../components/ui'
+import { IP_HINT, clampNum, isIp, normalizeIp } from '../../validation'
 
 // Эгнээний DEFAULT дугаар чиглэлээр: орох=1, гарах=2. Ихэнх зогсоол нэг орох,
 // нэг гарах эгнээтэй бөгөөд эгнээ бүрд өөр дугаар өгөх ЁСТОЙ (нэг зогсоолын нэг
@@ -46,8 +47,11 @@ export default function DevicesSection() {
 
   const save = async (e) => {
     e.preventDefault()
+    // IP буруу бол камер/хаалт руу холбогдох оролдлого чимээгүй бүтэлгүйтэж,
+    // «хаалт нээгдэхгүй» гэсэн оношлоход хүнд гэмтэл болдог тул энд зогсооно.
+    if (!isIp(editing.ip_address)) { toast(`IP хаяг буруу — ${IP_HINT}`, 'error'); return }
     try {
-      const body = { ...editing, lane_no: +editing.lane_no }
+      const body = { ...editing, lane_no: clampNum(editing.lane_no, { min: 1, max: 16, fallback: 1 }) }
       if (editing.id) await api(`/api/admin/devices/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/devices', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -210,11 +214,14 @@ export default function DevicesSection() {
                   onChange={(e) => setEditing({ ...editing, model: e.target.value })} />
               </Field>
               <Field label="IP хаяг">
-                <input className="input font-mono" value={editing.ip_address || ''} placeholder="192.168.1.108"
-                  onChange={(e) => setEditing({ ...editing, ip_address: e.target.value })} />
+                <input className={`input font-mono${isIp(editing.ip_address) ? '' : ' input-error'}`}
+                  value={editing.ip_address || ''} placeholder="192.168.1.108" inputMode="decimal" maxLength={15}
+                  aria-invalid={!isIp(editing.ip_address)}
+                  onChange={(e) => setEditing({ ...editing, ip_address: normalizeIp(e.target.value) })} />
+                {!isIp(editing.ip_address) && <div className="hint-error">{IP_HINT}</div>}
               </Field>
               <Field label="Эгнээ (lane)">
-                <input className="input" type="number" min="1" value={editing.lane_no}
+                <input className="input" type="number" min="1" max="16" step="1" value={editing.lane_no}
                   onChange={(e) => setEditing({ ...editing, lane_no: e.target.value })} />
                 {!editing.id && +editing.lane_no === LANE_DEFAULT[editing.lane_dir] && (
                   <div className="text-[11px] text-slate-500 mt-1">

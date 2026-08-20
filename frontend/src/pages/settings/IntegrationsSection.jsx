@@ -94,6 +94,12 @@ function AccountModal({ state, tenants, sites, isSuper, onClose, onDone }) {
     if (!f.qpay_password.trim() && !f.password_set) {
       return toast('QPay нууц үгээ бичнэ үү — нэр ганцаараа хангалтгүй', 'error')
     }
+    // Буруу нэхэмжлэхийн код/дүүргийн кодтой данс нь QPay рүү явахдаа л алдаа
+    // өгдөг тул энд зогсоовол «яагаад QR гарахгүй байна» гэсэн оношилгоо хэмнэнэ
+    const inv = (f.qpay_invoice_code || '').trim()
+    if (inv && !inv.startsWith('EB_')) return toast('Нэхэмжлэхийн код EB_-ээр эхлэх ёстой', 'error')
+    const dist = (f.qpay_district_code || '').trim()
+    if (dist && !/^\d{4}$/.test(dist)) return toast('НӨАТ дүүрэг+хорооны код яг 4 орон байна', 'error')
     try {
       const body = {
         qpay_username: f.qpay_username.trim(),
@@ -172,8 +178,9 @@ function AccountModal({ state, tenants, sites, isSuper, onClose, onDone }) {
               placeholder="EB_MONNIS_INVOICE" onChange={set('qpay_invoice_code')} />
           </Field>
           <Field label="НӨАТ дүүрэг+хороо (4 орон)">
-            <input className="input font-mono text-xs" value={f.qpay_district_code || ''}
-              placeholder="2318" onChange={set('qpay_district_code')} />
+            <input className={`input font-mono text-xs${!f.qpay_district_code || /^\d{4}$/.test(f.qpay_district_code) ? '' : ' input-error'}`}
+              value={f.qpay_district_code || ''} placeholder="2318" inputMode="numeric" maxLength={4}
+              onChange={(e) => setF({ ...f, qpay_district_code: e.target.value.replace(/\D/g, '').slice(0, 4) })} />
           </Field>
         </div>
         {(f.qpay_invoice_code || '').trim() && !(f.qpay_invoice_code || '').startsWith('EB_') && (
@@ -207,6 +214,10 @@ function BankModal({ state, onClose, onDone }) {
     // site_id === '*' — нэг дансыг БҮХ зогсоолд хадгална
     const targets = f.site_id === '*' ? (f._all || []).map((s) => s.id) : [f.site_id]
     if (!targets.length) return toast('Зогсоол олдсонгүй', 'error')
+    const filled = [f.bank_name, f.bank_account, f.bank_account_name].filter((x) => (x || '').trim()).length
+    if (filled && filled < 3) {
+      return toast('Банк, дансны дугаар, эзэмшигч гурвыг бүрэн бөглөнө үү (эсвэл гурвыг хоослож устгана)', 'error')
+    }
     const body = { bank_name: f.bank_name || '', bank_account: f.bank_account || '',
                    bank_account_name: f.bank_account_name || '' }
     try {
@@ -227,7 +238,8 @@ function BankModal({ state, onClose, onDone }) {
           </Field>
           <Field label="Дансны дугаар">
             <input className="input font-mono" value={f.bank_account || ''} placeholder="5123456789"
-              onChange={set('bank_account')} />
+              inputMode="numeric" maxLength={20}
+              onChange={(e) => setF({ ...f, bank_account: e.target.value.replace(/\D/g, '').slice(0, 20) })} />
           </Field>
           <Field label="Данс эзэмшигч">
             <input className="input" value={f.bank_account_name || ''} placeholder="Моннис Пропертис ХХК"

@@ -1,6 +1,7 @@
 // Дундын UI компонентууд
 import { Eye, EyeOff, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { dateRangeError, toDateInput } from '../validation'
 
 export function Modal({ open, onClose, title, children, wide }) {
   useEffect(() => {
@@ -91,6 +92,27 @@ export function Table({ headers, children, empty, maxH }) {
         </tbody>
       </table>
     </div>
+  )
+}
+
+/** Огнооны муж — тайлангийн бүх хуудсанд НЭГ ижил дүрмээр:
+ *  ирээдүйн огноо сонгуулахгүй, эхлэх нь дуусахаас хойш байж чадахгүй.
+ *  (Өмнө нь хуудас бүр өөрийн хоёр input-тай, ямар ч хязгааргүй байсан —
+ *  «2030 он»-ы тайлан хоосон буцаж хэрэглэгч эргэлздэг байв.) */
+export function DateRange({ from, to, setFrom, setTo, maxDays = 0, className = 'w-40' }) {
+  const today = toDateInput()
+  const err = dateRangeError(from, to, { maxDays })
+  return (
+    <>
+      <input type="date" className={`input ${className}${err ? ' input-error' : ''}`} value={from}
+        max={to && to < today ? to : today} aria-label="Эхлэх огноо" aria-invalid={!!err}
+        onChange={(e) => setFrom(e.target.value)} />
+      <span className="text-slate-500">—</span>
+      <input type="date" className={`input ${className}${err ? ' input-error' : ''}`} value={to}
+        min={from || undefined} max={today} aria-label="Дуусах огноо" aria-invalid={!!err}
+        onChange={(e) => setTo(e.target.value)} />
+      {err && <span className="hint-error" role="alert">{err}</span>}
+    </>
   )
 }
 

@@ -8,6 +8,7 @@ import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import { PLATE_HINT, isPlate, normalizePlate } from '../validation'
 
 const STATUSES = [
   ['', 'Бүгд (зогсоолд байгаа)'],
@@ -102,9 +103,14 @@ export default function Check() {
   // буруугий нь "өр үүсгэхгүй" чагтгүйгээр хасна — endpoint давхардлыг өөрөө хориглоно.
   const editPlate = async (s) => {
     const entered = window.prompt(
-      `${s.plate_number} дугаарыг засах — зөв дугаарыг оруулна уу:`, s.plate_number)
-    if (!entered || entered.trim().toUpperCase() === s.plate_number) return
-    const newPlate = entered.trim().toUpperCase()
+      `${s.plate_number} дугаарыг засах — зөв дугаарыг оруулна уу:\n${PLATE_HINT}`, s.plate_number)
+    if (entered === null) return
+    // Гараас бичихэд зай/латин үсэг холилдох нь элбэг — эндээс шууд цэвэрлэнэ
+    const newPlate = normalizePlate(entered)
+    if (!newPlate) { toast('Дугаар хоосон байна', 'error'); return }
+    if (newPlate === s.plate_number) return
+    if (!isPlate(newPlate)
+      && !confirm(`«${newPlate}» стандарт форматад тохирохгүй байна.\n${PLATE_HINT}\n\nТусгай/дипломат дугаар мөн бол OK дарна уу.`)) return
     try {
       await api(`/api/sessions/${s.id}/plate`, { method: 'PUT', body: { plate_number: newPlate } })
       toast(`${s.plate_number} → ${newPlate} болж засагдлаа`)
@@ -189,7 +195,7 @@ export default function Check() {
       </div>
 
       <div className={`card grid grid-cols-1 gap-3 ${sites.length > 1 ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
-        <input className="input font-mono text-lg" placeholder="Дугаараар шүүх… (эхний тоо хангалттай)"
+        <input className="input font-mono text-lg uppercase" maxLength={7} placeholder="Дугаараар шүүх… (эхний тоо хангалттай)"
           value={plate} onChange={(e) => setPlate(e.target.value.toUpperCase())} autoFocus
           aria-label="Улсын дугаараар шүүх" />
         {sites.length > 1 && (

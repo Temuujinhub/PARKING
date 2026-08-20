@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../auth'
 import { api, fmtDate } from '../api'
 import { Badge, Field, Modal, PasswordInput, Table, useToast } from '../components/ui'
+import { PASSWORD_HINT, PHONE_HINT, USERNAME_HINT, isPassword, isPhone, isUsername, normalizePhone, normalizeUsername } from '../validation'
 
 const ROLES = {
   SUPER_ADMIN: 'Супер админ (бүх эрх)',
@@ -73,7 +74,7 @@ export default function Users() {
 
   // Засах/нэмэх modal нээхэд эрхийн матриц + зогсоолуудыг бэлдэнэ
   const openEdit = (u) => setEditing(u.id
-    ? { ...u, password: '', perms: u.permissions || ROLE_DEFAULTS[u.role] || [], site_ids: u.site_ids || (u.site_id ? [u.site_id] : []), tenant_id: u.tenant_id || '' }
+    ? { ...u, password: '', phone: normalizePhone(u.phone), perms: u.permissions || ROLE_DEFAULTS[u.role] || [], site_ids: u.site_ids || (u.site_id ? [u.site_id] : []), tenant_id: u.tenant_id || '' }
     : { username: '', password: '', full_name: '', phone: '', role: 'OPERATOR', site_id: '', perms: ROLE_DEFAULTS.OPERATOR, site_ids: [], tenant_id: '' })
 
   const save = async (e) => {
@@ -92,6 +93,13 @@ export default function Users() {
       }
       if (isSuper) body.tenant_id = editing.tenant_id || null; else delete body.tenant_id
       if (isSuper && !editing.tenant_id) { toast('Түрээслэгчийг сонгоно уу', 'error'); return }
+      // Нэвтрэх нэр/нууц үг/утасны формат — backend бас шалгана, энэ нь ойлгомжтой мессеж өгөх давхарга
+      // Зөвхөн ШИНЭ хэрэглэгчид — хуучин бүртгэлийн нэр (том үсэг г.м.) засварыг хаахгүй
+      if (!editing.id && !isUsername(editing.username)) { toast(`Нэвтрэх нэр — ${USERNAME_HINT}`, 'error'); return }
+      if ((!editing.id || editing.password) && !isPassword(editing.password)) {
+        toast(`Нууц үг — ${PASSWORD_HINT}`, 'error'); return
+      }
+      if (!isPhone(editing.phone)) { toast(`Утас — ${PHONE_HINT}`, 'error'); return }
       if (editing.id) await api(`/api/admin/users/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/users', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -158,20 +166,30 @@ export default function Users() {
           <form onSubmit={save} className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Нэвтрэх нэр" required>
-                <input className="input font-mono" value={editing.username} required disabled={!!editing.id}
-                  onChange={(e) => setEditing({ ...editing, username: e.target.value })} autoComplete="off" />
+                <input className={`input font-mono${editing.id || !editing.username || isUsername(editing.username) ? '' : ' input-error'}`}
+                  value={editing.username} required disabled={!!editing.id} maxLength={60}
+                  aria-invalid={!editing.id && !!editing.username && !isUsername(editing.username)}
+                  onChange={(e) => setEditing({ ...editing, username: normalizeUsername(e.target.value) })} autoComplete="off" />
+                {!editing.id && <div className="hint">{USERNAME_HINT}</div>}
               </Field>
               <Field label={editing.id ? 'Шинэ нууц үг (хоосон=өөрчлөхгүй)' : 'Нууц үг'} required={!editing.id}>
-                <PasswordInput value={editing.password} required={!editing.id}
+                <PasswordInput value={editing.password} required={!editing.id} minLength={8}
+                  className={`input${!editing.password || isPassword(editing.password) ? '' : ' input-error'}`}
+                  aria-invalid={!!editing.password && !isPassword(editing.password)}
                   onChange={(e) => setEditing({ ...editing, password: e.target.value })} autoComplete="new-password" />
+                {(!editing.id || editing.password) && (
+                  <div className={editing.password && !isPassword(editing.password) ? 'hint-error' : 'hint'}>{PASSWORD_HINT}</div>
+                )}
               </Field>
               <Field label="Бүтэн нэр">
                 <input className="input" value={editing.full_name}
                   onChange={(e) => setEditing({ ...editing, full_name: e.target.value })} />
               </Field>
               <Field label="Утас">
-                <input className="input" type="tel" value={editing.phone || ''}
-                  onChange={(e) => setEditing({ ...editing, phone: e.target.value })} />
+                <input className={`input${isPhone(editing.phone) ? '' : ' input-error'}`} type="tel"
+                  inputMode="numeric" maxLength={8} placeholder="99112233" value={editing.phone || ''}
+                  aria-invalid={!isPhone(editing.phone)}
+                  onChange={(e) => setEditing({ ...editing, phone: normalizePhone(e.target.value) })} />
               </Field>
             </div>
             {isSuper && (

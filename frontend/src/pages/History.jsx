@@ -5,7 +5,8 @@ import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useAuth } from '../auth'
 import { useFetch } from '../hooks/useFetch'
 import { SnapshotButton } from '../components/Snapshot'
-import { Badge, Table, useToast } from '../components/ui'
+import { Badge, DateRange, Table, useToast } from '../components/ui'
+import { normalizePlate } from '../validation'
 
 // Хаагдсан бүртгэлийг буцаан зогсоолд оруулж болох төлвүүд (төлбөргүй хаагдсан)
 const REOPENABLE = new Set(['MANUAL_CLOSED', 'FREE', 'CLOSED'])
@@ -100,12 +101,11 @@ export default function History() {
         <select className="input" value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} aria-label="Төлөв">
           {STATUSES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
-        <input className="input font-mono" placeholder="Дугаар…" value={filters.plate}
-          onChange={(e) => setFilters({ ...filters, plate: e.target.value.toUpperCase() })} aria-label="Дугаар" />
-        <input type="date" className="input" value={filters.date_from}
-          onChange={(e) => setFilters({ ...filters, date_from: e.target.value })} aria-label="Эхлэх огноо" />
-        <input type="date" className="input" value={filters.date_to}
-          onChange={(e) => setFilters({ ...filters, date_to: e.target.value })} aria-label="Дуусах огноо" />
+        <input className="input font-mono uppercase" placeholder="Дугаар…" value={filters.plate} maxLength={7}
+          onChange={(e) => setFilters({ ...filters, plate: normalizePlate(e.target.value) })} aria-label="Дугаар" />
+        <DateRange className="" from={filters.date_from} to={filters.date_to}
+          setFrom={(v) => setFilters({ ...filters, date_from: v })}
+          setTo={(v) => setFilters({ ...filters, date_to: v })} />
       </div>
 
       <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Төлбөр', 'Хөнгөлөлт',

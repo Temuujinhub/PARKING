@@ -1396,7 +1396,9 @@ def list_discounts(db: Session = Depends(get_db), user: User = Depends(require("
 
 
 @router.post("/discounts")
-def create_discount(body: dict, db: Session = Depends(get_db), user: User = Depends(require("discounts"))):
+def create_discount(payload: schemas.DiscountCreate, db: Session = Depends(get_db),
+                    user: User = Depends(require("discounts"))):
+    body = payload.dump()
     d = Discount(name=body["name"], discount_type=body["discount_type"], value=body["value"])
     db.add(d)
     db.flush()
@@ -1406,11 +1408,20 @@ def create_discount(body: dict, db: Session = Depends(get_db), user: User = Depe
 
 
 @router.put("/discounts/{discount_id}")
-def update_discount(discount_id: str, body: dict, db: Session = Depends(get_db),
+def update_discount(discount_id: str, payload: schemas.DiscountUpdate, db: Session = Depends(get_db),
                     user: User = Depends(require("discounts"))):
     d = db.get(Discount, discount_id)
     if not d:
         raise HTTPException(404, "Хөнгөлөлт олдсонгүй")
+    body = payload.dump()
+    # PERCENT/FREE_MINUTES-ийн дээд хязгаарыг ЗӨВХӨН value ирсэн үед схем шалгадаг —
+    # төрлийг нь дангаар нь солиход хуучин утга хязгаараас хэтрэх эрсдэлтэй тул дахин шалгана
+    new_type = body.get("discount_type", d.discount_type)
+    new_value = body.get("value", d.value)
+    if new_type == "PERCENT" and new_value > 100:
+        raise HTTPException(400, "Хувиар хөнгөлөлт 100-аас их байж болохгүй")
+    if new_type == "FREE_MINUTES" and new_value > 1440:
+        raise HTTPException(400, "Үнэгүй минут 1440 (1 хоног)-аас их байж болохгүй")
     for k in ("name", "discount_type", "value", "is_active"):
         if k in body:
             setattr(d, k, body[k])

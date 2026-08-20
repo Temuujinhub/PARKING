@@ -3,11 +3,13 @@ import { AlertTriangle, Ban, FileCheck2, QrCode, RefreshCw, Send } from 'lucide-
 import { useRef, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
-import { Badge, Modal, Table, useToast } from '../components/ui'
+import { Badge, DateRange, Modal, Table, useToast } from '../components/ui'
+import { toDateInput } from '../validation'
 
 export default function Vat() {
-  const today = new Date().toISOString().slice(0, 10)
-  const monthAgo = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10)
+  // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
+  const today = toDateInput()
+  const monthAgo = toDateInput(new Date(Date.now() - 30 * 864e5))
   const [from, setFrom] = useState(monthAgo)
   const [to, setTo] = useState(today)
   const [qrReceipt, setQrReceipt] = useState(null)
@@ -98,9 +100,7 @@ export default function Vat() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Ибаримт (НӨАТ)</h1>
         <div className="flex items-center gap-2">
-          <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх огноо" />
-          <span className="text-slate-500">—</span>
-          <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах огноо" />
+          <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
           <input ref={fileRef} type="file" accept=".xlsx" className="hidden"
             onChange={(e) => reconcile(e.target.files?.[0])} />
           <button className="btn-secondary" disabled={reconBusy}

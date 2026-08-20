@@ -4,6 +4,10 @@ import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import {
+  PHONE_HINT, PLATE_HINT, clampNum, dateRangeError, isPhone, isPlate,
+  normalizePhone, normalizePlate, timeWindowError,
+} from '../validation'
 
 const CONTRACT_TYPES = {
   MONTHLY: 'Сарын эрх', CONTRACT: 'Гэрээт', VIP: 'VIP', STAFF: 'Ажилтан',
@@ -173,10 +177,28 @@ export default function Drivers() {
     valid_to: new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10),
   }
 
+  // Формын бүх алдаа (хоосон = бүх зүйл зөв). Хадгалахын өмнө шалгана.
+  const formErrors = (d) => [
+    !!d.plate_number && !isPlate(d.plate_number) && `Улсын дугаар — ${PLATE_HINT}`,
+    !isPhone(d.phone) && `Утас — ${PHONE_HINT}`,
+    dateRangeError(d.valid_from, d.valid_to),
+    timeWindowError(d.free_from, d.free_until),
+  ].filter(Boolean)
+
   const save = async (e) => {
     e.preventDefault()
+    const errs = formErrors(editing)
+    // Дугаарын форматын алдааг л (дипломат/тусгай дугаар байж болзошгүй тул)
+    // операторт баталгаажуулах эрх өгнө; бусад нь хатуу зогсоно.
+    const hard = errs.filter((m) => !m.startsWith('Улсын дугаар'))
+    if (hard.length) { toast(hard[0], 'error'); return }
+    if (errs.length && !confirm(`${errs[0]}\n\nТусгай дугаар мөн бол OK дарж хадгална уу.`)) return
     try {
-      const body = { ...editing, site_id: editing.site_id || null }
+      const body = {
+        ...editing,
+        site_id: editing.site_id || null,
+        monthly_fee: clampNum(editing.monthly_fee, { min: 0, max: 100_000_000 }),
+      }
       if (editing.id) await api(`/api/admin/drivers/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/drivers', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
@@ -245,7 +267,10 @@ export default function Drivers() {
             <td className="td"><Badge value={d.is_active ? 'active' : 'FAILED'} /></td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs"
-                onClick={() => setEditing({ ...d, valid_from: d.valid_from?.slice(0, 10), valid_to: d.valid_to?.slice(0, 10) })}>
+                onClick={() => setEditing({
+                  ...d, phone: normalizePhone(d.phone),
+                  valid_from: d.valid_from?.slice(0, 10), valid_to: d.valid_to?.slice(0, 10),
+                })}>
                 Засах
               </button>
               {isAdmin && (
@@ -266,16 +291,20 @@ export default function Drivers() {
           <form onSubmit={save} className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <Field label="Улсын дугаар" required>
-                <input className="input font-mono" value={editing.plate_number} required
-                  onChange={(e) => setEditing({ ...editing, plate_number: e.target.value.toUpperCase() })} />
+                <input className={`input font-mono uppercase${!editing.plate_number || isPlate(editing.plate_number) ? '' : ' input-error'}`}
+                  value={editing.plate_number} required maxLength={7} placeholder="1234УБА"
+                  aria-invalid={!!editing.plate_number && !isPlate(editing.plate_number)}
+                  onChange={(e) => setEditing({ ...editing, plate_number: normalizePlate(e.target.value) })} />
               </Field>
               <Field label="Нэр">
                 <input className="input" value={editing.full_name}
                   onChange={(e) => setEditing({ ...editing, full_name: e.target.value })} />
               </Field>
               <Field label="Утас">
-                <input className="input" type="tel" value={editing.phone}
-                  onChange={(e) => setEditing({ ...editing, phone: e.target.value })} />
+                <input className={`input${isPhone(editing.phone) ? '' : ' input-error'}`} type="tel"
+                  inputMode="numeric" maxLength={8} placeholder="99112233" value={editing.phone || ''}
+                  aria-invalid={!isPhone(editing.phone)}
+                  onChange={(e) => setEditing({ ...editing, phone: normalizePhone(e.target.value) })} />
               </Field>
               <Field label="Төрөл">
                 <select className="input" value={editing.contract_type}
@@ -291,7 +320,7 @@ export default function Drivers() {
                 </select>
               </Field>
               <Field label="Сарын төлбөр (₮)">
-                <input className="input" type="number" min="0" value={editing.monthly_fee}
+                <input className="input" type="number" min="0" max="100000000" step="1000" value={editing.monthly_fee}
                   onChange={(e) => setEditing({ ...editing, monthly_fee: e.target.value })} />
               </Field>
               <Field label="Эхлэх огноо" required>
@@ -299,7 +328,8 @@ export default function Drivers() {
                   onChange={(e) => setEditing({ ...editing, valid_from: e.target.value })} />
               </Field>
               <Field label="Дуусах огноо" required>
-                <input className="input" type="date" value={editing.valid_to} required
+                <input className={`input${dateRangeError(editing.valid_from, editing.valid_to) ? ' input-error' : ''}`}
+                  type="date" value={editing.valid_to} required min={editing.valid_from || undefined}
                   onChange={(e) => setEditing({ ...editing, valid_to: e.target.value })} />
               </Field>
               {/* Үнэгүй цагийн цонх: хоёуланг нь тохируулбал ЗӨВХӨН энэ цонхонд
@@ -314,8 +344,10 @@ export default function Drivers() {
                   onChange={(e) => setEditing({ ...editing, free_until: e.target.value || null })} />
               </Field>
             </div>
-            {(editing.free_from || editing.free_until) && !(editing.free_from && editing.free_until) && (
-              <div className="text-xs text-amber-400">Цагийн цонх үйлчлэхийн тулд эхлэх, дуусах хоёуланг нь бөглөнө.</div>
+            {formErrors(editing).length > 0 && (
+              <div className="text-xs text-amber-400" aria-live="polite">
+                {formErrors(editing).map((m) => <div key={m}>⚠ {m}</div>)}
+              </div>
             )}
             {editing.id && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">

@@ -1,5 +1,5 @@
 """Session удирдлага: жагсаалт, хайлт, шалгах, түүх, гараар хаах."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -431,6 +431,34 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
             "free": max(0, cap - occupied) if cap else None, "rows": rows}
 
 
+# Гараар бүртгэх боломжтой хамгийн эртний цаг. Frontend-д ч ижил хязгаар
+# (ManualEntryModal.MAX_BACKDATE_DAYS) — API-г шууд дуудахад ч хамгаалалттай байх ёстой.
+MANUAL_ENTRY_MAX_BACKDATE_DAYS = 7
+
+
+def _parse_manual_entry_time(raw) -> datetime:
+    """Гараар оруулсан орсон цагийг шалгаж хөрвүүлнэ.
+
+    Хязгааргүй үед: (1) ирээдүйн цаг → сөрөг/тэг хугацаа, (2) олон жилийн өмнөх
+    цаг → тэнгэр баганадсан төлбөр. Хоёулаа кассын тооцоог чимээгүй эвдэнэ.
+    """
+    if not raw:
+        return datetime.utcnow()
+    try:
+        t = datetime.fromisoformat(str(raw).replace("Z", ""))
+    except ValueError:
+        raise HTTPException(400, f"entry_time огнооны формат буруу (ISO байх ёстой): {raw!r}")
+    if t.tzinfo is not None:
+        t = t.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.utcnow()
+    # 5 минутын зөрүү — ажлын станцын цагийн бага зэргийн гажилтыг тэвчинэ
+    if t > now + timedelta(minutes=5):
+        raise HTTPException(400, "Орсон цаг ирээдүйд байж болохгүй")
+    if t < now - timedelta(days=MANUAL_ENTRY_MAX_BACKDATE_DAYS):
+        raise HTTPException(400, f"Орсон цаг {MANUAL_ENTRY_MAX_BACKDATE_DAYS} хоногоос хэтэрсэн байна")
+    return t
+
+
 @router.post("/manual-entry")
 async def manual_entry(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier"))):
@@ -457,8 +485,7 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
         raise HTTPException(400, f"{plate} дугаартай машин аль хэдийн бүртгэлтэй байна "
                                  f"(орсон: {existing.entry_time:%Y-%m-%d %H:%M})")
 
-    entry_time = (datetime.fromisoformat(body["entry_time"])
-                  if body.get("entry_time") else datetime.utcnow())
+    entry_time = _parse_manual_entry_time(body.get("entry_time"))
     registered = find_registered(db, plate, site_id)
     black = is_blacklisted(db, plate)
 

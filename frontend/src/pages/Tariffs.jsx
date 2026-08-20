@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Field, Modal, Table, useToast } from '../components/ui'
+import { clampNum, clampOrNull, tariffErrors, tariffWarnings } from '../validation'
 
 // Тарифыг ХАДГАЛАХААС ӨМНӨ бодит дүнг харуулна — «зөв оруулсан уу» гэдгийг
 // таамаглахын оронд тоогоор батална. Тооцоог backend хийнэ (production-ий
@@ -127,11 +128,20 @@ function Templates() {
 
   const save = async (e) => {
     e.preventDefault()
+    const errs = tariffErrors(editing)
+    if (errs.length) { toast(errs[0], 'error'); return }
     try {
       const body = {
         ...editing,
-        daily_cap: editing.daily_cap === '' ? null : +editing.daily_cap,
-        tiers: editing.tiers.map((t) => ({ upto_minutes: +t.upto_minutes, price: +t.price })),
+        free_minutes: clampNum(editing.free_minutes, { min: 0, max: 1440 }),
+        grace_minutes: clampNum(editing.grace_minutes, { min: 0, max: 1440 }),
+        prepaid_price: clampNum(editing.prepaid_price, { min: 0, max: 10_000_000 }),
+        extra_hour_price: clampNum(editing.extra_hour_price, { min: 0, max: 10_000_000 }),
+        daily_cap: clampOrNull(editing.daily_cap, { min: 0, max: 10_000_000 }),
+        tiers: editing.tiers.map((t) => ({
+          upto_minutes: clampNum(t.upto_minutes, { min: 1, max: 100000, fallback: 1 }),
+          price: clampNum(t.price, { min: 0, max: 10_000_000 }),
+        })),
       }
       if (editing.id) await api(`/api/admin/tariff-templates/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/tariff-templates', { method: 'POST', body })
@@ -173,38 +183,44 @@ function Templates() {
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
               </Field>
               <Field label="Үнэгүй байх хугацаа (мин)">
-                <input className="input" type="number" min="0" value={editing.free_minutes}
+                <input className="input" type="number" min="0" max="1440" step="1" value={editing.free_minutes}
                   onChange={(e) => setEditing({ ...editing, free_minutes: +e.target.value })} />
               </Field>
               <Field label="Төлбөрийн дараах гарах хугацаа (мин)">
-                <input className="input" type="number" min="0" value={editing.grace_minutes}
+                <input className="input" type="number" min="0" max="1440" step="1" value={editing.grace_minutes}
                   onChange={(e) => setEditing({ ...editing, grace_minutes: +e.target.value })} />
               </Field>
               <Field label="Урьдчилсан захиалгын үнэ (₮)">
-                <input className="input" type="number" min="0" value={editing.prepaid_price}
+                <input className="input" type="number" min="0" max="10000000" step="100" value={editing.prepaid_price}
                   onChange={(e) => setEditing({ ...editing, prepaid_price: +e.target.value })} />
               </Field>
               <Field label="Шатлалаас хэтэрсэн цагийн үнэ (₮)">
-                <input className="input" type="number" min="0" value={editing.extra_hour_price}
+                <input className="input" type="number" min="0" max="10000000" step="100" value={editing.extra_hour_price}
                   onChange={(e) => setEditing({ ...editing, extra_hour_price: +e.target.value })} />
               </Field>
               <Field label="Хоногийн дээд хязгаар (₮, хоосон=хязгааргүй)">
-                <input className="input" type="number" min="0" value={editing.daily_cap}
+                <input className="input" type="number" min="0" max="10000000" step="100" value={editing.daily_cap}
                   onChange={(e) => setEditing({ ...editing, daily_cap: e.target.value })} />
               </Field>
             </div>
+            {[...tariffErrors(editing), ...tariffWarnings(editing)].length > 0 && (
+              <div className="text-xs space-y-0.5" aria-live="polite">
+                {tariffErrors(editing).map((m) => <div key={m} className="text-red-400">✕ {m}</div>)}
+                {tariffWarnings(editing).map((m) => <div key={m} className="text-amber-400">⚠ {m}</div>)}
+              </div>
+            )}
             <div>
               <div className="label mb-2">Шатлалын үнэ (хугацаа хүртэл → нийт үнэ)</div>
               <div className="space-y-2">
                 {editing.tiers.map((t, i) => (
                   <div key={i} className="flex items-center gap-2">
-                    <input className="input w-32" type="number" min="1" value={t.upto_minutes} aria-label="Минут хүртэл"
+                    <input className="input w-32" type="number" min="1" max="100000" step="1" value={t.upto_minutes} aria-label="Минут хүртэл"
                       onChange={(e) => {
                         const tiers = [...editing.tiers]; tiers[i] = { ...t, upto_minutes: e.target.value }
                         setEditing({ ...editing, tiers })
                       }} />
                     <span className="text-sm text-slate-400">мин хүртэл →</span>
-                    <input className="input w-32" type="number" min="0" value={t.price} aria-label="Үнэ"
+                    <input className="input w-32" type="number" min="0" max="10000000" step="100" value={t.price} aria-label="Үнэ"
                       onChange={(e) => {
                         const tiers = [...editing.tiers]; tiers[i] = { ...t, price: e.target.value }
                         setEditing({ ...editing, tiers })

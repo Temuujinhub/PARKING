@@ -5,6 +5,12 @@
 /* Өдрийн горим (default) — Easy Parking брэндийн цайвар дэвсгэр.
    RGB triplet формат — Tailwind-ийн opacity modifier (/60 г.м) ажиллуулахад шаардлагатай */
 :root {
+  /* Браузерын ӨӨРИЙН popup (календарь, цагийн сонголт, select жагсаалт,
+     scrollbar) нь хуудасны color-scheme-ийг дагадаг. Зарлаагүй үед Chrome
+     цайвар схемээр зурдаг тул шөнийн горимд ХАР дэвсгэр дээр ХАР тоо гарч
+     уншигдахгүй байсан — доорх мөр үүнийг горим бүрд зөв болгоно. */
+  color-scheme: light;
+  accent-color: #4CAF52;
   --surface: 242 245 243;
   --surface-card: 255 255 255;
   --surface-muted: 231 236 232;
@@ -21,6 +27,7 @@
 
 /* Шөнийн горим */
 .dark {
+  color-scheme: dark;
   --surface: 17 19 18;
   --surface-card: 28 31 29;
   --surface-muted: 40 44 41;
@@ -56,10 +63,28 @@ body {
     @apply w-full bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm text-slate-100
       placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent/60;
   }
+  /* Буруу форматтай утга — улаан хүрээ + улаан focus ring (validation.js-тэй хамт) */
+  .input-error { @apply border-red-500/70 focus:ring-red-500/40 focus:border-red-500/70; }
   .label { @apply block text-xs font-medium text-slate-400 mb-1; }
+  .hint { @apply text-xs mt-1 text-slate-500; }
+  .hint-error { @apply text-xs mt-1 text-red-400; }
   .th { @apply px-3 py-2.5 text-left text-xs font-semibold text-slate-400 uppercase tracking-wide; }
   .td { @apply px-3 py-2.5 text-sm; }
 }
+
+/* Огноо/цагийн талбарын календарь товч — анхдагчаараа бүдэг саарал байдаг тул
+   хүрэхэд тодорч, дарж болохыг мэдэгдэнэ. Popup-ийн өнгийг дээрх color-scheme шийднэ. */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator,
+input[type="month"]::-webkit-calendar-picker-indicator {
+  opacity: 0.65;
+  cursor: pointer;
+}
+input[type="date"]::-webkit-calendar-picker-indicator:hover,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover,
+input[type="time"]::-webkit-calendar-picker-indicator:hover,
+input[type="month"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 
 /* Scrollbar — харагдахуйц ч НАМБАТАЙ. Анхдагч нимгэн саарал зураас хар дэвсгэр
    дээр үл ялгардаг байсан; эсрэгээр хатуу өнгө + бүрэн дүүрэн зурвас нь дэлгэцийн

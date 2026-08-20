@@ -5,8 +5,10 @@ import { useState } from 'react'
 import {
   ByPaymentTab, CompanyTab, DailyTab, MonthlyTab, RevenueTab, ShiftsTab, TransactionsTab, siteQ,
 } from '../components/ReportTabs'
+import { DateRange } from '../components/ui'
 import { useFetch } from '../hooks/useFetch'
 import { useDownload } from '../hooks/useDownload'
+import { toDateInput } from '../validation'
 
 const TABS = [['revenue', 'Зогсоолоор'], ['monthly', 'Сараар'], ['daily', 'Өдрөөр'],
   ['shifts', 'Ээлжээр'], ['bypayment', 'Төлбөрийн төрлөөр'], ['company', 'Байгууллагаар'],
@@ -15,8 +17,9 @@ const TABS = [['revenue', 'Зогсоолоор'], ['monthly', 'Сараар'], 
 export default function Reports() {
   const dl = useDownload()
   const [tab, setTab] = useState('revenue')
-  const today = new Date().toISOString().slice(0, 10)
-  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10)
+  // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
+  const today = toDateInput()
+  const weekAgo = toDateInput(new Date(Date.now() - 7 * 864e5))
   const [from, setFrom] = useState(weekAgo)
   const [to, setTo] = useState(today)
   const [siteId, setSiteId] = useState('')
@@ -37,9 +40,7 @@ export default function Reports() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Тайлан</h1>
         <div className="flex items-center gap-2">
-          <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх огноо" />
-          <span className="text-slate-500">—</span>
-          <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах огноо" />
+          <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
           {ex && <button className="btn-primary" onClick={() => dl(ex[0], ex[1])}><Download size={16} /> Excel</button>}
         </div>
       </div>

@@ -2,8 +2,17 @@ import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt } from '../api'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import { clampNum } from '../validation'
 
 const TYPES = { PERCENT: 'Хувиар (%)', FIXED: 'Тогтмол дүн (₮)', FREE_MINUTES: 'Үнэгүй минут' }
+
+// Төрөл бүрийн зөвшөөрөгдөх муж — хувь 100-аас хэтэрвэл СӨРӨГ төлбөр (буцаалт)
+// гарах эрсдэлтэй тул тус бүрд өөр дээд хязгаар тавина.
+const LIMITS = {
+  PERCENT: { max: 100, step: 1, unit: '%', hint: '0–100 хооронд' },
+  FIXED: { max: 10_000_000, step: 100, unit: '₮', hint: 'Төлбөрөөс хасагдах дүн' },
+  FREE_MINUTES: { max: 1440, step: 5, unit: 'мин', hint: '1 хоног (1440 мин) хүртэл' },
+}
 
 export default function Discounts() {
   const toast = useToast()
@@ -14,9 +23,12 @@ export default function Discounts() {
 
   const save = async (e) => {
     e.preventDefault()
+    const lim = LIMITS[editing.discount_type] || LIMITS.FIXED
+    const body = { ...editing, value: clampNum(editing.value, { min: 0, max: lim.max }) }
+    if (+editing.value !== body.value) { toast(`Утга 0–${lim.max} ${lim.unit} хооронд байх ёстой`, 'error'); return }
     try {
-      if (editing.id) await api(`/api/admin/discounts/${editing.id}`, { method: 'PUT', body: editing })
-      else await api('/api/admin/discounts', { method: 'POST', body: editing })
+      if (editing.id) await api(`/api/admin/discounts/${editing.id}`, { method: 'PUT', body })
+      else await api('/api/admin/discounts', { method: 'POST', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
     } catch (err) { toast(err.message, 'error') }
   }
@@ -77,13 +89,20 @@ export default function Discounts() {
             </Field>
             <Field label="Төрөл">
               <select className="input" value={editing.discount_type}
-                onChange={(e) => setEditing({ ...editing, discount_type: e.target.value })}>
+                onChange={(e) => setEditing({
+                  ...editing,
+                  discount_type: e.target.value,
+                  value: clampNum(editing.value, { min: 0, max: (LIMITS[e.target.value] || LIMITS.FIXED).max }),
+                })}>
                 {Object.entries(TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </Field>
-            <Field label="Утга" required>
-              <input type="number" step="1" min="0" className="input" value={editing.value} required
+            <Field label={`Утга (${(LIMITS[editing.discount_type] || LIMITS.FIXED).unit})`} required>
+              <input type="number" min="0" className="input" value={editing.value} required
+                step={(LIMITS[editing.discount_type] || LIMITS.FIXED).step}
+                max={(LIMITS[editing.discount_type] || LIMITS.FIXED).max}
                 onChange={(e) => setEditing({ ...editing, value: e.target.value })} />
+              <div className="hint">{(LIMITS[editing.discount_type] || LIMITS.FIXED).hint}</div>
             </Field>
             {editing.id && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">

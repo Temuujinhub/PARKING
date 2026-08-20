@@ -3,6 +3,7 @@
 // Тохиргоо → Холболт хэсэгт нэгдсэн (өмнө нь энэ модал 3 дансны хэсэгтэй
 // хэт урт байсан).
 import { Field, Modal } from '../../components/ui'
+import { normalizeCode } from '../../validation'
 
 // Эвхэгддэг бүлэг — summary дээр товч төлөв харагдана
 function Section({ title, status, statusClass = 'text-slate-500', open, children }) {
@@ -53,8 +54,9 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
                 onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
             </Field>
             <Field label="Код (QR URL-д)" required>
-              <input className="input font-mono" value={editing.site_code} required
-                onChange={(e) => setEditing({ ...editing, site_code: e.target.value.toUpperCase() })} />
+              <input className="input font-mono" value={editing.site_code} required maxLength={30}
+                onChange={(e) => setEditing({ ...editing, site_code: normalizeCode(e.target.value) })} />
+              <div className="hint">Латин үсэг, тоо (QR холбоост шууд ордог)</div>
             </Field>
             <Field label="Бүс">
               <select className="input" value={editing.zone_code}
@@ -76,7 +78,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
               </label>
             </Field>
             <Field label="Багтаамж">
-              <input className="input" type="number" min="1" value={editing.unlimited ? '' : editing.capacity}
+              <input className="input" type="number" min="1" max="100000" step="1" value={editing.unlimited ? '' : editing.capacity}
                 disabled={editing.unlimited} placeholder={editing.unlimited ? 'Хязгааргүй' : ''}
                 onChange={(e) => setEditing({ ...editing, capacity: e.target.value })} />
               <label className="flex items-center gap-2 mt-1.5 text-xs text-slate-400 cursor-pointer">
@@ -136,7 +138,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
             statusClass={ruleOverrides ? 'text-accent' : 'text-slate-500'}>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Гацсан машины авто хаалт (цаг)">
-                <input className="input" type="number" min="0" placeholder="12 (default)"
+                <input className="input" type="number" min="0" max="720" step="1" placeholder="12 (default)"
                   value={editing.auto_close_hours ?? ''}
                   onChange={(e) => setEditing({ ...editing, auto_close_hours: e.target.value })} />
                 <div className="text-[11px] text-slate-500 mt-1">
@@ -145,7 +147,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
                 </div>
               </Field>
               <Field label="Зөвхөн орох уншилттай машиныг үнэгүй хаах (цаг)">
-                <input className="input" type="number" min="0" placeholder="72 (default)"
+                <input className="input" type="number" min="0" max="720" step="1" placeholder="72 (default)"
                   value={editing.entry_only_free_hours ?? ''}
                   onChange={(e) => setEditing({ ...editing, entry_only_free_hours: e.target.value })} />
                 <div className="text-[11px] text-slate-500 mt-1">
@@ -158,7 +160,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
                 (2026-08-09 NIC). Мэдрэгч ажиллахгүй байх нь ховор биш тул сервер
                 талаас давхар хамгаалалт болгож тогтмол «хаах» команд илгээнэ. */}
             <Field label="Гарах хаалтыг тогтмол хаах (минут)">
-              <input className="input" type="number" min="0" placeholder="0 = унтраалттай"
+              <input className="input" type="number" min="0" max="1440" step="1" placeholder="0 = унтраалттай"
                 value={editing.barrier_close_sweep_min ?? ''}
                 onChange={(e) => setEditing({ ...editing, barrier_close_sweep_min: e.target.value })} />
               <div className="text-[11px] text-slate-500 mt-1">
@@ -223,7 +225,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
             </Field>
             {editing.parent_site_id && (
               <Field label="Дамжин зогсох дээд хугацаа (цаг)">
-                <input className="input" type="number" min="0" placeholder="4 (default)"
+                <input className="input" type="number" min="0" max="720" step="1" placeholder="4 (default)"
                   value={editing.transit_max_hours ?? ''}
                   onChange={(e) => setEditing({ ...editing, transit_max_hours: e.target.value })} />
                 <div className="text-[11px] text-slate-500 mt-1">

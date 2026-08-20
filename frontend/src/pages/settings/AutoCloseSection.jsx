@@ -4,6 +4,24 @@ import { Eraser, HeartPulse, PlayCircle, RotateCw, Save } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, useToast } from '../../components/ui'
+import { clampNum } from '../../validation'
+
+// Тоон дүрмийн зөвшөөрөгдөх муж — эдгээр нь ФОРМ биш товчоор хадгалагддаг тул
+// input-ийн min/max-ыг браузер шалгадаггүй. Хадгалахын өмнө өөрсдөө шахна.
+const BOUNDS = {
+  times_per_day: { min: 1, max: 24 },
+  lookback_hours: { min: 1, max: 72 },
+  min_age_minutes: { min: 0, max: 180 },
+  cooldown_min: { min: 10, max: 1440 },
+  samples: { min: 1, max: 10 },
+  invalid_plate_hours: { min: 0, max: 720 },
+  awaiting_hours: { min: 0, max: 720 },
+  entry_only_free_hours: { min: 0, max: 720 },
+  stale_hours: { min: 0, max: 720 },
+}
+/** Мужтай бүх талбарыг хязгаарт нь оруулна (бусад талбарыг хөндөхгүй). */
+const clampRules = (r) => Object.fromEntries(Object.entries(r).map(
+  ([k, v]) => [k, BOUNDS[k] ? clampNum(v, { ...BOUNDS[k], fallback: BOUNDS[k].min }) : v]))
 
 // Дүрэм бүрийн тайлбар — ЯМАР тохиолдолд ажилладгийг оператор ойлгохоор
 const RULES = [
@@ -30,7 +48,7 @@ function CamSyncCard({ toast }) {
   const save = async () => {
     setBusy(true)
     try {
-      const { watermarks, ...body } = rules
+      const { watermarks, ...body } = clampRules(rules)
       await api('/api/admin/camsync/rules', { method: 'PUT', body })
       toast('Хадгалагдлаа'); load()
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
@@ -178,7 +196,7 @@ function CamHealthCard({ toast }) {
   const save = async () => {
     setBusy(true)
     try {
-      const { last, ...body } = rules
+      const { last, ...body } = clampRules(rules)
       await api('/api/admin/camhealth/rules', { method: 'PUT', body })
       toast('Хадгалагдлаа'); load()
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
@@ -325,7 +343,7 @@ export default function AutoCloseSection() {
   const save = async () => {
     setBusy(true)
     try {
-      setRules(await api('/api/admin/autoclose/rules', { method: 'PUT', body: rules }))
+      setRules(await api('/api/admin/autoclose/rules', { method: 'PUT', body: clampRules(rules) }))
       toast('Хадгалагдлаа — дараагийн цэвэрлэгээнээс эхлэн үйлчилнэ')
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
@@ -371,7 +389,7 @@ export default function AutoCloseSection() {
         <div className="grid sm:grid-cols-2 gap-4">
           {RULES.map(([key, label, help]) => (
             <Field key={key} label={`${label} (цаг)`}>
-              <input className="input font-mono" type="number" min="0" value={rules[key]}
+              <input className="input font-mono" type="number" min="0" max="720" step="1" value={rules[key]}
                 disabled={!rules.enabled}
                 onChange={(e) => set(key, Number(e.target.value))} />
               <span className="block text-[11px] text-slate-500 mt-1">{help}</span>
