@@ -167,7 +167,9 @@ export default function DevicesSection() {
                         </div>
                       ) : (
                         d.device_type === 'camera' && d.foreign_checked_at ? (
-                          <span className="text-[10px] text-slate-600" title={`Гадны хандалт илрээгүй. Шалгасан: ${new Date(d.foreign_checked_at + 'Z').toLocaleTimeString()}`}>—</span>
+                          <span className="text-[10px] text-slate-600" title={`Гадны хандалт илрээгүй. Шалгасан: ${new Date(d.foreign_checked_at + 'Z').toLocaleTimeString()}`}>цэвэр</span>
+                        ) : d.device_type === 'camera' ? (
+                          <span className="text-[10px] text-amber-400" title={d.foreign_error || 'Хэмжилт хараахан ажиллаагүй'}>хэмжигдээгүй</span>
                         ) : null
                       )}
                     </td>

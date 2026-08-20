@@ -450,8 +450,26 @@ export default function Health() {
                       <td className="py-1.5 pr-3 font-mono">
                         {r.cmd_6h.last_fail_at ? new Date(r.cmd_6h.last_fail_at + 'Z').toLocaleTimeString() : '—'}
                       </td>
-                      <td className="py-1.5 text-red-400">
-                        {(r.foreign_sessions || []).map((s) => `${s.user}@${s.ip}`).join(', ') || '—'}
+                      <td className="py-1.5">
+                        {/* Гурван ТӨЛӨВ: илэрсэн (улаан) / хэмжигдсэн-цэвэр (саарал) /
+                            ХЭМЖИГДЭЭГҮЙ (шар). Өмнө нь гурвуулаа «—» харагддаг тул
+                            хэмжилт бүтэн унасныг «гадны хандалт алга» гэж уншиж байв. */}
+                        {(r.foreign_sessions || []).length > 0 ? (
+                          <span className="text-red-400">
+                            {r.foreign_sessions.map((s) => `${s.user}@${s.ip}`).join(', ')}
+                          </span>
+                        ) : r.foreign_checked_at ? (
+                          <span
+                            className="text-slate-600"
+                            title={`Хэмжигдсэн: ${new Date(r.foreign_checked_at + 'Z').toLocaleTimeString()} — гадны хандалт илрээгүй`}
+                          >
+                            цэвэр
+                          </span>
+                        ) : (
+                          <span className="text-amber-400" title={r.foreign_error || 'Хэмжилт хараахан ажиллаагүй'}>
+                            хэмжигдээгүй
+                          </span>
+                        )}
                       </td>
                     </tr>
                   )
@@ -463,6 +481,17 @@ export default function Health() {
             Бүх үзүүлэлт серверийн өгөгдлөөс тооцогдоно — камерт нэмэлт ачаалал өгөхгүй.
             LED тоолуур backend restart-аас хойш цуглардаг.
           </p>
+          {camPerf.foreign_status && (
+            <p className="text-[11px] text-slate-500">
+              Гадны хандалт:{' '}
+              {camPerf.foreign_status.enabled
+                ? `${camPerf.foreign_status.measured}/${camPerf.foreign_status.cameras} камер хэмжигдсэн · ${Math.round(camPerf.foreign_status.period_sec / 60)} мин тутам, сүүлийн ${camPerf.foreign_status.window_min} мин цонх`
+                : `ХЭМЖИГДЭХГҮЙ — ${camPerf.foreign_status.reason}`}
+              {camPerf.foreign_status.last_ok_at
+                ? ` · сүүлд ${new Date(camPerf.foreign_status.last_ok_at + 'Z').toLocaleTimeString()}`
+                : ''}
+            </p>
+          )}
         </div>
       )}
     </div>

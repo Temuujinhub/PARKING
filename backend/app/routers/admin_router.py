@@ -1031,7 +1031,9 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
                                      "probe_ok_at": (who or {}).get("checked_at"),
                                      "foreign_sessions": (who or {}).get("sessions") or [],
-                                     "foreign_checked_at": (who or {}).get("checked_at")}))
+                                     "foreign_checked_at": (who or {}).get("checked_at"),
+                                     "foreign_error": (who or {}).get("error")
+                                     or (who or {}).get("skipped")}))
     return out
 
 

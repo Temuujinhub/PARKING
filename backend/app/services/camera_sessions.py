@@ -28,13 +28,46 @@ from .device_auth import camera_credentials
 
 log = logging.getLogger("parking.camera_who")
 
-# device_id -> {"sessions": [{"user","ip","last"}], "checked_at": iso, "supported": bool}
+# device_id -> {"sessions": [{"user","ip","last"}], "checked_at": iso, "supported": bool,
+#               "error": str|None, "attempted_at": iso, "skipped": str|None}
+# checked_at нь ЗӨВХӨН амжилттай хэмжилтэд бичигдэнэ (admin_router түүнийг
+# probe_ok_at = «сервер→камер RPC ажиллаж байна»-гийн баримт болгож ашигладаг).
 _state: dict[str, dict] = {}
+# Хяналт огт ажиллахгүй болсон шалтгаан (mock/унтраалттай) — UI-д «—» гэдэг нь
+# ЦЭВЭР гэсэн үг үү, ХЭМЖЭЭГҮЙ гэсэн үг үү гэдгийг ялгахад хэрэгтэй.
+_off_reason: str | None = "хараахан эхлээгүй"
 
 
 def foreign_info(device_id: str) -> dict | None:
     """Тухайн камерт сүүлд илэрсэн гадны хандалтууд (UI-д харуулахад)."""
     return _state.get(device_id)
+
+
+def measurement_status() -> dict:
+    """ХЭМЖИЛТ ӨӨРӨӨ ажиллаж байна уу.
+
+    2026-08-20: Системийн эрүүл мэнд хуудсанд 22 камер бүгд «—» харуулж байсан
+    нь «гадны хандалт алга» мэт уншигдаж байв — үнэндээ хэмжилт нь амжилттай
+    болсон эсэх нь ХААНА Ч харагддаггүй байсан (алдаа нь зөвхөн debug логт).
+    Хэмжигдээгүйг цэвэрээс ялгахын тулд энэ төлөвийг API-аар гаргана."""
+    measured = [v["checked_at"] for v in _state.values() if v.get("checked_at")]
+    return {"enabled": _off_reason is None,
+            "reason": _off_reason,
+            "cameras": len(_state),
+            "measured": len(measured),
+            "failing": sum(1 for v in _state.values() if v.get("error")),
+            "last_ok_at": max(measured, default=None),
+            "window_min": settings.camera_sessions_window_min,
+            "period_sec": settings.camera_sessions_check_sec}
+
+
+def _note(device_id: str, **fields) -> None:
+    """Өмнөх амжилттай хэмжилтийг УСТГАЛГҮЙ төлөв шинэчилнэ."""
+    st = _state.setdefault(device_id, {"sessions": [], "supported": None,
+                                       "checked_at": None, "error": None,
+                                       "skipped": None})
+    st.update(fields)
+    st["attempted_at"] = datetime.utcnow().isoformat()
 
 
 def _our_ip_toward(cam_ip: str) -> str:
@@ -98,7 +131,11 @@ async def _fetch_log_entries(rpc: DahuaRpc) -> tuple[bool, dict]:
 async def _check_one(device_id: str, ip: str, creds: tuple[str, str]) -> None:
     # Таслуур идэвхтэй / хаалт хүлээж буй / камер саяхан timeout-оор унасан үед
     # энэ (заавал биш) шалгалт камерын нөөцийг булаахгүй — алгасна.
-    if auth_block_remaining(ip) or barrier_is_waiting(ip) or camera_sick_remaining(ip):
+    if auth_block_remaining(ip):
+        _note(device_id, skipped="нэвтрэлтийн таслуур идэвхтэй")
+        return
+    if barrier_is_waiting(ip) or camera_sick_remaining(ip):
+        _note(device_id, skipped="хаалт/камер завгүй")
         return
     async with _rpc_lock(ip):
         rpc = DahuaRpc(camera_client(ip), ip, *creds)
@@ -113,8 +150,12 @@ async def _check_one(device_id: str, ip: str, creds: tuple[str, str]) -> None:
                 for (u, i), t in sorted(entries.items(), key=lambda kv: kv[1], reverse=True)
                 if i not in ours][:5]
     prev = {(s["user"], s["ip"]) for s in (_state.get(device_id) or {}).get("sessions", [])}
-    _state[device_id] = {"sessions": sessions, "supported": supported,
-                         "checked_at": datetime.utcnow().isoformat()}
+    _note(device_id, sessions=sessions, supported=supported, error=None, skipped=None,
+          checked_at=datetime.utcnow().isoformat())
+    if not supported:
+        # Нэвтрэлт болсон ч log.startFind хариу өгөөгүй — энэ камер дээр хэмжилт
+        # БОЛОМЖГҮЙ (firmware/эрх). «Гадны хандалт алга» гэж уншигдах ёсгүй.
+        _note(device_id, error="камер нэвтрэлтийн лог өгөхгүй (эрх/firmware)")
     fresh = [s for s in sessions if (s["user"], s["ip"]) not in prev]
     if fresh:
         log.warning("%s: камерт МАНАЙХААС ӨӨР хандалт илэрлээ: %s "
@@ -124,9 +165,17 @@ async def _check_one(device_id: str, ip: str, creds: tuple[str, str]) -> None:
 
 async def supervisor():
     """Идэвхтэй зогсоолын камер бүрийг тойрч шалгана (алдаа нэгийг нь зогсоохгүй)."""
-    if settings.barrier_mock or settings.camera_sessions_check_sec <= 0:
+    global _off_reason
+    if settings.barrier_mock:
+        _off_reason = "BARRIER_MOCK=true — камерт хандахгүй"
+        log.info("гадны хандалтын хяналт унтраалттай: %s", _off_reason)
+        return
+    if settings.camera_sessions_check_sec <= 0:
+        _off_reason = "CAMERA_SESSIONS_CHECK_SEC=0 — унтраасан"
+        log.info("гадны хандалтын хяналт унтраалттай: %s", _off_reason)
         return
     await asyncio.sleep(90)   # startup — эхлээд поллер/хаалт тогтвортой болог
+    _off_reason = None
     log.info("камерын нэвтрэлтийн хяналт идэвхжлээ (%dс тутам, сүүлийн %d мин цонх)",
              settings.camera_sessions_check_sec, settings.camera_sessions_window_min)
     while True:
@@ -149,6 +198,13 @@ async def supervisor():
             except Exception as e:  # noqa: BLE001
                 if _is_auth_error(e):
                     _auth_failed(ip)
-                log.debug("%s: нэвтрэлтийн лог шалгалт амжилтгүй (%s)", ip, type(e).__name__)
+                # Өмнө нь debug байсан тул production дээр хэмжилт бүтэн унасан ч
+                # хаана ч харагддаггүй, UI нь «гадны хандалт алга» гэж уншигддаг
+                # байв. Одоо төлөвт бичиж, ШИНЭ алдаа бүрийг WARNING логлоно.
+                err = (f"{type(e).__name__}: {e}" if str(e) else type(e).__name__)[:120]
+                was = (_state.get(did) or {}).get("error")
+                _note(did, error=err, skipped=None)
+                if was != err:
+                    log.warning("%s: гадны хандалтын хэмжилт амжилтгүй — %s", ip, err)
             await asyncio.sleep(2)   # камеруудыг зэрэг цохихгүй
         await asyncio.sleep(settings.camera_sessions_check_sec)

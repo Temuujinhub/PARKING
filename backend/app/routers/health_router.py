@@ -449,7 +449,7 @@ def camera_performance(db=Depends(get_db), user: User = Depends(get_current_user
 
     from ..models import BarrierCommand, LprEvent, ParkingSite
     from ..services.barrier import screen_stats
-    from ..services.camera_sessions import foreign_info
+    from ..services.camera_sessions import foreign_info, measurement_status
 
     now = datetime.utcnow()
     h1, h6 = now - timedelta(hours=1), now - timedelta(hours=6)
@@ -526,6 +526,9 @@ def camera_performance(db=Depends(get_db), user: User = Depends(get_current_user
             "led_1h": {"ok": led1_ok, "fail": led1_fail},
             "led_6h": {"ok": led6_ok, "fail": led6_fail},
             "foreign_sessions": who.get("sessions") or [],
+            # Хэмжигдээгүйг ЦЭВЭРЭЭС ялгах (UI «—» гэж хоёуланг ижил харуулдаг байв)
+            "foreign_checked_at": who.get("checked_at"),
+            "foreign_error": who.get("error") or who.get("skipped"),
         }
         rows.append(row)
 
@@ -547,4 +550,21 @@ def camera_performance(db=Depends(get_db), user: User = Depends(get_current_user
             alerts.append({"level": "yellow", "site_code": site.site_code,
                            "text": f"{label}: {int(gap_now / 60)} мин дугаар уншаагүй (камер онлайн — машингүй байж болно)"})
 
-    return {"rows": rows, "alerts": alerts, "generated_at": now.isoformat()}
+    # Гадны хандалтын ХЭМЖИЛТ өөрөө зогссон бол тэр нь «гадны хандалт алга»
+    # гэсэн үг БИШ — мэдэхгүй гэсэн үг. Түүнийг ил анхааруулга болгоно.
+    fs = measurement_status()
+    if not fs["enabled"]:
+        alerts.append({"level": "yellow", "site_code": None,
+                       "text": f"Гадны хандалт ХЭМЖИГДЭХГҮЙ байна: {fs['reason']}"})
+    elif cams and fs["measured"] == 0:
+        alerts.append({"level": "yellow", "site_code": None,
+                       "text": "Гадны хандалт нэг ч камер дээр хэмжигдээгүй "
+                               "(камер лог өгөхгүй эсвэл нэвтрэлт амжилтгүй) — "
+                               "«—» нь «цэвэр» гэсэн үг биш"})
+    elif fs["failing"]:
+        alerts.append({"level": "yellow", "site_code": None,
+                       "text": f"Гадны хандалт {fs['failing']}/{fs['cameras']} камер дээр "
+                               f"хэмжигдэхгүй байна (доорх хүснэгтээс шалтгааныг хар)"})
+
+    return {"rows": rows, "alerts": alerts, "foreign_status": fs,
+            "generated_at": now.isoformat()}
