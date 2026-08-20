@@ -2,7 +2,7 @@
 Excel workbook угсрах код: reports_excel.py (энд endpoint-ууд нь нимгэн wrapper)."""
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1009,30 +1009,113 @@ def shifts_excel(date_from: str | None = None, date_to: str | None = None,
 
 
 @router.get("/vat-info")
-async def vat_info(user: User = Depends(require("vat", "reports"))):
-    """PosAPI getInformation — сугалааны үлдэгдэл, илгээгдээгүй мэдээ (ТЕГ шаардлага №6).
-    Frontend үүнийг ашиглан анхааруулга харуулна."""
+async def vat_info(db: Session = Depends(get_db), user: User = Depends(require("vat", "reports"))):
+    """Ибаримт хуудасны толгойн мэдээлэл — СУВАГ бүрийн бодит байдал.
+
+    2026-08-19-өөс баримтууд msgbill.mn/QPay-ээр (бодит) үүсдэг тул хуучин
+    «MOCK горим» badge нь локал PosAPI-ийн .env тохиргоог л заагаад төөрөгдүүлж
+    байв. PosAPI-ийн сугалаа/илгээлтийн мэдээллийг зөвхөн PosAPI БОДИТ үед л асууна."""
     from ..config import settings
-    from ..services import ebarimt
+    from ..services import ebarimt, msgbill
+    channels = {
+        "qpay": settings.qpay_ebarimt and not settings.qpay_mock,
+        "msgbill": msgbill.status_info(db).get("configured", False),
+        "posapi": not settings.ebarimt_mock,
+        # Хуурамч MOCK баримт үүсэх боломжтой юу (тест/демо серверт л true байх ёстой)
+        "mock_receipts": settings.ebarimt_mock and settings.ebarimt_mock_receipts,
+    }
     if operator_sites(user) is not None:
         # Хариуцах зогсоолтой (tenant) хэрэглэгч — глобал PosAPI (EasyParking-ийн ТТД)
-        # мэдээлэл хамаагүй тул хоосон буцаана; тэдний e-Barimt QPay ebarimt_v3-ээр үүсдэг
-        return {"warnings": [], "scoped": True,
-                "qpay_ebarimt": settings.qpay_ebarimt and not settings.qpay_mock,
-                "local_posapi_mock": settings.ebarimt_mock}
-    info = await ebarimt.get_information()
+        # мэдээлэл хамаагүй тул хоосон буцаана; тэдний e-Barimt QPay/msgbill-ээр үүсдэг
+        return {"warnings": [], "scoped": True, "channels": channels}
     warnings = []
-    if int(info.get("leftLotteries") or 0) < 500:
-        warnings.append(f"Сугалааны дугаар дуусаж байна ({info.get('leftLotteries')} үлдсэн) — "
-                        "шинээр авахгүй бол сугалаагүй баримт хэвлэгдэнэ!")
-    if int(info.get("unsentCount") or 0) > 0:
-        warnings.append(f"Илгээгдээгүй {info.get('unsentCount')} баримт байна — "
-                        "3 хоногийн дотор илгээх хуультай.")
-    # e-Barimt-ийн 2 суваг: (1) QR/QPay — ebarimt_v3 (бодит, QPay ТЕГ рүү өөрөө илгээнэ),
-    # (2) локал PosAPI — картын/бэлэн баримтад (энэ хуудасны сугалаа/мэдээ илгээх хэсэг).
-    return {**info, "warnings": warnings,
-            "qpay_ebarimt": settings.qpay_ebarimt and not settings.qpay_mock,
-            "local_posapi_mock": settings.ebarimt_mock}
+    if channels["mock_receipts"]:
+        warnings.append("MOCK баримт асаалттай (PARKING_EBARIMT_MOCK_RECEIPTS=true) — "
+                        "msgbill/PosAPI-гүй зогсоолд ХУУРАМЧ баримт үүснэ. Зөвхөн тест серверт байх ёстой!")
+    info = {}
+    if channels["posapi"]:
+        # Локал PosAPI бодит үед л түүний сугалаа/илгээлтийг хянана
+        info = await ebarimt.get_information()
+        if int(info.get("leftLotteries") or 0) < 500:
+            warnings.append(f"Сугалааны дугаар дуусаж байна ({info.get('leftLotteries')} үлдсэн) — "
+                            "шинээр авахгүй бол сугалаагүй баримт хэвлэгдэнэ!")
+        if int(info.get("unsentCount") or 0) > 0:
+            warnings.append(f"Илгээгдээгүй {info.get('unsentCount')} баримт байна — "
+                            "3 хоногийн дотор илгээх хуультай.")
+    return {**info, "warnings": warnings, "channels": channels,
+            "qpay_ebarimt": channels["qpay"], "local_posapi_mock": settings.ebarimt_mock}
+
+
+@router.post("/vat-reconcile")
+async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: int = 3,
+                        db: Session = Depends(get_db),
+                        user: User = Depends(require("vat", "reports"))):
+    """ТЕГ-ийн мерчант порталын баримтын экспортыг (xlsx) манай баримттай тулгана.
+
+    ДДТД-ээр тулгаж БОЛОХГҮЙ: суваг бүр (QPay, msgbill/Онлайм) операторын кодтой
+    билл буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог
+    (2026-08-19 нотлогдсон). Тиймээс (цаг UTC ± tol сек, дүн)-ээр тулгана.
+    tz_shift: ТЕГ файлын цагт нэмэх цаг (файл UTC бол 0, локал цаг бол -8)."""
+    import io as _io
+    from collections import Counter
+    from datetime import timedelta as _td
+    import openpyxl as _xl
+    from ..models import VatReceipt
+    try:
+        ws = _xl.load_workbook(_io.BytesIO(await file.read()), read_only=True).active
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"xlsx уншиж чадсангүй: {str(e)[:120]}")
+    tax = []
+    for r in ws.iter_rows(values_only=True):
+        # Толгой/хоосон мөр алгасна; ДДТД=33 оронтой тоо, огноо parse болдог байх
+        try:
+            ddtd = str(r[1] or "").strip()
+            if not (ddtd.isdigit() and len(ddtd) >= 30):
+                continue
+            dt = datetime.strptime(str(r[2])[:19], "%Y-%m-%d %H:%M:%S") + _td(hours=tz_shift)
+            tax.append({"ddtd": ddtd, "dt": dt, "amount": float(r[3] or 0),
+                        "src": str(r[12] or "") if len(r) > 12 else "", "used": False})
+        except Exception:  # noqa: BLE001
+            continue
+    if not tax:
+        raise HTTPException(400, "ТЕГ файлаас баримт олдсонгүй (ДДТД/Огноо багана таарахгүй байна)")
+    lo = min(t["dt"] for t in tax) - _td(hours=1)
+    hi = max(t["dt"] for t in tax) + _td(hours=1)
+    q = (db.query(VatReceipt, Payment, ParkingSession.plate_number)
+         .join(Payment, VatReceipt.payment_id == Payment.id)
+         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+         .filter(Payment.paid_at >= lo, Payment.paid_at < hi))
+    q = _flt(q, ParkingSession.site_id, _scope(user))
+    ours = q.all()
+    matched, ddtd_equal, un_ours = 0, 0, []
+    for rec, pay, plate in ours:
+        if rec.status == "CANCELLED" or pay.paid_at is None:
+            continue
+        cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
+                and abs((t["dt"] - pay.paid_at).total_seconds()) <= tol]
+        if cand:
+            best = min(cand, key=lambda x: abs((x["dt"] - pay.paid_at).total_seconds()))
+            best["used"] = True
+            matched += 1
+            ddtd_equal += int(rec.ebarimt_id == best["ddtd"])
+        else:
+            un_ours.append({"paid_at": pay.paid_at.isoformat(), "plate": plate,
+                            "amount": float(rec.amount), "status": rec.status,
+                            "provider": rec.provider or "POSAPI",
+                            "ebarimt_id": rec.ebarimt_id})
+    left = [t for t in tax if not t["used"]]
+    return {
+        "tax_total": len(tax), "ours_total": len(ours), "matched": matched,
+        "ddtd_equal": ddtd_equal,
+        "tax_sources": dict(Counter(t["src"] for t in tax)),
+        "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
+        "unmatched_ours_total": len(un_ours),
+        "unmatched_tax": [{"dt": t["dt"].isoformat(), "amount": t["amount"],
+                           "src": t["src"], "ddtd": t["ddtd"]}
+                          for t in sorted(left, key=lambda x: x["dt"])[:100]],
+        "unmatched_tax_total": len(left),
+        "note": "Тулгалт (цаг UTC ±%dс, дүн)-ээр. ДДТД ижил байх шаардлагагүй — суваг ба ТЕГ өөр дугаарладаг." % tol,
+    }
 
 
 @router.post("/vat-send")

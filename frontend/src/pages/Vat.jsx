@@ -1,6 +1,6 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, Ban, QrCode, RefreshCw, Send } from 'lucide-react'
-import { useState } from 'react'
+import { AlertTriangle, Ban, FileCheck2, QrCode, RefreshCw, Send } from 'lucide-react'
+import { useRef, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, Modal, Table, useToast } from '../components/ui'
@@ -15,7 +15,25 @@ export default function Vat() {
   const [cancelling, setCancelling] = useState(null)
 
   const [sending, setSending] = useState(false)
+  const [recon, setRecon] = useState(null)          // ТЕГ тулгалтын үр дүн
+  const [reconBusy, setReconBusy] = useState(false)
+  const fileRef = useRef(null)
   const toast = useToast()
+
+  // ТЕГ-ийн мерчант порталын xlsx экспортыг манай баримттай тулгах.
+  // ДДТД-ээр тулгадаггүй (суваг ба ТЕГ өөр дугаарладаг) — цаг(UTC)+дүнгээр.
+  const reconcile = async (f) => {
+    if (!f) return
+    setReconBusy(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      setRecon(await api('/api/reports/vat-reconcile', { method: 'POST', formData: fd }))
+    } catch (e) { toast(e.message, 'error') } finally {
+      setReconBusy(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
 
   const { data: rows, reload: reloadRows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
@@ -67,10 +85,19 @@ export default function Vat() {
           <input type="date" className="input w-40" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Эхлэх огноо" />
           <span className="text-slate-500">—</span>
           <input type="date" className="input w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Дуусах огноо" />
-          <button className="btn-primary" onClick={sendData} disabled={sending}
-            title="Цугларсан баримтуудыг ТЕГ-ын нэгдсэн системд илгээнэ (автоматаар өдөрт 1 удаа явдаг)">
-            <Send size={15} /> {sending ? 'Илгээж байна…' : 'Мэдээ илгээх'}
+          <input ref={fileRef} type="file" accept=".xlsx" className="hidden"
+            onChange={(e) => reconcile(e.target.files?.[0])} />
+          <button className="btn-secondary" disabled={reconBusy}
+            onClick={() => fileRef.current?.click()}
+            title="ТЕГ-ийн мерчант порталын баримтын xlsx экспортыг манай бүртгэлтэй тулгана (цаг+дүнгээр)">
+            <FileCheck2 size={15} /> {reconBusy ? 'Тулгаж байна…' : 'ТЕГ тулгалт'}
           </button>
+          {info?.channels?.posapi && (
+            <button className="btn-primary" onClick={sendData} disabled={sending}
+              title="Локал PosAPI-д цугларсан баримтуудыг ТЕГ-ын нэгдсэн системд илгээнэ (msgbill/QPay баримт өөрсдөө илгээгддэг)">
+              <Send size={15} /> {sending ? 'Илгээж байна…' : 'Мэдээ илгээх'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -88,10 +115,18 @@ export default function Vat() {
       )}
       {info && !info.scoped && (
         <div className="card py-3 flex flex-wrap gap-6 text-sm text-slate-400">
-          <span>Сугалааны үлдэгдэл: <b className="font-mono text-slate-200">{fmt(info.leftLotteries)}</b></span>
-          <span>Илгээгдээгүй баримт: <b className="font-mono text-slate-200">{fmt(info.unsentCount)}</b></span>
-          <span>Сүүлд илгээсэн: <b className="font-mono text-slate-200">{info.lastSentDate || '-'}</b></span>
-          {info.mock && <span className="text-amber-400 text-xs">MOCK горим</span>}
+          {/* Суваг бүрийн бодит байдал — өмнө нь локал PosAPI-ийн MOCK badge
+              бүх баримтыг хуурамч мэт харагдуулж төөрөгдүүлдэг байв */}
+          <span>QPay QR: {info.channels?.qpay
+            ? <b className="text-accent">бодит</b> : <b className="text-amber-400">mock</b>}</span>
+          <span>msgbill.mn: {info.channels?.msgbill
+            ? <b className="text-accent">холбогдсон</b> : <b className="text-amber-400">түлхүүргүй</b>}</span>
+          {info.channels?.posapi && (<>
+            <span>Сугалааны үлдэгдэл: <b className="font-mono text-slate-200">{fmt(info.leftLotteries)}</b></span>
+            <span>Илгээгдээгүй: <b className="font-mono text-slate-200">{fmt(info.unsentCount)}</b></span>
+            <span>Сүүлд илгээсэн: <b className="font-mono text-slate-200">{info.lastSentDate || '-'}</b></span>
+          </>)}
+          {info.channels?.mock_receipts && <span className="text-amber-400 text-xs font-semibold">MOCK баримт асаалттай!</span>}
         </div>
       )}
       <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'Үйлдэл']} empty={rows.length === 0}>
@@ -139,6 +174,41 @@ export default function Vat() {
           </tr>
         ))}
       </Table>
+
+      <Modal open={!!recon} onClose={() => setRecon(null)} title="ТЕГ тулгалтын дүн" wide>
+        {recon && (
+          <div className="space-y-3 text-sm">
+            <div className="flex flex-wrap gap-4">
+              <span>ТЕГ файлд: <b className="font-mono">{recon.tax_total}</b></span>
+              <span>Манайд (тухайн хугацаанд): <b className="font-mono">{recon.ours_total}</b></span>
+              <span className="text-accent">Таарсан: <b className="font-mono">{recon.matched}</b></span>
+              <span className="text-amber-400">Манайд бий/ТЕГ-д алга: <b className="font-mono">{recon.unmatched_ours_total}</b></span>
+              <span className="text-amber-400">ТЕГ-д бий/манайд алга: <b className="font-mono">{recon.unmatched_tax_total}</b></span>
+            </div>
+            <div className="text-xs text-slate-500">{recon.note} · ТЕГ эх сурвалж: {Object.entries(recon.tax_sources || {}).map(([k, v]) => `${k}: ${v}`).join(', ')}</div>
+            {recon.unmatched_ours?.length > 0 && (
+              <div>
+                <div className="font-semibold text-xs mb-1">Манайд бий, ТЕГ-д алга (эхний {recon.unmatched_ours.length}):</div>
+                <div className="max-h-48 overflow-auto text-xs font-mono space-y-0.5">
+                  {recon.unmatched_ours.map((r, i) => (
+                    <div key={i}>{r.paid_at?.slice(0, 19)} {r.plate || '—'} {fmt(r.amount)}₮ {r.provider} {r.status}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {recon.unmatched_tax?.length > 0 && (
+              <div>
+                <div className="font-semibold text-xs mb-1">ТЕГ-д бий, манайд алга (эхний {recon.unmatched_tax.length}) — өөр систем/POS байж болно:</div>
+                <div className="max-h-48 overflow-auto text-xs font-mono space-y-0.5">
+                  {recon.unmatched_tax.map((r, i) => (
+                    <div key={i}>{r.dt?.slice(11, 19)} {fmt(r.amount)}₮ {r.src} {r.ddtd}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
 
       <Modal open={!!qrReceipt} onClose={() => setQrReceipt(null)} title="e-Barimt баримтын QR">
         {qrReceipt && (
