@@ -28,11 +28,27 @@ export default function Vat() {
     try {
       const fd = new FormData()
       fd.append('file', f)
-      setRecon(await api('/api/reports/vat-reconcile', { method: 'POST', formData: fd }))
+      const data = await api('/api/reports/vat-reconcile', { method: 'POST', formData: fd })
+      setRecon({ ...data, _file: f })   // Excel татахад ижил файлыг дахин илгээнэ
     } catch (e) { toast(e.message, 'error') } finally {
       setReconBusy(false)
       if (fileRef.current) fileRef.current.value = ''
     }
+  }
+
+  // Санхүүд илгээх НЭГТГЭСЭН Excel — ТЕГ мөр бүрийн хажууд манай баримт
+  const reconExcel = async () => {
+    if (!recon?._file) return
+    try {
+      const fd = new FormData()
+      fd.append('file', recon._file)
+      const blob = await api('/api/reports/vat-reconcile?excel=1', { method: 'POST', formData: fd, blob: true })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = 'ebarimt-tulgalt.xlsx'
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } catch (e) { toast(e.message, 'error') }
   }
 
   const { data: rows, reload: reloadRows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
@@ -185,6 +201,9 @@ export default function Vat() {
               <span className="text-amber-400">Манайд бий/ТЕГ-д алга: <b className="font-mono">{recon.unmatched_ours_total}</b></span>
               <span className="text-amber-400">ТЕГ-д бий/манайд алга: <b className="font-mono">{recon.unmatched_tax_total}</b></span>
             </div>
+            <button className="btn-primary py-1.5 text-sm" onClick={reconExcel}>
+              Нэгтгэсэн Excel татах (санхүүд илгээх)
+            </button>
             <div className="text-xs text-slate-500">{recon.note} · ТЕГ эх сурвалж: {Object.entries(recon.tax_sources || {}).map(([k, v]) => `${k}: ${v}`).join(', ')}</div>
             {recon.unmatched_ours?.length > 0 && (
               <div>

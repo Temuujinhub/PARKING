@@ -1048,7 +1048,7 @@ async def vat_info(db: Session = Depends(get_db), user: User = Depends(require("
 
 @router.post("/vat-reconcile")
 async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: int = 3,
-                        db: Session = Depends(get_db),
+                        excel: bool = False, db: Session = Depends(get_db),
                         user: User = Depends(require("vat", "reports"))):
     """ТЕГ-ийн мерчант порталын баримтын экспортыг (xlsx) манай баримттай тулгана.
 
@@ -1096,6 +1096,7 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: 
         if cand:
             best = min(cand, key=lambda x: abs((x["dt"] - pay.paid_at).total_seconds()))
             best["used"] = True
+            best["ours"] = (rec, pay, plate)   # excel нэгтгэлд хэрэглэнэ
             matched += 1
             ddtd_equal += int(rec.ebarimt_id == best["ddtd"])
         else:
@@ -1104,6 +1105,10 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: 
                             "provider": rec.provider or "POSAPI",
                             "ebarimt_id": rec.ebarimt_id})
     left = [t for t in tax if not t["used"]]
+    if excel:
+        # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
+        # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
+        return _reconcile_excel(tax, ours, un_ours, tol)
     return {
         "tax_total": len(tax), "ours_total": len(ours), "matched": matched,
         "ddtd_equal": ddtd_equal,
@@ -1116,6 +1121,92 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: 
         "unmatched_tax_total": len(left),
         "note": "Тулгалт (цаг UTC ±%dс, дүн)-ээр. ДДТД ижил байх шаардлагагүй — суваг ба ТЕГ өөр дугаарладаг." % tol,
     }
+
+
+def _reconcile_excel(tax: list, ours: list, un_ours: list, tol: int):
+    """Тулгалтын нэгтгэсэн xlsx: (1) ТЕГ+манай mөр зэрэгцээ, (2) манайд бий/ТЕГ-д алга,
+    (3) дүгнэлт. Огноог UTC+8 (Улаанбаатар)-аар харуулна."""
+    import io as _io
+    from collections import Counter
+    from datetime import timedelta as _td
+    from urllib.parse import quote
+    import openpyxl as _xl
+    from fastapi.responses import StreamingResponse
+    from openpyxl.styles import Font, PatternFill
+
+    wb = _xl.Workbook()
+    bold = Font(bold=True)
+    warn = PatternFill("solid", fgColor="FFF2CC")
+    ok_f = PatternFill("solid", fgColor="E2EFDA")
+
+    ws = wb.active
+    ws.title = "Тулгалт"
+    ws.append(["ТЕГ огноо (УБ цаг)", "Дүн ₮", "ТЕГ ДДТД", "ТЕГ эх сурвалж",
+               "Тулгалт", "Машины дугаар", "Зогсоол", "Манай суваг", "Манай ДДТД",
+               "Сугалаа", "Манай төлөв", "Төлсөн (УБ цаг)"])
+    for c in ws[1]:
+        c.font = bold
+    for t in sorted(tax, key=lambda x: x["dt"]):
+        o = t.get("ours")
+        row = [(t["dt"] + _td(hours=8)).strftime("%Y-%m-%d %H:%M:%S"), t["amount"],
+               t["ddtd"], t["src"]]
+        if o:
+            rec, pay, plate = o
+            row += ["ТААРСАН", plate or "", getattr(getattr(pay, "session", None), "site", None)
+                    and pay.session.site.name or "", rec.provider or "POSAPI",
+                    rec.ebarimt_id or "", rec.lottery_code or "", rec.status,
+                    (pay.paid_at + _td(hours=8)).strftime("%Y-%m-%d %H:%M:%S") if pay.paid_at else ""]
+        else:
+            row += ["МАНАЙД АЛГА", "", "", "", "", "", "", ""]
+        ws.append(row)
+        if not o:
+            for c in ws[ws.max_row]:
+                c.fill = warn
+
+    ws2 = wb.create_sheet("Манайд бий - ТЕГ-д алга")
+    ws2.append(["Төлсөн (УБ цаг)", "Машины дугаар", "Дүн ₮", "Суваг", "Манай төлөв", "Манай ДДТД",
+                "Тайлбар"])
+    for c in ws2[1]:
+        c.font = bold
+    for r in sorted(un_ours, key=lambda x: x["paid_at"]):
+        note = ("MOCK/амжилтгүй баримт" if r["status"] != "SENT" else
+                "Monnis өөрийн ТТД байж болно" if r["provider"] == "QPAY" else "")
+        dt = datetime.fromisoformat(r["paid_at"]) + timedelta(hours=8)
+        ws2.append([dt.strftime("%Y-%m-%d %H:%M:%S"), r["plate"] or "", r["amount"],
+                    r["provider"], r["status"], r["ebarimt_id"] or "", note])
+
+    ws3 = wb.create_sheet("Дүгнэлт")
+    matched = sum(1 for t in tax if t.get("ours"))
+    lines = [
+        ("ТЕГ файлын баримт", len(tax)),
+        ("Манай баримт (тухайн хугацаанд)", len(ours)),
+        ("Таарсан (цаг ±%dс + дүн)" % tol, matched),
+        ("ТЕГ-д бий, манайд алга", len(tax) - matched),
+        ("Манайд бий, ТЕГ-д алга", len(un_ours)),
+        ("", ""),
+        ("ТЕГ эх сурвалжаар:", ""),
+        *[(f"  {k}", v) for k, v in Counter(t["src"] for t in tax).items()],
+        ("", ""),
+        ("ТАЙЛБАР: ДДТД хоорондоо таарахгүй нь ХЭВИЙН — QPay/msgbill операторын кодтой", ""),
+        ("билл буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн дугаарлалтаар бүртгэдэг.", ""),
+        ("Тулгалтыг цаг (UTC) + дүнгээр хийсэн.", ""),
+    ]
+    for a, b in lines:
+        ws3.append([a, b])
+    ws3["A1"].font = bold
+    for wsx in (ws, ws2):
+        for col, w in zip("ABCDEFGHIJKL", (20, 10, 36, 16, 13, 14, 16, 11, 36, 12, 10, 20)):
+            wsx.column_dimensions[col].width = w
+    ws3.column_dimensions["A"].width = 70
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    day = (min(t["dt"] for t in tax) + timedelta(hours=8)).strftime("%Y%m%d") if tax else "x"
+    fname = f"ebarimt-tulgalt-{day}.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}; filename*=UTF-8''{quote(fname)}"})
 
 
 @router.post("/vat-send")
