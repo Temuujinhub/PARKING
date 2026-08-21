@@ -19,6 +19,11 @@
     venv/bin/python tools/nested_lanes.py RASH --set ... --apply
         → камер + хосолсон дотоод ХААЛТ-ын чиглэлийг зэрэг засна (AuditLog үлдэнэ)
 
+    venv/bin/python tools/nested_lanes.py RASH --inside /tmp/dotor.txt [--apply]
+        → доторх талбарт БОДИТООР байгаа машины жагсаалтыг бүртгэлтэй ХОЁР ТАЛ
+        РУУ тулгана: жагсаалтад байгааг «дотор» болгож тоолуурыг зогсоох,
+        жагсаалтад БАЙХГҮЙ атлаа «дотор» гэж тэмдэглэгдсэнийг үргэлжлүүлэх.
+
     venv/bin/python tools/nested_lanes.py RASH --resume-open [--apply]
         → чиглэл солигдсоноос үүссэн ЯВЖ БУЙ зогсолтуудыг цуцлана (тоолуур
         дахин ажиллана). Засварын ДАРАА нэг удаа хийнэ.
@@ -203,6 +208,113 @@ def show(db, site, days: int):
     return inner_cams, inner_bars
 
 
+def read_plates(path: str) -> list[str]:
+    """Файл/клипбордоос дугаарын жагсаалт. Үл үзэгдэх тэмдэгт, латин/жижиг
+    үсгийг цэвэрлэнэ (гараар бичсэн жагсаалт ихэвчлэн жижиг үсгээр ирдэг)."""
+    import re
+    with open(path, encoding="utf-8") as f:
+        raw = [re.sub(r"[^0-9A-ZА-ЯЁӨҮ]", "", line.upper()) for line in f]
+    out, seen = [], set()
+    for p in raw:                      # давхардлыг хасаад дарааллыг хадгална
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def classify_inside(listed: list[str], sessions: list, similar) -> dict:
+    """Бодит жагсаалтыг идэвхтэй session-уудтай тулгана (DB-гүй, тестээр барина).
+
+    sessions: идэвхтэй session-ууд (plate_number, paused_since талбартай).
+    similar(a, b) -> bool: OCR-ойролцоо эсэх (шороон зогсоолд дугаар бохирддог).
+
+    Буцаах бүлгүүд:
+      already   — жагсаалтад бий, аль хэдийн «дотор»
+      to_pause  — жагсаалтад бий, session бий, гэвч «дотор» гэж тэмдэглэгдээгүй
+      no_session— жагсаалтад бий, идэвхтэй session ОГТ алга (гараар бүртгэнэ)
+      to_resume — «дотор» гэж тэмдэглэгдсэн ч жагсаалтад БАЙХГҮЙ (гадаа байгаа)
+    """
+    by_plate = {s.plate_number: s for s in sessions}
+    already, to_pause, no_session, matched = [], [], [], set()
+    for p in listed:
+        s = by_plate.get(p)
+        if s is None:                  # OCR-ойролцоо ГАНЦ тохирол л зөвшөөрнө
+            near = [x for x in sessions if similar(p, x.plate_number)]
+            s = near[0] if len(near) == 1 else None
+        if s is None:
+            no_session.append(p)
+            continue
+        matched.add(s.plate_number)
+        (already if s.paused_since else to_pause).append((p, s))
+    to_resume = [s for s in sessions if s.paused_since and s.plate_number not in matched]
+    return {"already": already, "to_pause": to_pause,
+            "no_session": no_session, "to_resume": to_resume}
+
+
+def reconcile_inside(db, site, path: str, apply: bool):
+    """Бодит тооллогын жагсаалтыг «дотор» тэмдэглэгээтэй ХОЁР ТАЛ РУУ тулгана:
+    жагсаалтад байгааг зогсоож, БАЙХГҮЙг нь үргэлжлүүлнэ."""
+    from app.session_logic import plates_ocr_similar
+
+    listed = read_plates(path)
+    sessions = (db.query(ParkingSession)
+                .filter(ParkingSession.site_id == site.id,
+                        ParkingSession.status.in_(ACTIVE)).all())
+    r = classify_inside(listed, sessions, plates_ocr_similar)
+    now = datetime.utcnow()
+
+    print(f"\n══ Бодит тооллого ({len(listed)} дугаар) vs бүртгэл "
+          f"({len(sessions)} идэвхтэй session) ══")
+    print(f"\n   ✅ аль хэдийн «дотор»: {len(r['already'])}")
+    for p, s in r["already"]:
+        print(f"      {p}  ({L(s.paused_since)}-ээс)")
+
+    print(f"\n   ▶ ЗОГСООХ (жагсаалтад бий, тоолуур ажиллаж байна): {len(r['to_pause'])}")
+    for p, s in r["to_pause"]:
+        mark = "" if p == s.plate_number else f"  → OCR-ойролцоо «{s.plate_number}»"
+        print(f"      {p}  орсон {L(s.entry_time)}{mark}")
+
+    print(f"\n   ⏹ ҮРГЭЛЖЛҮҮЛЭХ («дотор» гэж тэмдэглэгдсэн ч жагсаалтад алга): "
+          f"{len(r['to_resume'])}")
+    for s in r["to_resume"]:
+        mins = int((now - s.paused_since).total_seconds() // 60)
+        print(f"      {s.plate_number}  {L(s.paused_since)}-ээс {mins} мин зогссон")
+
+    print(f"\n   ❌ идэвхтэй session ОГТ АЛГА (тоолуур хөндөх боломжгүй): "
+          f"{len(r['no_session'])}")
+    for p in r["no_session"]:
+        print(f"      {p}")
+    if r["no_session"]:
+        print("      ⓘ Эдгээр машин орох камерт уншигдаагүй (уншилт алдагдсан) — "
+              "Касс → «Машин бүртгэх»-ээр гараар бүртгэнэ. Бүртгэсний дараа энэ "
+              "командыг дахин ажиллуулбал тоолуур нь зогсоно.")
+
+    if not apply:
+        print("\n   DRY-RUN — юу ч бичээгүй. Хэрэгжүүлэх бол --apply нэмнэ үү.")
+        return
+    for p, s in r["to_pause"]:
+        s.paused_since = now
+        db.add(AuditLog(username="tools/nested_lanes.py", action="NESTED_MANUAL_PAUSE",
+                        entity="session", entity_id=s.id,
+                        detail={"plate": s.plate_number, "site": site.site_code,
+                                "reason": "бодит тооллогоор доторх талбарт байсан"}))
+    for s in r["to_resume"]:
+        # Хуримтлагдсан минутыг НЭМЭХГҮЙ: жагсаалтад байхгүй = тэр машин доторх
+        # талбарт БАЙГААГҮЙ, тэр хугацаа төлбөртэй талбарт өнгөрсөн.
+        db.add(AuditLog(username="tools/nested_lanes.py", action="NESTED_MANUAL_RESUME",
+                        entity="session", entity_id=s.id,
+                        detail={"plate": s.plate_number, "site": site.site_code,
+                                "paused_since": str(s.paused_since),
+                                "reason": "бодит тооллогод дотор байгаагүй "
+                                          "(минут нэмээгүй)"}))
+        s.paused_since = None
+    db.commit()
+    print(f"\n   ✅ {len(r['to_pause'])} машины тоолуур ЗОГСЛОО, "
+          f"{len(r['to_resume'])}-ийнх ҮРГЭЛЖЛЭВ.")
+    print("   Зогссон машин доторхоос гарч 10.0.106.12-т уншигдмагц тоолуур нь "
+          "автоматаар үргэлжилнэ.")
+
+
 def apply_changes(db, site, inner_cams, inner_bars, wanted: dict, apply: bool):
     """wanted: {ip: 'entry'|'exit'} — камерын шинэ чиглэл. Хосолсон дотоод
     ХААЛТ нь камерынхаа эгнээнд үлдэж, чиглэлээ л дагана (реле нь ЯГ ТЭР
@@ -364,6 +476,9 @@ def main():
                     help="--phantom дээр камерын өөрийн бүртгэлтэй тулгах (сүлжээ шаардана)")
     ap.add_argument("--resume-open", action="store_true",
                     help="чиглэл солигдсоноос үүссэн ЯВЖ БУЙ зогсолтуудыг цуцлах")
+    ap.add_argument("--inside", metavar="ФАЙЛ",
+                    help="доторх талбарт БОДИТООР байгаа машины жагсаалт (мөр бүрт "
+                         "нэг дугаар) — бүртгэлтэй ХОЁР ТАЛ РУУ тулгана")
     a = ap.parse_args()
 
     db = SessionLocal()
@@ -387,6 +502,8 @@ def main():
         wanted[ip.strip()] = direction
     if wanted:
         apply_changes(db, site, inner_cams, inner_bars, wanted, a.apply)
+    if a.inside:
+        reconcile_inside(db, site, a.inside, a.apply)
     if a.resume_open:
         resume_open_pauses(db, site, a.apply)
 
