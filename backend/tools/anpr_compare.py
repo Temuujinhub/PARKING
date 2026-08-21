@@ -45,6 +45,9 @@ LOT_MAP = {
     "MonnisBuilding": "MONNIS",
     "Раш булаг": "RASH",
     "Раш булаг шороо": "RASH",     # доторх (nested) талбай — ижил зогсоол
+    # «СТӨ» нь Соёлын төв (2026-08-21 баталсан). Нэрээр таавал «Спортын төв
+    # ордон» руу буруу очих эрсдэлтэй тул ЗААВАЛ энд бичсэн байх ёстой.
+    "СТӨ": "STO",
     "Хан гарьд": "HANGARD",
     "kh": "KH",
     "Ялалт": "YALALT",
@@ -82,7 +85,7 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s\-_.]", "", (s or "").lower())
 
 
-def resolve_sites(db, lots: set[str], overrides: dict) -> dict:
+def resolve_sites(db, lots: set[str], overrides: dict, how: dict) -> dict:
     """Тэдний зогсоолын нэр → манай ParkingSite.
 
     Дараалал: --map (гараар) → LOT_MAP → site_code → нэрийн ойролцоо тохирол.
@@ -93,6 +96,7 @@ def resolve_sites(db, lots: set[str], overrides: dict) -> dict:
     for lot in lots:
         code = (overrides.get(lot) or LOT_MAP.get(lot) or "").upper()
         site = by_code.get(code)
+        by_code_hit = site is not None
         if site is None:
             # Нэрийн ойролцоо тохирол — аль нэг нь нөгөөгөө агуулж байвал
             k = _norm(lot)
@@ -104,6 +108,10 @@ def resolve_sites(db, lots: set[str], overrides: dict) -> dict:
                         break
         if site is not None:
             out[lot] = site
+            # ҮНЭН ЯЛГАА: кодоор олдсон уу, эсвэл нэрээр ТААСАН уу.
+            # Жагсаалтад байгаа ч код нь энэ DB-д байхгүй бол мөн л таалт.
+            how[lot] = (("гараар (--map)" if lot in overrides else "жагсаалтаас")
+                        if by_code_hit else "НЭРЭЭР ТААСАН")
     return out
 
 
@@ -132,7 +140,8 @@ def main():
         lot, _, code = item.partition("=")
         if code:
             ov[lot.strip()] = code.strip()
-    sites = resolve_sites(db, {r["lot"] for r in rows}, ov)
+    how: dict = {}
+    sites = resolve_sites(db, {r["lot"] for r in rows}, ov, how)
     unmapped = sorted({r["lot"] for r in rows} - set(sites))
 
     # Манай уншилтууд — тухайн өдрийн (UTC мужаар, цонхны зайтай)
@@ -178,7 +187,7 @@ def main():
     print(f"{'Зогсоол':<22}{'ANPR':>7}{'Манай':>8}{'Тохирсон':>10}{'АЛДСАН':>9}{'алдагдал':>10}")
     print("─" * 66)
     totals = [0, 0, 0]
-    missing_all = []
+    missing_all, zero_sites = [], []
     by_site = defaultdict(list)
     for lot, site in sites.items():
         by_site[site.id].append(lot)
@@ -209,6 +218,8 @@ def main():
         mark = "  ⚠" if loss >= 20 else ""
         print(f"{site.name[:21]:<22}{len(theirs):>7}{len(mine):>8}{matched:>10}"
               f"{len(missing):>9}{loss:>9.0f}%{mark}")
+        if len(theirs) >= 50 and not mine:
+            zero_sites.append((site.name, lots_, len(theirs)))
         totals[0] += len(theirs)
         totals[1] += len(mine)
         totals[2] += matched
@@ -218,6 +229,20 @@ def main():
     lost = totals[0] - totals[2]
     pct = 100 * lost / totals[0] if totals[0] else 0
     print(f"{'НИЙТ':<22}{totals[0]:>7}{totals[1]:>8}{totals[2]:>10}{lost:>9}{pct:>9.0f}%")
+
+    if zero_sites:
+        print("\n   ⛔ ANPR-т уншилт бий атал МАНАЙД ТЭГ — зураглал буруу эсвэл "
+              "бүтэн өдрийн тасалдал:")
+        for name, lots_, n in zero_sites:
+            print(f"      «{'», «'.join(lots_)}» → «{name}» — тэдэнд {n}, манайд 0")
+        print("      Зураглалыг шалгах: --map \"<тэдний нэр>=<манай код>\"")
+
+    guessed = [(lot, sites[lot].name) for lot, h in how.items() if h == "НЭРЭЭР ТААСАН"]
+    if guessed:
+        print("\n   ⚠ НЭРЭЭР таасан зураглал — баталгаажуулна уу:")
+        for lot, name in sorted(guessed):
+            print(f"      «{lot}» → «{name}»")
+        print("      Буруу бол: --map \"<тэдний нэр>=<манай код>\" эсвэл LOT_MAP-д бичнэ.")
 
     if unmapped:
         print(f"\n   ⓘ Манай системд БАЙХГҮЙ {len(unmapped)} зогсоол (тооцоонд ороогүй):")
