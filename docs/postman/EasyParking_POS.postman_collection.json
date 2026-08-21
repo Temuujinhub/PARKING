@@ -83,12 +83,12 @@
           }
         },
         {
-          "name": "Төхөөрөмжийн жагсаалт (device_key-үүд эндээс)",
+          "name": "Хаалтны жагсаалт (device_id — хаалт гараар нээхэд)",
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{base_url}}/api/admin/devices?site_id={{site_id}}",
-              "host": ["{{base_url}}"], "path": ["api", "admin", "devices"],
+              "raw": "{{base_url}}/api/barriers/devices?site_id={{site_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "barriers", "devices"],
               "query": [{ "key": "site_id", "value": "{{site_id}}" }]
             }
           }

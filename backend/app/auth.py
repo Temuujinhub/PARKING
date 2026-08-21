@@ -136,6 +136,10 @@ def require(*modules: str):
         if any(has_permission(user, m) for m in modules):
             return user
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Танд энэ үйлдлийг хийх эрх байхгүй.")
+    # Шаардлагыг функц дээрээ тэмдэглэнэ — эрхийн матриц бүхэл системээрээ зөв
+    # эсэхийг тест/оношилгоо ROUTE-уудаас уншиж шалгах боломжтой болгоно
+    # (POS-ийн урсгал операторын эрхээр бүрэн ажиллах эсэх regression тест).
+    checker.required_modules = modules
     return checker
 
 
@@ -144,6 +148,7 @@ def require_role(*roles: str):
         if user.role in roles:
             return user
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Танд энэ үйлдлийг хийх эрх байхгүй.")
+    checker.required_roles = roles
     return checker
 
 

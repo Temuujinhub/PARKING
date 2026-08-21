@@ -156,7 +156,16 @@ PosLink-ийн хариунаас ДДТД/сугалаа/QR-ыг `"ebarimt_id"`
 POST /api/barriers/{device_id}/open
 ```
 
-Barrier device_id-г `GET /api/admin/devices?site_id=...` (device_type=barrier, lane_dir=exit).
+Barrier device_id-г **`GET /api/barriers/devices?site_id=...`**-ээс авна
+(`lane_dir=exit` мөрийг сонгоно). Хариу: `[{id, site_id, name, lane_no, lane_dir,
+auto_open, status, last_seen}]`.
+
+> ⚠ **2026-08-21 өөрчлөлт (заавал шинэчилнэ).** Өмнө нь `GET /api/admin/devices`
+> ашиглаж байсан. Тэр endpoint нь камерын `device_key`-г буцаадаг тул
+> 2026-08-20-ны аюулгүй байдлын хатууруулалтаар `devices/settings/barriers`
+> эрхээр хаагдсан — OPERATOR эрхтэй POS хэрэглэгч **403 «Танд энэ үйлдлийг хийх
+> эрх байхгүй»** авдаг болсон. Шинэ endpoint нь `cashier`/`free_exit`/`barriers`
+> эрхийн аль нэгээр ажиллах бөгөөд ямар ч нууц талбар агуулахгүй.
 
 ## 4. Тохиргооны файл (апп дотор)
 

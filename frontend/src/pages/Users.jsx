@@ -25,7 +25,7 @@ const MODULE_GROUPS = [
   ['Үйл ажиллагаа', [
     ['dashboard', 'Хянах самбар'], ['cashier', 'Касс'], ['check', 'Шалгах'],
     ['history', 'Түүх'], ['compensations', 'Ээлж хаах / Нөхөн төлбөр'],
-    ['free_exit', '⚠ Гараар/төлбөргүй гаргах + хаалт удирдах'],
+    ['free_exit', '⚠ Гараар/төлбөргүй гаргах + хаалт гараар нээх (касс/POS)'],
     // Online operator: кассын «Бэлнээр»-ийн оронд «Дансаар» (шилжүүлэг) товч гарна
     ['pay_transfer', 'Дансаар (шилжүүлгээр) төлбөр авах'],
   ]],
@@ -47,7 +47,10 @@ const ROLE_DEFAULTS = {
   FINANCE: ['dashboard', 'history', 'reports', 'vat', 'payments', 'logs',
     'compensations', 'discounts', 'blacklist'],
   HR: ['users'],
-  OPERATOR: ['cashier', 'check', 'history', 'compensations'],
+  // pay_transfer — backend ROLE_PERMISSIONS.OPERATOR-т БАЙДАГ. Энд дутуу байсан тул
+  // «default-той ижил бол null» логик 4 модулийг default гэж үзэж null хадгалж,
+  // бодит эрх нь 5 болж «Дансаар» товч чекбоксгүйгээр гарч ирдэг байв.
+  OPERATOR: ['cashier', 'check', 'history', 'compensations', 'pay_transfer'],
   ONLINE_OPERATOR: ['cashier', 'check', 'history', 'compensations', 'pay_transfer'],
 }
 const isDefaultPerms = (role, perms) => {

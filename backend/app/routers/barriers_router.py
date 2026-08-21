@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, require
+from ..auth import enforce_site, operator_sites, require
 from ..database import get_db
 from ..models import AuditLog, BarrierCommand, Device, User
 from ..serializers import to_dict
@@ -93,3 +93,33 @@ def command_log(site_id: str | None = None, limit: int = 100,
     rows = q.order_by(BarrierCommand.created_at.desc()).limit(min(limit, 500)).all()
     return [to_dict(c, extra={"device_name": c.device.name if c.device else None,
                               "site_id": c.device.site_id if c.device else None}) for c in rows]
+
+
+@router.get("/devices")
+def barrier_devices(site_id: str | None = None, db: Session = Depends(get_db),
+                    user: User = Depends(require("barriers", "free_exit", "cashier"))):
+    """Хаалт нээх товчинд хэрэгтэй НИМГЭН жагсаалт (POS/касс).
+
+    Яагаад тусдаа endpoint вэ: `GET /api/admin/devices` нь 2026-08-20-ны аюулгүй
+    байдлын хатууруулалтаар `devices/settings/barriers` эрхээр хаагдсан — хариу
+    нь камерын `device_key` агуулдаг бөгөөд тэр түлхүүрээр хуурамч LPR event
+    илгээж хаалт нээх боломжтой байсан. Гэтэл PAX POS нь хаалтаа нээхийн тулд
+    `device_id`-г ЗӨВХӨН тэндээс олдог байсан тул операторын «хаалт нээх» товч
+    403 иддэг болов (prod дээр 13 удаагийн 403-оор батлагдсан).
+
+    Тиймээс энд ЗӨВХӨН хаалтны id/нэр/эгнээ буцаана — `device_key`, IP, нэвтрэх
+    нэр/нууц үг ОГТ БАЙХГҮЙ. Ингэснээр хатууруулалтын зорилго хэвээр үлдэж,
+    `free_exit`/`barriers` эрхтэй оператор хаалтаа нээх боломжтой болно.
+    """
+    q = db.query(Device).filter(Device.device_type == "barrier", Device.status != "deleted")
+    allowed = operator_sites(user)
+    if site_id:
+        enforce_site(user, site_id)  # эрхгүй зогсоолын хаалт руу IDOR хийхээс сэргийлнэ
+        q = q.filter(Device.site_id == site_id)
+    elif allowed:
+        q = q.filter(Device.site_id.in_(allowed))
+    return [{"id": d.id, "site_id": d.site_id, "name": d.name,
+             "lane_no": d.lane_no, "lane_dir": d.lane_dir,
+             "auto_open": d.auto_open, "status": d.status,
+             "last_seen": d.last_seen.isoformat() if d.last_seen else None}
+            for d in q.order_by(Device.lane_dir, Device.lane_no, Device.created_at).all()]
