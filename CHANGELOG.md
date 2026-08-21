@@ -26,6 +26,19 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-21 — nginx хатууруулалт: Monnis прод дээр 1, 2, 4-р үе шат дуусав
+
+| Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | **Header ДАВХАРДАЛ** — vhost-д өмнөөс байсан `add_header` дээр snippet нэмэгдэхэд нэг контекстэд 2 болж, хариунд header 2 удаа явж байв (nginx-д add_header нь ДАРДАГГҮЙ, НЭМДЭГ). Удирддаг 7 header-ийн гар хуулбарыг автоматаар хасна; `Cache-Control` зэрэгт хүрэхгүй | ``a4ef2c0`` | ✅ 08-21 | ✅ 08-21 Monnis |
+| feat | **`--scanner` / `--lpr`** — үе шат 2, 4-ийн дүрмийг versioned snippet болгож (`parking-scanner-guard.conf`, `parking-lpr-guard.conf`) скрипт өөрөө server блокт холбоно. Гараар vhost засах шаардлагагүй боллоо (хэрэглэгч nginx блокийг shell-д 2 удаа буулгасны хариу) | ``a4ef2c0`` | ✅ 08-21 | ✅ 08-21 Monnis |
+| ops | **Monnis LPR хаагдав** — 7 хоногийн журнал (08-14-өөс) бүтэн хамарсныг батлаад `lpr_push` 0 гарсан тул `allow 127.0.0.1; deny all;` + `X-Forwarded-For $remote_addr` | ``a4ef2c0`` | — | ✅ 08-21 |
+| ops | **Monnis UFW идэвхжив** (22/80/443) | — | — | ✅ 08-21 |
+
+**Үлдсэн:** Monnis дээр `server_tokens off` (nginx.conf-д sed таараагүй — хувилбар
+ил хэвээр), rate limit (NAT-аас болж `/api/`-д тавихгүй, зөвхөн login).
+**site.easy-parking.mn (202.21.117.179) бол ТУСДАА машин** — тэнд 1-5 бүх үе шат ⏳.
+
 ## 2026-08-21 — nginx хатууруулалтыг repo-д оруулж, прод хэрэгжүүлэлтийг автоматжуулав
 
 08-20-ны OWASP багцын **код** нь `55d273e`-ээр хоёр прод дээр аль хэдийн орсон
