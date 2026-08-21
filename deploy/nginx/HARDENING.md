@@ -107,8 +107,26 @@ curl -s http://127.0.0.1/api/health; systemctl is-active nginx parking-backend
 Скрипт үүнийг ОРУУЛАХГҮЙ — http түвшний тунхагтай давхцаж `nginx -t`-г
 унагаадаг. `/etc/nginx/nginx.conf`-ийн http блокт нэг удаа нээнэ:
 
+Эхлээд мөр байгаа эсэхийг хар — Debian-ы зарим суулгацад тэр мөр огт байдаггүй
+тул `sed` чимээгүй юу ч хийхгүй өнгөрдөг (nginx -t өнгөрч, хувилбар ил хэвээр):
+
 ```bash
-sudo sed -i 's/^\s*#\s*server_tokens off;/\tserver_tokens off;/' /etc/nginx/nginx.conf && sudo nginx -t && sudo systemctl reload nginx
+grep -n server_tokens /etc/nginx/nginx.conf || echo "МӨР АЛГА — доорхыг ажиллуул"
+```
+
+Тайлбар болсон мөр байвал нээнэ; огт байхгүй бол `http {` блокт шинээр нэмнэ:
+
+```bash
+sudo sed -i 's/^\s*#\s*server_tokens off;/\tserver_tokens off;/' /etc/nginx/nginx.conf
+grep -q '^\s*server_tokens' /etc/nginx/nginx.conf \
+  || sudo sed -i '0,/^http {/s//http {\n\tserver_tokens off;/' /etc/nginx/nginx.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Батлах (хувилбаргүй `Server: nginx` байх ёстой):
+
+```bash
+curl -sI http://127.0.0.1/ | grep -i '^server:'
 ```
 
 ---
@@ -121,8 +139,11 @@ sudo sed -i 's/^\s*#\s*server_tokens off;/\tserver_tokens off;/' /etc/nginx/ngin
 
 ## Үе шат 2 — Сканнерын шуугианг таслах (эрсдэл бага)
 
-vhost-ийн `server { }` дотор гараар нэмнэ (SPA-гийн `try_files` улмаас
-`/xxx.php` → `index.html` 200 буцаж ботуудад «амьд» мэт харагддаг):
+⚠ Доорх нь **ТОХИРГООНЫ ФАЙЛД БИЧИХ АГУУЛГА** — терминалд буулгавал
+`syntax error near unexpected token '('` гэж унана. `sudo nano
+/etc/nginx/sites-enabled/parking` нээж, `server { }` блок дотор нэмнэ
+(SPA-гийн `try_files` улмаас `/xxx.php` → `index.html` 200 буцаж ботуудад
+«амьд» мэт харагддаг):
 
 ```nginx
 location ~* \.(php|asp|aspx|jsp|cgi)$ { access_log off; return 444; }
