@@ -1,5 +1,5 @@
 """Кассын ээлж: нээх, хаах, тайлан."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -25,6 +25,40 @@ def _shift_totals(db: Session, shift: CashierShift) -> dict:
             "count": sum(v["count"] for v in by_provider.values())}
 
 
+def _z_report(db: Session, shift: CashierShift, totals: dict, closed_cars: int = 0) -> dict:
+    """Ээлжийн Z-тайлан — POS терминал дээр хэвлэхэд бэлэн мөрүүд.
+
+    Өмнө нь ээлжийн тооцоог оператор ГАРААР бичдэг байсан (алдаа, маргаан).
+    Кассын бүх сувгийн задаргаа + баталгаажуулсан бэлэн мөнгө нэг хуудсанд."""
+    tz = timedelta(hours=8)   # Улаанбаатар — принтерт орон нутгийн цаг
+    label = {"CASH": "Бэлэн", "POS": "Карт", "QPAY": "QPay", "TRANSFER": "Дансаар"}
+    site = shift.site if shift.site_id else None
+    lines = [
+        "ЭЭЛЖИЙН ТАЙЛАН (Z)",
+        site.name if site else "",
+        f"Оператор: {shift.user.username if shift.user else '-'}",
+        f"Нээсэн: {(shift.opened_at + tz):%Y-%m-%d %H:%M}" if shift.opened_at else "",
+        f"Хаасан: {(shift.closed_at + tz):%Y-%m-%d %H:%M}" if shift.closed_at
+        else f"Хэвлэсэн: {(datetime.utcnow() + tz):%Y-%m-%d %H:%M}",
+        "-" * 24,
+    ]
+    for prov, v in sorted(totals["by_provider"].items(), key=lambda kv: -kv[1]["amount"]):
+        lines.append(f"{label.get(prov, prov)}: {v['amount']:,.0f}₮ ({v['count']})")
+    lines += [
+        "-" * 24,
+        f"НИЙТ: {totals['total']:,.0f}₮ ({totals['count']} гүйлгээ)",
+    ]
+    if shift.cash_confirmed is not None:
+        cash = float(totals["by_provider"].get("CASH", {}).get("amount", 0))
+        diff = float(shift.cash_confirmed) - cash
+        lines.append(f"Тушаасан бэлэн: {float(shift.cash_confirmed):,.0f}₮")
+        if abs(diff) >= 1:
+            lines.append(f"ЗӨРҮҮ: {diff:+,.0f}₮")
+    if closed_cars:
+        lines.append(f"Хаасан машин: {closed_cars}")
+    return {"lines": [ln for ln in lines if ln]}
+
+
 @router.get("/shift/current")
 def current_shift(db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     shift = db.query(CashierShift).filter(CashierShift.user_id == user.id,
@@ -36,7 +70,10 @@ def current_shift(db: Session = Depends(get_db), user: User = Depends(require("c
         ParkingSession.site_id == shift.site_id,
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"])).count() if shift.site_id else 0
     shift_out = to_dict(shift, extra={"site_name": shift.site.name if shift.site else None})
-    return {"open": True, "shift": shift_out, "remaining_cars": remaining, **_shift_totals(db, shift)}
+    _t = _shift_totals(db, shift)
+    return {"open": True, "shift": shift_out, "remaining_cars": remaining, **_t,
+            # Ээлж хаахаас өмнө ч завсрын тайлан хэвлэж болно (X-тайлан)
+            "print_data": _z_report(db, shift, _t)}
 
 
 @router.post("/shift/open")
@@ -106,7 +143,9 @@ def close_shift(body: dict | None = None, db: Session = Depends(get_db),
                     detail={**totals, "closed_cars": closed_cars,
                             "confirmed_cash": body.get("confirmed_cash")}))
     db.commit()
-    return {"shift": to_dict(shift), **totals, "closed_cars": closed_cars}
+    # POS/веб дээр шууд хэвлэх Z-тайлан
+    return {"shift": to_dict(shift), **totals, "closed_cars": closed_cars,
+            "print_data": _z_report(db, shift, totals, closed_cars)}
 
 
 @router.get("/hr/worked-days")

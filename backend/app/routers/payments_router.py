@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, require, scoped_site
+from ..auth import enforce_site, operator_sites, require, scoped_site
 from ..config import settings
 from ..database import get_db
 from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Payment,
@@ -340,6 +340,19 @@ async def _confirm_qpay(db: Session, payment: Payment) -> bool:
         payment.provider_payment_id = res["payment_id"]
     await _finalize_paid(db, payment, raw=res.get("raw"))
     return True
+
+
+def _remember_app_version(terminal, version: str | None):
+    """POS аппын хувилбарыг терминалын бүртгэлд хадгална (X-App-Version толгой)."""
+    v = (version or "").strip()[:40]
+    if not v or terminal is None:
+        return
+    extra = dict(terminal.extra or {})
+    if extra.get("app_version") != v:
+        log.info("POS апп хувилбар: %s → %s", terminal.name or terminal.device_key, v)
+    extra["app_version"] = v
+    extra["app_version_at"] = datetime.utcnow().isoformat(timespec="seconds")
+    terminal.extra = extra
 
 
 def _print_payload(db: Session, payment: Payment) -> dict:
@@ -737,6 +750,59 @@ def _find_terminal(db: Session, terminal_id: str):
                     Device.status == "active").first())
 
 
+@router.get("/ebarimt/payer")
+async def ebarimt_payer(reg_no: str, user: User = Depends(require("cashier"))):
+    """Регистрээр татвар төлөгчийг шалгана — POS дээр НЭР харуулахад.
+
+    Байгууллагын регистр/ТТД → байгууллагын нэр. Иргэний регистр → хүний нэр ба
+    НӨАТ төлөгч эсэх. Оператор дугаараа зөв бичсэн эсэхээ дэлгэц дээр шалгана.
+
+    `available: false` бол шалгах суваг ажиллахгүй байна — «олдсонгүй» ГЭЖ БИШ.
+    Тэр үед POS «шалгах боломжгүй» гэж харуулаад төлбөрийг үргэлжлүүлнэ.
+    """
+    from ..services import tin_lookup
+    return await tin_lookup.lookup(reg_no)
+
+
+@router.get("/pos/receipts")
+def pos_recent_receipts(terminal_id: str | None = None, limit: int = 10,
+                        db: Session = Depends(get_db),
+                        user: User = Depends(require("cashier"))):
+    """Сүүлийн төлбөрүүд — ДАХИН ХЭВЛЭХЭД. Цаас дуусах/зам гацах нь өдөр тутмын
+    явдал бөгөөд өмнө нь баримт бүрмөсөн алдагддаг байв.
+
+    Мөр бүр `print_data` + `receipt`-тэй ирнэ — POS шууд хэвлэнэ."""
+    q = (db.query(Payment).filter(Payment.status == "PAID")
+         .order_by(Payment.paid_at.desc().nullslast()))
+    if terminal_id:
+        q = q.filter(Payment.terminal_id == terminal_id)
+    allowed = operator_sites(user)   # оператор зөвхөн өөрийн зогсоолын баримт
+    rows = []
+    for p in q.limit(min(max(limit, 1), 50) * 3).all():
+        s = db.get(ParkingSession, p.session_id) if p.session_id else None
+        if allowed and (s is None or s.site_id not in allowed):
+            continue
+        rows.append({"payment_id": p.id, "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+                     "plate_number": s.plate_number if s else None,
+                     **_print_payload(db, p)})
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+@router.get("/{payment_id}/print")
+def payment_print(payment_id: str, db: Session = Depends(get_db),
+                  user: User = Depends(require("cashier"))):
+    """Нэг төлбөрийн хэвлэх өгөгдөл — дахин хэвлэх/баримт үзүүлэхэд."""
+    p = db.get(Payment, payment_id)
+    if not p:
+        raise HTTPException(404, "Төлбөр олдсонгүй")
+    s = db.get(ParkingSession, p.session_id) if p.session_id else None
+    if s is not None:
+        enforce_site(user, s.site_id)
+    return {"payment_id": p.id, "status": p.status, **_print_payload(db, p)}
+
+
 @router.get("/pos/terminal/{terminal_id}")
 def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):
@@ -764,7 +830,7 @@ def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
 
 
 @router.post("/pos/confirm")
-async def pos_confirm(body: dict, db: Session = Depends(get_db),
+async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):
     """PAX A9000 апп картын төлбөр авсныг баталгаажуулна.
     body: {session_id, amount, auth_code, card_last4, card_brand, terminal_id, transaction_id}"""
@@ -802,6 +868,9 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     # Терминал бүртгэлтэй бол зогсоолын харьяаллыг тулгана — А зогсоолын POS
     # Б зогсоолын машинд төлбөр авахаас (буруу тооцоо) сэргийлнэ
     terminal = _find_terminal(db, body.get("terminal_id", ""))
+    # Аппын хувилбарыг бүртгэнэ — «энэ алдаа хуучин build дээр л гарч байна уу»
+    # гэдгийг тогтоох цорын ганц арга (өмнө нь ямар ч ул мөр үлддэггүй байв).
+    _remember_app_version(terminal, request.headers.get("X-App-Version"))
     if terminal and terminal.site_id != session.site_id:
         raise HTTPException(400, f"Энэ терминал «{terminal.site.name if terminal.site else '?'}» "
                                  "зогсоолд харьяалагддаг — өөр зогсоолын машинд төлбөр авах боломжгүй")

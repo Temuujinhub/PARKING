@@ -155,6 +155,12 @@ class Settings(BaseSettings):
     ebarimt_branch_no: str = "001"
     ebarimt_district_code: str = "3420"
     ebarimt_classification_code: str = "6743000"  # GS1: Автомашины зогсоолын үйлчилгээ
+    # Регистрээр татвар төлөгчийг шалгах (POS дээр байгууллагын НЭР харуулах).
+    # PosAPI суусан бол түүнийг эхэлж, эс бол энэ нийтийн хаягийг ашиглана.
+    # ⚠ Монголын IP-ээс л хариулдаг — гадаад сервер дээр суваг байхгүй байж болно.
+    # Хоосон болговол нийтийн сувгийг унтраана.
+    ebarimt_tin_lookup_url: str = "https://api.ebarimt.mn/api"
+    ebarimt_tin_lookup_timeout: float = 4.0   # POS хүлээх ёсгүй — богино
     ebarimt_mock: bool = True
     # MOCK үед ХУУРАМЧ (SENT харагдах) баримт үүсгэх үү? Анхдагч FALSE (2026-08-19):
     # прод дээр PosAPI суугаагүй атлаа кассын/картын баримт «Илгээсэн» гэж хуурамч
