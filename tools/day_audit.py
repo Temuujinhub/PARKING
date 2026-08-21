@@ -35,7 +35,8 @@ from app.database import SessionLocal  # noqa: E402
 from app.models import (Compensation, ParkingSession, ParkingSite,  # noqa: E402
                         Payment)
 
-CLEAN_MARKS = ("цэвэрлэгээ", "өр цуцлав", "үнэгүй болгов", "нэвтрүүлэлтийн")
+CLEAN_MARKS = ("цэвэрлэгээ", "өр цуцлав", "үнэгүй болгов", "нэвтрүүлэлтийн",
+               "camsync-давхардал цэвэрлэв")
 AUTO_MARKS = ("авто:",)
 
 
