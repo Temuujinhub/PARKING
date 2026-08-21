@@ -1,21 +1,56 @@
 {
   "info": {
     "name": "Easy Parking — POS/Mobile хөгжүүлэгчийн API",
-    "description": "PAX A9000 POS апп болон Mobile апп хөгжүүлэгчдэд зориулсан бүрэн collection.\n\n**Ашиглах заавар:**\n1. `base_url` хувьсагчийг шалгана (одоогоор https://test.easy-parking.mn)\n2. Эхлээд `1. Нэвтрэлт → Login` хүсэлтийг ажиллуулна — token автоматаар хадгалагдана\n3. Бусад хүсэлтүүд `{{token}}`-ийг автоматаар ашиглана\n\n**Туршилтын урсгал (Туршилт хавтас доторх дарааллаар):**\nМашин оруулах → Гарах камерт уншуулах → Recent Exits-ээс харах → POS confirm.\n\nWebSocket: wss://test.easy-parking.mn/ws/sites/{site_id} (Postman-ий New → WebSocket Request ашиглана)",
+    "description": "PAX A930 / Bonum POS терминал ба Easy Parking системийн API.\n\nДэлгэрэнгүй заавар: PAX_POS_APP_GUIDE.md\n\nСҮҮЛИЙН ӨӨРЧЛӨЛТ (2026-08-21):\n• GET /api/barriers/devices — хаалтны id (өмнөх /api/admin/devices хаагдсан)\n• can_open — хаалт нээх товчийг харуулах эсэх\n• payer_reg_no — 3 формат (ААН регистр / ТТД / иргэний регистр)\n• GET /api/payments/ebarimt/payer — регистрээр нэр шалгах\n• receipt объект — орсон/гарсан цаг, зогссон хугацаа талбараар\n• GET /api/payments/pos/receipts — баримт дахин хэвлэх\n• shift print_data — ээлжийн Z-тайлан\n• X-App-Version толгой — аппын хувилбар бүртгүүлэх\n\nАжиллуулах дараалал: 1 → 2 → 3. Хувьсагчид автоматаар хадгалагдана.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "https://test.easy-parking.mn" },
-    { "key": "token", "value": "" },
-    { "key": "site_id", "value": "" },
-    { "key": "site_code", "value": "SITE01" },
-    { "key": "session_id", "value": "" },
-    { "key": "payment_id", "value": "" },
-    { "key": "test_plate", "value": "8888ТЕС" }
+    {
+      "key": "base_url",
+      "value": "https://test.easy-parking.mn"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "site_id",
+      "value": ""
+    },
+    {
+      "key": "site_code",
+      "value": "SITE01"
+    },
+    {
+      "key": "session_id",
+      "value": ""
+    },
+    {
+      "key": "payment_id",
+      "value": ""
+    },
+    {
+      "key": "test_plate",
+      "value": "8888ТЕС"
+    },
+    {
+      "key": "device_id",
+      "value": ""
+    },
+    {
+      "key": "payer_reg_no",
+      "value": "1234567"
+    }
   ],
   "auth": {
     "type": "bearer",
-    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
   },
   "item": [
     {
@@ -38,27 +73,61 @@
             }
           ],
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
+            ],
             "body": {
               "mode": "urlencoded",
               "urlencoded": [
-                { "key": "username", "value": "operator" },
-                { "key": "password", "value": "Operator@2026" }
+                {
+                  "key": "username",
+                  "value": "operator"
+                },
+                {
+                  "key": "password",
+                  "value": "Operator@2026"
+                }
               ]
             },
-            "url": { "raw": "{{base_url}}/api/auth/login", "host": ["{{base_url}}"], "path": ["api", "auth", "login"] }
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            }
           }
         },
         {
           "name": "Me (эрх шалгах)",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/auth/me", "host": ["{{base_url}}"], "path": ["api", "auth", "me"] }
+            "url": {
+              "raw": "{{base_url}}/api/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me"
+              ]
+            }
           }
         }
-      ]
+      ],
+      "description": "Апп асахад нэг удаа login → token. ХҮСЭЛТ БҮРД `X-App-Version: 1.4.0` толгой илгээнэ — сервер терминалын бүртгэлд хадгалж, аль build ямар алдаа өгснийг мөшгих боломжтой болно (2026-08-21)."
     },
     {
       "name": "2. Зогсоол ба төхөөрөмж",
@@ -79,19 +148,57 @@
           ],
           "request": {
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/admin/sites", "host": ["{{base_url}}"], "path": ["api", "admin", "sites"] }
+            "url": {
+              "raw": "{{base_url}}/api/admin/sites",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "sites"
+              ]
+            }
           }
         },
         {
-          "name": "Хаалтны жагсаалт (device_id — хаалт гараар нээхэд)",
+          "name": "Хаалтны жагсаалт (device_id + can_open)",
           "request": {
             "method": "GET",
             "url": {
               "raw": "{{base_url}}/api/barriers/devices?site_id={{site_id}}",
-              "host": ["{{base_url}}"], "path": ["api", "barriers", "devices"],
-              "query": [{ "key": "site_id", "value": "{{site_id}}" }]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "barriers",
+                "devices"
+              ],
+              "query": [
+                {
+                  "key": "site_id",
+                  "value": "{{site_id}}"
+                }
+              ]
+            },
+            "description": "⚠️ `can_open: false` бол тухайн операторт хаалт нээх эрх БАЙХГҮЙ — «Хаалт нээх» товчийг ОГТ ХАРУУЛАХГҮЙ. Эрхийг Ажилтан → эрхийн матрицын «Гараар/төлбөргүй гаргах + хаалт гараар нээх (касс/POS)» (`free_exit`)-ээс олгоно.\n\nХариу: [{id, site_id, name, device_type, lane_no, lane_dir, auto_open, status, can_open, last_seen}]"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "const exit = rows.find(r => r.lane_dir === 'exit') || rows[0];",
+                  "if (exit) { pm.collectionVariables.set('device_id', exit.id);",
+                  "  console.log('Гарах хаалт:', exit.name, '| can_open:', exit.can_open); }",
+                  "pm.test('can_open талбар ирсэн', () => pm.expect(rows[0]).to.have.property('can_open'));"
+                ]
+              }
             }
-          }
+          ]
         }
       ]
     },
@@ -117,10 +224,23 @@
             "method": "GET",
             "url": {
               "raw": "{{base_url}}/api/sessions/recent-exits?site_id={{site_id}}&minutes=30",
-              "host": ["{{base_url}}"], "path": ["api", "sessions", "recent-exits"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sessions",
+                "recent-exits"
+              ],
               "query": [
-                { "key": "site_id", "value": "{{site_id}}" },
-                { "key": "minutes", "value": "30" }
+                {
+                  "key": "site_id",
+                  "value": "{{site_id}}"
+                },
+                {
+                  "key": "minutes",
+                  "value": "30"
+                }
               ]
             }
           }
@@ -131,10 +251,23 @@
             "method": "GET",
             "url": {
               "raw": "{{base_url}}/api/sessions/check?plate={{test_plate}}&site_id={{site_id}}",
-              "host": ["{{base_url}}"], "path": ["api", "sessions", "check"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sessions",
+                "check"
+              ],
               "query": [
-                { "key": "plate", "value": "{{test_plate}}" },
-                { "key": "site_id", "value": "{{site_id}}" }
+                {
+                  "key": "plate",
+                  "value": "{{test_plate}}"
+                },
+                {
+                  "key": "site_id",
+                  "value": "{{site_id}}"
+                }
               ]
             }
           }
@@ -143,8 +276,56 @@
           "name": "Session дэлгэрэнгүй (картын өмнө дүн баталгаажуулах!)",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/sessions/{{session_id}}", "host": ["{{base_url}}"], "path": ["api", "sessions", "{{session_id}}"] }
+            "url": {
+              "raw": "{{base_url}}/api/sessions/{{session_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "sessions",
+                "{{session_id}}"
+              ]
+            }
           }
+        },
+        {
+          "name": "Худалдан авагч шалгах (нэр харуулах)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/payments/ebarimt/payer?reg_no={{payer_reg_no}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "ebarimt",
+                "payer"
+              ],
+              "query": [
+                {
+                  "key": "reg_no",
+                  "value": "{{payer_reg_no}}"
+                }
+              ]
+            },
+            "description": "Регистр оруулмагц дэлгэц дээр НЭРИЙГ нь харуулж, оператор зөв бичсэн эсэхийг батална.\n\n• ORGANIZATION + found → байгууллагын нэрийг том харуулна\n• CITIZEN + found → хүний нэр + «НӨАТ төлөгч мөн/биш»\n• is_vat_payer=null → «мэдэгдэхгүй» (БИШ гэж бүү бич)\n• available=false → «шалгах боломжгүй», төлбөрийг үргэлжлүүлнэ\n• found=false → «татвар төлөгч олдсонгүй»"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json();",
+                  "console.log('Нэр:', d.name, '| Төрөл:', d.receipt_type, '| НӨАТ төлөгч:', d.is_vat_payer);",
+                  "if (!d.available) console.warn('Шалгах суваг ажиллахгүй байна — «олдсонгүй» ГЭЖ БИШ');"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "POS Confirm — карт амжилттай уншсаны дараа",
@@ -155,7 +336,9 @@
                 "exec": [
                   "const d = pm.response.json();",
                   "pm.test('PAID + barrier нээгдсэн', () => { pm.expect(d.status).to.eql('PAID'); pm.expect(d.barrier_opened).to.be.true; });",
-                  "console.log('e-Barimt:', d.ebarimt_id, '| Сугалаа:', d.lottery_code);",
+                  "pm.test('хэвлэх өгөгдөл ирсэн', () => { pm.expect(d.print_data.lines).to.be.an('array'); pm.expect(d).to.have.property('receipt'); });",
+                  "if (d.payment_id) pm.collectionVariables.set('payment_id', d.payment_id);",
+                  "console.log('e-Barimt:', d.ebarimt_id, '| Сугалаа:', d.lottery_code, '| Төлөв:', d.receipt && d.receipt.ebarimt_status);",
                   "console.log('Хэвлэх мөрүүд:', JSON.stringify(d.print_data.lines, null, 1));"
                 ],
                 "type": "text/javascript"
@@ -164,23 +347,131 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-App-Version",
+                "value": "1.4.0",
+                "description": "Аппын хувилбар — серверт бүртгэгдэнэ"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"amount\": 1000,\n  \"auth_code\": \"TEST01\",\n  \"card_last4\": \"4242\",\n  \"card_brand\": \"Visa\",\n  \"terminal_id\": \"TDB-PAX-SITE01-01\",\n  \"transaction_id\": \"TDB-TXN-TEST-001\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"amount\": 1000,\n  \"auth_code\": \"TEST01\",\n  \"card_last4\": \"4242\",\n  \"card_brand\": \"Visa\",\n  \"terminal_id\": \"TDB-PAX-SITE01-01\",\n  \"transaction_id\": \"TDB-TXN-TEST-001\",\n  \"payer_reg_no\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
-            "url": { "raw": "{{base_url}}/api/payments/pos/confirm", "host": ["{{base_url}}"], "path": ["api", "payments", "pos", "confirm"] },
-            "description": "⚠️ amount нь Session дэлгэрэнгүй-гээс авсан fee.total_fee-тэй таарах ёстой, эс бөгөөс 400 ирнэ (картын гүйлгээг VOID хийнэ)."
+            "url": {
+              "raw": "{{base_url}}/api/payments/pos/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "pos",
+                "confirm"
+              ]
+            },
+            "description": "⚠️ `amount` нь Session дэлгэрэнгүйгээс авсан `fee.total_fee`-тэй таарах ёстой, эс бол 400.\n\n`payer_reg_no` (сонголт) — 3 формат: ААН регистр (7 орон), ТТД (11–14), иргэний регистр (АА00112233). Хоосон = нэргүй баримт.\n\nХариунд `print_data.lines` (бэлэн мөрүүд), `receipt` (талбараар: орсон/гарсан цаг, зогссон хугацаа, дүн, НӨАТ, ДДТД, сугалаа) болон `qr_data` (QR болгон хэвлэнэ) ирнэ."
           }
         },
         {
           "name": "Бэлэн мөнгөний төлбөр",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/payments/cash", "host": ["{{base_url}}"], "path": ["api", "payments", "cash"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/payments/cash",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "cash"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Сүүлийн баримтууд (дахин хэвлэх)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/payments/pos/receipts?terminal_id=TDB-PAX-SITE01-01&limit=10",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "pos",
+                "receipts"
+              ],
+              "query": [
+                {
+                  "key": "terminal_id",
+                  "value": "TDB-PAX-SITE01-01"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            },
+            "description": "Цаас дуусах/зам гацахад баримтыг дахин хэвлэнэ. Мөр бүр `print_data` + `receipt`-тэй ирнэ."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const rows = pm.response.json();",
+                  "console.log(rows.length + ' баримт'); if (rows[0]) console.log(rows[0].print_data.lines.join(' | '));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Нэг баримтын хэвлэх өгөгдөл",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/payments/{{payment_id}}/print",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "{{payment_id}}",
+                "print"
+              ]
+            },
+            "description": "Тодорхой нэг төлбөрийн баримтыг дахин хэвлэх."
           }
         }
       ]
@@ -191,30 +482,71 @@
         {
           "name": "Site мэдээлэл (public)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/public/site/{{site_code}}", "host": ["{{base_url}}"], "path": ["api", "public", "site", "{{site_code}}"] }
+            "url": {
+              "raw": "{{base_url}}/api/public/site/{{site_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "site",
+                "{{site_code}}"
+              ]
+            }
           }
         },
         {
           "name": "Recent exits (public, гарах хаалтны QR)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/public/recent-exits/{{site_code}}", "host": ["{{base_url}}"], "path": ["api", "public", "recent-exits", "{{site_code}}"] }
+            "url": {
+              "raw": "{{base_url}}/api/public/recent-exits/{{site_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "recent-exits",
+                "{{site_code}}"
+              ]
+            }
           }
         },
         {
           "name": "Хялбар хайлт (эхний тоогоор, үсэггүй)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "GET",
             "url": {
               "raw": "{{base_url}}/api/public/search?site={{site_code}}&q=8888",
-              "host": ["{{base_url}}"], "path": ["api", "public", "search"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "search"
+              ],
               "query": [
-                { "key": "site", "value": "{{site_code}}" },
-                { "key": "q", "value": "8888" }
+                {
+                  "key": "site",
+                  "value": "{{site_code}}"
+                },
+                {
+                  "key": "q",
+                  "value": "8888"
+                }
               ]
             },
             "description": "Жолооч дугаарынхаа эхний тоог (2+ тэмдэгт) бичихэд таарах машинуудын жагсаалт. /pay хуудасны live хайлт үүнийг ашигладаг."
@@ -234,14 +566,29 @@
             }
           ],
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "GET",
             "url": {
               "raw": "{{base_url}}/api/public/sessions?plate={{test_plate}}&site={{site_code}}",
-              "host": ["{{base_url}}"], "path": ["api", "public", "sessions"],
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "sessions"
+              ],
               "query": [
-                { "key": "plate", "value": "{{test_plate}}" },
-                { "key": "site", "value": "{{site_code}}" }
+                {
+                  "key": "plate",
+                  "value": "{{test_plate}}"
+                },
+                {
+                  "key": "site",
+                  "value": "{{site_code}}"
+                }
               ]
             }
           }
@@ -262,32 +609,100 @@
             }
           ],
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/payments/qpay/invoice", "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "invoice"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/payments/qpay/invoice",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "qpay",
+                "invoice"
+              ]
+            }
           }
         },
         {
           "name": "Төлбөр шалгах (polling, 5 сек тутам)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "url": { "raw": "{{base_url}}/api/payments/qpay/check/{{payment_id}}", "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "check", "{{payment_id}}"] }
+            "url": {
+              "raw": "{{base_url}}/api/payments/qpay/check/{{payment_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "qpay",
+                "check",
+                "{{payment_id}}"
+              ]
+            }
           }
         },
         {
           "name": "[MOCK] Webhook — төлөгдсөн мэт дуудах (туршилтад)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"payment_status\": \"PAID\",\n  \"amount\": 1000\n}", "options": { "raw": { "language": "json" } } },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_status\": \"PAID\",\n  \"amount\": 1000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
             "url": {
               "raw": "{{base_url}}/api/payments/qpay/webhook?payment_id={{payment_id}}",
-              "host": ["{{base_url}}"], "path": ["api", "payments", "qpay", "webhook"],
-              "query": [{ "key": "payment_id", "value": "{{payment_id}}" }]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "qpay",
+                "webhook"
+              ],
+              "query": [
+                {
+                  "key": "payment_id",
+                  "value": "{{payment_id}}"
+                }
+              ]
             },
             "description": "⚠️ Зөвхөн MOCK горимд туршилтад ашиглана. amount нь invoice-ийн дүнтэй таарах ёстой."
           }
@@ -301,26 +716,97 @@
           "name": "Одоогийн ээлж",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{base_url}}/api/cashier/shift/current", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "current"] }
-          }
+            "url": {
+              "raw": "{{base_url}}/api/cashier/shift/current",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "cashier",
+                "shift",
+                "current"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json();",
+                  "if (d.print_data) console.log('Z-ТАЙЛАН:\\n' + d.print_data.lines.join('\\n'));"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Ээлж нээх",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"opening_amount\": 0\n}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/cashier/shift/open", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "open"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"opening_amount\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/cashier/shift/open",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "cashier",
+                "shift",
+                "open"
+              ]
+            }
           }
         },
         {
           "name": "Ээлж хаах",
           "request": {
             "method": "POST",
-            "url": { "raw": "{{base_url}}/api/cashier/shift/close", "host": ["{{base_url}}"], "path": ["api", "cashier", "shift", "close"] }
-          }
+            "url": {
+              "raw": "{{base_url}}/api/cashier/shift/close",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "cashier",
+                "shift",
+                "close"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = pm.response.json();",
+                  "if (d.print_data) console.log('Z-ТАЙЛАН:\\n' + d.print_data.lines.join('\\n'));"
+                ]
+              }
+            }
+          ]
         }
-      ]
+      ],
+      "description": "`shift/current` ба `shift/close` хоёулаа `print_data.lines` буцаана — ээлжийн Z-тайлан (сувгийн задаргаа, нийт дүн, тушаасан бэлэн, ЗӨРҮҮ). POS дээр шууд хэвлэнэ."
     },
     {
       "name": "6. Хаалт",
@@ -329,9 +815,33 @@
           "name": "Хаалт гараар нээх (device_id-г 2-р хавтаснаас)",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/barriers/BARRIER_DEVICE_ID/open", "host": ["{{base_url}}"], "path": ["api", "barriers", "BARRIER_DEVICE_ID", "open"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/barriers/BARRIER_DEVICE_ID/open",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "barriers",
+                "BARRIER_DEVICE_ID",
+                "open"
+              ]
+            }
           }
         }
       ]
@@ -342,11 +852,36 @@
         {
           "name": "Машин ОРУУЛАХ",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"device_key\": \"cam-entry-site01\",\n  \"plate\": \"{{test_plate}}\"\n}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/lpr/simulate", "host": ["{{base_url}}"], "path": ["api", "lpr", "simulate"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_key\": \"cam-entry-site01\",\n  \"plate\": \"{{test_plate}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/lpr/simulate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "lpr",
+                "simulate"
+              ]
+            }
           }
         },
         {
@@ -365,28 +900,76 @@
             }
           ],
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"device_key\": \"cam-exit-site01\",\n  \"plate\": \"{{test_plate}}\"\n}", "options": { "raw": { "language": "json" } } },
-            "url": { "raw": "{{base_url}}/api/lpr/simulate", "host": ["{{base_url}}"], "path": ["api", "lpr", "simulate"] }
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"device_key\": \"cam-exit-site01\",\n  \"plate\": \"{{test_plate}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/lpr/simulate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "lpr",
+                "simulate"
+              ]
+            }
           }
         },
         {
           "name": "Dahua ITSAPI жинхэнэ формат (камерын callback)",
           "request": {
-            "auth": { "type": "noauth" },
+            "auth": {
+              "type": "noauth"
+            },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"Events\": [{\n    \"Code\": \"TrafficJunction\",\n    \"Action\": \"Start\",\n    \"TrafficCar\": {\n      \"PlateNumber\": \"{{test_plate}}\",\n      \"VehicleColor\": \"White\",\n      \"Confidence\": 97\n    },\n    \"UTC\": \"2026-07-06 12:00:00\"\n  }]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/api/lpr/callback?device_key=cam-entry-site01",
-              "host": ["{{base_url}}"], "path": ["api", "lpr", "callback"],
-              "query": [{ "key": "device_key", "value": "cam-entry-site01" }]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "lpr",
+                "callback"
+              ],
+              "query": [
+                {
+                  "key": "device_key",
+                  "value": "cam-entry-site01"
+                }
+              ]
             }
           }
         }
