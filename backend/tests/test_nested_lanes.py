@@ -124,8 +124,26 @@ check("хоосон жагсаалтад зогсоох зүйл алга", r2["
 # Хоёр session-д ойролцоо тохирвол ТААМАГЛАХГҮЙ (эргэлзээтэй)
 amb = [S("7777ААА"), S("7777ААБ")]
 r3 = classify_inside(["7777ААВ"], amb, sim)
-check("хоёрдмол OCR тохирлыг таамаглахгүй, session алга гэж үзнэ",
-      r3["no_session"] == ["7777ААВ"] and r3["to_pause"] == [])
+check("хоёрдмол OCR тохирлыг таамаглахгүй, тусад нь жагсаана",
+      r3["ambiguous"] == [("7777ААВ", ["7777ААА", "7777ААБ"])] and r3["to_pause"] == [])
+check("хоёрдмол нь «session алга» биш", r3["no_session"] == [])
+
+# 2026-08-21 Рашбулаг: тайрагдсан уншилт хоёрдмол болоод, ДОТОР байгаа машины
+# тоолуур эргээд асч байсан регресс. Ойролцоо бол ҮРГЭЛЖЛҮҮЛЭХ-д ОРОХГҮЙ.
+def trunc(a, b):     # «7387УКО» ↔ «387УКО» — эхний цифр тайрагдсан
+    lo, sh = (a, b) if len(a) > len(b) else (b, a)
+    return a == b or (len(lo) - len(sh) <= 2 and lo.endswith(sh))
+
+
+cut = [S("387УКО", paused=T0), S("87УКО", paused=T0)]   # хоёулаа тайрагдсан → хоёрдмол
+r4 = classify_inside(["7387УКО"], cut, trunc)
+check("тайрагдсан уншилт хоёрдмол бол ч ҮРГЭЛЖЛҮҮЛЭХГҮЙ (дотор хэвээр)",
+      r4["to_resume"] == [] and len(r4["ambiguous"]) == 1)
+
+one = [S("387УКО", paused=T0)]
+r5 = classify_inside(["7387УКО"], one, trunc)
+check("ганц тайрагдсан тохирол «аль хэдийн дотор» гэж танигдана",
+      [s.plate_number for _p, s in r5["already"]] == ["387УКО"] and r5["to_resume"] == [])
 
 print(f"\n{PASS} PASS, {FAIL} FAIL")
 sys.exit(1 if FAIL else 0)

@@ -231,23 +231,35 @@ def classify_inside(listed: list[str], sessions: list, similar) -> dict:
     Буцаах бүлгүүд:
       already   — жагсаалтад бий, аль хэдийн «дотор»
       to_pause  — жагсаалтад бий, session бий, гэвч «дотор» гэж тэмдэглэгдээгүй
+      ambiguous — жагсаалтад бий, ойролцоо session ОЛОН — таамаглахгүй, нэрсийг нь харуулна
       no_session— жагсаалтад бий, идэвхтэй session ОГТ алга (гараар бүртгэнэ)
       to_resume — «дотор» гэж тэмдэглэгдсэн ч жагсаалтад БАЙХГҮЙ (гадаа байгаа)
+
+    ХАМГААЛАЛТ: жагсаалтын аль нэг дугаартай ОЙРОЛЦОО session-ийг `to_resume`-д
+    ХЭЗЭЭ Ч оруулахгүй. Эс бол тайрагдсан уншилт (ж: «7387УКО» → «387УКО»)
+    хоёрдмол болоод «жагсаалтад алга» гэж ангилагдмагц, дотор байгаа машины
+    тоолуур эргээд АСДАГ байв — 2026-08-21-нд Рашбулаг дээр яг ингэж болсон.
     """
     by_plate = {s.plate_number: s for s in sessions}
-    already, to_pause, no_session, matched = [], [], [], set()
+    already, to_pause, ambiguous, no_session, matched = [], [], [], [], set()
     for p in listed:
         s = by_plate.get(p)
         if s is None:                  # OCR-ойролцоо ГАНЦ тохирол л зөвшөөрнө
             near = [x for x in sessions if similar(p, x.plate_number)]
-            s = near[0] if len(near) == 1 else None
+            if len(near) == 1:
+                s = near[0]
+            elif near:
+                ambiguous.append((p, [x.plate_number for x in near]))
+                continue
         if s is None:
             no_session.append(p)
             continue
         matched.add(s.plate_number)
         (already if s.paused_since else to_pause).append((p, s))
-    to_resume = [s for s in sessions if s.paused_since and s.plate_number not in matched]
-    return {"already": already, "to_pause": to_pause,
+    to_resume = [s for s in sessions
+                 if s.paused_since and s.plate_number not in matched
+                 and not any(similar(p, s.plate_number) for p in listed)]
+    return {"already": already, "to_pause": to_pause, "ambiguous": ambiguous,
             "no_session": no_session, "to_resume": to_resume}
 
 
@@ -279,6 +291,14 @@ def reconcile_inside(db, site, path: str, apply: bool):
     for s in r["to_resume"]:
         mins = int((now - s.paused_since).total_seconds() // 60)
         print(f"      {s.plate_number}  {L(s.paused_since)}-ээс {mins} мин зогссон")
+
+    print(f"\n   ❓ ХОЁРДМОЛ — ойролцоо session олон, таамаглахгүй: {len(r['ambiguous'])}")
+    for p, cands in r["ambiguous"]:
+        print(f"      {p}  → нэр дэвшигчид: {', '.join(cands)}")
+    if r["ambiguous"]:
+        print("      ⓘ Шалгах хуудсан дээр зөв дугаарыг нь засвал (харандаа товч) "
+              "дараагийн ажиллуулалтад ЯГ таарч, тоолуур нь зогсоно. Тоолуур нь "
+              "энэ хооронд АЖИЛЛАСААР байна — гэхдээ үргэлжлүүлэх бүлэгт орохгүй.")
 
     print(f"\n   ❌ идэвхтэй session ОГТ АЛГА (тоолуур хөндөх боломжгүй): "
           f"{len(r['no_session'])}")
