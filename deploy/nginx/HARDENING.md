@@ -139,74 +139,78 @@ curl -sI http://127.0.0.1/ | grep -i '^server:'
 
 ## Үе шат 2 — Сканнерын шуугианг таслах (эрсдэл бага)
 
-⚠ Доорх нь **ТОХИРГООНЫ ФАЙЛД БИЧИХ АГУУЛГА** — терминалд буулгавал
-`syntax error near unexpected token '('` гэж унана. `sudo nano
-/etc/nginx/sites-enabled/parking` нээж, `server { }` блок дотор нэмнэ
-(SPA-гийн `try_files` улмаас `/xxx.php` → `index.html` 200 буцаж ботуудад
-«амьд» мэт харагддаг):
+SPA-гийн `try_files` улмаас `/xxx.php` → `index.html` болж 200 буцдаг тул
+ботуудад «амьд» мэт харагдаж, өдөрт хэдэн зуун хүсэлт татдаг. Дүрэм нь
+`snippets/parking-scanner-guard.conf`-д байгаа — **гараар засах шаардлагагүй**:
 
-```nginx
-location ~* \.(php|asp|aspx|jsp|cgi)$ { access_log off; return 444; }
-location ~  /\.(env|git|svn|aws)      { access_log off; return 444; }
+```bash
+sudo bash /root/PARKING/deploy/nginx/apply_headers.sh --scanner
 ```
-
-Дараа нь `sudo nginx -t && sudo systemctl reload nginx`.
 
 ---
 
 ## Үе шат 3 — Rate limit (ЭХЛЭЭД ХЭМЖИНЭ)
 
-Нэг IP-ээс минутад хэдэн хүсэлт ирдгийг бодит логоос:
+Нэг IP-ээс хэдэн хүсэлт ирдгийг бодит логоос:
 
 ```bash
 sudo awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head -20
 ```
 
-Хамгийн идэвхтэй IP нь `600r/m`-ээс доогуур байвал л үргэлжлүүл. NAT ард олон
-оператор байвал энэ тоо асар өндөр гарна — тэр тохиолдолд зөвхөн login-ы
-хязгаарыг (`parking_login`, 10r/m) хэрэглэ, ерөнхий `/api/`-д БҮҮ тавь.
+⚠ Энэ нь логийн бүх хугацааны НИЙТ тоо, минутын хурд БИШ. Хамгийн дээд IP нь
+дотоод gateway (ж: `172.16.100.1`) бол **бүх оператор нэг IP-ээр гарч байна** —
+тэр тохиолдолд ерөнхий `/api/`-д хязгаар тавивал бодит ажилтан 429 иднэ.
+
+Аюулгүй хувилбар — зөвхөн login (бодит урсгал: 2 хүсэлт/ХОНОГ, хязгаар 10/мин):
 
 ```bash
 sudo cp /root/PARKING/deploy/nginx/parking-ratelimit.conf /etc/nginx/conf.d/
-# vhost-ийн location = /api/auth/login дотор:  limit_req zone=parking_login burst=5 nodelay;
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-7 хоног `grep 'limiting requests' /var/log/nginx/error.log` — бодит оператор
-цохигдоогүй бол л `/api/` дээр `parking_api`-г нэмнэ.
+Файлыг хуулах нь ЗӨВХӨН бүсийг тодорхойлно — `limit_req` бичих хүртэл юунд ч
+нөлөөлөхгүй. Login дээр идэвхжүүлэхийн тулд vhost-ийн
+`location = /api/auth/login` дотор нэг мөр нэмнэ:
+
+> ⚠ **ЭНЭ БОЛ ФАЙЛД БИЧИХ АГУУЛГА, ТЕРМИНАЛЫН КОМАНД БИШ.**
+> `sudo nano /etc/nginx/sites-enabled/parking`
+
+```nginx
+limit_req zone=parking_login burst=5 nodelay;
+```
+
+7 хоног ажиглаад бодит оператор цохигдоогүй бол л `/api/`-г авч үзнэ:
+
+```bash
+grep 'limiting requests' /var/log/nginx/error.log
+```
 
 ---
 
 ## Үе шат 4 — LPR callback хаах (ЭХЛЭЭД ХЭМЖИНЭ)
 
-Прод дээр камер HTTP push ҮНЭХЭЭР хийдэг эсэх, ямар IP-ээс ирдгийг:
+Камер HTTP push **үнэхээр хийдэг эсэхийг** эхлээд тогтооно:
 
 ```bash
 sudo journalctl -u parking-backend --since '-7 days' | grep -oE 'lpr_push: ip=[0-9.]+' | sort | uniq -c | sort -rn
 ```
 
-* **Хоосон** (TEST дээр 10 хоногт 0 байсан — event нь comet сувгаар ирдэг) →
-  `allow 127.0.0.1; deny all;` тавихад аюулгүй.
-* **IP гарч ирвэл** → тэдгээрийн дэд сүлжээг ЗААВАЛ `allow`-д нэмнэ.
-  Таамгаар бүү бич — жагсаалтад гарсан IP-г л бич.
+Хоосон гарвал логийн хугацаа үнэхээр хамарсан эсэхийг ч батал (лог эргэлдсэн
+бол хэмжилт хүчингүй):
 
-⚠ Дараах нь мөн адил **тохиргооны файлд бичих агуулга**, терминалын команд БИШ — `sudo nano /etc/nginx/sites-enabled/parking` дотор бичнэ.
-
-```nginx
-location /api/lpr/ {
-    include snippets/parking-security.conf;
-    allow 127.0.0.1;
-    # allow <ХЭМЖИЛТЭЭР ГАРСАН дэд сүлжээ>;
-    deny all;
-    proxy_pass http://127.0.0.1:8000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;   # хуурах гинжийг таслана
-}
+```bash
+sudo journalctl -u parking-backend --since '-7 days' | head -1
 ```
 
-`X-Forwarded-For $remote_addr` нь халдагчийн илгээсэн XFF гинжийг таслах гол мөр
-(443 ба 80 БОТЬ блокт хийнэ).
+* **Хоосон бол** (event нь comet сувгаар ирдэг) хаахад аюулгүй:
+
+```bash
+sudo bash /root/PARKING/deploy/nginx/apply_headers.sh --lpr
+```
+
+* **IP гарч ирвэл** эхлээд `snippets/parking-lpr-guard.conf`-д тэр дэд сүлжээг
+  `allow`-оор нэмээд дараа нь ажиллуул. Скрипт нь гараар засагдсан snippet-ийг
+  дарж бичихгүй.
 
 ---
 

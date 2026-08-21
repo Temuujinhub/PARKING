@@ -32,6 +32,7 @@ from datetime import datetime
 
 INCLUDE = "include snippets/parking-security.conf;"
 BLOCK_RE = re.compile(r"^(\s*)(?:location\s+.*|server\s*)\{\s*$")
+SERVER_ONLY_RE = re.compile(r"^(\s*)server\s*\{\s*$")
 
 
 def _strip(line: str) -> str:
@@ -49,29 +50,62 @@ def _depths(lines: list[str]) -> list[int]:
     return out
 
 
-def transform(lines: list[str]) -> tuple[list[str], int]:
+# Snippet өөрөө өгдөг header-үүд. Vhost-д ГАРААР бичигдсэн эдгээр мөр үлдвэл
+# нэг блокт ХОЁР add_header болж, хариунд header ХОЁР УДАА явна (nginx-д нэг
+# контекст доторх add_header нь ДАРДАГГҮЙ, НЭМДЭГ). 2026-08-21 Monnis дээр
+# «X-Frame-Options ×2, HSTS ×2 (нэг нь includeSubDomains-гүй)» гэж илэрсэн.
+MANAGED = ("x-frame-options", "x-content-type-options", "referrer-policy",
+           "strict-transport-security", "permissions-policy",
+           "content-security-policy", "content-security-policy-report-only")
+
+
+def _is_managed_header(line: str) -> bool:
+    """Мөр нь ЗӨВХӨН удирддаг add_header-ийн тунхаг мөн үү (хаалт агуулаагүй)."""
+    code = _strip(line)
+    if not code.lower().startswith("add_header") or "{" in code or "}" in code:
+        return False
+    parts = code.split(None, 2)
+    return len(parts) >= 2 and parts[1].strip('"\'').lower() in MANAGED
+
+
+def _has_in_body(lines: list[str], depth: list[int], i: int, needle: str) -> bool:
+    """i-р мөрөөр нээгдсэн блокийн ӨӨРИЙН биед (дэд блокт БИШ) needle байгаа эсэх."""
+    for j in range(i + 1, len(lines)):
+        if depth[j] <= depth[i]:
+            return False                 # блок хаагдлаа
+        if depth[j] == depth[i] + 1 and _strip(lines[j]) == needle:
+            return True
+    return False
+
+
+def transform(lines: list[str], extra: tuple[str, ...] = ()) -> tuple[list[str], int]:
+    """extra — server блокт нэмж холбох snippet-ийн НЭР (scanner-guard г.м).
+    Тэдгээр нь `location` тунхаг агуулдаг тул ЗӨВХӨН server контекстэд орно."""
     depth = _depths(lines)
     insert_at: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
         m = BLOCK_RE.match(line)
         if not m:
             continue
-        body = depth[i] + 1
-        # Блокийн ӨӨРИЙН биед (дэд location-д БИШ) include аль хэдийн бий юу
-        already = False
-        for j in range(i + 1, len(lines)):
-            if depth[j] <= depth[i]:
-                break                      # блок хаагдлаа
-            if depth[j] == body and _strip(lines[j]) == INCLUDE:
-                already = True
-                break
-        if not already:
+        if extra and SERVER_ONLY_RE.match(line):
+            for name in extra:
+                inc = f"include snippets/{name};"
+                if not _has_in_body(lines, depth, i, inc):
+                    insert_at.append((i + 1, f"{m.group(1)}    {inc}\n"))
+        if not _has_in_body(lines, depth, i, INCLUDE):
             insert_at.append((i + 1, f"{m.group(1)}    {INCLUDE}\n"))
 
     out = list(lines)
     for pos, text in reversed(insert_at):   # ард талаас — индекс гулсахгүй
         out.insert(pos, text)
-    return out, len(insert_at)
+    # Snippet-ийн өгдөг header-ийн ГАРААР бичсэн хуулбаруудыг хасна
+    kept, dropped = [], 0
+    for ln in out:
+        if _is_managed_header(ln):
+            dropped += 1
+            continue
+        kept.append(ln)
+    return kept, len(insert_at) + dropped
 
 
 def main() -> int:
@@ -80,11 +114,15 @@ def main() -> int:
         return 2
     path = sys.argv[1]
     write = "--write" in sys.argv[2:]
+    extra: tuple[str, ...] = ()
+    for a in sys.argv[2:]:
+        if a.startswith("--with="):
+            extra = tuple(x.strip() for x in a[7:].split(",") if x.strip())
 
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
-    new, added = transform(lines)
+    new, added = transform(lines, extra)
 
     if added == 0:
         print(f"✓ {path}: аль хэдийн бүрэн хатууруулсан — өөрчлөх зүйл алга")
