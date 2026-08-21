@@ -36,11 +36,11 @@ fail-open (хүлээгээд нээнэ) — хог их зогсоолд stric
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| feat | **Тохиргоо → Дүрэм → «Орох дугаарын шалгалт»** — `open`/`hold`/`strict` бодлого + хүлээх секунд, зогсоол бүрээр override (`entry_plate_rules`) | ``629add2`` | ⏳ | ⏳ |
-| feat | **hold урсгал** — 4с хүлээж burst дахин уншилтыг авна: зөв ирвэл autocorrect + нээнэ; ирэхгүй бол policy-ээр нээнэ/нээхгүй, `ENTRY_HOLD` audit + `PLATE_UNREADABLE` WS | ``629add2`` | ⏳ | ⏳ |
-| fix | **dedup цоорхой** — junk-ийн дараах ЗӨВ уншилт dedup-д хаягдаж session junk дугаартайгаа үлддэг байв; одоо autocorrect руу үргэлжилж дугаар засагдана | ``629add2`` | ⏳ | ⏳ |
-| feat | **PLATE_RE** — дипломат шинэ формат 4 цифр+ДК/АК (`1302ДК`, `9914АК`, docs/дугаарын стандарт-ын зургаар) | ``629add2`` | ⏳ | ⏳ |
-| test | `tests/test_entry_plate_hold.py` (25) — формат, hold/strict/open, dedup хаалт, fail-open, autocorrect зам | ``629add2`` | ⏳ | ⏳ |
+| feat | **Тохиргоо → Дүрэм → «Орох дугаарын шалгалт»** — `open`/`hold`/`strict` бодлого + хүлээх секунд, зогсоол бүрээр override (`entry_plate_rules`) | ``629add2`` | ✅ 08-21 | ⏳ |
+| feat | **hold урсгал** — 4с хүлээж burst дахин уншилтыг авна: зөв ирвэл autocorrect + нээнэ; ирэхгүй бол policy-ээр нээнэ/нээхгүй, `ENTRY_HOLD` audit + `PLATE_UNREADABLE` WS | ``629add2`` | ✅ 08-21 | ⏳ |
+| fix | **dedup цоорхой** — junk-ийн дараах ЗӨВ уншилт dedup-д хаягдаж session junk дугаартайгаа үлддэг байв; одоо autocorrect руу үргэлжилж дугаар засагдана | ``629add2`` | ✅ 08-21 | ⏳ |
+| feat | **PLATE_RE** — дипломат шинэ формат 4 цифр+ДК/АК (`1302ДК`, `9914АК`, docs/дугаарын стандарт-ын зургаар) | ``629add2`` | ✅ 08-21 | ⏳ |
+| test | `tests/test_entry_plate_hold.py` (25) — формат, hold/strict/open, dedup хаалт, fail-open, autocorrect зам | ``629add2`` | ✅ 08-21 | ⏳ |
 
 ## 2026-08-21 — POS API v2: төлөгч шалгах, баримт дахин хэвлэх, Z-тайлан, аппын хувилбар
 
