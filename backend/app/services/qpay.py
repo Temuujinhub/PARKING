@@ -24,11 +24,11 @@ qpay_mock=True үед бодит QPay руу хандахгүй — туршил
        PARKING_QPAY_USERNAME/PASSWORD/INVOICE_CODE.
 """
 import base64
-import math
 import random
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 
 import httpx
 
@@ -194,10 +194,20 @@ def _parse_expiry(raw, now: datetime) -> datetime:
 
 
 def _vat_units(price: float) -> int:
-    """НӨАТ-ыг 1/10000 нэгжээр, БҮХЭЛ тоогоор (float алдаа хуримтлагдахгүй).
-    4 орны нарийвчлалтай ТАСЛАНА (round биш truncate — docs жишээ)."""
-    r = settings.vat_rate
-    return math.floor(price * r / (1 + r) * 10000)
+    """НӨАТ-ыг 1/10000 нэгжээр, БҮХЭЛ тоогоор. 4 орны нарийвчлалтай ТАСЛАНА
+    (round биш truncate — QPay-ийн docs жишээ).
+
+    Тооцоог ЗААВАЛ `Decimal`-аар хийнэ. float-оор бодоход нарийвчлалын алдаа
+    ГАРЦААГҮЙ дүнг ч доогуур тавьдаг:
+        11000 * 0.1 / 1.1 = 999.9999999999999  → тасалбал 999.9999
+        зөв утга нь                              1000.0000
+    Ингээд QPay `VAT_AMOUNT_INVALID` буцааж, QR ОГТ үүсдэггүй байв. Энэ нь
+    11-т хуваагддаг БҮХ дүнд (1,100 / 5,500 / 11,000 / 22,000 …) тохиолддог —
+    Хангарьд дээр 11,000₮ болмогц жолооч QR-аар төлж чадахгүй болсон нь энэ
+    (2026-08-21, `MONNIS_PROPERTIES` дансаар туршиж баталсан)."""
+    r = Decimal(str(settings.vat_rate))
+    v = Decimal(str(price)) * r / (1 + r) * 10000
+    return int(v.to_integral_value(rounding=ROUND_DOWN))
 
 
 def _vat_of(price: float) -> float:
@@ -218,22 +228,18 @@ def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]
     totals = [round(float(it["unit_price"]), 2) * float(it.get("quantity", 1) or 1)
               for it in items]
 
-    # ЧУХАЛ (production-д QPay «VAT_AMOUNT_INVALID» өгч байсан алдаа):
-    # НӨАТ-ыг мөр БҮРД тусад нь таслахад тасархай хэсгүүд алдагддаг тул
-    # мөрүүдийн НӨАТ-ын нийлбэр нь НИЙТ дүнгээс тасалсан НӨАТ-тай таардаггүй.
-    #   1,000₮ + 2,000₮:  90.9090 + 181.8181 = 272.7271
-    #   3,000₮-аас шууд:                       272.7272   ← QPay үүнийг хүлээдэг
-    # 0.0001₮-ийн зөрүү. Нэг мөртэй нэхэмжлэлд хэзээ ч гардаггүй тул анзаарагдалгүй
-    # өнгөрч, ӨМНӨХ ӨРТЭЙ (2+ мөртэй) жолооч QR-аар ЕРӨӨСӨӨ төлж чаддаггүй байв.
-    # Шийдэл: НӨАТ-ыг 1/10000 бүхэл нэгжээр бодож, нийт дүнгээс гарсан утгад
-    # яг таарган хуваарилна — үлдэгдлийг хамгийн том мөрд өгнө.
-    vat_units: list[int] = []
-    if vat_able:
-        vat_units = [_vat_units(t) for t in totals]
-        drift = _vat_units(sum(totals)) - sum(vat_units)
-        if drift and vat_units:
-            biggest = max(range(len(totals)), key=lambda i: totals[i])
-            vat_units[biggest] += drift
+    # QPay нь НӨАТ-ыг МӨР БҮРЭЭР шалгадаг — мөрийн дүнгээс өөрөө бодоод
+    # илгээсэнтэй маань тулгана. Тиймээс мөр бүрийнхийг ТУСАД НЬ бодно.
+    #
+    # Өмнө нь мөрүүдийн нийлбэрийг НИЙТ дүнгийн НӨАТ-д таарган «үлдэгдлийг
+    # хамгийн том мөрд» нэмдэг байв. Тэр нь нийлбэрийг зөв болгодог ч ТУХАЙН
+    # МӨРИЙН утгыг буруу болгож QPay-гээр татгалзуулна. 2026-08-21-нд
+    # `MONNIS_PROPERTIES` дансаар туршихад:
+    #     мөр бүр тусад нь (Decimal)        → ✅ хүлээж авав
+    #     нийлбэрт тэнцүүлж хуваарилсан     → ❌ VAT_AMOUNT_INVALID
+    # Жинхэнэ шалтгаан нь тэнцвэржүүлэлт биш, `_vat_units`-ийн float алдаа
+    # байсан — түүнийг Decimal болгож зассан.
+    vat_units: list[int] = [_vat_units(t) for t in totals] if vat_able else []
 
     lines = []
     for idx, it in enumerate(items):
