@@ -37,9 +37,9 @@ site.easy-parking.mn дээр `/assets/` header-гүй, Monnis (172.16.100.21) �
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| ops | **`deploy/nginx/`** — `parking-security.conf` + `parking-ratelimit.conf` (TEST дээр ажиллаж буй батлагдсан файлууд) repo-д орлоо; autodeploy-аар сервер бүрд хүрнэ | ``f61f9b5`` | ✅ 08-21 | ⏳ |
-| ops | **`apply_headers.sh`** — нөөцлөх → snippet-ийг location бүрд тараах → `nginx -t` → graceful `reload`; тест унавал нөөцөөс **автоматаар буцаана**. Idempotent | ``f61f9b5`` | ⏳ гараар | ⏳ гараар |
-| ops | **`HARDENING.md`** — 5 үе шат, тус бүрийн тасалдлын эрсдэлтэй. 1-2 (header, сканнер 444) эрсдэлгүй; 3-5 (rate limit NAT, LPR `deny all`, UFW) нь ХЭМЖИЛТ шаардана — хэмжих командыг хамт өгсөн | ``f61f9b5`` | — | — |
+| ops | **`deploy/nginx/`** — `parking-security.conf` + `parking-ratelimit.conf` (TEST дээр ажиллаж буй батлагдсан файлууд) repo-д орлоо; autodeploy-аар сервер бүрд хүрнэ | ``ff944f0`` | ✅ 08-21 | ⏳ |
+| ops | **`apply_headers.sh`** — нөөцлөх → snippet-ийг location бүрд тараах → `nginx -t` → graceful `reload`; тест унавал нөөцөөс **автоматаар буцаана**. Idempotent | ``ff944f0`` | ⏳ гараар | ⏳ гараар |
+| ops | **`HARDENING.md`** — 5 үе шат, тус бүрийн тасалдлын эрсдэлтэй. 1-2 (header, сканнер 444) эрсдэлгүй; 3-5 (rate limit NAT, LPR `deny all`, UFW) нь ХЭМЖИЛТ шаардана — хэмжих командыг хамт өгсөн | ``ff944f0`` | — | — |
 
 **Илрүүлсэн:** dry-run нь TEST серверийн ӨӨРИЙНХ нь порт-80 блокт хамгаалалтын
 header дутуу байгааг олов (443 блок бүрэн байсан).
