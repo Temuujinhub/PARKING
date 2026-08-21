@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from ..auth import (ALL_MODULES, enforce_site, get_current_user, grant_site, hash_password,
-                    operator_sites, require, require_role)
+from ..auth import (ALL_MODULES, enforce_site, get_current_user, grant_site, has_permission,
+                    hash_password, operator_sites, require, require_role)
 from ..database import get_db
 from ..models import (
     AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
@@ -942,13 +942,24 @@ def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
 @router.get("/devices")
 def list_devices(site_id: str | None = None, include_deleted: bool = False,
                  db: Session = Depends(get_db),
-                 user: User = Depends(require("devices", "settings", "barriers"))):
+                 user: User = Depends(require("devices", "settings", "barriers",
+                                             "free_exit", "cashier"))):
     # Эрх нэмэгдсэн шалтгаан: хариу нь камерын `device_key`-г агуулдаг бөгөөд тэр
     # түлхүүрээр /api/lpr/callback руу НЭВТРЭЛТГҮЙГЭЭР хуурамч event илгээж хаалт
     # нээх боломжтой. Өмнө нь зөвхөн get_current_user байсан тул OPERATOR (зориудаар
     # free_exit-гүй болгосон) болон HR хүртэл түлхүүрийг уншиж чаддаг байв.
     # Талбарыг нуухын оронд endpoint-ийг хаасан учир нь: камер тохируулах
     # ажлын урсгал (SiteWizardModal → callback URL) device_key-г ХАРУУЛАХ ёстой.
+    #
+    # ГЭВЧ хаалттай болгосноор кассын/POS-ийн «хаалт гараар нээх» тасарсан:
+    # PAX POS нь `device_id`-г ЗӨВХӨН эндээс олдог тул Моннис дээр 13 удаагийн
+    # 403 болж, оператор хаалтаа нээж чадахгүй болов (2026-08-21). Апп нь
+    # вендорын build учир endpoint солих нь шинэ хувилбар хүлээнэ. Тиймээс
+    # эрх багатай хэрэглэгчид ТАТГАЛЗАХЫН ОРОНД ДАТАГ ХАСНА — зөвхөн хаалтны
+    # нууц талбаргүй мөрүүд. `device_key` эрхгүй хүнд ЯМАР Ч ТОХИОЛДОЛД очихгүй.
+    if not any(has_permission(user, m) for m in ("devices", "settings", "barriers")):
+        from .barriers_router import lean_barrier_rows
+        return lean_barrier_rows(db, user, site_id)
     from datetime import timedelta
     q = db.query(Device)
     if not include_deleted:  # устгасан төхөөрөмж UI-д харагдахгүй (Хаалт/Тохиргоо/Камер)

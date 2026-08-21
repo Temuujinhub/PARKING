@@ -93,14 +93,25 @@ check("free_exit-гүй энгийн оператор хаалтаа нээхг�
 check("free_exit-гүй ч хаалтны ЖАГСААЛТ харна (касс — нэр/эгнээ л харагдана)",
       allowed(plain, "GET", "/api/barriers/devices"))
 
-print("\n2026-08-20-ны хатууруулалт хэвээр (device_key задрахгүй):")
-check("GET /api/admin/devices — оператор ХАРАХГҮЙ", not allowed(pos, "GET", "/api/admin/devices"))
-check("GET /api/admin/devices — HR ч ХАРАХГҮЙ",
+print("\nХУУЧИН POS build (шинэчлээгүй апп) — /admin/devices дуудсаар байна:")
+check("оператор 403 иДЭХГҮЙ (датаг хасаж хариулна)",
+      allowed(pos, "GET", "/api/admin/devices"))
+check("HR — /admin/devices ХААЛТТАЙ хэвээр (ажилтны эрхэд хамаагүй)",
       not allowed(U("HR"), "GET", "/api/admin/devices"))
-src = inspect.getsource(barriers_router.barrier_devices)
+check("`reports`-той санхүүгийн ажилтан ч ХААЛТТАЙ",
+      not allowed(U("FINANCE"), "GET", "/api/admin/devices"))
+
+print("\n2026-08-20-ны хатууруулалт хэвээр (device_key задрахгүй):")
+src = inspect.getsource(barriers_router.lean_barrier_rows)
 body = src.split('"""')[-1]  # docstring-гүй бие
 for leak in ("device_key", "password", "username", "ip_address"):
     check(f"нимгэн жагсаалтад {leak} БАЙХГҮЙ", leak not in body)
+admin_src = inspect.getsource(admin_router.list_devices)
+# `to_dict(d)` нь Device-ийн БҮХ баганыг (device_key орно) буцаадаг — эрх багатай
+# хэрэглэгч тэр мөр хүртэл ХҮРЭХГҮЙ, өмнө нь нимгэн замаар гарсан байх ёстой
+check("/admin/devices эрх багатайг нимгэн зам руу to_dict-ээс ӨМНӨ буцаана",
+      "lean_barrier_rows" in admin_src
+      and admin_src.index("lean_barrier_rows") < admin_src.index("to_dict("))
 
 print("\nЭрхийн матрицын үнэн зөв байдал (UI-д харагдахтай нийцэх):")
 check("OPERATOR default-д pay_transfer БАЙНА (frontend ROLE_DEFAULTS-тай таарах ёстой)",

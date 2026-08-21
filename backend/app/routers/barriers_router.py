@@ -97,7 +97,8 @@ def command_log(site_id: str | None = None, limit: int = 100,
 
 @router.get("/devices")
 def barrier_devices(site_id: str | None = None, db: Session = Depends(get_db),
-                    user: User = Depends(require("barriers", "free_exit", "cashier"))):
+                    user: User = Depends(require("barriers", "free_exit", "cashier",
+                                                "devices", "settings"))):
     """Хаалт нээх товчинд хэрэгтэй НИМГЭН жагсаалт (POS/касс).
 
     Яагаад тусдаа endpoint вэ: `GET /api/admin/devices` нь 2026-08-20-ны аюулгүй
@@ -111,6 +112,13 @@ def barrier_devices(site_id: str | None = None, db: Session = Depends(get_db),
     нэр/нууц үг ОГТ БАЙХГҮЙ. Ингэснээр хатууруулалтын зорилго хэвээр үлдэж,
     `free_exit`/`barriers` эрхтэй оператор хаалтаа нээх боломжтой болно.
     """
+    return lean_barrier_rows(db, user, site_id)
+
+
+def lean_barrier_rows(db: Session, user: User, site_id: str | None = None) -> list[dict]:
+    """Хаалтны НУУЦ ТАЛБАРГҮЙ мөрүүд. `GET /admin/devices` нь эрх багатай
+    хэрэглэгчид (касс/POS) мөн энэ хэлбэрээр хариулдаг тул ХУУЧИН POS build ч
+    ажиллана — доорх талбаруудаас өөр юу ч задрахгүй."""
     q = db.query(Device).filter(Device.device_type == "barrier", Device.status != "deleted")
     allowed = operator_sites(user)
     if site_id:
@@ -119,6 +127,7 @@ def barrier_devices(site_id: str | None = None, db: Session = Depends(get_db),
     elif allowed:
         q = q.filter(Device.site_id.in_(allowed))
     return [{"id": d.id, "site_id": d.site_id, "name": d.name,
+             "device_type": "barrier",  # хуучин POS энэ талбараар шүүдэг
              "lane_no": d.lane_no, "lane_dir": d.lane_dir,
              "auto_open": d.auto_open, "status": d.status,
              "last_seen": d.last_seen.isoformat() if d.last_seen else None}
