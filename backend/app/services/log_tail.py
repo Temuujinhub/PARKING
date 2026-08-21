@@ -51,6 +51,24 @@ def _key(plate: str, t: datetime) -> str:
     return f"{plate}@{int(t.timestamp())}"
 
 
+def may_open(gap_sec: float, interval_sec: float | None = None) -> bool:
+    """Логоос сэргээсэн уншилтад ХААЛТ НЭЭХ эрх өгөх үү.
+
+    gap_sec = энэ камерыг сүүлд амжилттай татсанаас хойшх хугацаа. Хэвийн
+    ажиллагаанд энэ нь ~1 мөчлөг (20с) тул уншилт шинэхэн — жолооч гарцад
+    хүлээж байгаа байх магадлалтай, хаалт нээгдэх ЁСТОЙ. Завсар том бол
+    (сервис саяхан асcан, камер удаан хүрэхгүй байсан) уншилт хэдэн минутын
+    өмнөх байж болно — машин яваад өгсөн, хаалт нээх нь эзэнгүй онгорхой
+    хаалт үүсгэнэ (уншуулалгүй нэвтрэх нүх).
+
+    Босго нь `log_tail_open_max_lag_sec` (default 90с) — гэхдээ 3 мөчлөгөөс
+    доош БУУХГҮЙ: чимээгүй камер олон болж мөчлөг удаашрахад (concurrency=3)
+    хэвийн ажиллагаа «хуучин» гэж ангилагдаад хаалт огт нээхгүй болох вий.
+    """
+    iv = settings.log_tail_interval_sec if interval_sec is None else interval_sec
+    return gap_sec <= max(settings.log_tail_open_max_lag_sec, max(1.0, iv) * 3)
+
+
 def _remember(device_id: str, key: str) -> None:
     s = _seen.setdefault(device_id, set())
     if len(s) >= _SEEN_MAX:
@@ -108,6 +126,23 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
     except Exception as e:  # noqa: BLE001 — камер завгүй байж болно, дараагийн мөчлөгт
         log.debug("%s (%s): лог татагдсангүй — %s", name, ip, type(e).__name__)
         return 0
+
+    # ── ХААЛТ НЭЭХ ЭРХ: зөвхөн уншилт ШИНЭХЭН бол ───────────────────────────
+    # Энэ зам нь хаалт нээдэг (жолооч гарцад хүлээж байгаа бол нээгдэх ЁСТОЙ).
+    # Гэвч уншилт хуучин бол машин аль хэдийн яваад өгсөн байна — тэр үед хаалт
+    # нээх нь (1) «машин байхгүй атал нээгдэж байна» гэж харагдана, (2) эзэнгүй
+    # онгорхой хаалт нь уншуулалгүй нэвтрэх нүх үүсгэнэ.
+    #
+    # Хуучин эсэхийг КАМЕРЫН ЦАГААР шалгаж БОЛОХГҮЙ — NTP-гүй камерын цаг
+    # гулсдаг (Рашбулаг: +32 мин) тул шинэхэн уншилт «хуучин» болж харагдана.
+    # Оронд нь ӨӨРИЙН мөчлөгийн завсраар хэмжинэ: сүүлийн амжилттай таталтаас
+    # хойш 1 мөчлөгийн зайд байвал уншилт хамгийн ихдээ тэр төдий хуучин.
+    # Сервис саяхан асcан/камер удаан хүрэхгүй байсан бол завсар том — тэр үед
+    # уншилтыг БҮРТГЭНЭ, харин хаалт НЭЭХГҮЙ.
+    _mono = time.monotonic()
+    gap = _mono - _last_pull.get(device_id, 0.0)
+    _last_pull[device_id] = _mono
+    allow_open = may_open(gap)
 
     rows = []
     for r in recs:
@@ -176,17 +211,23 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
                     LprEvent.created_at >= fresh).first():
                 continue
             raw_ev = {"log_tail": True, "camera_time": t.isoformat(),
-                      "TrafficCar": {"PlateNumber": plate}}
+                      "TrafficCar": {"PlateNumber": plate}, "opened": allow_open}
             if device.nested_inner:
-                res = await handle_inner_pass(db, device, plate, 100.0, raw_ev)
+                res = await handle_inner_pass(db, device, plate, 100.0, raw_ev,
+                                              allow_open=allow_open)
             elif device.lane_dir == "exit":
-                res = await handle_exit(db, device, plate, 100.0, raw_ev)
+                res = await handle_exit(db, device, plate, 100.0, raw_ev,
+                                        allow_open=allow_open)
             else:
-                res = await handle_entry(db, device, plate, 100.0, raw_ev)
+                res = await handle_entry(db, device, plate, 100.0, raw_ev,
+                                         allow_open=allow_open)
             done += 1
             log.warning("[лог-нөөц] %s %s → %s (стрим чимээгүй байсан тул "
-                        "камерын логоос авав)", device.lane_dir, plate,
-                        res.get("action", "?"))
+                        "камерын логоос авав)%s", device.lane_dir, plate,
+                        res.get("action", "?"),
+                        "" if allow_open else
+                        f" [мөчлөгийн завсар {gap:.0f}с — уншилт хуучин байж "
+                        f"болзошгүй тул ХААЛТ НЭЭГЭЭГҮЙ]")
         except Exception as e:  # noqa: BLE001 — нэг уншилт бусдыг зогсоохгүй
             log.error("[лог-нөөц] %s боловсруулах алдаа: %r", plate, e)
         finally:

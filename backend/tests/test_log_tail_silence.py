@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import Device, LprEvent, ParkingSite  # noqa: E402
-from app.services.log_tail import _silent_devices  # noqa: E402
+from app.services.log_tail import _silent_devices, may_open  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -34,6 +34,19 @@ def check(name, cond):
 def silent_ids(db, site_id):
     return {d.id for d in asyncio.run(_silent_devices(db, site_id))}
 
+
+print("may_open — хуучин уншилтад хаалт нээхгүй (эзэнгүй онгорхой хаалтаас сэргийлнэ):")
+check("хэвийн мөчлөг (20с) → нээнэ", may_open(20.0, 20.0))
+check("чимээгүй камер олноос мөчлөг удаашрав (80с) → нээсээр байна",
+      may_open(80.0, 20.0))
+check(f"босго ({settings.log_tail_open_max_lag_sec:.0f}с) хүртэл нээнэ",
+      may_open(settings.log_tail_open_max_lag_sec, 20.0))
+check("сервис саяхан асcан (3 мин) → НЭЭХГҮЙ", not may_open(180.0, 20.0))
+check("камер 5 мин хүрээгүй байсан → НЭЭХГҮЙ", not may_open(300.0, 20.0))
+check("анхны таталт (gap = monotonic бүхэл) → НЭЭХГҮЙ", not may_open(1_000_000.0, 20.0))
+check("мөчлөг маш удаан тохируулсан ч 3 мөчлөгөөс доош буухгүй",
+      may_open(150.0, 50.0))
+print()
 
 db = SessionLocal()
 try:
