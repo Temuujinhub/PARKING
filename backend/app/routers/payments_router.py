@@ -4,7 +4,7 @@ import logging
 import hmac
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -202,7 +202,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                 payment_method=payment.payment_method,   # TRANSFER→BANK_TRANSFER, CASH, CARD
                 # Idempotency-Key = payment id: давхар finalize/retry-д давхар баримт үүсэхгүй
                 idempotency_key=f"pay-{payment.id}",
-                customer_tin=payment.customer_tin,       # ААН → ORGANIZATION + payer_reg_no
+                # Форматаар нь таньж receipt_type-ыг тодорхойлно (ААН регистр/ТТД
+                # → ORGANIZATION, иргэний регистр → CITIZEN нэрийн баримт)
+                payer_reg_no=payment.customer_tin,
             )
             if not receipt_raw.get("billId"):
                 ebarimt_error = (receipt_raw.get("error")
@@ -340,24 +342,60 @@ def _print_payload(db: Session, payment: Payment) -> dict:
     """POS терминал/веб-д хэвлэх e-Barimt баримтын мэдээлэл (мөрүүд + QR + сугалаа)."""
     session = db.get(ParkingSession, payment.session_id)
     receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).first()
+    site = session.site if session else None
+    tz = timedelta(hours=8)     # Улаанбаатар — принтерт ОРОН НУТГИЙН цаг хэвлэнэ
+    ent = (session.entry_time + tz) if session and session.entry_time else None
+    ext = (session.exit_time + tz) if session and session.exit_time else None
+    if ext is None and session and session.status in ("OPEN", "AWAITING_PAYMENT"):
+        ext = datetime.utcnow() + tz   # гарц дээр төлж байгаа — «одоо» гэж хэвлэнэ
+    mins = int(session.duration_minutes or 0) if session else 0
+    dur = f"{mins // 60}ц {mins % 60}м" if mins else "-"
+    method = {"CASH": "Бэлэн", "CARD": "Карт", "QR": "QPay",
+              "TRANSFER": "Дансаар"}.get(payment.payment_method or "", payment.payment_method or "-")
     lines = [
         "ЗОГСООЛЫН ТӨЛБӨРИЙН БАРИМТ",
+        site.name if site else "",
         f"Дугаар: {session.plate_number if session else '-'}",
-        f"Орсон: {session.entry_time:%Y-%m-%d %H:%M}" if session and session.entry_time else "",
-        f"Хугацаа: {session.duration_minutes} мин" if session and session.duration_minutes else "",
+        f"Орсон:  {ent:%Y-%m-%d %H:%M}" if ent else "",
+        f"Гарсан: {ext:%Y-%m-%d %H:%M}" if ext else "",
+        f"Хугацаа: {dur}",
+        f"Төлсөн: {method}",
         f"Дүн: {float(payment.amount):,.0f}₮",
         f"НӨАТ: {float(payment.vat_amount):,.0f}₮",
         f"ДДТД: {receipt.ebarimt_id if receipt else '-'}",
     ]
-    if payment.customer_tin:
+    if payment.customer_tin and payment.ebarimt_receiver_type == "COMPANY":
         lines.append(f"Худалдан авагч ТТД: {payment.customer_tin}")  # ААН — сугалаа хэвлэгдэхгүй
-    elif receipt and receipt.lottery_code:
-        lines.append(f"Сугалаа: {receipt.lottery_code}")
+    else:
+        if payment.customer_tin:
+            lines.append(f"Регистр: {payment.customer_tin}")
+        if receipt and receipt.lottery_code:
+            lines.append(f"Сугалаа: {receipt.lottery_code}")
     return {
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
         # thermal printer энэ qrData-г QR болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй)
         "qr_data": ebarimt.get_cached_qr(payment.id),
+        # Апп өөрөө байрлуулж хэвлэхэд зориулсан ТАЛБАРУУД (мөрүүдээс задлахгүй).
+        # `print_data.lines` нь бэлэн формат — аль нэгийг нь сонгож хэрэглэнэ.
+        "receipt": {
+            "site_name": site.name if site else None,
+            "plate_number": session.plate_number if session else None,
+            "entry_time": ent.isoformat(timespec="seconds") if ent else None,
+            "exit_time": ext.isoformat(timespec="seconds") if ext else None,
+            "duration_minutes": mins,
+            "duration_text": dur,
+            "amount": float(payment.amount),
+            "vat_amount": float(payment.vat_amount or 0),
+            "payment_method": payment.payment_method,
+            "receipt_type": ("ORGANIZATION" if payment.ebarimt_receiver_type == "COMPANY"
+                             else "CITIZEN"),
+            "payer_reg_no": payment.customer_tin,
+            "ebarimt_id": receipt.ebarimt_id if receipt else None,
+            "lottery_code": receipt.lottery_code if receipt else None,
+            "ebarimt_status": receipt.status if receipt else None,
+            "ebarimt_error": receipt.receipt_url if receipt and receipt.status == "FAILED" else None,
+        },
         "print_data": {"lines": [ln for ln in lines if ln]},
     }
 
@@ -772,11 +810,14 @@ async def pos_confirm(body: dict, db: Session = Depends(get_db),
     payment.card_brand = body.get("card_brand")
     payment.terminal_id = body.get("terminal_id")
     payment.provider_payment_id = txn_id or None  # retry-ийн idempotency түлхүүр
-    if body.get("customer_tin"):
-        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
-        payment.ebarimt_receiver_type = "COMPANY"
-    else:
-        payment.ebarimt_receiver_type = "CITIZEN"
+    # Худалдан авагчийн дугаар: `payer_reg_no` (шинэ — 3 форматыг таньдаг) эсвэл
+    # хуучин `customer_tin`. Иргэний регистр (АА00112233) өгвөл баримт ИРГЭНИЙ
+    # нэр дээр гарч сугалаанд оролцоно; ААН регистр (7 орон)/ТТД (11–14) өгвөл
+    # байгууллагын баримт. Танигдахгүй утга нэргүй баримт болно (алдаа өгөхгүй —
+    # POS дээр жолооч буруу бичихэд төлбөр таслагдах ёсгүй).
+    reg, rtype = msgbill.classify_reg_no(body.get("payer_reg_no") or body.get("customer_tin"))
+    payment.customer_tin = reg
+    payment.ebarimt_receiver_type = "COMPANY" if rtype == "ORGANIZATION" else "CITIZEN"
     import time as _t
     _c0 = _t.monotonic()
     # Терминал өөрөө e-Barimt гаргасан бол (банкны PosLink-ийн Ибаримт үйлчилгээ)

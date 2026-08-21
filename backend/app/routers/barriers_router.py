@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import enforce_site, operator_sites, require
+from ..auth import enforce_site, has_permission, operator_sites, require
 from ..database import get_db
 from ..models import AuditLog, BarrierCommand, Device, User
 from ..serializers import to_dict
@@ -119,6 +119,11 @@ def lean_barrier_rows(db: Session, user: User, site_id: str | None = None) -> li
     """Хаалтны НУУЦ ТАЛБАРГҮЙ мөрүүд. `GET /admin/devices` нь эрх багатай
     хэрэглэгчид (касс/POS) мөн энэ хэлбэрээр хариулдаг тул ХУУЧИН POS build ч
     ажиллана — доорх талбаруудаас өөр юу ч задрахгүй."""
+    # ХААЛТ НЭЭХ эрхтэй эсэх — POS/касс энэ тугаар «Хаалт нээх» товчийг
+    # ХАРУУЛАХ/НУУНА. Жагсаалтыг кассын эрхээр өгдөг (машины эгнээ харуулахад
+    # хэрэгтэй) ч нээх нь `free_exit`/`barriers` эрх шаардана — товчийг нуухгүй
+    # бол оператор дараад 403 иддэг, шалтгаан нь ойлгомжгүй байдаг.
+    can_open = has_permission(user, "barriers") or has_permission(user, "free_exit")
     q = db.query(Device).filter(Device.device_type == "barrier", Device.status != "deleted")
     allowed = operator_sites(user)
     if site_id:
@@ -130,5 +135,7 @@ def lean_barrier_rows(db: Session, user: User, site_id: str | None = None) -> li
              "device_type": "barrier",  # хуучин POS энэ талбараар шүүдэг
              "lane_no": d.lane_no, "lane_dir": d.lane_dir,
              "auto_open": d.auto_open, "status": d.status,
+             # POS/касс: false бол «Хаалт нээх» товчийг ХАРУУЛАХГҮЙ
+             "can_open": can_open,
              "last_seen": d.last_seen.isoformat() if d.last_seen else None}
             for d in q.order_by(Device.lane_dir, Device.lane_no, Device.created_at).all()]

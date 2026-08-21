@@ -29,6 +29,7 @@ msgbill түлхүүргүй түрээслэгчийн баримтыг EasyPar
 qrData, date, ...}) — payments_router-ийн VatReceipt бүртгэл өөрчлөгдөхгүй.
 """
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -229,21 +230,51 @@ def normalize(data: dict) -> dict:
     }
 
 
+def classify_reg_no(value: str | None) -> tuple[str | None, str]:
+    """Худалдан авагчийн дугаарыг таньж (цэвэрлэсэн утга, receipt_type) буцаана.
+
+    msgbill 2026-08-21-ээс ГУРВАН форматыг зэрэг хүлээж авдаг болсон:
+      • байгууллагын регистр — 7 орон              → ORGANIZATION
+      • ТТД — 11–14 орон                            → ORGANIZATION
+      • иргэний регистр — 2 кирилл үсэг + 8 орон    → CITIZEN (нэрийн баримт)
+    Танигдахгүй/хоосон бол (None, "CITIZEN") — нэргүй энгийн баримт.
+
+    Иргэний регистрийг дамжуулснаар жолооч баримтаа өөрийн нэр дээр авч,
+    сугалаанд оролцоно. Өмнө нь ЗӨВХӨН ААН-ийн ТТД дамжуулдаг байсан тул
+    иргэн хүн баримтаа нэр дээрээ авах боломжгүй байв.
+    """
+    v = re.sub(r"[\s-]", "", str(value or "")).upper()
+    if not v:
+        return None, "CITIZEN"
+    if re.fullmatch(r"[0-9]{7}", v) or re.fullmatch(r"[0-9]{11,14}", v):
+        return v, "ORGANIZATION"
+    if re.fullmatch(r"[А-ЯЁӨҮ]{2}[0-9]{8}", v):
+        return v, "CITIZEN"
+    return None, "CITIZEN"
+
+
 async def create_receipt(acc: MsgbillAccount, amount: float, *, description: str,
                          payment_method: str, idempotency_key: str,
-                         customer_tin: str | None = None) -> dict:
-    """Баримт үүсгэнэ. Амжилтгүй HTTP → MsgbillError (дуудагч барьж VatReceipt FAILED болгоно)."""
+                         customer_tin: str | None = None,
+                         payer_reg_no: str | None = None) -> dict:
+    """Баримт үүсгэнэ. Амжилтгүй HTTP → MsgbillError (дуудагч барьж VatReceipt FAILED болгоно).
+
+    payer_reg_no өгвөл түүнийг форматаар нь таньж receipt_type-ыг тодорхойлно
+    (иргэний регистр → CITIZEN, ААН регистр/ТТД → ORGANIZATION). Өгөөгүй бол
+    хуучин зан үйл: `customer_tin` байвал ORGANIZATION.
+    """
     if not acc.enabled:
         raise MsgbillError("msgbill API түлхүүр тохируулаагүй", code="NOT_CONFIGURED")
+    reg, rtype = classify_reg_no(payer_reg_no if payer_reg_no is not None else customer_tin)
     body = {
         # msgbill бүхэл төгрөгөөр (НӨАТ багтсан) — таслалын зөрүү үүсэхээс сэргийлж round
         "amount": int(round(float(amount))),
         "description": (description or "Зогсоолын үйлчилгээ")[:200],
-        "receipt_type": "ORGANIZATION" if customer_tin else "CITIZEN",
+        "receipt_type": rtype,
         "payment_method": _METHOD_MAP.get((payment_method or "").upper(), "CASH"),
     }
-    if customer_tin:
-        body["payer_reg_no"] = str(customer_tin).strip()[:20]
+    if reg:
+        body["payer_reg_no"] = reg
     async with httpx.AsyncClient(timeout=settings.msgbill_timeout) as client:
         resp = await client.post(f"{acc.base_url}/partner/receipts", json=body,
                                  headers=_headers(acc, idempotency_key))
