@@ -379,6 +379,135 @@ def apply_changes(db, site, inner_cams, inner_bars, wanted: dict, apply: bool):
           f"{site.site_code}  — 2) хэсгийн нотолгоо ✅ болсон эсэхийг хараарай.")
 
 
+def close_absent(db, site, inside_path: str | None, outside_path: str, apply: bool,
+                 min_age_min: int = 30):
+    """Талбайн БҮРЭН тооллого — жагсаалтуудад БАЙХГҮЙ машиныг бүртгэлээс хаана.
+
+    Хоёр жагсаалтын нийлбэр = зогсоолд ОДОО бодитоор байгаа бүх машин. Бүртгэлд
+    идэвхтэй атлаа аль алинд нь байхгүй бол тэр машин хэдийнэ ЯВСАН — гарах
+    камер уншаагүйгээс session нь нээлттэй үлдсэн (phantom).
+
+    ӨР ҮҮСГЭХГҮЙ, ДҮН ч бичихгүй (`create_comp=False`): машин хэзээ гарсныг
+    мэдэхгүй тул «одоо − орсон» гэж бодвол хуурамч төлбөр бичигдэж тайлангийн
+    «Үүссэн» багана хөөрөгдөж, цуглуулалт% худал доогуур харагдана.
+    """
+    from app.session_logic import close_session_forced, plates_ocr_similar
+
+    listed = (read_plates(inside_path) if inside_path else []) + read_plates(outside_path)
+    sessions = (db.query(ParkingSession)
+                .filter(ParkingSession.site_id == site.id,
+                        ParkingSession.status.in_(ACTIVE)).all())
+    exact = set(listed)
+    # ОЙРОЛЦОО тохирол ч байвал ХААХГҮЙ — тайрагдсан/бохир уншилттай машиныг
+    # «байхгүй» гэж андуурч хаах нь жолоочийн бүртгэлийг устгана.
+    absent = [s for s in sessions if s.plate_number not in exact
+              and not any(plates_ocr_similar(p, s.plate_number) for p in listed)]
+    # Тооллого хийж яваа зуур ОРЖ ИРСЭН машиныг хаахгүй — жагсаалт бичигдэж
+    # дуусахад тэр машин зогсоолд байгаа ч цаасан дээр байхгүй.
+    cut = datetime.utcnow() - timedelta(minutes=min_age_min)
+    too_new = [s for s in absent if s.entry_time > cut]
+    absent = [s for s in absent if s.entry_time <= cut]
+
+    print(f"\n══ Талбайн тооллого: бодитоор {len(listed)} машин, "
+          f"бүртгэлд {len(sessions)} идэвхтэй ══")
+    if too_new:
+        print(f"\n   ⏳ саяхан орсон тул ХӨНДӨХГҮЙ ({min_age_min} минутаас "
+              f"дотогш): {len(too_new)}")
+        for s in too_new:
+            print(f"      {s.plate_number:10} орсон {L(s.entry_time)}")
+    print(f"\n   ✖ ХААХ (бүртгэлд бий, талбайд АЛГА — хэдийнэ явсан): {len(absent)}")
+    total_would = 0.0
+    for s in absent:
+        hrs = (datetime.utcnow() - s.entry_time).total_seconds() / 3600
+        total_would += float(s.total_fee or 0)
+        print(f"      {s.plate_number:10} орсон {L(s.entry_time)}  ({hrs:5.1f}ц)  "
+              f"төлөв {s.status}")
+    if not absent:
+        print("      (бүх бүртгэл тооллоготой таарч байна)")
+    if not apply:
+        print("\n   DRY-RUN — юу ч хаагаагүй. Хэрэгжүүлэх бол --apply нэмнэ үү.")
+        return
+    closed = 0
+    for s in absent:
+        close_session_forced(db, s, "тооллого: талбайд байхгүй", "tools/nested_lanes.py",
+                             create_comp=False)
+        db.add(AuditLog(username="tools/nested_lanes.py", action="SESSION_CENSUS_CLOSE",
+                        entity="session", entity_id=s.id,
+                        detail={"plate": s.plate_number, "site": site.site_code,
+                                "entry_time": str(s.entry_time),
+                                "reason": "бодит тооллогод байхгүй — өргүй, дүнгүй хаав"}))
+        closed += 1
+    db.commit()
+    print(f"\n   ✅ {closed} бүртгэл хаагдлаа — өр үүсээгүй, дүн бичээгүй.")
+
+
+def backdate_inside(db, site, apply: bool):
+    """«Дотор» гэж тэмдэглэсэн машины тоолуурыг ДОТОГШ ОРСОН ЦАГААС нь эхлүүлж
+    буцаан тооцно.
+
+    Гараар тэмдэглэхэд `paused_since` = ОДОО болдог тул доторх (үнэгүй) талбарт
+    өдөржин зогссон машин ч өнөөдрийн бүх төлбөрөө үүрсэн хэвээр үлддэг. Гэтэл
+    ДОТООД ОРОХ камерын уншилт нь тэр машин ХЭЗЭЭ дотогшоо орсныг яг хэлдэг —
+    түүгээр буцаан засна (чиглэл солигдохоос өмнөх уншилтууд «exit» гэж
+    бичигдсэн ч ижил төхөөрөмжийнх тул олдоно).
+    """
+    from app.session_logic import plates_ocr_similar, session_fee_info
+
+    cam = (db.query(Device)
+           .filter(Device.site_id == site.id, Device.device_type == "camera",
+                   Device.nested_inner.is_(True), Device.lane_dir == "entry",
+                   Device.status != "deleted").first())
+    if not cam:
+        print("\n   ⚠ дотоод ОРОХ камер олдсонгүй — эхлээд чиглэлээ тохируулна уу")
+        return
+    rows = (db.query(ParkingSession)
+            .filter(ParkingSession.site_id == site.id,
+                    ParkingSession.status.in_(ACTIVE),
+                    ParkingSession.paused_since.isnot(None)).all())
+    evs = (db.query(LprEvent.plate_number, LprEvent.created_at)
+           .filter(LprEvent.device_id == cam.id, LprEvent.accepted.is_(True))
+           .order_by(LprEvent.created_at).all())
+
+    print(f"\n══ «Дотор» {len(rows)} машины тоолуурыг орсон цагаас нь буцаан тооцох ══")
+    print(f"   Эх сурвалж: «{cam.name}» ({cam.ip_address}) — {len(evs)} уншилт\n")
+    plan, missing = [], []
+    for s in rows:
+        cands = [t for p, t in evs
+                 if s.entry_time <= t < s.paused_since
+                 and (p == s.plate_number or plates_ocr_similar(p, s.plate_number))]
+        if not cands:
+            missing.append(s)
+            continue
+        plan.append((s, max(cands)))
+
+    for s, t in plan:
+        before = session_fee_info(db, s)["total_fee"]
+        mins = int((s.paused_since - t).total_seconds() // 60)
+        old, s.paused_since = s.paused_since, t
+        after = session_fee_info(db, s)["total_fee"]
+        s.paused_since = old if not apply else t
+        print(f"   {s.plate_number:10} дотогш орсон {L(t)}  → {mins:4} мин нэмж хасна  "
+              f"{float(before):>8,.0f}₮ → {float(after):>8,.0f}₮")
+    if missing:
+        print(f"\n   ⚠ дотоод орох уншилт олдсонгүй ({len(missing)}) — тоолуур нь "
+              f"гараар тэмдэглэсэн цагаасаа хэвээр:")
+        for s in missing:
+            print(f"      {s.plate_number}")
+    if not plan:
+        return
+    if not apply:
+        print("\n   DRY-RUN — юу ч бичээгүй. Хэрэгжүүлэх бол --apply нэмнэ үү.")
+        return
+    for s, t in plan:
+        db.add(AuditLog(username="tools/nested_lanes.py", action="NESTED_BACKDATE_PAUSE",
+                        entity="session", entity_id=s.id,
+                        detail={"plate": s.plate_number, "site": site.site_code,
+                                "paused_since": str(t),
+                                "reason": "дотоод орох камерын уншилтаар буцаан тооцов"}))
+    db.commit()
+    print(f"\n   ✅ {len(plan)} машины тоолуур дотогш орсон цагаасаа зогссон болов.")
+
+
 def resume_open_pauses(db, site, apply: bool):
     """Чиглэл СОЛИГДСОН үед үүссэн ЯВЖ БУЙ зогсолтуудыг цуцлана.
 
@@ -499,6 +628,12 @@ def main():
     ap.add_argument("--inside", metavar="ФАЙЛ",
                     help="доторх талбарт БОДИТООР байгаа машины жагсаалт (мөр бүрт "
                          "нэг дугаар) — бүртгэлтэй ХОЁР ТАЛ РУУ тулгана")
+    ap.add_argument("--outside", metavar="ФАЙЛ",
+                    help="ГАДНАХ (төлбөртэй) талбарт бодитоор байгаа машин. --inside-тай "
+                         "хамт = бүрэн тооллого: аль алинд нь БАЙХГҮЙ бүртгэлийг өргүй хаана")
+    ap.add_argument("--backdate-inside", action="store_true",
+                    help="«дотор» машины тоолуурыг дотоод орох камерын уншилтын "
+                         "цагаас буцаан тооцох (гараар тэмдэглэснийг засна)")
     a = ap.parse_args()
 
     db = SessionLocal()
@@ -524,6 +659,10 @@ def main():
         apply_changes(db, site, inner_cams, inner_bars, wanted, a.apply)
     if a.inside:
         reconcile_inside(db, site, a.inside, a.apply)
+    if a.backdate_inside:
+        backdate_inside(db, site, a.apply)
+    if a.outside:
+        close_absent(db, site, a.inside, a.outside, a.apply)
     if a.resume_open:
         resume_open_pauses(db, site, a.apply)
 
