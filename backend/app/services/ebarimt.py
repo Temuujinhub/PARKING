@@ -16,6 +16,7 @@
 """
 import random
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
@@ -57,9 +58,65 @@ def _mock_receipt() -> dict:
     }
 
 
+@dataclass(frozen=True)
+class Merchant:
+    """Баримт ХЭНИЙ нэр дээр гарахыг тодорхойлох мэдээлэл."""
+    tin: str
+    district_code: str
+    branch_no: str
+    pos_no: str
+    source: str          # "tenant" | "global"
+    name: str | None = None
+
+
+class MerchantMissing(Exception):
+    """Түрээслэгчийн ТТД тохируулаагүй — глобалаар БҮҮ орлуул."""
+
+
+def merchant_for(site) -> Merchant:
+    """Тухайн зогсоолын баримт хэний ТТД-ээр гарах вэ: ТҮРЭЭСЛЭГЧ → глобал.
+
+    ЧУХАЛ ДҮРЭМ: түрээслэгчтэй зогсоолын баримтыг ГЛОБАЛ (EasyParking-ийн) ТТД-ээр
+    гаргахыг ХОРИГЛОНО. Тэр нь өөр татвар төлөгчийн нэр дээр баримт гаргаж байгаа
+    хэрэг — татварын хувьд ноцтой. Түрээслэгчид ТТД тохируулаагүй бол
+    `MerchantMissing` шидэж, баримтыг FAILED гэж бүртгэнэ (төлбөр, хаалт хэвийн
+    үргэлжилнэ; баримтыг тохиргоо хийсний дараа дахин үүсгэнэ).
+
+    Глобал ТТД нь зөвхөн ТҮРЭЭСЛЭГЧГҮЙ (EasyParking өөрөө ажиллуулдаг) зогсоолд.
+    """
+    ten = getattr(site, "tenant", None) if site is not None else None
+    if ten is None and site is not None and getattr(site, "tenant_id", None):
+        from sqlalchemy.orm import object_session
+        from ..models import Tenant
+        db = object_session(site)
+        if db is not None:
+            ten = db.get(Tenant, site.tenant_id)
+    if ten is not None:
+        tin = (getattr(ten, "ebarimt_merchant_tin", None) or "").strip()
+        if not tin:
+            raise MerchantMissing(
+                f"«{getattr(ten, 'name', '?')}» түрээслэгчид e-Barimt ТТД "
+                f"тохируулаагүй байна — баримтыг EasyParking-ийн ТТД-ээр гаргах "
+                f"боломжгүй. Тохиргоо → Түрээслэгч дээр «e-Barimt ТТД»-г бөглөнө үү.")
+        return Merchant(
+            tin=tin,
+            district_code=(getattr(ten, "ebarimt_district_code", None) or "").strip()
+            or settings.ebarimt_district_code,
+            branch_no=(getattr(ten, "ebarimt_branch_no", None) or "").strip()
+            or settings.ebarimt_branch_no,
+            pos_no=settings.ebarimt_pos_no,
+            source="tenant", name=getattr(ten, "name", None))
+    return Merchant(tin=settings.ebarimt_merchant_tin,
+                    district_code=settings.ebarimt_district_code,
+                    branch_no=settings.ebarimt_branch_no,
+                    pos_no=settings.ebarimt_pos_no, source="global")
+
+
 def _build_payload(amount: float, vat_amount: float, payment_type: str,
-                   customer_tin: str | None) -> dict:
+                   customer_tin: str | None, merchant: Merchant | None = None) -> dict:
     """POS API 3.0 баримт үүсгэх payload. НӨАТ үнэд багтсан гэж үзнэ."""
+    m = merchant or Merchant(settings.ebarimt_merchant_tin, settings.ebarimt_district_code,
+                             settings.ebarimt_branch_no, settings.ebarimt_pos_no, "global")
     amount = round(amount, 2)
     vat = round(vat_amount, 2)
     item = {
@@ -77,10 +134,10 @@ def _build_payload(amount: float, vat_amount: float, payment_type: str,
         "totalAmount": amount,
         "totalVAT": vat,
         "totalCityTax": 0,
-        "districtCode": settings.ebarimt_district_code,
-        "merchantTin": settings.ebarimt_merchant_tin,
-        "branchNo": settings.ebarimt_branch_no,
-        "posNo": settings.ebarimt_pos_no,
+        "districtCode": m.district_code,
+        "merchantTin": m.tin,
+        "branchNo": m.branch_no,
+        "posNo": m.pos_no,
         # Байгууллагын ТТД өгвөл B2B, үгүй бол иргэний B2C баримт
         "type": "B2B_RECEIPT" if customer_tin else "B2C_RECEIPT",
         "customerTin": customer_tin or "",
@@ -89,7 +146,7 @@ def _build_payload(amount: float, vat_amount: float, payment_type: str,
             "totalVAT": vat,
             "totalCityTax": 0,
             "taxType": "VAT_ABLE",
-            "merchantTin": settings.ebarimt_merchant_tin,
+            "merchantTin": m.tin,
             "items": [item],
         }],
         "payments": [{
@@ -101,12 +158,16 @@ def _build_payload(amount: float, vat_amount: float, payment_type: str,
 
 
 async def create_receipt(amount: float, vat_amount: float, payment_type: str,
-                         customer_tin: str | None = None) -> dict:
-    """Баримт үүсгэнэ. Буцаах: {status, billId, lottery, qrData, date}."""
+                         customer_tin: str | None = None,
+                         merchant: Merchant | None = None) -> dict:
+    """Баримт үүсгэнэ. Буцаах: {status, billId, lottery, qrData, date}.
+
+    `merchant` — баримт хэний ТТД-ээр гарах вэ (`merchant_for(site)`). Өгөөгүй бол
+    глобал (EasyParking) — зөвхөн түрээслэгчгүй зогсоолд зөв."""
     if settings.ebarimt_mock:
         return _mock_receipt()
 
-    payload = _build_payload(amount, vat_amount, payment_type, customer_tin)
+    payload = _build_payload(amount, vat_amount, payment_type, customer_tin, merchant)
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(f"{settings.ebarimt_posapi_url}/receipt", json=payload)
         resp.raise_for_status()

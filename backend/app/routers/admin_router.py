@@ -271,7 +271,11 @@ def create_tenant(payload: schemas.TenantCreate, db: Session = Depends(get_db),
                qpay_password=encrypt_secret((body.get("qpay_password") or "").strip() or None),
                qpay_invoice_code=(body.get("qpay_invoice_code") or "").strip() or None,
                qpay_branch_code=(body.get("qpay_branch_code") or "").strip() or None,
-               qpay_district_code=(body.get("qpay_district_code") or "").strip() or None)
+               qpay_district_code=(body.get("qpay_district_code") or "").strip() or None,
+               # e-Barimt: баримт ЭНЭ түрээслэгчийн ТТД-ээр гарна
+               ebarimt_merchant_tin=(body.get("ebarimt_merchant_tin") or "").strip() or None,
+               ebarimt_district_code=(body.get("ebarimt_district_code") or "").strip() or None,
+               ebarimt_branch_no=(body.get("ebarimt_branch_no") or "").strip() or None)
     _check_district(t.qpay_district_code)
     db.add(t)
     db.flush()
@@ -309,7 +313,8 @@ def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = D
     for k in ("name", "register", "contact_name", "phone", "email", "note", "is_active"):
         if k in body:
             setattr(t, k, body[k])
-    for k in ("qpay_username", "qpay_invoice_code", "qpay_branch_code", "qpay_district_code"):
+    for k in ("qpay_username", "qpay_invoice_code", "qpay_branch_code", "qpay_district_code",
+              "ebarimt_merchant_tin", "ebarimt_district_code", "ebarimt_branch_no"):
         if k in body:
             setattr(t, k, (body[k] or "").strip() or None)
     if "qpay_password" in body:

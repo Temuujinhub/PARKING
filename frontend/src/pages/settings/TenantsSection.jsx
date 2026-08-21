@@ -14,6 +14,7 @@ import QpayTestModal from './QpayTestModal'
 
 const EMPTY = {
   name: '', code: '', register: '', contact_name: '', phone: '', email: '', note: '',
+  ebarimt_merchant_tin: '', ebarimt_district_code: '', ebarimt_branch_no: '',
   admin_username: '', admin_password: '', admin_full_name: '', site_ids: [],
 }
 
@@ -55,8 +56,10 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
         toast('Түрээслэгч бүртгэгдлээ')
       } else {
         // QPay данс энд илгээхгүй — Тохиргоо → Холболт хэсэгт удирдана
-        const { id, name, code, register, contact_name, phone, email, note, is_active, site_ids } = f
-        const body = { name, code, register, contact_name, phone, email, note, is_active, site_ids }
+        const { id, name, code, register, contact_name, phone, email, note, is_active, site_ids,
+          ebarimt_merchant_tin, ebarimt_district_code, ebarimt_branch_no } = f
+        const body = { name, code, register, contact_name, phone, email, note, is_active, site_ids,
+          ebarimt_merchant_tin, ebarimt_district_code, ebarimt_branch_no }
         await api(`/api/admin/tenants/${id}`, { method: 'PUT', body })
         toast('Хадгалагдлаа')
       }
@@ -90,6 +93,32 @@ function TenantModal({ state, sites, onClose, onDone, onGotoIntegrations }) {
         </div>
         <Field label="Тэмдэглэл">
           <input className="input" value={f.note} onChange={set('note')} /></Field>
+
+        {/* e-Barimt: баримт ХЭНИЙ нэр дээр гарахыг тодорхойлно. Хоосон бол
+            EasyParking-ийн ТТД руу УНАХГҮЙ — баримт FAILED болно (өөр татвар
+            төлөгчийн нэр дээр баримт гаргахаас сэргийлсэн зориудын дүрэм). */}
+        <div className="border-t border-surface-border/60 pt-3">
+          <div className="label mb-1">e-Barimt (татварын баримт)</div>
+          <p className="text-[11px] text-slate-500 mb-2.5">
+            Энэ түрээслэгчийн зогсоолуудын баримт <b className="text-slate-300">эдгээр
+            дугаараар</b> гарна. Хоосон орхивол баримт үүсэхгүй (FAILED) —
+            EasyParking-ийн ТТД-ээр орлуулахгүй.
+          </p>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <Field label="Мерчант ТТД">
+              <input className="input font-mono" value={f.ebarimt_merchant_tin}
+                placeholder="71101242183" maxLength={20}
+                onChange={set('ebarimt_merchant_tin')} /></Field>
+            <Field label="Дүүргийн код">
+              <input className="input font-mono" value={f.ebarimt_district_code}
+                placeholder="2318" maxLength={10}
+                onChange={set('ebarimt_district_code')} /></Field>
+            <Field label="Салбарын дугаар">
+              <input className="input font-mono" value={f.ebarimt_branch_no}
+                placeholder="хоосон = үндсэн" maxLength={10}
+                onChange={set('ebarimt_branch_no')} /></Field>
+          </div>
+        </div>
 
         <div>
           <div className="label mb-1.5">Хамаарах зогсоолууд</div>

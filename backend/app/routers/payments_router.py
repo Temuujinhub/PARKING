@@ -216,6 +216,9 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                 # шилжүүлсэн төлбөрийг CASH кодоор бүртгэнэ (API мөнгөн урсгал шалгадаггүй)
                 "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
                 customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
+                # Баримт ТУХАЙН ТҮРЭЭСЛЭГЧИЙН ТТД-ээр гарна (Моннисын зогсоолын
+                # баримт EasyParking-ийн нэр дээр гарах ёсгүй)
+                merchant=ebarimt.merchant_for(_site_of(payment)),
             )
     except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
         ebarimt_error = _ebarimt_err(e)
@@ -268,7 +271,8 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                                       or f"msgbill төлөв {comp_receipt.get('state') or '?'}")
                 else:
                     comp_receipt = await ebarimt.create_receipt(
-                        comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin)
+                        comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin,
+                        merchant=ebarimt.merchant_for(_site_of(payment)))
             except Exception as e:  # noqa: BLE001
                 comp_error = _ebarimt_err(e)
                 log.error(f"e-Barimt амжилтгүй: compensation={comp.id}: {comp_error}")
@@ -945,7 +949,8 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
             raw = await ebarimt.create_receipt(
                 float(payment.amount), float(payment.vat_amount),
                 "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
-                customer_tin=payment.customer_tin)
+                customer_tin=payment.customer_tin,
+                merchant=ebarimt.merchant_for(_site_of(payment)))
     except Exception as e:  # noqa: BLE001
         err = _ebarimt_err(e)
         if rec:

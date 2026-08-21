@@ -192,7 +192,9 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
             rec_err = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), msgbill түлхүүр "
                        "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API")
         else:
-            receipt = await ebarimt.create_receipt(amount, vat, pm, customer_tin=tin)
+            receipt = await ebarimt.create_receipt(
+                amount, vat, pm, customer_tin=tin,
+                merchant=ebarimt.merchant_for(site))   # түрээслэгчийн ТТД-ээр
         ebarimt.cache_qr(comp.id, receipt.get("qrData"))
         if pay is not None:
             ebarimt.cache_qr(pay.id, receipt.get("qrData"))

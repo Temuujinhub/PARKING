@@ -73,6 +73,14 @@ class Tenant(Base):
     # msgbill-ээр үүсгэхэд. Шифрлэгдэж хадгалагдана (secretbox), UI-д зөвхөн *_set.
     msgbill_api_key = Column(String(160), nullable=True)
     msgbill_webhook_secret = Column(String(160), nullable=True)  # whsec_… (шифрлэгдсэн)
+    # ─── Түрээслэгчийн e-Barimt (ТЕГ PosAPI) хувийн мэдээлэл ───────────────
+    # Баримт ХЭНИЙ нэр дээр гарахыг тодорхойлно. Өмнө нь ЗӨВХӨН .env-ийн глобал
+    # ТТД байсан тул Моннисын зогсоолын картын баримт EasyParking-ийн нэр дээр
+    # гардаг байв (буруу татвар төлөгч). Хоосон бол глобал руу УНАХГҮЙ —
+    # `merchant_for` алдаа өгнө (доорх тайлбарыг үзнэ үү).
+    ebarimt_merchant_tin = Column(String(20), nullable=True)     # ж: 71101242183
+    ebarimt_district_code = Column(String(10), nullable=True)    # ж: 2318
+    ebarimt_branch_no = Column(String(10), nullable=True)        # салбарын дугаар
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
