@@ -59,11 +59,23 @@ def _remember(device_id: str, key: str) -> None:
 
 
 async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
-    """Стрим нь чимээгүй байгаа камерууд. «Чимээгүй» = сүүлийн ХҮЛЭЭН АВСАН
+    """Стрим нь чимээгүй байгаа камерууд. «Чимээгүй» = СТРИМЭЭР сүүлд ирсэн
     уншилтаас хойш `log_tail_silence_sec` өнгөрсөн. Шөнө машин ирэхгүй үед ч
     чимээгүй болох тул энэ нь ГАЦСАН гэсэн үг биш — гэхдээ логийг татах нь
-    хямд, машин байхгүй бол хоосон буцна."""
-    from sqlalchemy import func
+    хямд, машин байхгүй бол хоосон буцна.
+
+    ЧУХАЛ: ӨӨРИЙНХӨӨ оруулсан уншилтыг (raw.log_tail=true) тооцохгүй. Өмнө нь
+    тооцдог байсан тул log_tail нэг уншилт оруулмагц камер «амьд» болж харагдаж,
+    дараагийн таталт `silence_sec` (180с) хүлээдэг байв — үр дүнд нь мөчлөг нь
+    20 секунд БИШ, 180+20=200 секунд болж:
+      • бодит машины уншилт 200 секунд ХОЦРОН ирж, хаалт нь машин яваад
+        өгсний ДАРАА нээгддэг («машин байхгүй атал хаалт нээгдэж байна»),
+      • мөчлөг тутамд НЭГ уншилт боловсруулдаг тул дараалал үүсч,
+        `log_tail_fresh_sec` (240с)-ээс хуучирсан уншилтууд ХАЯГДАЖ, машин
+        огт бүртгэгдэхгүй үлддэг байв (2026-08-21 Рашбулаг ЭТТ дээр
+        хаалтны лог яг 200 секундын алхамтай байснаар илэрсэн).
+    """
+    from sqlalchemy import func, or_
 
     cams = (db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id)
             .filter(Device.device_type == "camera", Device.status == "active",
@@ -75,9 +87,11 @@ async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
     if not cams:
         return []
     cutoff = datetime.utcnow() - timedelta(seconds=settings.log_tail_silence_sec)
+    _injected = LprEvent.raw["log_tail"].as_string()
     last = dict(db.query(LprEvent.device_id, func.max(LprEvent.created_at))
                 .filter(LprEvent.device_id.in_([c.id for c in cams]),
-                        LprEvent.accepted.is_(True))
+                        LprEvent.accepted.is_(True),
+                        or_(_injected.is_(None), _injected != "true"))
                 .group_by(LprEvent.device_id).all())
     return [c for c in cams if (last.get(c.id) or datetime.min) < cutoff]
 
@@ -125,6 +139,14 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
     # ажилладаг тул хэд хэдэн уншилтыг зэрэг өгвөл дахин нийлүүлнэ.
     fresh_cut = datetime.utcnow() - timedelta(seconds=settings.log_tail_fresh_sec)
     todo = [r for r in rows if _key(r[1], r[0]) not in seen]
+    if len(todo) > 1:
+        # ЧИМЭЭГҮЙ БҮҮ ХАЯ: эдгээр нь бодит машинууд бөгөөд энд боловсруулагдахгүй
+        # бол хаалт нь нээгдэхгүй, session нь үүсэхгүй. Дараалал үүсч байгаа нь
+        # мөчлөг хэт удаан эсвэл урсгал их гэсэн дохио — тоогоор нь харуулна.
+        log.warning("[лог-нөөц] %s: нэг мөчлөгт %d уншилт хуримтлагдсан — зөвхөн "
+                    "хамгийн сүүлийнхийг боловсруулна, үлдсэн %d нь ХАЯГДАНА (%s)",
+                    name, len(todo), len(todo) - 1,
+                    ", ".join(p for _t, p, _r in todo[:-1])[:200])
     for t, plate, raw in todo[:-1]:
         # Хуучирсан/илүү уншилтыг ДАХИН авахгүйгээр тэмдэглээд өнгөрнө
         _remember(device_id, _key(plate, t))
