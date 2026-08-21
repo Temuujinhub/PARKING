@@ -35,6 +35,26 @@ TZ = timedelta(hours=8)  # УБ-ын цаг
 MATCH_SEC = 120
 
 
+def estimate_skew(deltas, candidates):
+    """Цагийн зөрүүний медиан ба түүнд ИТГЭЖ БОЛОХ эсэх.
+
+    Цөөн хосоос гарсан том зөрүүг хэрэглэвэл бүх бичлэг «алдагдсан» болж,
+    оношилгоо эрүүл камерыг эвдэрсэн гэж заана (2026-08-21 Эрэл-13).
+    """
+    if not deltas:
+        return 0.0, False
+    skew = sorted(deltas)[len(deltas) // 2]
+    if abs(skew) <= MATCH_SEC:
+        return skew, True
+    return skew, len(deltas) >= max(10, candidates * 0.2)
+
+
+def suspect_matching(total_log, lost_total, accepted_srv):
+    """Камерын логоос ЦӨӨН БИШ уншилт серверт ирсэн атал «алдагдал» өндөр бол
+    энэ нь стримийн тасралт биш, тулгалтын алдаа."""
+    return bool(total_log) and lost_total > total_log * 0.5 and accepted_srv >= total_log
+
+
 def L(dt):
     return (dt + TZ).strftime("%m-%d %H:%M:%S") if dt else "—"
 
@@ -84,8 +104,21 @@ def check_site(db, site: ParkingSite, hours: float, listing: int) -> None:
             if abs(d) <= 3600:
                 deltas.append(d)
     deltas.sort()
-    skew = deltas[len(deltas) // 2] if deltas else 0.0
-    if abs(skew) > MATCH_SEC:
+    # Хосын тоо ХЭТ ЦӨӨН бол медиан нь санамсаргүй давхцлаас гарсан байж болно
+    # (нэг дугаар өдөрт хэд хэдэн удаа ирдэг). Ийм «зөрүү»-г хэрэглэвэл БҮХ
+    # бичлэг «алдагдсан» болж, оношилгоо ЭРҮҮЛ камерыг эвдэрсэн гэж заана.
+    # 2026-08-21 Эрэл-13: камерын цаг ±0с (camera_clock_check) байхад ердөө
+    # 5 хосоор -54.4 минутын зөрүү «хэмжигдэж», 98% алдагдал гэж худал мэдээлэв.
+    cand = sum(1 for ev in log_all
+               if normalize_plate(ev.get("plate") or "") in by_plate)
+    skew, trusted = estimate_skew(deltas, cand)
+    if abs(skew) > MATCH_SEC and not trusted:
+        print(f"\n   ⚠ ЦАГИЙН ЗӨРҮҮ {skew / 60:+.1f} мин гэж гарсан ч ердөө "
+              f"{len(deltas)} хосоор тулгуурлаж байна ({cand} боломжоос) —")
+        print("      ИТГЭЛГҮЙ тул тооцоонд ОРУУЛСАНГҮЙ. Камерын цагийг "
+              "`camera_clock_check.py`-ээр шууд шалга.")
+        skew = 0.0
+    elif abs(skew) > MATCH_SEC:
         print(f"\n   ⚠ ЦАГИЙН ЗӨРҮҮ: камерын лог серверээс {skew / 60:+.1f} минутаар "
               f"зөрүүтэй ({len(deltas)} хосоор хэмжив) — тулгалтад тооцов.")
         print("      Камерын NTP тохиргоог засах хэрэгтэй; эс бол camera_sync ч "
@@ -143,6 +176,17 @@ def check_site(db, site: ParkingSite, hours: float, listing: int) -> None:
           f"{sum(s['ok'] for s in stats.values()):8}"
           f"{sum(s['rejected'] for s in stats.values()):11}{lost_total:11}"
           f"{lost_total * 100 // total_log:9}%")
+
+    # ЭСРЭГ НОТОЛГОО: камер логтоо байгаагаас илүү олон уншилтыг сервер хүлээн
+    # авсан бол «алдагдал» гэдэг нь тулгалтын алдаа болохоос стримийн тасралт
+    # БИШ. Ийм үед хувь хэмжээг нүүрэн дээр нь итгэж болохгүй.
+    accepted_srv = sum(1 for _p, _t, o, _l in rows if o)
+    if suspect_matching(total_log, lost_total, accepted_srv):
+        print(f"\n   ⚠⚠ ЗӨРЧИЛ: сервер {accepted_srv} уншилт хүлээн авсан нь камерын "
+              f"логийн {total_log} бичлэгээс ЦӨӨН БИШ —")
+        print(f"      тиймээс дээрх {lost_total * 100 // total_log}% «алдагдал» нь "
+              "ТУЛГАЛТЫН алдаа (цаг/дугаарын хэлбэр), стрим тасраагүй.")
+        print("      Эхлээд `camera_clock_check.py` ажиллуулж камерын цагийг шалга.")
 
     print("\n   Тайлбар:")
     print("     ирсэн     — камер уншсан, сервер хүлээн авсан (хэвийн)")
