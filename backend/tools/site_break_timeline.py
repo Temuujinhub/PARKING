@@ -36,7 +36,7 @@ from sqlalchemy import func
 
 from app.database import SessionLocal
 from app.models import (Device, LprEvent, ParkingSession, ParkingSite, Payment,
-                        User)
+                        TariffTemplate, User)
 
 TZ = timedelta(hours=8)
 WD = ["Да", "Мя", "Лх", "Пү", "Ба", "Бя", "Ня"]
@@ -106,6 +106,10 @@ def collect(db, site, days, cut_hour):
                .join(ParkingSession, ParkingSession.id == Payment.session_id)
                .filter(ParkingSession.site_id == site.id, Payment.status == "PAID",
                        Payment.paid_at >= a, Payment.paid_at < b).scalar())
+        top = (db.query(func.coalesce(func.max(Payment.amount), 0))
+               .join(ParkingSession, ParkingSession.id == Payment.session_id)
+               .filter(ParkingSession.site_id == site.id, Payment.status == "PAID",
+                       Payment.paid_at >= a, Payment.paid_at < b).scalar())
         cashiers = (db.query(func.count(func.distinct(Payment.cashier_id)))
                     .join(ParkingSession, ParkingSession.id == Payment.session_id)
                     .filter(ParkingSession.site_id == site.id, Payment.status == "PAID",
@@ -115,7 +119,7 @@ def collect(db, site, days, cut_hour):
         rows.append({"d": d, "partial": partial, "reads_in": r_in, "reads_out": r_out,
                      "gap": gap, "ent": ent, "exits": len(fees), "billed": billed,
                      "free": len(fees) - billed, "rev": float(rev or 0),
-                     "cashiers": cashiers})
+                     "top": float(top or 0), "cashiers": cashiers})
     return rows, cam_daily
 
 
@@ -200,7 +204,19 @@ def anomalies(rows, brk, base, cashier_stats, today):
         out.append(f"0₮ ГАРЦ 80%-иас дээш: {d}")
         out.append("   → тариф холбоогүй / no_charge / гэрээт жагсаалт хэт өргөн")
 
-    # (4) Тогтмол ажиллаж байсан кассир/терминал зогссон
+    # (4) Нэг төлбөрийн ДЭЭД дүн тасарсан — тарифын хоногийн хязгаарын гарын үсэг
+    if brk:
+        before = [r["top"] for r in rows if r["d"] < brk["d"] and r["top"]]
+        after = [r["top"] for r in rows if r["d"] >= brk["d"] and r["top"]]
+        if len(before) >= 3 and len(after) >= 3:
+            hi, lo = max(before), max(after)
+            if lo and lo < hi * 0.6:
+                out.append(f"НЭГ ТӨЛБӨРИЙН ДЭЭД ДҮН тасарсан: {hi:,.0f}₮ → {lo:,.0f}₮ "
+                           f"({len(after)} хоногт нэг ч төлбөр {lo:,.0f}₮-ээс хэтрээгүй)")
+                out.append("   → тарифын «хоногийн дээд хязгаар» (daily_cap) эсвэл "
+                           "шатлал өөрчлөгдсөн эсэхийг доорх Тариф мөрөөс шалга")
+
+    # (5) Тогтмол ажиллаж байсан кассир/терминал зогссон
     for uname, last, n in cashier_stats:
         idle = (today - last.date()).days
         if n >= 20 and idle >= 2:
@@ -214,7 +230,8 @@ def report(db, site, days, cut_hour):
     print(f"\n══ {site.name} ({site.site_code}) — {days} хоногийн ХООЛОЙН ЗУРАГЛАЛ "
           f"(УБ цаг) ══")
     print(f"   {'өдөр':10}{'уншилт о/г':>14}{'цоорхой':>9}{'орсон':>7}{'гарсан':>8}"
-          f"{'төлб.':>7}{'0₮':>6}{'орлого₮':>11}{'дунд₮':>8}{'касс':>6}")
+          f"{'төлб.':>7}{'0₮':>6}{'орлого₮':>11}{'дунд₮':>8}{'дээд₮':>8}"
+          f"{'касс':>6}")
     for r in rows:
         mark = "  ← өнөөдөр (дуусаагүй)" if r["partial"] else ""
         gap = f"{r['gap']:.1f}ц" + ("⚠" if r["gap"] >= 4 else " ")
@@ -222,7 +239,8 @@ def report(db, site, days, cut_hour):
         day = f"{r['d']} {WD[r['d'].weekday()]}"
         print(f"   {day:10}{reads:>14}{gap:>9}{r['ent']:>7}{r['exits']:>8}"
               f"{r['billed']:>7}{r['free']:>6}{r['rev']:>11,.0f}"
-              f"{avg_ticket(r):>8,.0f}{r['cashiers']:>6}{mark}")
+              f"{avg_ticket(r):>8,.0f}{r['top']:>8,.0f}"
+              f"{r['cashiers']:>6}{mark}")
 
     # Кассирын идэвх — цуглуулалт зогссон эсэхийг хүн тус бүрээр
     a, _ = day_bounds(rows[0]["d"])
@@ -270,6 +288,19 @@ def report(db, site, days, cut_hour):
         print("\n   ── МӨН АНЗААР ──")
         for line in extra:
             print(f"   {line}" if line.startswith("   ") else f"   ⚠ {line}")
+
+    tpl = db.get(TariffTemplate, site.tariff_template_id) if site.tariff_template_id else None
+    if tpl:
+        cap = f"{float(tpl.daily_cap):,.0f}₮" if tpl.daily_cap else "хязгааргүй"
+        tiers = ", ".join(f"{t.upto_minutes}м={float(t.price):,.0f}₮"
+                          for t in sorted(tpl.tiers, key=lambda x: x.upto_minutes)[:4])
+        print(f"\n   Тариф «{tpl.name}»: үнэгүй {tpl.free_minutes}м · grace "
+              f"{tpl.grace_minutes}м · цаг тутам {float(tpl.extra_hour_price):,.0f}₮ · "
+              f"ХОНОГИЙН ДЭЭД {cap}")
+        if tiers:
+            print(f"      шатлал: {tiers}")
+    else:
+        print("\n   ⚠ ТАРИФ ХОЛБОГДООГҮЙ — бүх зогсолт 0₮ болно!")
 
     # Камерын өдөр тутмын уншилт — аль ТУХАЙН камер унтарсныг заана
     cams = (db.query(Device).filter(Device.site_id == site.id,

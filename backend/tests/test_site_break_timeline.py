@@ -28,11 +28,12 @@ def check(name, cond):
     ok += 1
 
 
-def day(i, reads=200, ent=190, exits=185, billed=170, rev=580_000, partial=False):
+def day(i, reads=200, ent=190, exits=185, billed=170, rev=580_000, partial=False,
+        top=50_000):
     return {"d": date(2026, 8, 14) + timedelta(days=i), "partial": partial,
             "reads_in": reads, "reads_out": reads, "gap": 1.0, "ent": ent,
             "exits": exits, "billed": billed, "free": exits - billed,
-            "rev": rev, "cashiers": 2}
+            "rev": rev, "top": top, "cashiers": 2}
 
 
 def stage_of(rows):
@@ -154,5 +155,17 @@ check("өчигдөр ажилласан кассирыг зогссон гэх�
 rare = [("uyanga", datetime(2026, 8, 14, 10, 0), 3)]
 txt = " ".join(anomalies([day(0)], None, base, rare, TODAY))
 check("цөөн төлбөртэй данс худал дохио үүсгэхгүй", "uyanga" not in txt)
+
+# ── Нэг төлбөрийн ДЭЭД дүн тасарсан (Рашбулаг: 96к → бүгд ≤25к) ─────────────
+capped = [day(i, top=t) for i, t in enumerate([96_000, 57_000, 75_000])]
+capped += [day(i + 3, rev=105_500, billed=86, top=25_000) for i in range(4)]
+txt = " ".join(anomalies(capped, capped[3], base, [], TODAY))
+check("төлбөрийн дээд дүн тасарсныг илрүүлнэ", "ДЭЭД ДҮН тасарсан" in txt)
+
+# Дээд дүн хэвээр байвал дуугарахгүй — зөвхөн эзлэхүүн буурсан тохиолдол
+same = [day(i, top=96_000) for i in range(3)]
+same += [day(i + 3, rev=105_500, billed=86, top=90_000) for i in range(4)]
+txt = " ".join(anomalies(same, same[3], base, [], TODAY))
+check("дээд дүн хэвээр бол хязгаар гэж хэлэхгүй", "ДЭЭД ДҮН тасарсан" not in txt)
 
 print(f"\n{ok} шалгалт БҮГД тэнцэв.")
