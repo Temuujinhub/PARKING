@@ -97,7 +97,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ### 4. Үйлчилгээ амьд эсэхийг батлах
 
 ```bash
-curl -sI http://127.0.0.1/api/health && systemctl is-active nginx parking-backend
+curl -s http://127.0.0.1/api/health; systemctl is-active nginx parking-backend
 ```
 
 ---
@@ -112,6 +112,12 @@ sudo sed -i 's/^\s*#\s*server_tokens off;/\tserver_tokens off;/' /etc/nginx/ngin
 ```
 
 ---
+
+### HSTS дотоод HTTP хаяг дээр аюулгүй юу?
+
+Тийм. Snippet-д HSTS байгаа ч **энгийн HTTP-ээр ирсэн HSTS-ийг браузер зарчмын
+хувьд үл тоомсорлодог** (RFC 6797). Мөн IP хаягт (172.16.100.21) HSTS огт
+хамаарахгүй. Тиймээс дотоод админ UI хүчээр HTTPS рүү шилжихгүй.
 
 ## Үе шат 2 — Сканнерын шуугианг таслах (эрсдэл бага)
 
