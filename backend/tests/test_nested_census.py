@@ -46,8 +46,11 @@ try:
     db.flush()
 
     def sess(plate, entered_h, paused=None):
+        # `updated_at`-ыг мөн хойш нь тавина: тооллогын хамгаалалт нь СҮҮЛИЙН
+        # хөдөлгөөнөөр шалгадаг тул шинэ мөр бүр «саяхан хөдөлсөн» болж харагдана
+        at = now - timedelta(hours=entered_h)
         s = ParkingSession(site_id=site.id, plate_number=plate, status="OPEN",
-                           entry_time=now - timedelta(hours=entered_h), paused_since=paused)
+                           entry_time=at, updated_at=at, paused_since=paused)
         db.add(s)
         return s
 
@@ -56,6 +59,10 @@ try:
     c = sess("3333ВВВ", 20)                 # талбайд АЛГА — хаагдана
     d = sess("4444ГГГ", 2)                  # гадаа, тооллогод бий
     f = sess("6666ЕЕЕ", 0)                  # ДӨНГӨЖ орсон, тооллогод амжаагүй
+    # Өглөө орсон ч ЯГ ОДОО гарцад төлбөр хүлээж байгаа — хаах нь машиныг
+    # үнэгүй гаргана. Орсон цаг нь хуучин ч сүүлийн хөдөлгөөн нь САЯ.
+    g = sess("7777ЖЖЖ", 9)
+    g.status, g.exit_time, g.total_fee = "AWAITING_PAYMENT", now, 20000
     db.flush()
     # «1111ААА» 3 цагийн өмнө дотогшоо орсон гэсэн уншилт
     db.add(LprEvent(site_id=site.id, device_id=cam.id, plate_number="1111ААА",
@@ -92,6 +99,7 @@ try:
           a.status == "OPEN" and b.status == "OPEN" and d.status == "OPEN")
     check("дөнгөж орсон машиныг хаахгүй (тооллого хийх зуур ирсэн)",
           f.status == "OPEN")
+    check("гарцад төлбөр хүлээж буй машиныг хаахгүй", g.status == "AWAITING_PAYMENT")
 
     print("\nОйролцоо (тайрагдсан) уншилттай машиныг АЛДААТАЙ хаахгүй:")
     e = sess("555ДДД", 3)                    # камер эхний цифрийг алгассан бүртгэл

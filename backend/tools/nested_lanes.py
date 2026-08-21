@@ -402,19 +402,35 @@ def close_absent(db, site, inside_path: str | None, outside_path: str, apply: bo
     # «байхгүй» гэж андуурч хаах нь жолоочийн бүртгэлийг устгана.
     absent = [s for s in sessions if s.plate_number not in exact
               and not any(plates_ocr_similar(p, s.plate_number) for p in listed)]
-    # Тооллого хийж яваа зуур ОРЖ ИРСЭН машиныг хаахгүй — жагсаалт бичигдэж
-    # дуусахад тэр машин зогсоолд байгаа ч цаасан дээр байхгүй.
+    # САЯХАН ХӨДӨЛГӨӨНТЭЙ бүртгэлийг хаахгүй. Зөвхөн орсон цагаар шалгах нь
+    # ХАНГАЛТГҮЙ: өглөө орсон машин гарцын камерт САЯ уншигдаад төлбөрөө хүлээж
+    # байж болно (AWAITING_PAYMENT = машин ЯГ ОДОО гарцад зогсож байна). Тийм
+    # бүртгэлийг хаах нь машиныг үнэгүй гаргаж, төлбөрийг нь алдана. Тиймээс
+    # орсон/шинэчлэгдсэн/гарах уншилтын ХАМГИЙН СҮҮЛИЙНХЭЭР шалгана.
     cut = datetime.utcnow() - timedelta(minutes=min_age_min)
-    too_new = [s for s in absent if s.entry_time > cut]
-    absent = [s for s in absent if s.entry_time <= cut]
+
+    def last_seen(s):
+        return max(t for t in (s.entry_time, s.updated_at, s.exit_time) if t)
+
+    too_new = [s for s in absent if last_seen(s) > cut]
+    absent = [s for s in absent if last_seen(s) <= cut]
 
     print(f"\n══ Талбайн тооллого: бодитоор {len(listed)} машин, "
           f"бүртгэлд {len(sessions)} идэвхтэй ══")
     if too_new:
-        print(f"\n   ⏳ саяхан орсон тул ХӨНДӨХГҮЙ ({min_age_min} минутаас "
+        print(f"\n   ⏳ саяхан хөдөлгөөнтэй тул ХӨНДӨХГҮЙ ({min_age_min} минутаас "
               f"дотогш): {len(too_new)}")
         for s in too_new:
-            print(f"      {s.plate_number:10} орсон {L(s.entry_time)}")
+            print(f"      {s.plate_number:10} орсон {L(s.entry_time)}  "
+                  f"сүүлд {L(last_seen(s))}  төлөв {s.status}")
+    waiting = [s for s in absent if s.status == "AWAITING_PAYMENT"]
+    if waiting:
+        print(f"\n   ⚠ АНХААР: хаагдах жагсаалтад ТӨЛБӨР ХҮЛЭЭЖ буй {len(waiting)} "
+              f"бүртгэл байна — эдгээр нь гарцын камерт уншигдсан машинууд. "
+              f"Тооллогын жагсаалт дутуу биш эсэхээ шалгаарай:")
+        for s in waiting:
+            print(f"      {s.plate_number:10} {float(s.total_fee or 0):,.0f}₮  "
+                  f"сүүлд {L(last_seen(s))}")
     print(f"\n   ✖ ХААХ (бүртгэлд бий, талбайд АЛГА — хэдийнэ явсан): {len(absent)}")
     total_would = 0.0
     for s in absent:
