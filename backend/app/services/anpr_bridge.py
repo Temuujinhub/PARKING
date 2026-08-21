@@ -14,6 +14,15 @@
   inject   — уншилтыг манай урсгал руу ОРУУЛНА (log_tail-тай ижил зам).
              Зөвхөн зураглал бүрэн батлагдсаны дараа асаана.
 
+⚠ ТЭДНИЙ ЧИГЛЭЛД (`camDirection`) ИТГЭХГҮЙ. Тэр систем нь мөнгө хураах биш —
+гомдол, техникийн тулгалт, онлайн операторын ажил хэмжих зориулалттай тул
+орох/гарахаа зөв тохируулдаггүй (2026-08-21: Рашбулагийн дотоод камер эсрэгээр,
+Эрэл дээр хоёр камер хоёулаа «Орох»). Тиймээс энд ЗӨВХӨН дараах гурвыг авна:
+  • ямар ДУГААР уншигдсан
+  • АЛЬ камер уншсан
+  • ХЭЗЭЭ уншсан
+Чиглэлийг ямагт МАНАЙ `Device.lane_dir`-ээс авна.
+
 Зураглал: тэдний `parkingCameraId` → манай `Device`. Тохиргоо → Төхөөрөмж дээрх
 төхөөрөмжийн `extra.anpr_camera_id`-д бичнэ. Зураглаагүй камерын уншилтыг
 алгасах бөгөөд тоолж харуулна (юуг зураглах шаардлагатайг өөрөө хэлнэ).
@@ -79,7 +88,9 @@ async def _handle(raw: dict):
     try:
         dev = _camera_map(db).get(cam_id)
         if dev is None:
-            stats["unmapped_cams"][f"{cam_id}·{raw.get('parkingLotName') or '?'}"] += 1
+            # Зураглал хийхэд хэрэгтэй БҮХ мэдээллийг түлхүүрт үлдээнэ
+            stats["unmapped_cams"][
+                f"{cam_id}·{raw.get('parkingLotName') or '?'}·{raw.get('camDirection') or '?'}"] += 1
             return
         stats["mapped"] += 1
         # Тэдний timestamp нь камерын цаг — гулсдаг тул цонх өргөн авна
@@ -105,6 +116,7 @@ async def _handle(raw: dict):
             from ..session_logic import handle_entry, handle_exit, handle_inner_pass
             raw_ev = {"anpr_bridge": True, "source_id": raw.get("id"),
                       "TrafficCar": {"PlateNumber": plate}}
+            # Чиглэл нь МАНАЙ тохиргооноос — тэдний `camDirection`-д итгэхгүй
             if dev.nested_inner:
                 await handle_inner_pass(db, dev, plate, 100.0, raw_ev)
             elif dev.lane_dir == "exit":
