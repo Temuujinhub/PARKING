@@ -39,6 +39,10 @@ stats: dict = {
     "connected": False, "since": None, "events": 0, "mapped": 0,
     "matched": 0, "missing": 0, "unmapped_cams": defaultdict(int),
     "missing_by_site": defaultdict(int), "last_event_at": None, "error": None,
+    # ЗУРАГ: тэдний SSE нь зургийг event-тэй ХАМТ илгээдэггүй — дараа нь
+    # тусдаа `imageUpdate` мессежээр (id + URL) нөхдөг. Хэдэн зураг ирж
+    # байгааг тоолж, сүүлийн URL-ыг үлдээнэ (татах боломжтой эсэхийг харах).
+    "images": 0, "last_image_url": None,
 }
 
 
@@ -128,16 +132,31 @@ async def supervisor():
                     stats["connected"] = True
                     stats["since"] = datetime.utcnow().isoformat(timespec="seconds")
                     stats["error"] = None
+                    ev_type = "message"
                     async for line in r.aiter_lines():
+                        if not line.strip():          # хоосон мөр = мессежийн төгсгөл
+                            ev_type = "message"
+                            continue
+                        if line.startswith("event:"):
+                            ev_type = line[6:].strip()
+                            continue
                         if not line.startswith("data:"):
-                            continue          # `event:`/comment мөрүүд
+                            continue                  # comment (`:`) г.м
                         body = line[5:].strip()
-                        if not body or body.startswith("{\"maxEvents\""):
-                            continue          # config мессеж
+                        if not body:
+                            continue
                         try:
-                            await _handle(json.loads(body))
+                            payload = json.loads(body)
                         except json.JSONDecodeError:
                             continue
+                        if ev_type == "imageUpdate":
+                            # {id, imageUrl} — зураг нь URL-аар ирнэ, байт биш
+                            stats["images"] += 1
+                            stats["last_image_url"] = str(payload.get("imageUrl") or "")[:200]
+                            continue
+                        if ev_type != "message":
+                            continue                  # config г.м
+                        await _handle(payload)
         except Exception as e:  # noqa: BLE001
             stats["connected"] = False
             stats["error"] = f"{type(e).__name__}: {e}"[:200]

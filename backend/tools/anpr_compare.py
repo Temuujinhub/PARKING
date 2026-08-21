@@ -29,7 +29,14 @@ from app.database import SessionLocal  # noqa: E402
 from app.models import LprEvent, ParkingSite  # noqa: E402
 from app.session_logic import normalize_plate, plates_ocr_similar  # noqa: E402
 
-TZ = timedelta(hours=8)          # CSV нь УБ цагаар, манай DB нь UTC
+TZ = timedelta(hours=8)          # Улаанбаатар — ЗӨВХӨН харуулахад
+
+# CSV-ийн цаг UTC уу, орон нутгийн уу гэдэг нь ANPR системийн хувилбараас
+# хамаарч ӨӨР байдаг (лог хуудас нь UTC, event хүснэгт нь УБ цагаар харуулдаг).
+# Тааруулж таамаглавал БҮХ уншилт «алдагдсан» гэж худал гарна — 2026-08-21-нд
+# яг ингэж 100% алдагдал харуулж байсан. Тиймээс ТААМАГЛАХГҮЙ: боломжит
+# шилжилт бүрээр тулгаад ХАМГИЙН ОЛОН тохирлыг өгснийг нь сонгоно.
+OFFSETS = [timedelta(0), timedelta(hours=-8), timedelta(hours=8)]
 
 # ANPR системийн зогсоолын нэр → манай зогсоолын код.
 # Тэдэнд байгаа атал бидэнд байхгүй зогсоол (Их монгол, Маргад, 100 айл…) энд
@@ -62,7 +69,7 @@ def read_csv(path: str) -> list[dict]:
                 continue
             plate, conf, direction, lot, cam = m.groups()
             try:
-                at = datetime.strptime(f"{r['date']} {r['time']}", "%Y-%m-%d %H:%M:%S") - TZ
+                at = datetime.strptime(f"{r['date']} {r['time']}", "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 continue
             out.append({"at": at, "plate": normalize_plate(plate), "raw_plate": plate,
@@ -137,14 +144,49 @@ def main():
         ours[sid].append((at, plate))
 
     win = timedelta(minutes=a.window)
+
+    def count_matches(shift: timedelta) -> int:
+        """Тухайн цагийн шилжилтэд хэдэн уншилт тохирохыг тоолно."""
+        n = 0
+        for lot, site in sites.items():
+            by_plate = defaultdict(list)
+            for at, p in ours.get(site.id, []):
+                by_plate[p].append(at)
+            for r in rows:
+                if r["lot"] != lot:
+                    continue
+                t0 = r["at"] + shift
+                if any(abs((t - t0).total_seconds()) <= win.total_seconds()
+                       for t in by_plate.get(r["plate"], ())):
+                    n += 1
+        return n
+
+    # Шилжилтийг ӨГӨГДЛӨӨР сонгоно (таамаглахгүй)
+    scored = [(count_matches(o), o) for o in OFFSETS]
+    best_n, shift = max(scored, key=lambda x: x[0])
+    for n, o in sorted(scored, key=lambda x: -x[0]):
+        h = int(o.total_seconds() // 3600)
+        print(f"   цагийн шилжилт {h:+3d}ц → {n:5} тохирол"
+              + ("   ← сонгов" if o == shift else ""))
+    if best_n == 0:
+        print("\n   ⚠ Ямар ч шилжилтэд тохирол олдсонгүй — зогсоолын зураглал "
+              "буруу байж болзошгүй (--map-аар зааж өгнө үү).")
+    print()
+    for r in rows:
+        r["at"] += shift
+
     print(f"{'Зогсоол':<22}{'ANPR':>7}{'Манай':>8}{'Тохирсон':>10}{'АЛДСАН':>9}{'алдагдал':>10}")
     print("─" * 66)
     totals = [0, 0, 0]
     missing_all = []
-    for lot, site in sorted(sites.items(), key=lambda kv: kv[1].name):
+    by_site = defaultdict(list)
+    for lot, site in sites.items():
+        by_site[site.id].append(lot)
+    for sid, lots_ in sorted(by_site.items(), key=lambda kv: sites[kv[1][0]].name):
+        site = sites[lots_[0]]
         if a.site and site.site_code != a.site.upper():
             continue
-        theirs = [r for r in rows if r["lot"] == lot]
+        theirs = [r for r in rows if r["lot"] in lots_]
         mine = ours.get(site.id, [])
         by_plate = defaultdict(list)
         for at, p in mine:
