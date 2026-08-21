@@ -53,9 +53,13 @@ LOT_MAP = {
     "Ялалт": "YALALT",
     "Туушин": "TUUSHIN",
     "Номадс": "NOMADS",
-    "Спорт": "SPORT",
     "Эрэл": "EREL",
 }
+
+# Тооцоонд ОРУУЛАХГҮЙ лотууд. «Спорт» нь манай «Спортын төв ордон» мөн эсэх
+# тодорхойгүй (2026-08-21: тэдэнд 770 уншилт, манайд 0) — нэрээр таагаад
+# худал 100% алдагдал үзүүлэхээс сэргийлж түр хассан.
+SKIP_LOTS = {"Спорт"}
 
 ROW = re.compile(r'plate=(\S+)\s+conf=(\d+)%\s+dir=(\w+)\s+lot="([^"]*)"\s+cam=(\d+)')
 
@@ -94,6 +98,8 @@ def resolve_sites(db, lots: set[str], overrides: dict, how: dict) -> dict:
     by_code = {(s.site_code or "").upper(): s for s in all_sites}
     out = {}
     for lot in lots:
+        if lot in SKIP_LOTS and lot not in overrides:
+            continue
         code = (overrides.get(lot) or LOT_MAP.get(lot) or "").upper()
         site = by_code.get(code)
         by_code_hit = site is not None
@@ -147,12 +153,39 @@ def main():
     # Манай уншилтууд — тухайн өдрийн (UTC мужаар, цонхны зайтай)
     lo = min(r["at"] for r in rows) - timedelta(minutes=a.window)
     hi = max(r["at"] for r in rows) + timedelta(minutes=a.window)
-    ours = defaultdict(list)     # site_id → [(at, plate)]
-    for at, plate, sid in (db.query(LprEvent.created_at, LprEvent.plate_number, LprEvent.site_id)
-                           .filter(LprEvent.created_at >= lo, LprEvent.created_at <= hi).all()):
-        ours[sid].append((at, plate))
+    ours = defaultdict(list)      # site_id → [(at, plate)] — ХҮЛЭЭН АВСАН
+    rejected = defaultdict(int)   # site_id → татгалзсан (дугаар танигдаагүй/итгэл багатай)
+    for at, plate, sid, ok in (db.query(LprEvent.created_at, LprEvent.plate_number,
+                                        LprEvent.site_id, LprEvent.accepted)
+                               .filter(LprEvent.created_at >= lo,
+                                       LprEvent.created_at <= hi).all()):
+        if ok:
+            ours[sid].append((at, plate))
+        else:
+            rejected[sid] += 1
 
     win = timedelta(minutes=a.window)
+
+    def site_offset(theirs: list, by_plate: dict) -> float:
+        """Тухайн зогсоолын цагийн зөрүүг ӨГӨГДЛӨӨС олно (секунд).
+
+        Камерын цаг NTP-гүй бол гулсдаг (Рашбулаг +32 мин байсан түүхтэй). Ижил
+        дугаарын хамгийн ойрын хос бүрийн зөрүүг цуглуулж МЕДИАНЫГ авна —
+        нэг хоёр санамсаргүй тохирол дүнг гуйвуулахгүй. Хос цөөн бол 0 (итгэхгүй).
+        """
+        deltas = []
+        for r in theirs:
+            best = None
+            for t in by_plate.get(r["plate"], ()):
+                d = (t - r["at"]).total_seconds()
+                if abs(d) <= 3600 and (best is None or abs(d) < abs(best)):
+                    best = d
+            if best is not None:
+                deltas.append(best)
+        if len(deltas) < 5:
+            return 0.0
+        deltas.sort()
+        return deltas[len(deltas) // 2]
 
     def count_matches(shift: timedelta) -> int:
         """Тухайн цагийн шилжилтэд хэдэн уншилт тохирохыг тоолно."""
@@ -184,10 +217,10 @@ def main():
     for r in rows:
         r["at"] += shift
 
-    print(f"{'Зогсоол':<22}{'ANPR':>7}{'Манай':>8}{'Тохирсон':>10}{'АЛДСАН':>9}{'алдагдал':>10}")
-    print("─" * 66)
+    print(f"{'Зогсоол':<22}{'ANPR':>7}{'Манай':>8}{'татг.':>7}{'Тохир':>7}{'АЛДСАН':>8}{'алдаг.':>8}")
+    print("─" * 68)
     totals = [0, 0, 0]
-    missing_all, zero_sites = [], []
+    missing_all, zero_sites, drifted = [], [], []
     by_site = defaultdict(list)
     for lot, site in sites.items():
         by_site[site.id].append(lot)
@@ -200,6 +233,12 @@ def main():
         by_plate = defaultdict(list)
         for at, p in mine:
             by_plate[p].append(at)
+        # Зогсоолын цагийн зөрүү (камерын цаг гулссан) — тооцож хасна
+        off = site_offset(theirs, by_plate)
+        if abs(off) > win.total_seconds():
+            drifted.append((site.name, off))
+            for r in theirs:
+                r["at"] += timedelta(seconds=off)
         matched, missing = 0, []
         for r in theirs:
             cand = by_plate.get(r["plate"])
@@ -216,8 +255,8 @@ def main():
                 missing.append(r)
         loss = 100 * len(missing) / len(theirs) if theirs else 0
         mark = "  ⚠" if loss >= 20 else ""
-        print(f"{site.name[:21]:<22}{len(theirs):>7}{len(mine):>8}{matched:>10}"
-              f"{len(missing):>9}{loss:>9.0f}%{mark}")
+        print(f"{site.name[:21]:<22}{len(theirs):>7}{len(mine):>8}"
+              f"{rejected.get(sid, 0):>7}{matched:>7}{len(missing):>8}{loss:>7.0f}%{mark}")
         if len(theirs) >= 50 and not mine:
             zero_sites.append((site.name, lots_, len(theirs)))
         totals[0] += len(theirs)
@@ -225,10 +264,19 @@ def main():
         totals[2] += matched
         missing_all += [(site.name, r) for r in missing]
 
-    print("─" * 66)
+    print("─" * 68)
     lost = totals[0] - totals[2]
     pct = 100 * lost / totals[0] if totals[0] else 0
-    print(f"{'НИЙТ':<22}{totals[0]:>7}{totals[1]:>8}{totals[2]:>10}{lost:>9}{pct:>9.0f}%")
+    print(f"{'НИЙТ':<22}{totals[0]:>7}{totals[1]:>8}{sum(rejected.values()):>7}"
+          f"{totals[2]:>7}{lost:>8}{pct:>7.0f}%")
+    print("   «татг.» = дугаар танигдаагүй/итгэл багатай тул ТАТГАЛЗСАН уншилт "
+          "(ANPR лог ийм мөр агуулдаггүй)")
+
+    if drifted:
+        print("\n   🕐 ЦАГИЙН ЗӨРҮҮ илэрсэн зогсоолууд (камерын цаг гулссан):")
+        for name, off in drifted:
+            print(f"      {name}: {off / 60:+.0f} минут — тооцоонд хасав")
+        print("      Камерын цагийг NTP-д холбох: tools/camera_ntp_config.py")
 
     if zero_sites:
         print("\n   ⛔ ANPR-т уншилт бий атал МАНАЙД ТЭГ — зураглал буруу эсвэл "
