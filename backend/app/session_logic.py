@@ -711,7 +711,10 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             existing.total_fee = old_fee["total_fee"]
         existing.status = "FREE" if old_fee["is_free"] else "MANUAL_CLOSED"
         due = amount_due(db, existing, old_fee)
-        if due > 0:
+        # Өр үүсгэх эсэх нь Тохиргоо → Авто цэвэрлэгээ хуудаснаас удирдагдана
+        # (өмнө нь кодод хатуу бичигдсэн байв — 2026-08-21).
+        from .services.app_settings import get_autoclose_rules
+        if due > 0 and get_autoclose_rules(db)["create_debt_reentry"]:
             comp = create_compensation(db, existing, "unpaid_exit", "system")
             comp.amount = due
         # Энэ зам ямар ч AuditLog үлдээдэггүй байсан тул Түүх дээр «хэн хаасан»

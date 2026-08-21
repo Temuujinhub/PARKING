@@ -23,6 +23,25 @@ const BOUNDS = {
 const clampRules = (r) => Object.fromEntries(Object.entries(r).map(
   ([k, v]) => [k, BOUNDS[k] ? clampNum(v, { ...BOUNDS[k], fallback: BOUNDS[k].min }) : v]))
 
+// ӨР ҮҮСГЭДЭГ БҮХ ЗАМ нэг дор. Өмнө нь зарим нь кодод хатуу бичигдсэн байсан
+// тул «өр дахин хуримтлагдаж байна» гэдэгт deploy-гүйгээр нөлөөлж чаддаггүй байв.
+const DEBT_SWITCHES = [
+  ['create_debt', 'Авто хаалт — гарах уншилтгүй машинд',
+   'Машин хэзээ гарсныг МЭДЭХГҮЙ тул хугацаа нь таамаг. 2026-08-12-ны аудитаар ийм '
+   + 'дүрэм 1,786 хуурамч өр (3.3 сая₮) үүсгэсэн. Унтраалттай орхихыг зөвлөнө.'],
+  ['create_debt_unpaid_exit', 'Авто хаалт — гарцад уншигдсан ч төлөөгүй машинд',
+   'Гарсан нь камерын уншилтаар БАРИМТТАЙ, төлөөгүй нь мэдэгдэж байгаа тул '
+   + 'жинхэнэ авлага. Ихэвчлэн асаалттай байх нь зөв.'],
+  ['create_debt_reentry', 'Төлөлгүй үлдсэн машин ДАХИН орж ирэхэд',
+   'Өмнөх удаа гарцад уншигдаад төлөлгүй үлдсэн бүртгэлийг хааж, үлдэгдлээр нь '
+   + 'нэхэмжлэл үүсгэнэ.'],
+  ['create_debt_shift_close', 'Ээлж хаахад «бүх машиныг гаргах» сонгосон үед',
+   'Ээлж хаахдаа зогсоолд үлдсэн машинуудыг хаах бөгөөд төлбөртэйд нь өр үүсгэнэ. '
+   + 'Тэдгээр машин ихэнхдээ хэдийнэ явсан байдаг.'],
+  ['create_debt_night_close', 'Шөнийн бөөнөөр хаалтад',
+   'Нэхэмжлэл хуудасны «Шөнийн хаалт» үйлдэлд өр үүсгэх эсэх.'],
+]
+
 // Дүрэм бүрийн тайлбар — ЯМАР тохиолдолд ажилладгийг оператор ойлгохоор
 const RULES = [
   ['invalid_plate_hours', 'Формат буруу (junk) дугаар',
@@ -397,17 +416,26 @@ export default function AutoCloseSection() {
           ))}
         </div>
 
-        <label className="flex items-start gap-2 text-sm cursor-pointer border-t border-surface-border/60 pt-3">
-          <input type="checkbox" className="mt-0.5" checked={rules.create_debt}
-            onChange={(e) => set('create_debt', e.target.checked)} />
-          <span>Хаахдаа <b>өр (нөхөн төлбөр) үүсгэх</b>
-            <span className="block text-xs text-slate-500">
-              «Ерөнхий хугацаа хэтэрсэн» болон «төлөөгүй» дүрмээр хаагдсан машинд
-              төлөгдөөгүй дүнгээр нэхэмжлэл үүснэ (дараа ирэхэд нь нэхэгдэнэ).
-              Унтраавал бүртгэл зүгээр хаагдана.
-            </span>
-          </span>
-        </label>
+        <div className="border-t border-surface-border/60 pt-3 space-y-2">
+          <div>
+            <h3 className="font-semibold text-sm">Өр (нөхөн төлбөр) ҮҮСГЭХ бодлого</h3>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Системд өр үүсгэдэг <b className="text-slate-300">БҮХ</b> зам энд байна.
+              Унтраасан зам дээр бүртгэл зүгээр хаагдана — мөнгө нэхэгдэхгүй, машин
+              хар жагсаалтад ч орохгүй. Хуримтлагдсан өрийг цэвэрлэх нь тусдаа
+              (Нэхэмжлэл хуудас эсвэл <code>tools/debt_cleanup.py</code>).
+            </p>
+          </div>
+          {DEBT_SWITCHES.map(([key, label, help]) => (
+            <label key={key} className="flex items-start gap-2 text-sm cursor-pointer">
+              <input type="checkbox" className="mt-0.5" checked={!!rules[key]}
+                onChange={(e) => set(key, e.target.checked)} />
+              <span>{label}
+                <span className="block text-xs text-slate-500">{help}</span>
+              </span>
+            </label>
+          ))}
+        </div>
 
         <div className="flex flex-wrap gap-2">
           <button className="btn-primary" onClick={save} disabled={busy}>

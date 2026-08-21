@@ -264,7 +264,9 @@ async def night_close(body: dict, db: Session = Depends(get_db),
         db.add(AuditLog(username=user.username, action="NIGHT_CLOSE_CAR",
                         entity="session", entity_id=s.id,
                         detail={"plate": s.plate_number}))
-        if not fee["is_free"]:
+        # Өр үүсгэх эсэх — Тохиргоо → Авто цэвэрлэгээ (2026-08-21)
+        from ..services.app_settings import get_autoclose_rules
+        if not fee["is_free"] and get_autoclose_rules(db)["create_debt_night_close"]:
             create_compensation(db, s, "night_close", user.username)
             created += 1
     db.add(AuditLog(username=user.username, action="NIGHT_CLOSE", entity="site",

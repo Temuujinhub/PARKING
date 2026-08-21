@@ -84,7 +84,10 @@ def close_shift(body: dict | None = None, db: Session = Depends(get_db),
             s.exit_time, s.duration_minutes = now, fee["duration_minutes"]
             s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
             s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
-            if not fee["is_free"]:
+            # Өр үүсгэх эсэх — Тохиргоо → Авто цэвэрлэгээ (2026-08-21-ээс өмнө
+            # хатуу бичигдсэн байсан тул ээлж хаах бүрд өр хуримтлагддаг байв)
+            from ..services.app_settings import get_autoclose_rules
+            if not fee["is_free"] and get_autoclose_rules(db)["create_debt_shift_close"]:
                 create_compensation(db, s, "shift_close", user.username)
             # Session тутамд бичнэ — эс бол Түүх дээр «хэн хаасан» нь хоосон
             # үлдэж, оператор гараар хаасан мэт харагддаг (site-ийн түвшний

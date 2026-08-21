@@ -157,7 +157,8 @@ def run_once() -> int:
                     #    камер уншаагүй байх нь элбэг тул төлөөгүй гэх нотолгоо алга
                     #    → өр үүсгэхгүй (create_debt тохиргоо энэ тохиолдолд үйлчилнэ).
                     if s.status == "AWAITING_PAYMENT" and valid:
-                        reason, make_debt = "unpaid_exit", True
+                        reason = "unpaid_exit"
+                        make_debt = rules["create_debt_unpaid_exit"]
                     else:
                         reason, make_debt = "auto_close", (rules["create_debt"] and valid)
                     debt = close_session_forced(db, s, reason, "system", make_debt)

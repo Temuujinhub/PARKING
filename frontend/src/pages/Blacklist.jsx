@@ -116,6 +116,24 @@ export default function Blacklist() {
     } catch (err) { toast(err.message, 'error') }
   }
 
+  // БҮГДИЙГ цэвэрлэх — гараар нэмсэн хоригийг ч. Аудитын дараа «шинээр эхлэх»
+  // үед хэрэглэнэ. Гараар нэмсэн хоригийг устгах тул давхар баталгаажуулна.
+  const clearAll = async () => {
+    const active = rows.filter((b) => b.is_active)
+    const manual = active.filter((b) => !/автомат хориг/.test(b.reason || '')).length
+    if (!confirm(`Хар жагсаалтыг БҮХЭЛД НЬ цэвэрлэх үү?\n\n`
+      + `Идэвхтэй хориг: ${active.length}, үүнээс ГАРААР нэмсэн: ${manual}\n\n`
+      + `Гараар нэмсэн хориг нь ихэвчлэн жинхэнэ шалтгаантай байдаг — тэдгээр ч `
+      + `чөлөөлөгдөнө.`)) return
+    if (manual && !confirm(`Гараар нэмсэн ${manual} хоригийг үнэхээр авах уу?`)) return
+    try {
+      const r = await api('/api/admin/blacklist/clear', { method: 'POST',
+        body: { auto_only: false, cancel_debts: true } })
+      toast(`${r.deactivated} хориг цэвэрлэв${r.canceled_debts ? `, ${r.canceled_debts} өр цуцлав` : ''}`)
+      load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const toggle = async (b) => {
     try {
       await api(`/api/admin/blacklist/${b.id}`, { method: 'PUT', body: { is_active: !b.is_active } })
@@ -131,6 +149,12 @@ export default function Blacklist() {
           {rows.some((b) => b.is_active && /автомат хориг/.test(b.reason || '')) && (
             <button className="btn-secondary flex items-center gap-1.5" onClick={clearAuto}>
               <Trash2 size={15} /> Автомат хоригийг цэвэрлэх
+            </button>
+          )}
+          {rows.some((b) => b.is_active) && (
+            <button className="btn-secondary flex items-center gap-1.5 border-red-500/40 text-red-400"
+              onClick={clearAll} title="Гараар нэмсэн хоригийг ч чөлөөлнө">
+              <Trash2 size={15} /> Бүгдийг цэвэрлэх
             </button>
           )}
           <button className="btn-primary" onClick={() => setEditing({ plate_number: '', reason: '' })}>
