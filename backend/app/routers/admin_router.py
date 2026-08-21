@@ -1771,6 +1771,24 @@ def put_autoclose_rules(body: dict, db: Session = Depends(get_db),
     return rules
 
 
+@router.get("/entry-plate/rules")
+def get_entry_plate_rules_api(db: Session = Depends(get_db),
+                              user: User = Depends(require("settings"))):
+    """Орох дугаарын шалгалт — формат буруу уншилтад хаалтыг яах дүрэм."""
+    from ..services.app_settings import get_entry_plate_rules
+    return get_entry_plate_rules(db)
+
+
+@router.put("/entry-plate/rules")
+def put_entry_plate_rules(body: dict, db: Session = Depends(get_db),
+                          user: User = Depends(require("settings"))):
+    from ..services.app_settings import set_entry_plate_rules
+    rules = set_entry_plate_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "entry_plate_rules", "-", rules)
+    db.commit()
+    return rules
+
+
 @router.post("/autoclose/run")
 def run_autoclose_now(db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):

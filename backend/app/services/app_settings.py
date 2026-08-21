@@ -13,6 +13,7 @@ import time
 BLACKLIST_KEY = "blacklist_rules"
 OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
+ENTRYPLATE_KEY = "entry_plate_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
@@ -86,6 +87,21 @@ DEFAULTS: dict[str, dict] = {
         "create_debt_log_exit": True,   # логоор ГАРСАН нь тогтоогдсонд (баримттай)
         "skip_invalid_plate": True,  # формат буруу (junk) дугаарыг алгасах
     },
+    ENTRYPLATE_KEY: {
+        # Орох хаалт: ФОРМАТ БУРУУ уншигдсан дугаарыг яах вэ (2026-08-21).
+        # Хангарьд дээр 5-7 оронтой хог уншилт session болж, гарахдаа
+        # «бүртгэлгүй гарах оролдлого» үүсгэдэг байсны хариу арга.
+        #   open   — одоогийн зан төлөв: шууд нээнэ
+        #   hold   — hold_seconds хүлээж камерын ДАХИН уншилтыг (burst autocorrect)
+        #            хүлээнэ; зөв уншилт ирэхгүй бол НЭЭГЭЭД тэмдэглэнэ (fail-open)
+        #   strict — хүлээгээд ирэхгүй бол НЭЭХГҮЙ, операторт мэдэгдэнэ
+        # Хатуу хаалтыг default болгодоггүй шалтгаан: гадаад/түр дугаар, бохир
+        # дугаар regex-д хэзээ ч таарахгүй байж болно — машин эгнээ хааж гацна.
+        "policy": "hold",
+        "hold_seconds": 4,       # burst цонх (6с)-оос богино байх нь зүйтэй
+        # Зогсоол бүрийн давхарга: {site_id: policy}. Хоосон = глобал policy.
+        "site_overrides": {},
+    },
     CAMHEALTH_KEY: {
         # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).
         # Гацсан = event стрим АМЬД (200) атлаа snapshot.cgi ШУУД 400 буцаана
@@ -96,6 +112,14 @@ DEFAULTS: dict[str, dict] = {
         "cooldown_min": 120,       # нэг камерыг дахин reboot хийхээс өмнөх завсар
         "samples": 3,              # snapshot.cgi-г хэдэн удаа шалгаж баталгаажуулах
     },
+}
+
+# Сонголттой (enum) утгын зөвшөөрөгдөх багц — (бүлэг, түлхүүр) бүрээр.
+# dict төрлийн түлхүүрт БҮХ утга нь энэ багцад багтах ёстой (site_overrides г.м).
+_POLICY_CHOICES = {"open", "hold", "strict"}
+CHOICES: dict[tuple[str, str], set] = {
+    (ENTRYPLATE_KEY, "policy"): _POLICY_CHOICES,
+    (ENTRYPLATE_KEY, "site_overrides"): _POLICY_CHOICES,
 }
 
 _cache: dict[str, tuple[float, dict]] = {}
@@ -127,8 +151,21 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
         if k not in values:
             continue
         v = values[k]
+        allowed = CHOICES.get((key, k))
         if isinstance(default, bool):
             clean[k] = bool(v)
+        elif isinstance(default, str):
+            v = str(v).strip()[:30]
+            if allowed and v not in allowed:
+                continue                      # мэдэхгүй утга — хуучин нь хэвээр
+            clean[k] = v
+        elif isinstance(default, dict):
+            # {гадаад түлхүүр: утга} хэлбэрийн давхарга (site_overrides г.м) —
+            # бүхэлд нь дарж бичигдэнэ, буруу утгатай мөрүүд нь хаягдана
+            if isinstance(v, dict):
+                clean[k] = {str(kk)[:64]: str(vv).strip()[:30]
+                            for kk, vv in v.items()
+                            if not allowed or str(vv).strip() in allowed}
         else:
             try:
                 clean[k] = max(0, int(v))
@@ -161,6 +198,21 @@ def get_autoclose_rules(db) -> dict:
 
 def set_autoclose_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, AUTOCLOSE_KEY, values, username)
+
+
+def get_entry_plate_rules(db) -> dict:
+    return get_rules(db, ENTRYPLATE_KEY)
+
+
+def set_entry_plate_rules(db, values: dict, username: str) -> dict:
+    return set_rules(db, ENTRYPLATE_KEY, values, username)
+
+
+def entry_plate_policy(db, site_id: str | None) -> tuple[str, int]:
+    """Тухайн зогсоолд үйлчлэх (policy, hold_seconds) — override нь глобалыг дарна."""
+    r = get_rules(db, ENTRYPLATE_KEY)
+    pol = (r.get("site_overrides") or {}).get(site_id or "") or r["policy"]
+    return (pol if pol in _POLICY_CHOICES else "hold"), max(1, int(r["hold_seconds"]))
 
 
 def get_camsync_rules(db) -> dict:

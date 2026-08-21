@@ -10,6 +10,7 @@ const EVENT_LABELS = {
   PAYMENT_COMPLETED: { label: 'Төлбөр төлөгдлөө', color: 'text-accent', icon: Banknote },
   BLACKLIST_ALERT: { label: '⚠ Хар жагсаалт!', color: 'text-red-400', icon: Car },
   UNREGISTERED_DENIED: { label: '⚠ Бүртгэлгүй машин — хаалт нээгээгүй', color: 'text-amber-400', icon: Car },
+  PLATE_UNREADABLE: { label: '⚠ Дугаар буруу уншигдав — орох хаалт түр саатав', color: 'text-amber-400', icon: Car },
   EXIT_NO_SESSION: { label: 'Бүртгэлгүй гарах оролдлого', color: 'text-red-400', icon: Car },
   BARRIER_MANUAL_OPEN: { label: 'Хаалт гараар нээв', color: 'text-purple-400', icon: Activity },
 }

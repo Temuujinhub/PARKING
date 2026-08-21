@@ -1,6 +1,6 @@
 // Тохиргоо → Авто цэвэрлэгээ: зогсоолд гацсан бүртгэлийг ХЭЗЭЭ, ЯАЖ хаах дүрэм.
 // Өмнө нь эдгээр нь .env-д хатуу бичигдсэн байсан тул өөрчлөхөд deploy шаарддаг байв.
-import { Eraser, HeartPulse, ListChecks, PlayCircle, RotateCw, Save } from 'lucide-react'
+import { Eraser, HeartPulse, ListChecks, PlayCircle, RotateCw, Save, ScanLine } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, useToast } from '../../components/ui'
@@ -53,6 +53,123 @@ const RULES = [
   ['stale_hours', 'Ерөнхий хугацаа хэтэрсэн',
    'Дээрхэд хамаарахгүй бүх гацсан бүртгэл. Зогсоол бүрд өөрөөр («Зогсоол» табын засах цонхны «Гацсан машины авто хаалт») тохируулж болно.'],
 ]
+
+// Орох дугаарын шалгалт — формат буруу уншигдсан дугаарт орох хаалтыг яах вэ.
+// «Хатуу хаах» биш «түр барих» default-ын учир: гадаад/түр/бохир дугаар regex-д
+// хэзээ ч таарахгүй байж болно — машин эгнээ хааж гацахаас сэргийлнэ.
+const POLICY_OPTIONS = [
+  ['open', 'Шууд нээнэ', 'Шалгалтгүй — өмнөх зан төлөв.'],
+  ['hold', 'Түр барина, дараа нь нээнэ',
+   'Хэдэн секунд хүлээж камерын дахин уншилтыг авна. Зөв дугаар ирвэл түүгээр '
+   + 'бүртгэж нээнэ; ирэхгүй бол НЭЭГЭЭД бүртгэлийг тэмдэглэнэ (санал болгож буй).'],
+  ['strict', 'Түр барина, нээхгүй',
+   'Зөв уншилт ирэхгүй бол хаалт хаалттай үлдэж, операторт мэдэгдэнэ. Оператор '
+   + 'гараар нээж дугаарыг оруулна. Хог уншилт ихтэй зогсоолд.'],
+]
+
+function EntryPlateCard({ toast }) {
+  const [rules, setRules] = useState(null)
+  const [sites, setSites] = useState([])
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api('/api/admin/entry-plate/rules').then(setRules).catch(() => {})
+    api('/api/admin/sites').then(setSites).catch(() => {})
+  }, [])
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const body = { ...rules, hold_seconds: clampNum(rules.hold_seconds, { min: 2, max: 30, fallback: 4 }) }
+      setRules(await api('/api/admin/entry-plate/rules', { method: 'PUT', body }))
+      toast('Хадгалагдлаа — дараагийн орох уншилтаас эхлэн үйлчилнэ')
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  if (!rules) return null
+  const set = (k, v) => setRules({ ...rules, [k]: v })
+  const setOverride = (siteId, v) => {
+    const o = { ...(rules.site_overrides || {}) }
+    if (v) o[siteId] = v; else delete o[siteId]
+    set('site_overrides', o)
+  }
+
+  return (
+    <div className="card space-y-4">
+      <div>
+        <h2 className="font-semibold flex items-center gap-2">
+          <ScanLine size={16} className="text-accent" /> Орох дугаарын шалгалт
+        </h2>
+        <p className="text-xs text-slate-400 mt-1">
+          Камер дугаарыг <b className="text-slate-300">дутуу/буруу форматтай</b> уншвал
+          («4132», 5-7 оронтой үсэг г.м) орох хаалтыг шууд нээхгүй, дахин уншилтыг
+          түр хүлээнэ. LED дэлгэцэнд «Дугаар уншигдсангүй / Зөв өнцгөөр уншуулна уу»
+          гэж 2 мөрөөр анхааруулна. Ингэснээр буруу дугаартай бүртгэл багасаж,
+          гарах үеийн «бүртгэлгүй гарах оролдлого» цөөрнө.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {POLICY_OPTIONS.map(([val, label, help]) => (
+          <label key={val} className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="radio" name="entry-plate-policy" className="mt-0.5"
+              checked={rules.policy === val} onChange={() => set('policy', val)} />
+            <span>{label}
+              <span className="block text-xs text-slate-500">{help}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Хүлээх хугацаа (секунд)">
+          <input className="input font-mono" type="number" min="2" max="30"
+            value={rules.hold_seconds} disabled={rules.policy === 'open'}
+            onChange={(e) => set('hold_seconds', Number(e.target.value))} />
+          <span className="block text-[11px] text-slate-500 mt-1">
+            Камер ихэвчлэн 1-3 секундэд дахин уншдаг — 4с хангалттай. Хэт уртасгавал
+            жолооч хүлээж бухимдана.
+          </span>
+        </Field>
+      </div>
+
+      {sites.length > 0 && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-slate-300">
+            Зогсоол бүрийн ялгаатай тохиргоо
+            {Object.keys(rules.site_overrides || {}).length > 0
+              && ` (${Object.keys(rules.site_overrides).length} зогсоолд)`}
+          </summary>
+          <p className="text-[11px] text-slate-500 mt-1 mb-2">
+            Сонгоогүй зогсоолд дээрх ерөнхий дүрэм үйлчилнэ. Хог уншилт ихтэй
+            зогсоолд «нээхгүй»-г туршиж болно.
+          </p>
+          <div className="space-y-1.5">
+            {sites.map((s) => (
+              <div key={s.id} className="flex items-center gap-2">
+                <span className="w-52 truncate">{s.name}</span>
+                <select className="input w-auto text-sm"
+                  value={(rules.site_overrides || {})[s.id] || ''}
+                  onChange={(e) => setOverride(s.id, e.target.value)}>
+                  <option value="">(ерөнхий дүрмээр)</option>
+                  <option value="open">Шууд нээнэ</option>
+                  <option value="hold">Барина, дараа нь нээнэ</option>
+                  <option value="strict">Барина, нээхгүй</option>
+                </select>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <button className="btn-primary" onClick={save} disabled={busy}>
+          <Save size={15} /> {busy ? 'Хадгалж байна…' : 'Хадгалах'}
+        </button>
+      </div>
+    </div>
+  )
+}
 
 // Камерын лог нөхөлт — камер уншсан ч серверт бүртгэгдээгүй машиныг нөхнө.
 // WATERMARK-аар ажилладаг тул нэг event ХОЁР УДАА боловсруулагдахгүй (өмнө нь
@@ -449,6 +566,7 @@ export default function AutoCloseSection() {
 
   return (
     <div className="space-y-4">
+      <EntryPlateCard toast={toast} />
       <CamHealthCard toast={toast} />
       <CamSyncCard toast={toast} />
       <OpenReasonsCard toast={toast} />

@@ -1,4 +1,5 @@
 """Орох/гарах урсгалын гол логик — LPR event-ээс session үүсгэх, хаах, barrier нээх."""
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -21,12 +22,17 @@ import re
 
 log = logging.getLogger("parking.session_logic")
 
-# Монгол улсын дугаарын формат: 4 орон + 3 кирилл үсэг (Ө, Ү орно). Жишээ: 1234УБА
-# Энгийн (1234УБА) + тусгай/дипломат (ДК1234 — 2 үсэг ЭХЭНДЭЭ, 4 цифр).
-# АНХААР: 4 цифр + 2 үсэг (1234УБ) хэлбэрийг ЗОРИУД оруулаагүй — энэ нь энгийн
-# дугаарын ТАЙРАГДСАН уншилт бөгөөд plates_ocr_similar-ийн тайралт-тохирол
-# «богино нь буруу форматтай» гэдэгт тулгуурладаг.
-PLATE_RE = re.compile(r"^(?:\d{4}[А-ЯЁӨҮ]{3}|[А-ЯЁӨҮ]{2}\d{4})$")
+# Монгол улсын дугаарын формат (docs/дугаарын стандарт-ын зургууд, MNS 4410:2002):
+#   • энгийн/эко/тээвэр/технологи: 4 цифр + 3 кирилл үсэг (1234УБА, Ө/Ү орно)
+#   • дипломат хуучин: 2 үсэг ЭХЭНДЭЭ + 4 цифр (ДК0188 — Nissan Patrol-ын зураг)
+#   • дипломат шинэ: 4 цифр + ДК/АК АРДАА (1302ДК, 9914АК — улаан дэвсгэртэй) —
+#     зөвхөн ЭДГЭЭР хос үсгийг зөвшөөрнө!
+# АНХААР: 4 цифр + ДУРЫН 2 үсэг (1234УБ) хэлбэрийг ЗОРИУД оруулаагүй — энэ нь
+# энгийн дугаарын ТАЙРАГДСАН уншилт бөгөөд plates_ocr_similar-ийн тайралт-тохирол
+# «богино нь буруу форматтай» гэдэгт тулгуурладаг. ДК/АК-г нэмснээр «1234ДКХ →
+# 1234ДК» тайралт нийлэхээ болих жижиг эрсдэл бий — дипломат сери ховор тул
+# хог уншилтаар хаалт гацахаас (Хангарьд, 2026-08) хамаагүй бага хохиролтой.
+PLATE_RE = re.compile(r"^(?:\d{4}[А-ЯЁӨҮ]{3}|[А-ЯЁӨҮ]{2}\d{4}|\d{4}(?:ДК|АК))$")
 
 
 def normalize_plate(plate: str) -> str:
@@ -616,6 +622,55 @@ def _inner_lane_devices(site_id: str):
                                    Device.nested_inner.is_(True))
 
 
+def schedule_entry_hold(session_id: str, device_id: str, hold_seconds: int, policy: str):
+    """Формат буруу дугаартай орох event-ийн хаалтын шийдвэрийг АРД НЬ хойшлуулна
+    (snapshot/дэлгэцтэй ижил хэв маяг — event боловсруулалтыг хэзээ ч хүлээлгэхгүй)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return  # event loop-гүй орчин (тест г.м) — тест coroutine-ийг шууд дуудна
+    asyncio.create_task(entry_hold_expire(session_id, device_id, hold_seconds, policy))
+
+
+async def entry_hold_expire(session_id: str, device_id: str, hold_seconds: int, policy: str):
+    """Hold цонх дуусахад: зөв уншилт ирээгүй л бол policy-гийн дагуу шийднэ.
+
+    Зөв уншилт ИРСЭН бол юу ч хийхгүй — burst autocorrect session-ий дугаарыг
+    зөв болгоод хаалтаа өөрөө нээчихсэн (тэр зам hold-д баригддаггүй).
+    """
+    await asyncio.sleep(max(1, hold_seconds))
+    from .database import SessionLocal
+    db = SessionLocal()
+    try:
+        s = db.get(ParkingSession, session_id)
+        if not s or s.status != "OPEN":
+            return          # хаагдсан/устгагдсан — шийдэх зүйл алга
+        if is_valid_plate(s.plate_number):
+            return          # autocorrect зөв дугаар авчирсан — хаалт нээгдсэн
+        device = db.get(Device, device_id)
+        opened = False
+        if policy == "hold" and device:
+            # fail-open: зөв уншилт ирсэнгүй ч машиныг гацаахгүй — нээгээд
+            # тэмдэглэнэ. Оператор сүүлд нь snapshot-оос дугаарыг засна.
+            opened = await ensure_entry_barrier(db, device, s.plate_number, s.id)
+        db.add(AuditLog(username="system", action="ENTRY_HOLD", entity="session",
+                        entity_id=s.id,
+                        detail={"plate": s.plate_number, "policy": policy,
+                                "hold_seconds": hold_seconds, "opened": opened}))
+        db.commit()
+        notify(s.site_id, "PLATE_UNREADABLE", {
+            "session_id": s.id, "plate": s.plate_number, "lane": "entry",
+            "policy": policy, "holding": False, "opened": opened})
+        log.info("[entry-hold] %s: хүлээлт дууслаа — зөв уншилт ирсэнгүй "
+                 "(policy=%s, opened=%s, session %s)",
+                 s.plate_number, policy, opened, session_id)
+    except Exception:
+        log.exception("[entry-hold] шийдвэрийн алдаа (session %s)", session_id)
+        db.rollback()
+    finally:
+        db.close()
+
+
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict,
                        allow_open: bool = True) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол).
@@ -631,6 +686,14 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     _site = db.get(ParkingSite, site_id)
     restricted = bool(_site and _site.registered_only)
 
+    # Орох дугаарын шалгалт (Тохиргоо → Дүрэм): формат буруу уншилтад хаалтыг
+    # ШУУД нээхгүй, burst цонхны дахин уншилтыг хүлээнэ (hold), эсвэл огт
+    # нээхгүй (strict). Хангарьд: 5-7 оронтой хог уншилт session болж, гарахдаа
+    # «бүртгэлгүй гарах оролдлого» болдог байв (2026-08-21).
+    from .services.app_settings import entry_plate_policy
+    _pol, _hold_sec = entry_plate_policy(db, site_id)
+    hold_active = _pol in ("hold", "strict") and not is_valid_plate(plate)
+
     # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Орох камер нэг
     # машиныг хэдэн секундын зайтай 2 удаа өөр дугаараар (Х/К, О/0 г.м. андуурч)
     # уншихад 2 тусдаа session үүсдэг байсныг (ж: 5155УХК + 5155УКК) зогсооно.
@@ -642,13 +705,26 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
         ).all()
     ]
-    if any(is_duplicate_read(plate, rp) for rp in recent_plates):
+    dup_of = [rp for rp in recent_plates if is_duplicate_read(plate, rp)]
+    # ЗӨВ форматтай уншилт зөвхөн БУРУУ форматтай саяхны уншилтуудтай давхацвал
+    # энэ нь junk-аар бүртгэгдсэн (hold-д баригдсан) машины ЖИНХЭНЭ дугаар:
+    # dedup-аар хаявал session нь junk дугаартайгаа үлдэж гарахдаа таарахгүй.
+    # Оронд нь доош — burst autocorrect руу үргэлжлүүлж дугаарыг засуулна.
+    if dup_of and is_valid_plate(plate) and not any(is_valid_plate(rp) for rp in dup_of):
+        dup_of = []
+    if dup_of:
         # Давхар уншилт — шинэ session үүсгэхгүй, ГЭХДЭЭ хаалтыг заавал нээнэ:
         # машин хаалганы өмнө зогсож байгаа тул уншилт давтагдсан байж болно.
-        _can_open = allow_open and (not restricted or find_registered(db, plate, site_id))
+        # Hold горимд нэг л ялгаа: барьж буй машины ДАВТАН junk уншилт нээх
+        # ёсгүй (эс бол хүлээлт утгагүй) — харин саяхны ЗӨВ уншилттай давхацсан
+        # junk бол тэр зөв event хэдийнэ нээсэн тул энд нээх нь зөв хэвээр.
+        _held_dup = hold_active and not any(is_valid_plate(rp) for rp in dup_of)
+        _can_open = (allow_open and not _held_dup
+                     and (not restricted or find_registered(db, plate, site_id)))
         opened = await ensure_entry_barrier(db, device, plate) if _can_open else False
         db.commit()
-        return {"action": "dedup", "plate": plate, "barrier_opened": opened}
+        return {"action": "dedup", "plate": plate, "barrier_opened": opened,
+                "held": _held_dup}
 
     # ЦУВРАЛ уншилт: burst цонхонд (default 6с) энэ зогсоолын орох камерт өөр event
     # аль хэдийн ирсэн бол физикийн хувьд НЭГ машин (хаалтаар 6 секундэд 2 машин
@@ -687,10 +763,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                 return {"action": "plate_autocorrect", "session_id": prev_session.id,
                         "old": old_plate, "new": plate, "barrier_opened": opened}
         _reg = find_registered(db, plate, site_id)
+        # Hold: өмнөх burst уншилт нь ч буруу форматтай бол машин баригдсан
+        # хэвээр — junk-ийн junk давталт хаалт нээхгүй. Өмнөх нь зөв бол хаалт
+        # аль хэдийн нээгдсэн (cooldown давтахгүй) тул нээх нь аюулгүй.
+        _held_burst = hold_active and not is_valid_plate(burst_prev.plate_number)
         opened = (await ensure_entry_barrier(db, device, plate, registered=_reg)
-                  if allow_open and (not restricted or _reg) else False)
+                  if allow_open and not _held_burst and (not restricted or _reg) else False)
         db.commit()
-        return {"action": "burst_dedup", "plate": plate, "barrier_opened": opened}
+        return {"action": "burst_dedup", "plate": plate, "barrier_opened": opened,
+                "held": _held_burst}
 
     black = is_blacklisted(db, plate)
     registered = find_registered(db, plate, site_id)
@@ -771,9 +852,16 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
 
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
     denied = restricted and registered is None and not black_blocks
-    _entry_lines = None if (black_blocks or denied) else _site_screen_lines(db, site_id, "entry")
+    # Формат буруу дугаар + hold/strict policy → хаалтыг түр барина (доор шийднэ)
+    held = hold_active and not black_blocks and not denied
+    _entry_lines = None if (black_blocks or denied or held) else _site_screen_lines(db, site_id, "entry")
     if black_blocks:
         _welcome = ""
+    elif held:
+        # 2 мөрт анхааруулга: жолооч дугаараа камерт дахин зөв уншуулбал burst
+        # цонхонд autocorrect ажиллаж хаалт нээгдэнэ
+        _welcome = render_screen_text(settings.screen_plate_unreadable_text,
+                                      plate=plate, time_str=_local_hm)
     elif denied:  # хаалттай зогсоол — татгалзсан шалтгааныг дэлгэцэнд харуулна
         _welcome = render_screen_text("{plate}\nBurtgelgui mashin", plate=plate,
                                       time_str=_local_hm)
@@ -802,6 +890,17 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     elif denied:
         # Зөвхөн бүртгэлтэй машины зогсоол — хаалт нээхгүй, операторт мэдэгдэнэ
         notify(site_id, "UNREGISTERED_DENIED", {"plate": plate, "lane": "entry"})
+    elif held:
+        # Хаалтыг ОДООХОНДОО нээхгүй — _hold_sec хүлээгээд дахин шалгана:
+        # burst autocorrect зөв дугаар авчирвал тэр зам өөрөө нээнэ; ирэхгүй
+        # бол policy=hold үед нээгээд тэмдэглэнэ, strict үед оператор шийднэ.
+        log.info("[entry-hold] %s: формат буруу — хаалтыг %sс барьж дахин уншилт хүлээнэ "
+                 "(policy=%s, session %s)", plate, _hold_sec, _pol, session.id)
+        if allow_open and device.auto_open:
+            schedule_entry_hold(session.id, device.id, _hold_sec, _pol)
+        notify(site_id, "PLATE_UNREADABLE", {
+            "session_id": session.id, "plate": plate, "lane": "entry",
+            "policy": _pol, "holding": True})
     elif device.auto_open and allow_open:
         barrier_opened = await ensure_entry_barrier(db, device, plate, session.id, registered,
                                                     screen_text=_welcome)
@@ -809,7 +908,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     notify(site_id, "ENTRY_EVENT", {
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
         "registered": registered is not None, "blacklisted": black is not None,
-        "denied": denied, "barrier_opened": barrier_opened,
+        "denied": denied, "held": held, "barrier_opened": barrier_opened,
     })
     # Орох LED дэлгэцэнд орсон цаг + дугаар + мэндчилгээ (Managed горимд камер өөрөө
     # харуулахгүй тул сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг
@@ -818,7 +917,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # хаалтгүй/mock/амжилтгүй үед л камерт тусад нь очно.
     if _welcome:
         schedule_display(device.ip_address, _welcome, camera_credentials(device))
-    return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened}
+    return {"action": "entry", "session_id": session.id, "barrier_opened": barrier_opened,
+            "held": held}
 
 
 async def handle_inner_pass(db: Session, device: Device, plate: str, confidence: float,

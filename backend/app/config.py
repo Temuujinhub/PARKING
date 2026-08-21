@@ -520,6 +520,11 @@ class Settings(BaseSettings):
     screen_nosession_text: str = "Burtgel oldsongui"  # session олдоогүй үед
     # Орох LED — 3 мөр: орсон цаг / дугаар / мэндчилгээ ({time} = локал HH:MM)
     screen_welcome_text: str = "{time}\n{plate}\nTavtai moril"
+    # Орох LED — дугаар ФОРМАТ БУРУУ уншигдаж хаалтыг түр барьж буй үеийн 2 мөр
+    # (Тохиргоо → Орох дугаарын шалгалт, policy=hold/strict). Кирилл LED дээр
+    # ажилладаг нь 2026-07-29-нд батлагдсан; урсдаг лаг дэлгэцтэй зогсоолд .env-ээс
+    # латинаар (Dugaar unshigdsangui|Zov ontsgoor unshuulna uu) сольж болно.
+    screen_plate_unreadable_text: str = "Дугаар уншигдсангүй\nЗөв өнцгөөр уншуулна уу"
     # Дуут зарлал (trafficParking.setVoiceBroadcast) — анхдагчаар унтраалттай
     # (TTS хөдөлгүүр латин/кирилл текстийг зөв уншихгүй байж болзошгүй)
     screen_voice: bool = False
