@@ -41,11 +41,11 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 | Төрөл | Өөрчлөлт | Commit/PR | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| fix | **`GET /api/barriers/devices`** — хаалтны НИМГЭН жагсаалт (`id, name, lane_no, lane_dir, auto_open, status, last_seen`), `cashier`/`free_exit`/`barriers` эрхээр. `device_key`, IP, нэвтрэх нэр/нууц үг ОГТ буцаахгүй тул 08-20-ны хатууруулалт бүрэн хэвээр | ``e67c764`` | ⏳ | ⏳ |
-| fix | **Операторын эрхийн матриц худал харагддаг байв** — frontend `ROLE_DEFAULTS.OPERATOR`-т `pay_transfer` дутуу байсан тул «default-той ижил бол `null`» логик нь 4 модулийг default гэж үзэж `null` хадгалж, бодит эрх нь backend default (5) болж **«Дансаар» товч чекбоксгүйгээр гарч ирдэг** байв | ``e67c764`` | ⏳ | ⏳ |
-| fix | `free_exit`-ийн шошго «хаалт удирдах» → «хаалт гараар нээх (касс/POS)» — «Хаалтны удирдлага» хуудас нь `barriers` эрхээр хаалттай хэвээр тул шошго нь бодит эрхээ зөв илэрхийлнэ | ``e67c764`` | ⏳ | ⏳ |
-| test | `tests/test_pos_permissions.py` (21) — POS-ийн урсгалын endpoint БҮРИЙН dependency-г route-оос уншиж операторын эрхээр ажиллахыг барина; `require()` одоо `required_modules`-аа функц дээрээ тэмдэглэдэг | ``e67c764`` | ⏳ | ⏳ |
-| docs | `PAX_POS_APP_GUIDE.md` §3.6 + Postman collection — POS вендор шинэ endpoint рүү шилжинэ (заавал) | ``e67c764`` | ⏳ | ⏳ |
+| fix | **`GET /api/barriers/devices`** — хаалтны НИМГЭН жагсаалт (`id, name, lane_no, lane_dir, auto_open, status, last_seen`), `cashier`/`free_exit`/`barriers` эрхээр. `device_key`, IP, нэвтрэх нэр/нууц үг ОГТ буцаахгүй тул 08-20-ны хатууруулалт бүрэн хэвээр | ``e67c764`` | ✅ 08-21 | ⏳ |
+| fix | **Операторын эрхийн матриц худал харагддаг байв** — frontend `ROLE_DEFAULTS.OPERATOR`-т `pay_transfer` дутуу байсан тул «default-той ижил бол `null`» логик нь 4 модулийг default гэж үзэж `null` хадгалж, бодит эрх нь backend default (5) болж **«Дансаар» товч чекбоксгүйгээр гарч ирдэг** байв | ``e67c764`` | ✅ 08-21 | ⏳ |
+| fix | `free_exit`-ийн шошго «хаалт удирдах» → «хаалт гараар нээх (касс/POS)» — «Хаалтны удирдлага» хуудас нь `barriers` эрхээр хаалттай хэвээр тул шошго нь бодит эрхээ зөв илэрхийлнэ | ``e67c764`` | ✅ 08-21 | ⏳ |
+| test | `tests/test_pos_permissions.py` (21) — POS-ийн урсгалын endpoint БҮРИЙН dependency-г route-оос уншиж операторын эрхээр ажиллахыг барина; `require()` одоо `required_modules`-аа функц дээрээ тэмдэглэдэг | ``e67c764`` | ✅ 08-21 | ⏳ |
+| docs | `PAX_POS_APP_GUIDE.md` §3.6 + Postman collection — POS вендор шинэ endpoint рүү шилжинэ (заавал) | ``e67c764`` | ✅ 08-21 | ⏳ |
 
 **Хараахан заагаагүй, шийдвэр шаардсан:** HR роль (`{"users"}`) нь «Ажилтан» хуудсыг
 нээгээд ЯГ ижил 403 иднэ — `GET/POST/PUT /api/admin/users` нь `require_role("ADMIN",
