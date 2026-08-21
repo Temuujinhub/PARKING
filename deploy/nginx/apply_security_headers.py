@@ -8,16 +8,23 @@ add_header байвал эцгийн бүх header алга болно. Тийм
 (2026-08-20-нд яг ийм шалтгаанаар /assets/ бүх header-ээ алдсан байсан).
 
 Хийдэг зүйл:
-  1) `server_tokens off;` файлын эхэнд байхгүй бол нэмнэ
-  2) `server {` ба `location ... {` блок бүрийн ЭХЭНД include мөр оруулна
-  3) НЭГ МӨРТ location блокт (`location ~ ... { return 444; }`) хүрэхгүй
-  4) Аль хэдийн include хийсэн блокийг давхардуулахгүй
+  1) `server {` ба `location ... {` блок бүрийн ЭХЭНД include мөр оруулна
+  2) НЭГ МӨРТ location блокт (`location ~ ... { return 444; }`) хүрэхгүй
+  3) Аль хэдийн include хийсэн блокийг давхардуулахгүй
+  4) Нөөцийг /var/backups/parking-nginx/ руу бичнэ — nginx-ийн include зам
+     (`sites-enabled/*`) нь өргөтгөлөөр шүүдэггүй тул нөөцийг ТЭНД үлдээвэл
+     nginx түүнийг ч ачаалж server блок давхардана (2026-08-21 прод осол)
+
+`server_tokens off;` энд ОРУУЛАХГҮЙ — http түвшний тунхагтай давхцаж
+"directive is duplicate" болдог. Түүнийг /etc/nginx/nginx.conf-д гараар нээнэ.
 
 Файлыг ӨӨРЧЛӨХ ЗӨВХӨН --write өгсөн үед. Анхдагчаар зөвхөн diff харуулна.
 
     python3 apply_security_headers.py /etc/nginx/sites-enabled/parking
     python3 apply_security_headers.py /etc/nginx/sites-enabled/parking --write
 """
+import os
+import pathlib
 import re
 import shutil
 import sys
@@ -78,9 +85,6 @@ def main() -> int:
         lines = f.readlines()
 
     new, added = transform(lines)
-    if not any("server_tokens" in ln for ln in new):
-        new.insert(0, "# nginx хувилбараа зарлахгүй (аюулгүй байдал)\nserver_tokens off;\n\n")
-        added += 1
 
     if added == 0:
         print(f"✓ {path}: аль хэдийн бүрэн хатууруулсан — өөрчлөх зүйл алга")
@@ -92,7 +96,9 @@ def main() -> int:
         sys.stdout.writelines(difflib.unified_diff(lines, new, "одоогийн", "шинэ"))
         return 0
 
-    backup = f"{path}.backup-{datetime.now():%Y%m%d-%H%M%S}"
+    bdir = pathlib.Path(os.environ.get("PARKING_NGINX_BACKUP_DIR", "/var/backups/parking-nginx"))
+    bdir.mkdir(parents=True, exist_ok=True)
+    backup = str(bdir / f"{pathlib.Path(path).name}.backup-{datetime.now():%Y%m%d-%H%M%S}")
     shutil.copy2(path, backup)
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(new)

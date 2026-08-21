@@ -58,6 +58,61 @@ ls -t /etc/nginx/sites-enabled/*.backup-* | head -1 | xargs -I{} sh -c 'cp {} "$
 
 ---
 
+## 🚑 Онцгой байдал: `nginx -t` унасан бол
+
+**Эхлээд мэд: `reload` нь ЗӨВХӨН `nginx -t` амжилттай болсны дараа ажилладаг.**
+Тиймээс тест унасан бол ажиллаж буй nginx санах ойд байгаа СҮҮЛИЙН САЙН
+тохиргоогоороо үйлчилсээр байна — сайт унахгүй. Гэхдээ `restart`/reboot хийвэл
+босохгүй тул яаралтай засна.
+
+### 1. Хамгийн түгээмэл: нөөц файл nginx-ийн ачаалах хавтсанд үлдсэн
+
+`include /etc/nginx/sites-enabled/*;` нь **өргөтгөлөөр шүүдэггүй** — тэнд үлдсэн
+`*.backup-*` файлыг ч nginx ачаалж, `server` блокууд давхардана.
+
+```bash
+sudo mkdir -p /var/backups/parking-nginx
+sudo mv /etc/nginx/sites-enabled/*.backup-* /var/backups/parking-nginx/ 2>/dev/null
+sudo mv /etc/nginx/conf.d/*.backup-*        /var/backups/parking-nginx/ 2>/dev/null
+sudo nginx -t
+```
+
+### 2. `"server_tokens" directive is duplicate`
+
+`/etc/nginx/nginx.conf`-ийн http блокт аль хэдийн байхад vhost дотор дахин
+тунхаглагдсан. vhost доторхыг нь устгана (http түвшнийх бүх server-т үйлчилнэ):
+
+```bash
+sudo sed -i '/^server_tokens/d' /etc/nginx/sites-enabled/parking && sudo nginx -t
+```
+
+### 3. Гараар бүрэн буцаах
+
+```bash
+ls -t /var/backups/parking-nginx/parking.backup-* | head -1
+sudo cp /var/backups/parking-nginx/parking.backup-<ЦАГ> /etc/nginx/sites-enabled/parking
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 4. Үйлчилгээ амьд эсэхийг батлах
+
+```bash
+curl -sI http://127.0.0.1/api/health && systemctl is-active nginx parking-backend
+```
+
+---
+
+## `server_tokens off` (нэмэлт, гараар)
+
+Скрипт үүнийг ОРУУЛАХГҮЙ — http түвшний тунхагтай давхцаж `nginx -t`-г
+унагаадаг. `/etc/nginx/nginx.conf`-ийн http блокт нэг удаа нээнэ:
+
+```bash
+sudo sed -i 's/^\s*#\s*server_tokens off;/\tserver_tokens off;/' /etc/nginx/nginx.conf && sudo nginx -t && sudo systemctl reload nginx
+```
+
+---
+
 ## Үе шат 2 — Сканнерын шуугианг таслах (эрсдэл бага)
 
 vhost-ийн `server { }` дотор гараар нэмнэ (SPA-гийн `try_files` улмаас

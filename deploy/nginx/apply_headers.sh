@@ -16,6 +16,28 @@ DRY=""
 [ "$(id -u)" -eq 0 ] || { echo "✗ root эрхээр ажиллуулна уу (sudo)"; exit 1; }
 command -v nginx >/dev/null || { echo "✗ nginx олдсонгүй"; exit 1; }
 
+BACKUP_DIR=/var/backups/parking-nginx
+export PARKING_NGINX_BACKUP_DIR="$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR"
+
+# ── 0. Тэнэсэн нөөц файлыг зайлуулах ──────────────────────────────────────
+# nginx-ийн `include sites-enabled/*` нь ӨРГӨТГӨЛӨӨР ШҮҮДЭГГҮЙ тул тэнд үлдсэн
+# нөөц файлыг ч ачаалж, server блок давхардуулж `nginx -t`-г унагаана.
+shopt -s nullglob
+STRAY=(/etc/nginx/sites-enabled/*.backup-* /etc/nginx/conf.d/*.backup-*)
+if [ ${#STRAY[@]} -gt 0 ]; then
+  echo "⚠ nginx-ийн ачаалах хавтсанд нөөц файл байна — $BACKUP_DIR руу зөөж байна:"
+  for s in "${STRAY[@]}"; do mv -v "$s" "$BACKUP_DIR/" | sed 's/^/    /'; done
+fi
+
+# ── 0b. Суурь төлөв — ЭХЛЭХИЙН ӨМНӨ тохиргоо эрүүл байх ёстой ─────────────
+if ! nginx -t >/dev/null 2>&1; then
+  echo "✗ nginx -t нь ӨӨРЧЛӨЛТ ХИЙХИЙН ӨМНӨ аль хэдийн унаж байна:"
+  nginx -t 2>&1 | sed 's/^/    /'
+  echo "  Эхлээд үүнийг засна уу — энэ скрипт юу ч хийхгүй гарлаа."
+  exit 1
+fi
+
 # ── 1. Snippet суулгах ────────────────────────────────────────────────────
 if [ -z "$DRY" ]; then
   install -D -m 0644 "$HERE/parking-security.conf" /etc/nginx/snippets/parking-security.conf
@@ -23,7 +45,6 @@ if [ -z "$DRY" ]; then
 fi
 
 # ── 2. vhost бүрд include тараах ──────────────────────────────────────────
-shopt -s nullglob
 VHOSTS=(/etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf)
 CHANGED=()
 for f in "${VHOSTS[@]}"; do
@@ -46,7 +67,7 @@ if nginx -t 2>&1 | sed 's/^/  /'; then
 else
   echo "✗ nginx -t УНАЛАА — нөөцөөс буцааж байна…"
   for f in "${CHANGED[@]}"; do
-    b=$(ls -t "$f".backup-* 2>/dev/null | head -1)
+    b=$(ls -t "$BACKUP_DIR/$(basename "$f")".backup-* 2>/dev/null | head -1)
     [ -n "$b" ] && cp "$b" "$f" && echo "  ↩ $f ← $b"
   done
   nginx -t >/dev/null 2>&1 && echo "✓ буцаалт амжилттай — тохиргоо хэвээр" \
