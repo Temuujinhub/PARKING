@@ -25,7 +25,8 @@ settings.log_tail_enabled = True
 
 from app.database import SessionLocal  # noqa: E402
 from app.models import Device, LprEvent, ParkingSession, ParkingSite  # noqa: E402
-from app.services import log_tail  # noqa: E402
+from app.services import log_tail
+from app.services.camera_records import to_camera_epoch  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -37,9 +38,17 @@ def check(name, cond, extra=""):
 
 
 def _rec(plate, at_utc, skew_min=0):
-    """Камерын бичлэгийн хэлбэр. skew_min — камерын цаг гулссан байдал."""
+    """Камерын бичлэгийн хэлбэр. skew_min — камерын цаг гулссан байдал.
+
+    ЧУХАЛ: RecordFinder-ийн `Time` нь ЛОКАЛ цагийн epoch (2026-08-22-нд
+    10.0.106.12 дээр батлагдсан: бичлэгийн Time-ын заасан УБ цаг нь тэр
+    машины амьд event ирсэн УБ цагтай 6 секундын зөрүүтэй таарсан).
+    Хиймэл бичлэг ч мөн адил локал epoch байх ёстой — эс бол тест бодит бус
+    конвенцийг шалгана.
+    """
     t = at_utc + timedelta(minutes=skew_min)
-    return {"PlateNumber": plate, "Time": int(t.replace(tzinfo=timezone.utc).timestamp()),
+    return {"PlateNumber": plate,
+            "Time": to_camera_epoch(t.replace(tzinfo=timezone.utc)),
             "Event": 34, "event_name": "TrafficTollGate"}
 
 

@@ -23,7 +23,31 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from ..config import settings
 from .barrier import DahuaRpc, DahuaRpcError
+
+
+def _cam_offset_sec() -> int:
+    return int(settings.camera_tz_offset_hours) * 3600
+
+
+def to_camera_epoch(dt_utc: datetime) -> int:
+    """UTC → камерын ЛОКАЛ epoch.
+
+    RecordFinder-ийн `Time` талбар нь нэрнээсээ үл хамааран төхөөрөмжийн
+    ЛОКАЛ цагийг epoch болгосон утга (Dahua-ийн live event-д ч мөн адил:
+    `UTC` талбар=локал, `RealUTC`=жинхэнэ UTC). Батлагдсан (2026-08-22,
+    10.0.106.12): камерын бичлэг Time→«UTC» 08-20 18:59:41 гэж уншигдсан
+    машин ҮНЭНДЭЭ УБ 18:59:47-д амьд event-ээр ирсэн — өөрөөр хэлбэл Time нь
+    УБ локал цаг байв.
+    """
+    return int(dt_utc.timestamp()) + _cam_offset_sec()
+
+
+def from_camera_epoch(t) -> datetime:
+    """Камерын локал epoch → жинхэнэ UTC (naive)."""
+    return (datetime.fromtimestamp(t - _cam_offset_sec(), tz=timezone.utc)
+            .replace(tzinfo=None))
 
 EVENT_NAMES = {
     34: "gate_pass",        # TrafficTollGate — хаалтын гарцаар машин өнгөрсөн
@@ -75,7 +99,7 @@ async def _fetch_with_rpc(rpc: DahuaRpc, start_utc: datetime, end_utc: datetime,
         raise DahuaRpcError(f"RecordFinder.create бүтсэнгүй: {inst}")
     records: list[dict] = []
     try:
-        cond: dict = {"Time": ["<>", int(start_utc.timestamp()), int(end_utc.timestamp())]}
+        cond: dict = {"Time": ["<>", to_camera_epoch(start_utc), to_camera_epoch(end_utc)]}
         if plate:
             cond["PlateNumber"] = f"*{plate}*"
         st = await rpc._call("RecordFinder.startFind", {"condition": cond}, obj=obj)
@@ -87,8 +111,7 @@ async def _fetch_with_rpc(rpc: DahuaRpc, start_utc: datetime, end_utc: datetime,
             batch = params.get("records") or []
             for rec in batch:
                 t = rec.get("Time")
-                rec["time_utc"] = (datetime.fromtimestamp(t, tz=timezone.utc)
-                                   .strftime("%Y-%m-%d %H:%M:%S")
+                rec["time_utc"] = (from_camera_epoch(t).strftime("%Y-%m-%d %H:%M:%S")
                                    if isinstance(t, (int, float)) else None)
                 rec["event_name"] = EVENT_NAMES.get(rec.get("Event"),
                                                     str(rec.get("Event")))
@@ -194,7 +217,7 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
             ev = {
                 "plate": normalized_plate(r),
                 "raw_plate": r.get("PlateNumber"),
-                "time": datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None),
+                "time": from_camera_epoch(t),
                 "lane_dir": lane_dir,
                 "event": r.get("event_name"),
                 "source": r.get("SnapSource"),

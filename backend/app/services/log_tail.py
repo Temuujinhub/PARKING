@@ -35,7 +35,8 @@ from ..database import SessionLocal
 from ..models import Device, LprEvent, ParkingSite
 from ..session_logic import (handle_entry, handle_exit, handle_inner_pass,
                              normalize_plate)
-from .camera_records import fetch_snap_events, normalized_plate
+from .camera_records import (fetch_snap_events, from_camera_epoch,
+                             normalized_plate)
 from .device_auth import camera_credentials
 
 log = logging.getLogger("parking.log_tail")
@@ -150,8 +151,7 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
         t = r.get("Time")
         if not p or not isinstance(t, (int, float)):
             continue
-        rows.append((datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None),
-                     normalize_plate(p), r))
+        rows.append((from_camera_epoch(t), normalize_plate(p), r))
     rows.sort()
 
     # ── ЭХНИЙ УДАА: зөвхөн ТЭМДЭГЛЭНЭ, боловсруулахгүй ──────────────────────
