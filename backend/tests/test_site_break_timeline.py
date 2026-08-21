@@ -10,12 +10,13 @@
 """
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 
-from site_break_timeline import baseline, find_break  # noqa: E402
+from site_break_timeline import (anomalies, avg_ticket, baseline,  # noqa: E402
+                                 find_break, is_weekend)
 
 ok = 0
 
@@ -83,5 +84,75 @@ check("бааз = эхний хагасын медиан (эвдэрсэн өд�
 # Эхний хагас нь дууссан өдрүүдээс тооцогдоно — дуусаагүй өдөр баазыг гажуудуулахгүй
 rows = [day(i) for i in range(6)] + [day(6, rev=10_000, partial=True)]
 check("дуусаагүй өдөр баазад орохгүй", baseline(rows, "rev") == 580_000)
+
+# ── Амралтын өдрийг «эвдрэл» гэж заахгүй (Хангарьд/Кэй Эйч дээр гарсан алдаа) ──
+# 08-12 Лх … 08-21 Ба; 08-15/16 нь Бямба/Ням — ачаалал хагасаар буурдаг.
+def real(i):
+    return date(2026, 8, 12) + timedelta(days=i)
+
+
+check("гараг зөв ангилагдана", is_weekend(real(3)) and is_weekend(real(4))
+      and not is_weekend(real(5)))
+
+week = []
+for i in range(9):
+    d = real(i)
+    if is_weekend(d):
+        row = day(0, reads=320, ent=560, exits=580, billed=147, rev=270_000)
+    else:
+        row = day(0, reads=650, ent=1100, exits=1100, billed=400, rev=950_000)
+    row["d"] = d
+    week.append(row)
+d, _ = stage_of(week)
+check("амралтын өдрийн уналтыг эвдрэл гэж зарлахгүй", d is None)
+
+# Ажлын өдөр үнэхээр унавал ажлын өдрийн баазаар барина
+week[7]["rev"] = 300_000        # 08-19 Лх
+d, _ = stage_of(week)
+check("ажлын өдрийн бодит уналт баригдана", d == real(7))
+
+# ── Ашиглалтад ороогүй эхний өдрийг эвдрэл гэж зарлахгүй (NIC) ──────────────
+new_site = []
+for i in range(9):
+    row = day(0, reads=70, ent=130, exits=130, billed=60, rev=120_000)
+    row["d"] = real(i)
+    new_site.append(row)
+new_site[0].update(reads_in=0, reads_out=0, ent=1, exits=6, billed=0, free=6, rev=0)
+d, _ = stage_of(new_site)
+check("цонхны эхний өдөр (өмнөх хэвийн өдөргүй) эвдрэл болохгүй", d is None)
+
+# ── anomalies(): алдаж байсан дөрвөн дохио ──────────────────────────────────
+TODAY = date(2026, 8, 20)
+base = {"rev": 844_000, "billed": 143, "reads_in": 228, "ent": 350, "exits": 339}
+
+# (1) Дундаж төлбөр унасан — машины тоо хэвээр, ҮНЭ унасан (Рашбулаг ЭТТ)
+brk = day(0, reads=192, ent=233, exits=242, billed=86, rev=105_500)
+txt = " ".join(anomalies([brk], brk, base, [], TODAY))
+check("дундаж төлбөрийн уналт илэрнэ", "ДУНДАЖ ТӨЛБӨР" in txt)
+check("дундаж төлбөр = орлого / төлбөртэй гарц", round(avg_ticket(brk)) == 1227)
+
+# Машины тоо ч хамт унасан бол энэ нь ҮНЭний асуудал БИШ — давхар дуугарахгүй
+vol = day(0, reads=20, ent=25, exits=25, billed=12, rev=15_000)
+txt = " ".join(anomalies([vol], vol, base, [], TODAY))
+check("тоо хэмжээний уналтыг «үнэ унасан» гэж хэлэхгүй", "ДУНДАЖ ТӨЛБӨР" not in txt)
+
+# (2) Гарц уншилтгүйгээр хаагдсан — авто-хаалтын дохио (Номадс, Эрэл-13)
+ghost = day(0, reads=163, ent=178, exits=268, billed=27, rev=24_000)
+ghost["reads_out"], ghost["free"] = 38, 241
+txt = " ".join(anomalies([ghost], None, base, [], TODAY))
+check("гарц >> гарах уншилт бол авто-хаалт сэжиглэнэ", "ГАРЦ УНШИЛТГҮЙ" in txt)
+check("0₮ гарц 80%+ бол тусад нь дуугарна", "0₮ ГАРЦ 80%" in txt)
+
+# (3) Тогтмол ажилласан терминал зогссон (pos.ylalt — 40% босгонд баригдаагүй)
+stats = [("pos.ylalt", datetime(2026, 8, 14, 18, 59), 234),
+         ("sogii", datetime(2026, 8, 20, 15, 19), 30)]
+txt = " ".join(anomalies([day(0)], None, base, stats, TODAY))
+check("6 хоног чимээгүй терминал илэрнэ", "pos.ylalt" in txt)
+check("өчигдөр ажилласан кассирыг зогссон гэхгүй", "sogii" not in txt)
+
+# Ховор хэрэглэгддэг данс 2 хоног чимээгүй байхад дуугарахгүй (шуугиан багасгах)
+rare = [("uyanga", datetime(2026, 8, 14, 10, 0), 3)]
+txt = " ".join(anomalies([day(0)], None, base, rare, TODAY))
+check("цөөн төлбөртэй данс худал дохио үүсгэхгүй", "uyanga" not in txt)
 
 print(f"\n{ok} шалгалт БҮГД тэнцэв.")

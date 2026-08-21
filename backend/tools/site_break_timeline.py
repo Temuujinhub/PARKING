@@ -119,27 +119,94 @@ def collect(db, site, days, cut_hour):
     return rows, cam_daily
 
 
-def baseline(rows, key):
-    """Дууссан өдрүүдийн эхний хагасын медиан — «хэвийн» түвшин."""
+def is_weekend(d):
+    return d.weekday() >= 5
+
+
+def baseline(rows, key, cls=None):
+    """Цонхны ЭХНИЙ ХАГАСЫН медиан — «эвдрэхээс өмнөх хэвийн түвшин».
+
+    cls өгвөл зөвхөн ижил төрлийн өдрөөр (ажлын өдөр vs амралт) тооцно —
+    эс тэгвэл Бямба/Ням нь ажлын өдрийн баазтай харьцуулагдаж «эвдрэл» мэт
+    харагдана (Хангарьд, Кэй Эйч дээр яг тийм худал дохио гарсан).
+    """
     done = [r for r in rows if not r["partial"]]
     half = done[: max(1, len(done) // 2)]
+    if cls is not None:
+        same = [r for r in half if is_weekend(r["d"]) == cls]
+        if same:
+            half = same
     return statistics.median([r[key] for r in half]) if half else 0
 
 
+def avg_ticket(r):
+    """Нэг ТӨЛБӨРТЭЙ гарцад ногдох дүн — тариф/хөнгөлөлтийн өөрчлөлтийг илчилнэ."""
+    return r["rev"] / r["billed"] if r["billed"] else 0
+
+
 def find_break(rows):
-    """Орлого эхлээд унасан өдөр, тэр өдөр эхлээд унасан ШАТ-ыг буцаана."""
-    base = {k: baseline(rows, k) for k, _, _ in STAGES}
-    if not base["rev"]:
-        return None, None, base
-    for r in rows:
-        if r["partial"]:
+    """Орлого эхлээд унасан өдөр, тэр өдөр эхлээд унасан ШАТ-ыг буцаана.
+
+    Эвдрэл гэдэг нь ХЭВИЙН → УНАСАН шилжилт. Тиймээс нэр дэвшсэн өдрийн
+    ӨМНӨХ ижил төрлийн өдөр хэвийн байсан байх ёстой — эс тэгвэл цонхны эхний
+    өдөр (зогсоол хараахан ашиглалтад ороогүй байхад) «эвдрэл» гэж гарна.
+    """
+    base_of = {c: {k: baseline(rows, k, c) for k, _, _ in STAGES}
+               for c in (False, True)}
+    done = [r for r in rows if not r["partial"]]
+    for i, r in enumerate(done):
+        cls = is_weekend(r["d"])
+        base = base_of[cls]
+        if not base["rev"] or r["rev"] >= base["rev"] * 0.4:
             continue
-        if r["rev"] < base["rev"] * 0.4:
-            for key, name, hint in STAGES:
-                if base[key] and r[key] < base[key] * 0.5:
-                    return r, (key, name, hint), base
-            return r, None, base
-    return None, None, base
+        prev = next((q for q in reversed(done[:i]) if is_weekend(q["d"]) == cls), None)
+        if prev is None or prev["rev"] < base["rev"] * 0.6:
+            continue
+        for key, name, hint in STAGES:
+            if base[key] and r[key] < base[key] * 0.5:
+                return r, (key, name, hint), base
+        return r, None, base
+    return None, None, base_of[False]
+
+
+def anomalies(rows, brk, base, cashier_stats, today):
+    """Эвдрэлийн өдрөөс ГАДНА анзаарах ёстой зүйлс."""
+    out = []
+
+    # (1) Дундаж төлбөр унасан — машины тоо биш ҮНЭ өөрчлөгдсөн
+    if brk and base["billed"]:
+        b_avg = base["rev"] / base["billed"]
+        r_avg = avg_ticket(brk)
+        if b_avg and brk["billed"] >= base["billed"] * 0.5 and r_avg < b_avg * 0.5:
+            out.append(f"ДУНДАЖ ТӨЛБӨР унасан: {b_avg:,.0f}₮ → {r_avg:,.0f}₮ "
+                       f"(төлбөртэй гарц {int(brk['billed'] * 100 // base['billed'])}% "
+                       f"хэвээр — машин биш ҮНЭ өөрчлөгдсөн)")
+            out.append("   → тариф/хөнгөлөлт шалга; ЭСВЭЛ өмнөх өндөр дундаж нь "
+                       "ӨР цуглуулалт байсан эсэхийг revenue_source_audit --site-ээр")
+
+    # (2) Гарц уншилтгүйгээр хаагдаж байна — авто-хаалт/гараар хаалтын дохио
+    ghost = [r for r in rows if r["exits"] >= 20 and r["exits"] > r["reads_out"] * 2]
+    if ghost:
+        d = ", ".join(f"{r['d'].strftime('%m-%d')} ({r['exits']} гарц / "
+                      f"{r['reads_out']} уншилт)" for r in ghost[-3:])
+        out.append(f"ГАРЦ УНШИЛТГҮЙ хаагдсан: {d}")
+        out.append("   → 12ц авто-хаалт эсвэл гараар хаалт; эдгээр гарц 0₮-өөр хаагддаг")
+
+    # (3) 0₮ гарцын эзлэх хувь огцом өссөн
+    free = [r for r in rows if r["exits"] >= 20 and r["free"] > r["exits"] * 0.8]
+    if free:
+        d = ", ".join(f"{r['d'].strftime('%m-%d')} ({r['free']}/{r['exits']})"
+                      for r in free[-3:])
+        out.append(f"0₮ ГАРЦ 80%-иас дээш: {d}")
+        out.append("   → тариф холбоогүй / no_charge / гэрээт жагсаалт хэт өргөн")
+
+    # (4) Тогтмол ажиллаж байсан кассир/терминал зогссон
+    for uname, last, n in cashier_stats:
+        idle = (today - last.date()).days
+        if n >= 20 and idle >= 2:
+            out.append(f"КАССИР/ТЕРМИНАЛ ЗОГССОН: «{uname}» — {n} төлбөр хийгээд "
+                       f"{last.strftime('%m-%d %H:%M')}-ээс хойш {idle} хоног чимээгүй")
+    return out
 
 
 def report(db, site, days, cut_hour):
@@ -147,7 +214,7 @@ def report(db, site, days, cut_hour):
     print(f"\n══ {site.name} ({site.site_code}) — {days} хоногийн ХООЛОЙН ЗУРАГЛАЛ "
           f"(УБ цаг) ══")
     print(f"   {'өдөр':10}{'уншилт о/г':>14}{'цоорхой':>9}{'орсон':>7}{'гарсан':>8}"
-          f"{'төлб.':>7}{'0₮':>6}{'орлого₮':>11}{'касс':>6}")
+          f"{'төлб.':>7}{'0₮':>6}{'орлого₮':>11}{'дунд₮':>8}{'касс':>6}")
     for r in rows:
         mark = "  ← өнөөдөр (дуусаагүй)" if r["partial"] else ""
         gap = f"{r['gap']:.1f}ц" + ("⚠" if r["gap"] >= 4 else " ")
@@ -155,7 +222,18 @@ def report(db, site, days, cut_hour):
         day = f"{r['d']} {WD[r['d'].weekday()]}"
         print(f"   {day:10}{reads:>14}{gap:>9}{r['ent']:>7}{r['exits']:>8}"
               f"{r['billed']:>7}{r['free']:>6}{r['rev']:>11,.0f}"
-              f"{r['cashiers']:>6}{mark}")
+              f"{avg_ticket(r):>8,.0f}{r['cashiers']:>6}{mark}")
+
+    # Кассирын идэвх — цуглуулалт зогссон эсэхийг хүн тус бүрээр
+    a, _ = day_bounds(rows[0]["d"])
+    _, b = day_bounds(rows[-1]["d"])
+    who = [(u, last + TZ, n) for u, last, n in
+           db.query(User.username, func.max(Payment.paid_at), func.count(Payment.id))
+           .join(Payment, Payment.cashier_id == User.id)
+           .join(ParkingSession, ParkingSession.id == Payment.session_id)
+           .filter(ParkingSession.site_id == site.id, Payment.status == "PAID",
+                   Payment.paid_at >= a, Payment.paid_at < b)
+           .group_by(User.username).order_by(func.max(Payment.paid_at).desc()).all()]
 
     brk, stage, base = find_break(rows)
     total_act = sum(r["reads_in"] + r["reads_out"] + r["ent"] + r["exits"] for r in rows)
@@ -187,6 +265,12 @@ def report(db, site, days, cut_hour):
         elif after:
             print(f"   Тэр өдрөөс хойш зарим өдөр сэргэсэн — тогтворгүй (тасалдаг).")
 
+    extra = anomalies(rows, brk, base, who, rows[-1]["d"])
+    if extra:
+        print("\n   ── МӨН АНЗААР ──")
+        for line in extra:
+            print(f"   {line}" if line.startswith("   ") else f"   ⚠ {line}")
+
     # Камерын өдөр тутмын уншилт — аль ТУХАЙН камер унтарсныг заана
     cams = (db.query(Device).filter(Device.site_id == site.id,
                                     Device.device_type == "camera").all())
@@ -210,22 +294,13 @@ def report(db, site, days, cut_hour):
             print(f"   {(c.name or '?')[:18]:20}{(c.lane_dir or '?'):7}{cells}"
                   f"{tag}{state}{age}{warn}")
 
-    # Кассирын идэвх — цуглуулалт зогссон эсэхийг хүн тус бүрээр
-    a, _ = day_bounds(rows[0]["d"])
-    _, b = day_bounds(rows[-1]["d"])
-    who = (db.query(User.username, func.max(Payment.paid_at), func.count(Payment.id))
-           .join(Payment, Payment.cashier_id == User.id)
-           .join(ParkingSession, ParkingSession.id == Payment.session_id)
-           .filter(ParkingSession.site_id == site.id, Payment.status == "PAID",
-                   Payment.paid_at >= a, Payment.paid_at < b)
-           .group_by(User.username).order_by(func.max(Payment.paid_at).desc()).all())
     if who:
         print("\n   Кассир (энэ хугацаанд):")
         for uname, last, n in who[:6]:
-            days_ago = (utcnow() - last).total_seconds() / 86400
+            days_ago = ((utcnow() + TZ) - last).total_seconds() / 86400
             warn = "  ⚠ ЗОГССОН" if days_ago >= 1.5 else ""
             print(f"   {uname[:20]:22}{n:>6} төлбөр   сүүлд "
-                  f"{(last + TZ).strftime('%m-%d %H:%M')}{warn}")
+                  f"{last.strftime('%m-%d %H:%M')}{warn}")
 
 
 def main():
