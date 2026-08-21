@@ -190,6 +190,8 @@ sudo journalctl -u parking-backend --since '-7 days' | grep -oE 'lpr_push: ip=[0
 * **IP гарч ирвэл** → тэдгээрийн дэд сүлжээг ЗААВАЛ `allow`-д нэмнэ.
   Таамгаар бүү бич — жагсаалтад гарсан IP-г л бич.
 
+⚠ Дараах нь мөн адил **тохиргооны файлд бичих агуулга**, терминалын команд БИШ — `sudo nano /etc/nginx/sites-enabled/parking` дотор бичнэ.
+
 ```nginx
 location /api/lpr/ {
     include snippets/parking-security.conf;
