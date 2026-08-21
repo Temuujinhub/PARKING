@@ -1,0 +1,70 @@
+Request URL
+http://172.16.100.20/api/events
+Request Method
+GET
+Status Code
+200 OK
+Remote Address
+172.16.100.20:80
+Referrer Policy
+strict-origin-when-cross-origin
+access-control-allow-origin
+*
+cache-control
+no-cache
+connection
+keep-alive
+content-type
+text/event-stream
+date
+Fri, 21 Aug 2026 13:19:11 GMT
+transfer-encoding
+chunked
+vary
+Origin
+accept
+text/event-stream
+accept-encoding
+gzip, deflate
+accept-language
+en-US,en;q=0.9,ru;q=0.8,mn;q=0.7
+cache-control
+no-cache
+connection
+keep-alive
+host
+172.16.100.20
+pragma
+no-cache
+referer
+http://172.16.100.20/
+user-agent
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36{"id":"1787318307289-6zd9j","plateNumber":"4799УАТ","confidence":90,"timestamp":"2026-08-21T13:18:26.000Z","vehicleColor":"Black","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"entering","objectId":23249,"groupId":136321718,"parkingLotId":38,"parkingLotName":"ҮЦХ-Зүүн","parkingCameraId":84,"camDirection":"enter"} data: {"id":"1787318186355-8q93u","plateNumber":"5285УБГ","confidence":78,"timestamp":"2026-08-21T13:15:56.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"exiting","objectId":746646401,"groupId":93404228,"parkingLotId":9,"parkingLotName":"Соло","parkingCameraId":21,"camDirection":"exit"}
+
+data: {"id":"1787318190150-giuq4","plateNumber":"7895УБҮ","confidence":90,"timestamp":"2026-08-21T13:16:30.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"entering","objectId":13857,"groupId":131083092,"parkingLotId":35,"parkingLotName":"Спорт","parkingCameraId":78,"camDirection":"enter"}
+
+data: {"id":"1787318190979-4ct72","plateNumber":"7337УБП","confidence":90,"timestamp":"2026-08-21T13:16:26.000Z","vehicleColor":"Gray","plateColor":"White","vehicleType":"Hyundai","laneNo":1,"direction":"entering","objectId":1249905841,"groupId":156241520,"parkingLotId":22,"parkingLotName":"3-р эмнэлэг","parkingCameraId":50,"camDirection":"enter"}
+
+data: {"id":"1787318199101-st7m1","plateNumber":"9059УНУ","confidence":90,"timestamp":"2026-08-21T13:09:33.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"exiting","objectId":1073786969,"groupId":134225922,"parkingLotId":15,"parkingLotName":"Хан гарьд","parkingCameraId":33,"camDirection":"exit"}
+
+data: {"id":"1787318203464-9z0sb","plateNumber":"337УБП","confidence":66,"timestamp":"2026-08-21T13:16:39.000Z","vehicleColor":"Gray","plateColor":"White","vehicleType":"Nissan","laneNo":1,"direction":"exiting","objectId":1258310785,"groupId":157302042,"parkingLotId":22,"parkingLotName":"3-р эмнэлэг","parkingCameraId":51,"camDirection":"exit"}
+
+data: {"id":"1787318203844-1voiu","plateNumber":"3421УВС","confidence":74,"timestamp":"2026-08-21T13:09:38.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Unknown","laneNo":1,"direction":"entering","objectId":1627428441,"groupId":203483916,"parkingLotId":13,"parkingLotName":"Ялалт","parkingCameraId":28,"camDirection":"enter"}
+
+data: {"id":"1787318211535-aim0m","plateNumber":"8887УЕХ","confidence":94,"timestamp":"2026-08-21T13:16:51.000Z","vehicleColor":"Black","plateColor":"Yellow","vehicleType":"Volkswagen","laneNo":1,"direction":"exiting","objectId":981472897,"groupId":122685100,"parkingLotId":11,"parkingLotName":"kh","parkingCameraId":25,"camDirection":"exit"}
+
+data: {"id":"1787318214015-svgsb","plateNumber":"4198ОРН","confidence":86,"timestamp":"2026-08-21T13:16:23.000Z","vehicleColor":"Black","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"exiting","objectId":746646409,"groupId":93404230,"parkingLotId":9,"parkingLotName":"Соло","parkingCameraId":21,"camDirection":"exit"}
+
+data: {"id":"1787318219895-ve0nu","plateNumber":"7249ЦАН","confidence":90,"timestamp":"2026-08-21T13:16:59.000Z","vehicleColor":"Gray","plateColor":"White","vehicleType":"Lexus","laneNo":1,"direction":"entering","objectId":23241,"groupId":136321704,"parkingLotId":38,"parkingLotName":"ҮЦХ-Зүүн","parkingCameraId":84,"camDirection":"enter"}
+
+data: {"id":"1787318224890-7mthx","plateNumber":"4022УБВ","confidence":82,"timestamp":"2026-08-21T13:17:04.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Lexus","laneNo":1,"direction":"exiting","objectId":22137,"groupId":40902684,"parkingLotId":33,"parkingLotName":"Гэгээнтэн урд","parkingCameraId":75,"camDirection":"exit"}
+
+data: {"id":"1787318228290-dg3nd","plateNumber":"3457УНО","confidence":90,"timestamp":"2026-08-21T13:17:08.000Z","vehicleColor":"Silver","plateColor":"White","vehicleType":"Toyota","laneNo":1,"direction":"exiting","objectId":117449025,"groupId":14687168,"parkingLotId":26,"parkingLotName":"ҮЦХ-Баруун","parkingCameraId":60,"camDirection":"exit"}
+
+data: {"id":"1787318229141-ld7z6","plateNumber":"2032УАЕ","confidence":90,"timestamp":"2026-08-21T13:17:05.000Z","vehicleColor":"Black","plateColor":"Yellow","vehicleType":"Toyota","laneNo":1,"direction":"entering","objectId":1082173129,"groupId":135307652,"parkingLotId":22,"parkingLotName":"3-р эмнэлэг","parkingCameraId":48,"camDirection":"enter"}
+
+data: {"id":"1787318232295-gk224","plateNumber":"7413УАР","confidence":90,"timestamp":"2026-08-21T13:17:08.000Z","vehicleColor":"Black","plateColor":"White","vehicleType":"Lexus","laneNo":1,"direction":"exiting","objectId":1317023433,"groupId":164631942,"parkingLotId":22,"parkingLotName":"3-р эмнэлэг","parkingCameraId":49,"camDirection":"exit"}
+
+data: {"id":"1787318249938-gydh6","plateNumber":"7337УБП","confidence":90,"timestamp":"2026-08-21T13:17:26.000Z","vehicleColor":"White","plateColor":"White","vehicleType":"Hyundai","laneNo":1,"direction":"exiting","objectId":1258310793,"groupId":157302074,"parkingLotId":22,"parkingLotName":"3-р эмнэлэг","parkingCameraId":51,"camDirection":"exit"}
+
+data: {"id":"1787318250717-
