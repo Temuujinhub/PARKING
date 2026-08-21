@@ -817,11 +817,26 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     """Оператор гараар гаргах (төлбөргүйгээр эсвэл асуудал шийдсэний дараа).
     ЭРХ: зөвхөн free_exit эрхтэй хэрэглэгч (default-оор ADMIN; итгэмжит операторт
     админ гараар олгоно) — энгийн оператор танилаа үнэгүй гаргахаас сэргийлнэ.
-    body: {open_barrier: bool, device_id?: str, reason: str, create_compensation?: bool}
-    create_compensation=true бол төлөгдөөгүй дүнгээр нөхөн төлбөрийн нэхэмжлэл үүснэ."""
+    body: {open_barrier: bool, device_id?: str, reason_code: str, reason?: str,
+           create_compensation?: bool}
+    create_compensation=true бол төлөгдөөгүй дүнгээр нөхөн төлбөрийн нэхэмжлэл үүснэ.
+
+    `reason_code` нь Тохиргоо → Нээх шалтгааны жагсаалтаас (кодоор хадгалагдана
+    тул тайланд бүлэглэгдэнэ). Чөлөөт `reason` текст нь «Бусад» сонголтын
+    тайлбар болж хамт хадгалагдана."""
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
+    # Шалтгааныг жагсаалттай тулгана — танигдахгүй код ирвэл татгалзана
+    # (эс бол чөлөөт текст рүү чимээгүй буцаж, тайлан дахин задарна).
+    from ..services.app_settings import get_open_reasons
+    reasons = {r["code"]: r["label"] for r in get_open_reasons(db, active_only=True)}
+    code = str(body.get("reason_code") or "").strip()
+    if code and code not in reasons:
+        raise HTTPException(400, f"«{code}» шалтгаан жагсаалтад алга — "
+                                 f"Тохиргоо → Нээх шалтгаанаас сонгоно уу")
+    note = str(body.get("reason") or "").strip()[:200]
+    reason_text = f"{reasons[code]}{f' — {note}' if note else ''}" if code else note
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын машиныг гаргана
     now = datetime.utcnow()
     fee = session_fee_info(db, s, at=now)
@@ -835,7 +850,7 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     # Төлбөргүй гаргаж буй бол нөхөн төлбөрийн нэхэмжлэл үүсгэх сонголт
     if body.get("create_compensation") and not s.paid_at and not fee["is_free"]:
         from .compensations_router import create_compensation
-        create_compensation(db, s, body.get("reason") or "unpaid_exit", user.username)
+        create_compensation(db, s, code or "unpaid_exit", user.username)
 
     barrier_opened = False
     if body.get("open_barrier"):
@@ -851,8 +866,13 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
                                      plate=s.plate_number)
             barrier_opened = cmd.status == "SUCCESS"
 
+    # Шалтгааныг КОДООР нь бичнэ — тайлан үүгээр бүлэглэнэ (чөлөөт текст нь
+    # тайлбар болж хамт үлдэнэ)
+    s.note = f"{s.note + ' | ' if s.note else ''}{reason_text}"[:1000] if reason_text else s.note
     db.add(AuditLog(username=user.username, action="MANUAL_EXIT", entity="session",
-                    entity_id=session_id, detail={"reason": body.get("reason", ""), **body}))
+                    entity_id=session_id,
+                    detail={**body, "reason_code": code or None, "reason": reason_text,
+                            "plate": s.plate_number, "site_id": s.site_id}))
     db.commit()
     await manager.broadcast(s.site_id, "EXIT_COMPLETED", {
         "session_id": s.id, "plate": s.plate_number, "status": s.status,

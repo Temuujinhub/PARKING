@@ -1728,6 +1728,31 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
 
 
 # ─────────────────────────── Хар жагсаалт ───────────────────────────
+@router.get("/open-reasons")
+def list_open_reasons(active_only: bool = False, db: Session = Depends(get_db),
+                      user: User = Depends(require("cashier", "free_exit", "settings"))):
+    """Хаалт нээх / машин төлбөргүй гаргах ШАЛТГААНЫ жагсаалт.
+
+    Оператор чөлөөт текст бичихийн оронд эндээс сонгоно — ингэснээр «хэн, ямар
+    шалтгаанаар хэдэн удаа үнэгүй гаргасан» гэдэг тайлан гарна."""
+    from ..services.app_settings import get_open_reasons
+    return get_open_reasons(db, active_only=active_only)
+
+
+@router.put("/open-reasons")
+def put_open_reasons(body: dict, db: Session = Depends(get_db),
+                     user: User = Depends(require("settings"))):
+    """Жагсаалтыг бүхэлд нь солино. body: {items: [{code, label, is_active}]}."""
+    from ..services.app_settings import set_open_reasons
+    try:
+        items = set_open_reasons(db, body.get("items"), user.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    _audit(db, user, "UPDATE", "open_reasons", "-", {"count": len(items)})
+    db.commit()
+    return items
+
+
 @router.get("/autoclose/rules")
 def get_autoclose_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("settings"))):

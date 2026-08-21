@@ -48,6 +48,28 @@ def _mono() -> float:
     return _t.monotonic()
 
 
+# ГЭРЧИЙН дохио: ANPR гүүр «тэр камер яг одоо машин уншсан, бидэнд ирээгүй»
+# гэж нотолмогц энд тэмдэглэнэ. Стримийн давталт үүнийг хараад ШУУД тасалж
+# дахин холбогдоно — таймер (idle 15 мин) хүлээхгүй.
+_force: set[str] = set()
+
+
+def force_reconnect(device_id: str) -> None:
+    """Тухайн камерын стримийг дараагийн боломжтой мөчид дахин холбуулна."""
+    if device_id:
+        _force.add(device_id)
+        log.warning("[гэрч] %s камерын стрим үхсэн нь нотлогдлоо — дахин холбоно",
+                    device_id[:8])
+
+
+def take_force(device_id: str) -> bool:
+    """Тэмдэглэгээ байвал АВААД True буцаана (нэг удаа л ажиллана)."""
+    if device_id in _force:
+        _force.discard(device_id)
+        return True
+    return False
+
+
 def stream_idle(last_event_at: float, now: float) -> bool:
     """ANPR event ирэхээ больсон тул дахин холбогдох ёстой юу.
 
@@ -580,6 +602,11 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                     # БАЙТААР уншина: стримд binary JPEG хэсэг ирдэг тул текст
                     # горимд тэдгээр нь мөхөж, event зураг АЛДАГДДАГ байв.
                     async for chunk in resp.aiter_bytes():
+                        # ГЭРЧ: ANPR систем тэр камер дээр уншилт харсан ч бидэнд
+                        # ирээгүй бол стрим үхсэн нь НОТЛОГДСОН — таймер хүлээхгүй
+                        if take_force(device_id):
+                            log.warning("%s: гэрчийн дохиогоор стримийг шинэчилж байна", ip)
+                            break
                         buffer += chunk
                         if stream_idle(last_ev, time.monotonic()):
                             log.warning("%s: %.0f минут ANPR event ирсэнгүй (heartbeat "

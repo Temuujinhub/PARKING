@@ -442,6 +442,17 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
 # чимээгүй завсар хамгийн их хэрэгтэй байсан. Энэ endpoint тэдгээрийг зогсоол/
 # камер бүрээр тооцож, босго давсныг alerts болгож буцаана (Dashboard-д банер).
 
+@router.get("/anpr-bridge")
+def anpr_bridge_stats(user: User = Depends(get_current_user)):
+    """ANPR гүүрийн төлөв: хэдэн уншилт ирсэн, хэд нь манайд БАЙХГҮЙ байсан.
+
+    `loss_pct` = тэдний харсан уншилтын хэдэн хувь нь манайд ирээгүй вэ —
+    манай стримийн бодит алдагдал. `unmapped_cams` нь зураглаагүй камерууд
+    (Тохиргоо → Төхөөрөмж дээр `extra.anpr_camera_id` бичнэ)."""
+    from ..services.anpr_bridge import snapshot
+    return snapshot()
+
+
 @router.get("/cameras")
 def camera_performance(db=Depends(get_db), user: User = Depends(get_current_user)):
     from collections import defaultdict

@@ -7,9 +7,11 @@ UI-аас удирдана. Уншилт нь халуун зам (event/30 ми
 Шинэ бүлэг дүрэм нэмэхдээ DEFAULTS-д нэг мөр нэмнэ — үлдсэн нь автоматаар
 (get/set/валидаци/кэш) ажиллана.
 """
+import re
 import time
 
 BLACKLIST_KEY = "blacklist_rules"
+OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
@@ -167,6 +169,51 @@ def get_camsync_rules(db) -> dict:
 
 def set_camsync_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, CAMSYNC_KEY, values, username)
+
+
+# ── НЭЭХ ШАЛТГААН — удирдлагатай жагсаалт ───────────────────────────────────
+# Хаалтыг гараар нээх / машиныг төлбөргүй гаргах бүрд оператор ЭНЭ ЖАГСААЛТААС
+# сонгоно. Өмнө нь чөлөөт текст байсан тул «хэн, ямар шалтгаанаар хэдэн удаа
+# үнэгүй гаргасан» гэдгийг тоолох боломжгүй байв — бүх мөр өөр өөрөөр бичигдэнэ.
+OPEN_REASON_DEFAULTS = [
+    {"code": "vip", "label": "VIP / гэрээт зочин", "is_active": True},
+    {"code": "staff", "label": "Ажилтны машин", "is_active": True},
+    {"code": "wrong_plate", "label": "Дугаар буруу уншсан", "is_active": True},
+    {"code": "no_session", "label": "Бүртгэл олдоогүй", "is_active": True},
+    {"code": "system_error", "label": "Системийн алдаа", "is_active": True},
+    {"code": "device_fault", "label": "Хаалт/камер эвдэрсэн", "is_active": True},
+    {"code": "emergency", "label": "Онцгой байдал (түргэн, гал)", "is_active": True},
+    {"code": "test", "label": "Туршилт", "is_active": True},
+    {"code": "other", "label": "Бусад", "is_active": True},
+]
+
+
+def get_open_reasons(db, active_only: bool = False) -> list[dict]:
+    """Нээх шалтгааны жагсаалт (тохируулаагүй бол анхдагч)."""
+    rows = get_state(db, OPEN_REASONS_KEY).get("items")
+    if not isinstance(rows, list) or not rows:
+        rows = OPEN_REASON_DEFAULTS
+    out = [r for r in rows if isinstance(r, dict) and r.get("code") and r.get("label")]
+    return [r for r in out if r.get("is_active", True)] if active_only else out
+
+
+def set_open_reasons(db, items: list, username: str) -> list[dict]:
+    """Жагсаалтыг бүхэлд нь дарж бичнэ. `code` нь давхардахгүй, тогтмол байх ёстой
+    (тайлан хуучин мөрүүдийг кодоор нь бүлэглэдэг)."""
+    clean, seen = [], set()
+    for r in items or []:
+        if not isinstance(r, dict):
+            continue
+        code = re.sub(r"[^a-z0-9_]", "", str(r.get("code") or "").strip().lower())[:30]
+        label = str(r.get("label") or "").strip()[:80]
+        if not code or not label or code in seen:
+            continue
+        seen.add(code)
+        clean.append({"code": code, "label": label, "is_active": bool(r.get("is_active", True))})
+    if not clean:
+        raise ValueError("Дор хаяж нэг шалтгаан үлдээх ёстой")
+    set_state(db, OPEN_REASONS_KEY, {"items": clean}, username)
+    return clean
 
 
 # ── ТӨЛӨВ (watermark) — дүрэм биш тул валидацигүй, кэшлэхгүй ────────────────

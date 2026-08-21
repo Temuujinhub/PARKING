@@ -208,6 +208,10 @@ async def start_vat_auto_send():
     from .services.log_tail import supervisor as log_tail_supervisor
     _bg_task(log_tail_supervisor(), "log-tail")
 
+    # ANPR системийн event урсгалыг сонсох гүүр (anpr_bridge_mode=off бол шууд буцна)
+    from .services.anpr_bridge import supervisor as anpr_supervisor
+    _bg_task(anpr_supervisor(), "anpr-bridge")
+
     # Event зургийн стрим — snapManager.attachFileProc (PARKING_SNAP_PULL, default true)
     from .services.snap_puller import supervisor as snap_supervisor
     _bg_task(snap_supervisor(), "snap-puller")

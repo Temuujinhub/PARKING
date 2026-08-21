@@ -8,6 +8,7 @@ import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
 import CashierStats from './cashier/CashierStats'
 import ExitQueue from './cashier/ExitQueue'
+import FreeExitModal from './cashier/FreeExitModal'
 import ManualEntryModal, { minutesAgo } from './cashier/ManualEntryModal'
 import PaymentPanel from './cashier/PaymentPanel'
 import QpayModal from './cashier/QpayModal'
@@ -126,17 +127,20 @@ export default function Cashier() {
     } catch (e) { toast(e.message, 'error') }
   }
 
-  const manualExit = async () => {
-    if (!confirm(`${selected.plate_number} дугаартай машиныг төлбөргүйгээр гаргах уу?`)) return
-    // Төлбөртэй машиныг гаргаж буй бол нөхөн төлбөрийн нэхэмжлэл үүсгэх эсэхийг асууна
-    const createComp = !fee?.is_free &&
-      confirm(`Нөхөн төлбөрийн нэхэмжлэл (${fmt(fee?.total_fee)}₮) үүсгэх үү?\n\nOK = үүсгэнэ (дараагийн ирэлтэд нэхэмжилнэ, 3+ бол хар жагсаалт)\nCancel = нэхэмжлэлгүй гаргана`)
+  // Төлбөргүй гаргах — шалтгааныг ЖАГСААЛТААС сонгуулна (FreeExitModal).
+  // Өмнө нь тогтмол «Кассын гараар гаргалт» текст бичигддэг байсан тул
+  // тайлан дээр шалтгаанаар нь ялгах боломжгүй байв.
+  const [freeExit, setFreeExit] = useState(false)
+  const manualExit = () => setFreeExit(true)
+
+  const doFreeExit = async (body) => {
+    setBusy(true)
     try {
       await api(`/api/sessions/${selected.id}/manual-exit`,
-        { method: 'POST', body: { open_barrier: true, reason: 'Кассын гараар гаргалт', create_compensation: createComp } })
-      toast(createComp ? 'Гаргаж, нөхөн төлбөрийн нэхэмжлэл үүслээ' : 'Гаргалаа')
-      setSelected(null); loadExits(siteId)
-    } catch (e) { toast(e.message, 'error') }
+        { method: 'POST', body: { open_barrier: true, ...body } })
+      toast(body.create_compensation ? 'Гаргаж, нөхөн төлбөрийн нэхэмжлэл үүслээ' : 'Гаргалаа')
+      setFreeExit(false); setSelected(null); loadExits(siteId)
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
 
   const addTestCar = async () => {
@@ -288,6 +292,10 @@ export default function Cashier() {
 
       {/* Гараар бүртгэх modal — уншигдалгүй орсон машин (эргүүлийн шалгалт) */}
       <ManualEntryModal manualEntry={manualEntry} setManualEntry={setManualEntry} siteId={siteId} />
+
+      {/* Төлбөргүй гаргах — шалтгаан сонгох */}
+      <FreeExitModal open={freeExit} session={selected} fee={fee} busy={busy}
+        onClose={() => setFreeExit(false)} onConfirm={doFreeExit} />
 
       {/* QPay QR modal */}
       <QpayModal qpayInfo={qpayInfo} onClose={() => setQpayInfo(null)} />
