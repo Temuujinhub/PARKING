@@ -4,10 +4,10 @@
 // гарахад 3 секундын toast л харагдаж «ЮУНЫ алдаа вэ» гэдэг ойлгогдохгүй,
 // (2) түрээслэгч/багана/цагийн тохиргоо тавих газаргүй байв. Одоо алдаа
 // ЗӨВ ХЭВЭЭР үлдэж, дэлгэрэнгүй оношилгоотойгоо хамт харагдана.
-import { AlertTriangle, FileCheck2, FileSpreadsheet, Upload } from 'lucide-react'
+import { AlertTriangle, Ban, FileCheck2, FileSpreadsheet, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { api, fmt } from '../api'
-import { useToast } from './ui'
+import { Modal, useToast } from './ui'
 
 const TZ_OPTS = [['', 'Авто (өөрөө тааруулна)'], ['0', 'Файл UTC цагаар'], ['-8', 'Файл УБ (локал) цагаар']]
 
@@ -21,6 +21,10 @@ export default function VatRecon({ tenants = [] }) {
   const [err, setErr] = useState(null)
   const [recon, setRecon] = useState(null)
   const [drag, setDrag] = useState(false)
+  const [dup, setDup] = useState(null)       // давхардлыг цуцлах цонх
+  const [dupNote, setDupNote] = useState('Тулгалтаар илэрсэн давхар баримт')
+  const [dupOk, setDupOk] = useState(false)
+  const [dupBusy, setDupBusy] = useState(false)
   const fileRef = useRef(null)
   const toast = useToast()
 
@@ -68,6 +72,25 @@ export default function VatRecon({ tenants = [] }) {
       a.click()
       URL.revokeObjectURL(a.href)
     } catch (e) { toast(e.message, 'error') }
+  }
+
+  // Давхардсан гэж тэмдэглэгдсэн мөрүүдийн ТӨЛБӨРүүд (давхардлыг арилгасан)
+  const dupIds = [...new Set((recon?.unmatched_tax || [])
+    .filter((r) => r.verdict === 'DUPLICATE' && r.payment_id).map((r) => r.payment_id))]
+
+  const cancelDup = async (apply) => {
+    setDupBusy(true)
+    try {
+      const res = await api('/api/reports/vat-reconcile/cancel-duplicates', {
+        method: 'POST',
+        body: { payment_ids: dupIds, dry_run: !apply, note: apply ? dupNote : undefined },
+      })
+      setDup(res)
+      if (apply) {
+        toast(`Цуцлагдсан: ${res.ok} · алдаа: ${res.failed}`, res.failed ? 'error' : undefined)
+        setDupOk(false)
+      }
+    } catch (e) { toast(e.message, 'error') } finally { setDupBusy(false) }
   }
 
   const d = recon?.diag
@@ -285,6 +308,13 @@ export default function VatRecon({ tenants = [] }) {
                   </span>
                 ))}
               </div>
+              {dupIds.length > 0 && (
+                <button className="btn-secondary text-xs py-1 mb-2 text-red-400 border-red-500/40"
+                  disabled={dupBusy} onClick={() => { setDupOk(false); cancelDup(false) }}
+                  title="Эхлээд ЮУ цуцлагдахыг бүтнээр нь харуулна — тэр үед л баталгаажуулна">
+                  <Ban size={13} /> Давхардсан {dupIds.length} баримтыг цуцлах…
+                </button>
+              )}
               <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
                 {recon.unmatched_tax.map((r, i) => (
                   <div key={i} className={r.verdict === 'DUPLICATE' || r.verdict === 'PAYMENT_NO_RECEIPT'
@@ -299,6 +329,59 @@ export default function VatRecon({ tenants = [] }) {
           )}
         </div>
       )}
+      <Modal open={!!dup} onClose={() => setDup(null)} wide
+        title={dup?.dry_run ? 'Давхар баримтыг цуцлах — урьдчилан харах' : 'Цуцлалтын үр дүн'}>
+        {dup && (
+          <div className="space-y-3 text-sm">
+            {dup.dry_run && (
+              <div className="card border-amber-500/50 bg-amber-500/5 text-xs space-y-1" role="alert">
+                <div className="flex items-center gap-2 text-amber-400 font-semibold">
+                  <AlertTriangle size={14} /> Аль баримт цуцлагдахыг анхаарна уу
+                </div>
+                <div className="text-slate-300">
+                  Манай систем зөвхөн ӨӨРИЙН үүсгэсэн баримтыг цуцалж чадна. ТЕГ-ийн файлд
+                  давхардсан гэж тэмдэглэгдсэн мөр нь ӨӨР кассын дугаартай бол түүнийг
+                  цуцлах боломжгүй — доорх жагсаалтад ЯГ ямар ДДТД цуцлагдахыг харуулав.
+                  Мөнгө буцаахгүй, зөвхөн татварын баримт.
+                </div>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-4 text-xs">
+              <span>Хүсэлт: <b className="font-mono">{dup.requested}</b></span>
+              <span className="text-accent">{dup.dry_run ? 'Цуцлах боломжтой' : 'Цуцлагдсан'}: <b className="font-mono">{dup.ok}</b></span>
+              {dup.failed > 0 && <span className="text-red-400">Алдаа: <b className="font-mono">{dup.failed}</b></span>}
+            </div>
+            <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
+              {(dup.items || []).map((it, i) => (
+                <div key={i} className={it.ok ? '' : 'text-red-400'}>
+                  {it.paid_at?.slice(0, 19)} {fmt(it.amount)}₮ {it.site_name}
+                  {' · '}
+                  {(it.will_cancel || it.cancelled || []).map((x) => x.ddtd || x).join(', ')
+                    || it.error || ''}
+                  {it.error ? ` · ${it.error}` : ''}
+                </div>
+              ))}
+            </div>
+            {dup.dry_run && dup.ok > 0 && (
+              <div className="space-y-2 border-t border-surface-border/60 pt-3">
+                <label className="block text-xs">
+                  <div className="text-slate-400 mb-1">Цуцлах шалтгаан (ТЕГ-ийн бүртгэлд үлдэнэ)</div>
+                  <input className="input" value={dupNote} onChange={(e) => setDupNote(e.target.value)} />
+                </label>
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input type="checkbox" checked={dupOk} onChange={(e) => setDupOk(e.target.checked)} />
+                  Ойлголоо — {dup.ok} баримтыг ТЕГ-т цуцлана. Мөнгө буцаагдахгүй.
+                </label>
+                <button className="btn-primary bg-red-600 hover:bg-red-500 text-white text-sm py-1.5"
+                  disabled={!dupOk || !dupNote.trim() || dupBusy}
+                  onClick={() => cancelDup(true)}>
+                  <Ban size={14} /> {dupBusy ? 'Цуцалж байна…' : `${dup.ok} баримтыг цуцлах`}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

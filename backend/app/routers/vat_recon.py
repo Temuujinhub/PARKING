@@ -473,7 +473,7 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                 and abs((p["paid_at"] - when).total_seconds()) <= tol]
         row = {"dt": t["dt"].isoformat(), "amount": t["amount"], "src": t["src"],
                "ddtd": t["ddtd"], "verdict": "NO_PAYMENT", "plate": "", "site_name": "",
-               "method": "", "our_ddtd": ""}
+               "method": "", "our_ddtd": "", "payment_id": None}
         if cand:
             # Аль хэдийн таарсан төлбөрийг СҮҮЛД нь авна — эс бөгөөс завгүй цагт
             # ижил дүнтэй хоёр төлбөр байхад хуурамч «давхардал» гарна
@@ -489,7 +489,9 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                 v = "RECEIPT_NOT_MATCHED"
             row.update({"verdict": v, "plate": p["plate"] or "", "site_name": p["site_name"] or "",
                         "method": f'{p["provider"]}/{p["method"]}',
-                        "our_ddtd": ", ".join(x for x in p["receipts"] if x)[:80]})
+                        "our_ddtd": ", ".join(x for x in p["receipts"] if x)[:80],
+                        # Бөөнөөр цуцлахад хэрэгтэй — UI энэ ID-аар хүсэлт илгээнэ
+                        "payment_id": p["id"]})
         out.append(row)
     return out
 

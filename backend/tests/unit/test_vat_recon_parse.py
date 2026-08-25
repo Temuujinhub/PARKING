@@ -284,3 +284,11 @@ def test_mixed_timezones_per_cash_register():
     r = best_shift(tax, ours, [0.0, -8.0], 3)
     assert r["group_shifts"] == {"10014863": 0.0, "10045952": -8.0}
     assert r["matched"] == 20 and r["unmatched_ours"] == []
+
+
+def test_duplicate_rows_carry_payment_id():
+    """Бөөнөөр цуцлахад UI нь давхардсан мөрийн ТӨЛБӨРийн ID-г мэдэх ёстой."""
+    left = [{"dt": BASE, "amount": 1000.0, "src": "", "ddtd": "d-dup"}]
+    probe = [_probe("pay-42", BASE, 1000, ["0152000000000000000000000000000001"])]
+    out = explain_unmatched_tax(left, probe, 0, 3, {"pay-42"}, None)
+    assert out[0]["verdict"] == "DUPLICATE" and out[0]["payment_id"] == "pay-42"

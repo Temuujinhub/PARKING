@@ -1230,6 +1230,82 @@ async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("
     return result
 
 
+@router.post("/vat-reconcile/cancel-duplicates")
+async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
+                                    user: User = Depends(require("vat", "reports"))):
+    """Тулгалтаар илэрсэн ДАВХАР баримтуудыг БӨӨНӨӨР цуцлах.
+
+    body: {payment_ids: [...], note: str, dry_run: bool = true}
+
+    ⚠ ЧУХАЛ — АЛЬ баримт цуцлагдахыг ойлгох: манай систем зөвхөн ӨӨРИЙН
+    үүсгэсэн (VatReceipt хүснэгтэд байгаа) баримтыг цуцалж чадна. Тулгалтад
+    «ДАВХАР» гэж тэмдэглэгдсэн ТЕГ-ийн мөр нь ӨӨР кассын дугаартай (манайд
+    бүртгэлгүй) байвал ТҮҮНИЙГ цуцлах боломжгүй — энэ endpoint нь тухайн
+    төлбөрийн МАНАЙ баримтыг цуцална. Тиймээс dry_run=true үед юу цуцлагдахыг
+    (ДДТД, суваг) бүтнээр нь буцаадаг ба UI үүнийг заавал харуулна.
+
+    Мөнгө буцаахгүй — зөвхөн татварын баримт."""
+    from .payments_router import _lock_payment, _site_of, cancel_ebarimt
+    ids = [str(x) for x in (body.get("payment_ids") or []) if x]
+    dry = bool(body.get("dry_run", True))
+    note = str(body.get("note") or "").strip()[:120]
+    if not ids:
+        raise HTTPException(400, "Цуцлах төлбөр сонгогдоогүй байна.")
+    if len(ids) > 500:
+        raise HTTPException(400, f"Нэг удаад 500-аас олон боломжгүй ({len(ids)} ирлээ).")
+    if not dry and not note:
+        raise HTTPException(400, "Цуцлах шалтгааныг бичнэ үү (ТЕГ-ийн бүртгэлд үлдэнэ).")
+    scope = _scope(user)
+    allowed = None if scope is None else ({scope} if isinstance(scope, str) else set(scope))
+
+    out, done, failed = [], 0, 0
+    for pid in ids:
+        payment = db.get(Payment, pid)
+        if not payment:
+            out.append({"payment_id": pid, "ok": False, "error": "Төлбөр олдсонгүй"})
+            failed += 1
+            continue
+        site = _site_of(payment)
+        if allowed is not None and (site is None or site.id not in allowed):
+            out.append({"payment_id": pid, "ok": False, "error": "Энэ зогсоолын эрхгүй"})
+            failed += 1
+            continue
+        recs = db.query(VatReceipt).filter(VatReceipt.payment_id == pid).all()
+        info = {"payment_id": pid, "site_name": site.name if site else "",
+                "amount": float(payment.amount), "paid_at": payment.paid_at.isoformat()
+                if payment.paid_at else None,
+                "receipts": [{"ddtd": r.ebarimt_id, "provider": r.provider, "status": r.status}
+                             for r in recs]}
+        target = [r for r in recs if r.status in ("SENT", "CANCEL_PENDING") and r.ebarimt_id]
+        if not target:
+            out.append({**info, "ok": False, "error": "Цуцлах ИЛГЭЭГДСЭН баримт алга"})
+            failed += 1
+            continue
+        if dry:
+            out.append({**info, "ok": True, "will_cancel":
+                        [{"ddtd": r.ebarimt_id, "provider": r.provider} for r in target]})
+            done += 1
+            continue
+        locked = _lock_payment(db, pid)   # давхар товшилтоос хамгаална
+        if locked is None:
+            out.append({**info, "ok": False, "error": "Баримтын ажиллагаа явагдаж байна"})
+            failed += 1
+            continue
+        res = await cancel_ebarimt(db, locked, note)
+        db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK", entity="payment",
+                        entity_id=pid, detail={**res, "note": note}))
+        db.commit()
+        out.append({**info, **res})
+        done += int(bool(res.get("ok")))
+        failed += int(not res.get("ok"))
+    if not dry:
+        db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK_SUMMARY",
+                        entity="vat", detail={"requested": len(ids), "ok": done,
+                                              "failed": failed, "note": note}))
+        db.commit()
+    return {"dry_run": dry, "requested": len(ids), "ok": done, "failed": failed, "items": out}
+
+
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  q: str | None = None, limit: int = 200, db: Session = Depends(get_db),
