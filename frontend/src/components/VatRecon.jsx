@@ -179,6 +179,20 @@ export default function VatRecon({ tenants = [] }) {
               )}
             </div>
           )}
+          {/* Кассын (POS) дугаараар — ДДТД-ийн сүүлийн 8 орон нь баримт гаргасан
+              кассыг заана. Файлд ямар касс байна, манайд ямар байна вэ. */}
+          {Object.keys(recon.tax_pos || {}).length > 0 && (
+            <div className="text-[11px] text-slate-400 space-y-0.5">
+              <div>ТЕГ файлын касс (ДДТД-ийн сүүлийн 8 орон): {Object.entries(recon.tax_pos)
+                .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ')}</div>
+              <div>Манай баримтын касс: {Object.entries(recon.ours_pos || {})
+                .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ') || '—'}</div>
+              {Object.keys(recon.unmatched_tax_pos || {}).length > 0 && (
+                <div className="text-amber-400">Таараагүй мөрийн касс: {Object.entries(recon.unmatched_tax_pos)
+                  .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ')}</div>
+              )}
+            </div>
+          )}
           {recon.matched > 0 && (
             <div className="rounded-lg border border-surface-border/60 p-3 space-y-2">
               <div className="text-xs font-semibold">
@@ -246,11 +260,30 @@ export default function VatRecon({ tenants = [] }) {
           {recon.unmatched_tax?.length > 0 && (
             <div>
               <div className="font-semibold text-xs mb-1">
-                ТЕГ-д бий, манайд алга (эхний {recon.unmatched_tax.length}) — өөр систем/POS байж болно:
+                ТЕГ-д бий, манайд алга ({recon.unmatched_tax_total}) — мөр бүрийг манай
+                ТӨЛБӨРийн бүртгэлтэй тулгаж шалтгааныг нь тодорхойлов:
+              </div>
+              {/* Шалтгааны хураангуй — «баримтгүй төлбөр авсан уу, давхар баримт уу»
+                  гэдгийг гараар хөөх ажлыг орлоно */}
+              <div className="flex flex-wrap gap-2 mb-2">
+                {Object.entries(recon.tax_verdicts || {}).sort((a, b) => b[1] - a[1]).map(([v, n]) => (
+                  <span key={v} title={recon.verdict_labels?.[v] || v}
+                    className={`text-[11px] px-2 py-1 rounded-md border ${
+                      v === 'DUPLICATE' || v === 'PAYMENT_NO_RECEIPT'
+                        ? 'border-red-500/50 bg-red-500/10 text-red-300'
+                        : 'border-surface-border/60 text-slate-400'}`}>
+                    {(recon.verdict_labels?.[v] || v).split(' — ')[0]}: <b className="font-mono">{n}</b>
+                  </span>
+                ))}
               </div>
               <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
                 {recon.unmatched_tax.map((r, i) => (
-                  <div key={i}>{r.dt?.slice(0, 19)} {fmt(r.amount)}₮ {r.src} {r.ddtd}</div>
+                  <div key={i} className={r.verdict === 'DUPLICATE' || r.verdict === 'PAYMENT_NO_RECEIPT'
+                    ? 'text-red-300' : ''}>
+                    {r.dt?.slice(0, 19)} {fmt(r.amount)}₮ {r.ddtd}
+                    {r.plate ? ` · ${r.plate} ${r.site_name} ${r.method}` : ''}
+                    {' · '}{(recon.verdict_labels?.[r.verdict] || r.verdict).split(' — ')[0]}
+                  </div>
                 ))}
               </div>
             </div>

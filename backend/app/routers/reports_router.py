@@ -1144,13 +1144,46 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
                                  f"{type(e).__name__}: {str(e)[:200]}")
     shift, matched, un_ours = r["shift"], r["matched"], r["unmatched_ours"]
+    left = [t for t in tax if not t["used"]]
+    # «ТЕГ-д бий, манайд алга» мөрүүдийг манай ТӨЛБӨРийн бүртгэлээр тайлна:
+    # баримтын бүртгэл байхгүй ч төлбөр нь байвал → баримт үүссэн боловч манайд
+    # хадгалагдаагүй, эсвэл давхар үүссэн. Энэ ялгааг гараар хөөх нь урт ажил байв.
+    tax_explained, verdicts = [], {}
+    if left:
+        off = timedelta(hours=shift)
+        lo_c = min(t["dt"] for t in tax) + off - timedelta(seconds=tol + 5)
+        hi_c = max(t["dt"] for t in tax) + off + timedelta(seconds=tol + 5)
+        pq = (db.query(Payment, ParkingSession.plate_number, ParkingSite.name,
+                       ParkingSession.site_id)
+              .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+              .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+              .filter(Payment.paid_at >= lo_c, Payment.paid_at <= hi_c,
+                      Payment.status == "PAID"))
+        pq = _flt(pq, ParkingSession.site_id, _scope(user))   # эрхийн хүрээ л барина
+        pay_rows = pq.all()
+        rec_by_pay: dict[str, list] = {}
+        if pay_rows:
+            ids = [p.id for p, *_ in pay_rows]
+            for pid, eid in db.query(VatReceipt.payment_id, VatReceipt.ebarimt_id).filter(
+                    VatReceipt.payment_id.in_(ids)).all():
+                rec_by_pay.setdefault(pid, []).append(eid)
+        probe = [{"id": p.id, "paid_at": p.paid_at, "amount": float(p.amount),
+                  "site_id": site_id, "plate": plate, "site_name": site_name,
+                  "provider": p.provider, "method": p.payment_method,
+                  "receipts": rec_by_pay.get(p.id, [])}
+                 for p, plate, site_name, site_id in pay_rows]
+        matched_pay_ids = {t["ours"][1].id for t in tax if t.get("ours")}
+        tax_explained = _vr.explain_unmatched_tax(
+            left, probe, shift, tol, matched_pay_ids,
+            set(scope_ids) if scope_ids is not None else None)
+        verdicts = dict(Counter(r["verdict"] for r in tax_explained))
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
         return await _aio.to_thread(
             _vr.reconcile_excel, tax, ours, un_ours, tol, _cfg.tz_offset_hours,
-            tenant.name if tenant else "Бүх зогсоол", shift)
-    left = [t for t in tax if not t["used"]]
+            tenant.name if tenant else "Бүх зогсоол", shift,
+            {r["ddtd"]: r for r in tax_explained})
     return {
         "tax_total": len(tax), "ours_total": r["ours_in_window"], "matched": matched,
         "ddtd_equal": r["ddtd_equal"], "tz_shift": shift, "tol": tol,
@@ -1161,12 +1194,18 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         "tenant": tenant.name if tenant else None,
         "diag": diag,
         "tax_sources": dict(Counter(t["src"] for t in tax)),
+        # ДДТД-ийн СҮҮЛИЙН 8 орон = баримт гаргасан КАССЫН (POS) дугаар. Файлд
+        # хэдэн өөр касс байна, тэдгээрийн аль нь манайх вэ гэдгийг харуулна —
+        # «энэ 82 мөр манай аль gateway-ээр гарсан бэ» гэдгийн шууд хариу.
+        "tax_pos": _vr.pos_groups([t["ddtd"] for t in tax]),
+        "unmatched_tax_pos": _vr.pos_groups([t["ddtd"] for t in left]),
+        "ours_pos": _vr.pos_groups([rec.ebarimt_id for rec, *_ in r["inside"]
+                                    if rec.status != "CANCELLED"]),
         "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
         "unmatched_ours_total": len(un_ours),
-        "unmatched_tax": [{"dt": t["dt"].isoformat(), "amount": t["amount"],
-                           "src": t["src"], "ddtd": t["ddtd"]}
-                          for t in sorted(left, key=lambda x: x["dt"])[:100]],
+        "unmatched_tax": sorted(tax_explained, key=lambda x: x["dt"])[:200],
         "unmatched_tax_total": len(left),
+        "tax_verdicts": verdicts, "verdict_labels": _vr.VERDICTS,
         "note": ("Тулгалт (цаг ±%dс, дүн)-ээр%s. ДДТД ижил байх шаардлагагүй — "
                  "суваг ба ТЕГ өөр дугаарладаг."
                  % (tol, "" if shift == 0 else f", файлын цагт {shift:+g}ц нэмсэн")),

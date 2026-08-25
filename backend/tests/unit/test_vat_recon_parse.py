@@ -19,7 +19,9 @@ import openpyxl
 import pytest
 from fastapi import HTTPException
 
-from app.routers.vat_recon import as_ddtd, as_dt, as_num, best_shift, parse_tax_export
+from app.routers.vat_recon import (
+    as_ddtd, as_dt, as_num, best_shift, explain_unmatched_tax, parse_tax_export, pos_groups,
+)
 
 BASE = datetime(2026, 8, 24, 6, 0, 0)
 HDR = ["ТТД", "ДДТД", "Огноо", "Нийт дүн", "", "НӨАТ", "Дүн", "Төрөл",
@@ -217,3 +219,49 @@ def test_ddtd_compared_per_provider():
     assert r["by_provider"]["MSGBILL"]["equal"] == 1
     assert r["by_provider"]["QPAY"]["equal"] == 0
     assert r["by_provider"]["QPAY"]["sample"]["tax"].endswith("1990")
+
+
+# ───────────── «ТЕГ-д бий, манайд алга» мөрийн шалтгаан ─────────────────────
+
+def _probe(pid, when, amount, receipts, site="S1", plate="1234УБА"):
+    return {"id": pid, "paid_at": when, "amount": float(amount), "site_id": site,
+            "plate": plate, "site_name": "Хангарьд", "provider": "QPAY",
+            "method": "QR", "receipts": receipts}
+
+
+def test_unmatched_tax_verdicts():
+    """Тохироогүй ТЕГ мөрийг манай ТӨЛБӨРөөр тайлна: давхар баримт уу,
+    баримтгүй төлбөр үү, өөр зогсоол уу, огт байхгүй юу."""
+    left = [
+        {"dt": BASE, "amount": 1000.0, "src": "", "ddtd": "d-dup"},
+        {"dt": BASE + timedelta(minutes=1), "amount": 2000.0, "src": "", "ddtd": "d-norec"},
+        {"dt": BASE + timedelta(minutes=2), "amount": 3000.0, "src": "", "ddtd": "d-other"},
+        {"dt": BASE + timedelta(minutes=3), "amount": 4000.0, "src": "", "ddtd": "d-none"},
+    ]
+    probe = [
+        _probe("p1", BASE, 1000, ["0152000000000000000000000000000001"]),
+        _probe("p2", BASE + timedelta(minutes=1), 2000, []),          # баримтгүй төлбөр
+        _probe("p3", BASE + timedelta(minutes=2), 3000, ["x"], site="S9"),  # өөр зогсоол
+    ]
+    out = explain_unmatched_tax(left, probe, 0, 3, {"p1"}, {"S1"})
+    assert [r["verdict"] for r in out] == [
+        "DUPLICATE", "PAYMENT_NO_RECEIPT", "OTHER_SCOPE", "NO_PAYMENT"]
+    assert out[1]["plate"] == "1234УБА" and out[1]["method"] == "QPAY/QR"
+
+
+def test_duplicate_prefers_unmatched_payment():
+    """Завгүй цагт ижил дүнтэй 2 төлбөр байхад хуурамч «давхардал» гаргах ёсгүй."""
+    left = [{"dt": BASE, "amount": 1000.0, "src": "", "ddtd": "d1"}]
+    probe = [_probe("p-matched", BASE, 1000, ["x"]),
+             _probe("p-free", BASE + timedelta(seconds=1), 1000, [])]
+    out = explain_unmatched_tax(left, probe, 0, 3, {"p-matched"}, None)
+    assert out[0]["verdict"] == "PAYMENT_NO_RECEIPT"   # DUPLICATE биш
+
+
+def test_pos_groups_finds_cash_register_tail():
+    """ДДТД-ийн төгсгөл дэх кассын дугаарыг уртыг нь таамаглалгүй бүлэглэнэ."""
+    ids = ["0152000200900009726%08d10002990" % i for i in range(90)]
+    ids += ["0152000200900009726%08d10045952" % i for i in range(10)]
+    g = pos_groups(ids)
+    assert g == {"10002990": 90, "10045952": 10}
+    assert pos_groups([]) == {}

@@ -393,11 +393,74 @@ def best_shift(tax: list, ours: list, candidates: list[float], tol: int) -> dict
             shift, best_matched = sh, m
     inside, outside = clip_to_file(tax, ours, shift, tol)
     res = match_pass(tax, inside, shift, tol)     # сонгосон шилжилтийг дахин тавина
-    return {**res, "shift": shift, "ours_in_window": len(inside), "outside_window": outside}
+    return {**res, "shift": shift, "ours_in_window": len(inside), "outside_window": outside,
+            "inside": inside}
+
+
+def pos_groups(ids: list[str]) -> dict:
+    """ДДТД-үүдийг КАССЫН (POS) дугаараар нь бүлэглэнэ.
+
+    Кассын дугаар нь ДДТД-ийн ТӨГСГӨЛД байдаг ба урт нь тогтмол биш. Тиймээс
+    «сүүлийн 8 орон» гэж таамаглахгүй — ялгаатай утгын тоо цөөн хэвээр байх
+    ХАМГИЙН УРТ төгсгөлийг сонгоно (нэг өдрийн экспортод 1-5 касс л байдаг)."""
+    ids = [i for i in ids if i]
+    if not ids:
+        return {}
+    best = 6
+    for ln in range(6, 13):
+        if len({i[-ln:] for i in ids}) <= max(6, len(ids) // 50):
+            best = ln
+    return dict(Counter(i[-best:] for i in ids))
+
+
+# «ТЕГ-д бий, манайд алга» мөрийн ШАЛТГААНЫГ манай ТӨЛБӨРИЙН бүртгэлээр тайлах.
+# Баримтын бүртгэл байхгүй ч ТӨЛБӨР нь байвал — баримт үүссэн боловч манайд
+# хадгалагдаагүй (эсвэл давхар үүссэн) гэсэн үг. Энэ ялгааг гараар хөөх нь
+# хэдэн цагийн ажил байсан.
+VERDICTS = {
+    "DUPLICATE": "ДАВХАР БАРИМТ — тухайн төлбөрт манайд баримт БИЙ (өөр ДДТД-тэй)",
+    "PAYMENT_NO_RECEIPT": "БАРИМТГҮЙ ТӨЛБӨР — төлбөр авсан ч баримтын бүртгэл алга",
+    "RECEIPT_NOT_MATCHED": "Баримт бий ч цаг/дүнгээр таарсангүй",
+    "OTHER_SCOPE": "ӨӨР ЗОГСООЛ — сонгосон түрээслэгчийн шүүлтээс гадуур",
+    "NO_PAYMENT": "Манайд төлбөр ч алга — өөр систем/POS",
+}
+
+
+def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
+                          matched_pay_ids: set, scope_ids: set | None) -> list:
+    """Тохироогүй ТЕГ мөр бүрийг манай ТӨЛБӨРүүдтэй (баримттай эсэхээс үл хамааран)
+    цаг+дүнгээр тулгаж ангилна. probe: {id, paid_at, amount, site_id, ...} жагсаалт."""
+    off = timedelta(hours=shift)
+    out = []
+    for t in left:
+        when = t["dt"] + off
+        cand = [p for p in probe if abs(p["amount"] - t["amount"]) < 1
+                and abs((p["paid_at"] - when).total_seconds()) <= tol]
+        row = {"dt": t["dt"].isoformat(), "amount": t["amount"], "src": t["src"],
+               "ddtd": t["ddtd"], "verdict": "NO_PAYMENT", "plate": "", "site_name": "",
+               "method": "", "our_ddtd": ""}
+        if cand:
+            # Аль хэдийн таарсан төлбөрийг СҮҮЛД нь авна — эс бөгөөс завгүй цагт
+            # ижил дүнтэй хоёр төлбөр байхад хуурамч «давхардал» гарна
+            p = min(cand, key=lambda x: (x["id"] in matched_pay_ids,
+                                         abs((x["paid_at"] - when).total_seconds())))
+            if scope_ids is not None and p["site_id"] not in scope_ids:
+                v = "OTHER_SCOPE"
+            elif not p["receipts"]:
+                v = "PAYMENT_NO_RECEIPT"
+            elif p["id"] in matched_pay_ids:
+                v = "DUPLICATE"
+            else:
+                v = "RECEIPT_NOT_MATCHED"
+            row.update({"verdict": v, "plate": p["plate"] or "", "site_name": p["site_name"] or "",
+                        "method": f'{p["provider"]}/{p["method"]}',
+                        "our_ddtd": ", ".join(x for x in p["receipts"] if x)[:80]})
+        out.append(row)
+    return out
 
 
 def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
-                    title: str = "", shift: float = 0):
+                    title: str = "", shift: float = 0, explained: dict | None = None):
     """Тулгалтын нэгтгэсэн xlsx: (1) ТЕГ+манай мөр зэрэгцээ, (2) манайд бий/ТЕГ-д алга,
     (3) дүгнэлт. Огноог ЛОКАЛ (УБ) цагаар харуулна.
 
@@ -419,7 +482,7 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
     ws.title = "Тулгалт"
     ws.append(["ТЕГ огноо (УБ цаг)", "Дүн ₮", "ТЕГ ДДТД", "ТЕГ эх сурвалж",
                "Тулгалт", "Машины дугаар", "Зогсоол", "Манай суваг", "Манай ДДТД",
-               "Сугалаа", "Манай төлөв", "Төлсөн (УБ цаг)"])
+               "Сугалаа", "Манай төлөв", "Төлсөн (УБ цаг)", "Шалтгаан (таараагүй бол)"])
     for c in ws[1]:
         c.font = bold
     for t in sorted(tax, key=lambda x: x["dt"]):
@@ -431,7 +494,10 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
                     rec.ebarimt_id or "", rec.lottery_code or "", rec.status,
                     (pay.paid_at + loc).strftime("%Y-%m-%d %H:%M:%S") if pay.paid_at else ""]
         else:
-            row += ["МАНАЙД АЛГА", "", "", "", "", "", "", ""]
+            e = explained.get(t["ddtd"]) if explained else None
+            row += ["МАНАЙД АЛГА", (e or {}).get("plate", ""), (e or {}).get("site_name", ""),
+                    (e or {}).get("method", ""), (e or {}).get("our_ddtd", ""), "", "", "",
+                    VERDICTS.get((e or {}).get("verdict", ""), "")]
         ws.append(row)
         if not o:
             for c in ws[ws.max_row]:
@@ -470,7 +536,7 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
         ws3.append([a, b])
     ws3["A1"].font = bold
     for wsx in (ws, ws2):
-        for col, w in zip("ABCDEFGHIJKL", (20, 10, 36, 16, 13, 14, 16, 11, 36, 12, 10, 20)):
+        for col, w in zip("ABCDEFGHIJKLM", (20, 10, 36, 16, 13, 14, 16, 11, 36, 12, 10, 20, 46)):
             wsx.column_dimensions[col].width = w
     ws3.column_dimensions["A"].width = 70
 
