@@ -22,8 +22,9 @@ export default function VatRecon({ tenants = [] }) {
   const [recon, setRecon] = useState(null)
   const [drag, setDrag] = useState(false)
   const [dup, setDup] = useState(null)       // давхардлыг цуцлах цонх
-  const [dupNote, setDupNote] = useState('Тулгалтаар илэрсэн давхар баримт')
+  const [dupNote, setDupNote] = useState('ТЕГ тулгалт: Ontime POS дээр баримт хэвлэгдсэн тул msgbill дэх давхардлыг цуцлав')
   const [dupOk, setDupOk] = useState(false)
+  const [dupSel, setDupSel] = useState([])   // сонгосон төлбөрүүд (сэжигтэйг хасна)
   const [dupBusy, setDupBusy] = useState(false)
   const fileRef = useRef(null)
   const toast = useToast()
@@ -83,9 +84,12 @@ export default function VatRecon({ tenants = [] }) {
     try {
       const res = await api('/api/reports/vat-reconcile/cancel-duplicates', {
         method: 'POST',
-        body: { payment_ids: dupIds, dry_run: !apply, note: apply ? dupNote : undefined },
+        body: { payment_ids: apply ? dupSel : dupIds, dry_run: !apply,
+          note: apply ? dupNote : undefined },
       })
       setDup(res)
+      // Анхдагчаар: цуцлах боломжтой БА сэжиггүй мөрүүд л сонгогдоно
+      if (!apply) setDupSel(res.items.filter((i) => i.ok && !i.suspect).map((i) => i.payment_id))
       if (apply) {
         toast(`Цуцлагдсан: ${res.ok} · алдаа: ${res.failed}`, res.failed ? 'error' : undefined)
         setDupOk(false)
@@ -339,10 +343,10 @@ export default function VatRecon({ tenants = [] }) {
                   <AlertTriangle size={14} /> Аль баримт цуцлагдахыг анхаарна уу
                 </div>
                 <div className="text-slate-300">
-                  Манай систем зөвхөн ӨӨРИЙН үүсгэсэн баримтыг цуцалж чадна. ТЕГ-ийн файлд
-                  давхардсан гэж тэмдэглэгдсэн мөр нь ӨӨР кассын дугаартай бол түүнийг
-                  цуцлах боломжгүй — доорх жагсаалтад ЯГ ямар ДДТД цуцлагдахыг харуулав.
-                  Мөнгө буцаахгүй, зөвхөн татварын баримт.
+                  Доорх жагсаалтад ЯГ ямар ДДТД цуцлагдахыг харуулав — тэмдэглэсэн мөр л
+                  цуцлагдана. Багцын зонхилох сувгаас ӨӨР сувгийнхыг (⚠) санамсаргүй
+                  тааралт байж болзошгүй тул анхдагчаар сонгоогүй. Мөнгө буцаахгүй,
+                  зөвхөн татварын баримт.
                 </div>
               </div>
             )}
@@ -353,13 +357,23 @@ export default function VatRecon({ tenants = [] }) {
             </div>
             <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
               {(dup.items || []).map((it, i) => (
-                <div key={i} className={it.ok ? '' : 'text-red-400'}>
-                  {it.paid_at?.slice(0, 19)} {fmt(it.amount)}₮ {it.site_name}
-                  {' · '}
-                  {(it.will_cancel || it.cancelled || []).map((x) => x.ddtd || x).join(', ')
-                    || it.error || ''}
-                  {it.error ? ` · ${it.error}` : ''}
-                </div>
+                <label key={i} className={`flex items-start gap-2 ${it.ok ? '' : 'text-red-400'} ${
+                  it.suspect ? 'text-amber-400' : ''} ${dup.dry_run && it.ok ? 'cursor-pointer' : ''}`}>
+                  {dup.dry_run && it.ok && (
+                    <input type="checkbox" className="mt-0.5" checked={dupSel.includes(it.payment_id)}
+                      onChange={(e) => setDupSel((v) => e.target.checked
+                        ? [...v, it.payment_id] : v.filter((x) => x !== it.payment_id))} />
+                  )}
+                  <span>
+                    {it.paid_at?.slice(0, 19)} {fmt(it.amount)}₮ {it.site_name}
+                    {it.provider ? ` ${it.provider}` : ''}
+                    {' · '}
+                    {(it.will_cancel || it.cancelled || []).map((x) => x.ddtd || x).join(', ')
+                      || it.error || ''}
+                    {it.error ? ` · ${it.error}` : ''}
+                    {it.suspect ? ' · ⚠ өөр суваг — санамсаргүй тааралт байж болно' : ''}
+                  </span>
+                </label>
               ))}
             </div>
             {dup.dry_run && dup.ok > 0 && (
@@ -370,12 +384,12 @@ export default function VatRecon({ tenants = [] }) {
                 </label>
                 <label className="flex items-center gap-2 text-xs cursor-pointer">
                   <input type="checkbox" checked={dupOk} onChange={(e) => setDupOk(e.target.checked)} />
-                  Ойлголоо — {dup.ok} баримтыг ТЕГ-т цуцлана. Мөнгө буцаагдахгүй.
+                  Ойлголоо — сонгосон {dupSel.length} баримтыг ТЕГ-т цуцлана. Мөнгө буцаагдахгүй.
                 </label>
                 <button className="btn-primary bg-red-600 hover:bg-red-500 text-white text-sm py-1.5"
-                  disabled={!dupOk || !dupNote.trim() || dupBusy}
+                  disabled={!dupOk || !dupNote.trim() || dupBusy || dupSel.length === 0}
                   onClick={() => cancelDup(true)}>
-                  <Ban size={14} /> {dupBusy ? 'Цуцалж байна…' : `${dup.ok} баримтыг цуцлах`}
+                  <Ban size={14} /> {dupBusy ? 'Цуцалж байна…' : `${dupSel.length} баримтыг цуцлах`}
                 </button>
               </div>
             )}

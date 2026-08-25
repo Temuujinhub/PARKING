@@ -292,3 +292,17 @@ def test_duplicate_rows_carry_payment_id():
     probe = [_probe("pay-42", BASE, 1000, ["0152000000000000000000000000000001"])]
     out = explain_unmatched_tax(left, probe, 0, 3, {"pay-42"}, None)
     assert out[0]["verdict"] == "DUPLICATE" and out[0]["payment_id"] == "pay-42"
+
+
+def test_only_msgbill_side_is_cancelled_target(tmp_path):
+    """Касс дээр Ontime POS баримт хэвлэдэг байсан бэлэн/картын төлбөрийн msgbill
+    баримт л давхардана. QPay/QR төлбөрт POS баримт хэвлэгддэггүй тул тэдгээрийн
+    «давхардал» нь цаг+дүнгээр санамсаргүй таарсан байх магадлалтай — UI тэднийг
+    ⚠ гэж тэмдэглэж анхдагчаар сонгохгүй (2026-08-24 продын дата: 61-ээс 2)."""
+    items = [{"will_cancel": [{"provider": "MSGBILL"}]} for _ in range(59)]
+    items += [{"will_cancel": [{"provider": "QPAY"}]} for _ in range(2)]
+    from collections import Counter
+    provs = Counter(w["provider"] for i in items for w in i["will_cancel"])
+    top = provs.most_common(1)[0][0]
+    suspects = [i for i in items if {w["provider"] for w in i["will_cancel"]} != {top}]
+    assert top == "MSGBILL" and len(suspects) == 2

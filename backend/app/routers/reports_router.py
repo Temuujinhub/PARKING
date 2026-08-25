@@ -1230,6 +1230,24 @@ async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("
     return result
 
 
+def _cancel_blocker(rec, payment, site) -> str | None:
+    """Энэ баримтыг цуцлах боломжгүй БОЛ шалтгааныг буцаана (урьдчилсан шалгалт)."""
+    from ..services import msgbill as _mb
+    prov = rec.provider or ("QPAY" if payment.provider == "QPAY" and payment.provider_payment_id
+                            else "POSAPI")
+    if prov == "MSGBILL":
+        if not rec.provider_ref:
+            return "msgbill баримтын ID (provider_ref) алга — цуцалж чадахгүй"
+        try:
+            if not _mb.api_key_for(site).enabled:
+                return "msgbill түлхүүр тохируулаагүй"
+        except Exception:  # noqa: BLE001
+            return "msgbill тохиргоог уншиж чадсангүй"
+    elif prov == "QPAY" and not payment.provider_payment_id:
+        return "QPay-ийн payment_id алга — цуцалж чадахгүй"
+    return None
+
+
 @router.post("/vat-reconcile/cancel-duplicates")
 async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
                                     user: User = Depends(require("vat", "reports"))):
@@ -1282,9 +1300,15 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
             failed += 1
             continue
         if dry:
-            out.append({**info, "ok": True, "will_cancel":
-                        [{"ddtd": r.ebarimt_id, "provider": r.provider} for r in target]})
-            done += 1
+            # Цуцлалт БОДИТООР ажиллах уу гэдгийг урьдчилан хэлнэ — 61 баримтыг
+            # эхлүүлээд дундуур нь «provider_ref алга» гэж унахаас сэргийлнэ
+            blockers = [b for b in (_cancel_blocker(r, payment, site) for r in target) if b]
+            out.append({**info, "ok": not blockers,
+                        "error": "; ".join(blockers) or None,
+                        "will_cancel": [{"ddtd": r.ebarimt_id, "provider": r.provider}
+                                        for r in target]})
+            done += int(not blockers)
+            failed += int(bool(blockers))
             continue
         locked = _lock_payment(db, pid)   # давхар товшилтоос хамгаална
         if locked is None:
@@ -1298,6 +1322,17 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
         out.append({**info, **res})
         done += int(bool(res.get("ok")))
         failed += int(not res.get("ok"))
+    if dry:
+        # Багцын ЗОНХИЛОХ суваг — давхардал нэг сувгаас үүсдэг (жишээ: касс дээр
+        # Ontime POS хэвлэдэг байсан бэлэн/картын төлбөрийн msgbill баримт).
+        # Цөөнх сувгийнх нь цаг+дүнгээр санамсаргүй таарсан байх магадлалтай тул
+        # СЭЖИГТЭЙ гэж тэмдэглэж, UI-д анхдагчаар СОНГОХГҮЙ.
+        provs = Counter(w["provider"] for i in out for w in i.get("will_cancel", []) if w.get("provider"))
+        top = provs.most_common(1)[0][0] if provs else None
+        for i in out:
+            ps = {w.get("provider") for w in i.get("will_cancel", [])}
+            i["provider"] = "/".join(sorted(p for p in ps if p)) or ""
+            i["suspect"] = bool(top and ps and ps != {top})
     if not dry:
         db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK_SUMMARY",
                         entity="vat", detail={"requested": len(ids), "ok": done,
