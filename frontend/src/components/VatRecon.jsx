@@ -164,7 +164,8 @@ export default function VatRecon({ tenants = [] }) {
           </div>
           {d && (
             <div className="text-xs text-slate-500 font-mono">
-              {d.file} · {d.kind} · хуудас «{d.sheet}» · {d.rows} мөр → {d.parsed} баримт ·
+              {d.file} · {d.kind} · {d.bytes ? `${(d.bytes / 1024).toFixed(0)}KB · ` : ''}
+              хуудас «{d.sheet}» · {d.rows} мөр → {d.parsed} баримт ·
               багана ДДТД={d.columns?.ddtd || '?'}/огноо={d.columns?.dt || '?'}/дүн={d.columns?.amount || '?'}
               {recon.tenant ? ` · түрээслэгч: ${recon.tenant}` : ''}
               {recon.tz_shift ? ` · цагийн шилжилт ${recon.tz_shift > 0 ? '+' : ''}${recon.tz_shift}ц` : ''}

@@ -271,7 +271,7 @@ def parse_tax_export(filename: str, raw: bytes, override: dict | None = None) ->
         tax.append({"ddtd": ddtd, "dt": dt, "amount": amount,
                     "src": str(cell(i_s) or "").strip(), "used": False})
     diag = {
-        "file": (filename or "")[:80], "kind": kind, "sheet": sheet,
+        "file": (filename or "")[:80], "kind": kind, "sheet": sheet, "bytes": len(raw),
         "rows": len(body), "parsed": len(tax), "header_row": data_from,
         "columns": {k: col_name(v) for k, v in cols.items() if v is not None},
         "skipped": dict(skip),

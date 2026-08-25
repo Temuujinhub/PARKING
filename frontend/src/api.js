@@ -29,19 +29,43 @@ export async function api(path, { method = 'GET', body, form, formData, blob } =
     throw new Error('Нэвтрэлт дууссан')
   }
   if (blob) {
-    if (!res.ok) throw new Error('Татахад алдаа гарлаа')
+    if (!res.ok) throw new Error(errMessage(null, res.status, await res.text().catch(() => '')))
     return res.blob()
   }
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(errMessage(data.detail))
+  // .json() биш .text() — nginx-ийн алдааны HTML хуудсыг ч харуулж чадна
+  const raw = await res.text().catch(() => '')
+  let data = {}
+  try { data = raw ? JSON.parse(raw) : {} } catch { /* JSON биш — доор боловсруулна */ }
+  if (!res.ok) throw new Error(errMessage(data.detail, res.status, raw))
   return data
+}
+
+// backend хүртэл ХҮРЭЭГҮЙ (nginx/proxy) алдааны товч тайлбар — эдгээр хариу нь
+// JSON биш HTML тул урьд нь бүгд «Алдаа гарлаа» болж, шалтгаан нь далд үлддэг байв
+const HTTP_HINT = {
+  400: 'Хүсэлт буруу',
+  403: 'Энэ үйлдлийг хийх эрхгүй',
+  404: 'Хаяг олдсонгүй',
+  413: 'Файл хэт том (сервер 10MB-аас их файл хүлээж авахгүй)',
+  429: 'Хэт олон хүсэлт — хэсэг хүлээгээд дахин оролдоно уу',
+  500: 'Серверийн дотоод алдаа — админд мэдэгдэнэ үү',
+  502: 'Сервер хариу өгсөнгүй (дахин ачаалж байгаа эсвэл унтарсан)',
+  503: 'Үйлчилгээ түр боломжгүй',
+  504: 'Серверийн хариу хэтэрхий удлаа (timeout)',
 }
 
 // Backend-ийн алдааг ойлгомжтой мессеж болгоно. FastAPI validation (422)-ийн
 // detail нь [{loc, msg, type}, ...] массив тул урьд нь «[object Object]» болдог
 // байсан — талбар бүрийн ойлгомжтой мессежийг гаргана.
-function errMessage(detail) {
-  if (!detail) return 'Алдаа гарлаа'
+function errMessage(detail, status, raw) {
+  if (!detail) {
+    // detail огт байхгүй = backend-ийн JSON биш (nginx/proxy-ийн HTML г.м).
+    // Статус болон биений эхлэлийг харуулж «юуны алдаа вэ» гэдгийг мэдэгдэнэ.
+    const hint = HTTP_HINT[status]
+    const body = String(raw || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+    if (!status) return 'Алдаа гарлаа'
+    return `Алдаа гарлаа — HTTP ${status}${hint ? ` (${hint})` : ''}${body ? `\n${body}` : ''}`
+  }
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) {
     return detail.map((e) => {

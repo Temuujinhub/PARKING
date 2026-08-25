@@ -1086,10 +1086,24 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
     from ..models import Tenant, VatReceipt
     from . import vat_recon as _vr
     raw = await file.read()
-    if len(raw) > 20 * 1024 * 1024:
-        raise HTTPException(400, "Файл хэт том (20MB-аас их). Огнооны мужаар хувааж экспортлоно уу.")
-    tax, diag = _vr.parse_tax_export(file.filename or "", raw,
-                                     {"ddtd": col_ddtd, "dt": col_dt, "amount": col_amount})
+    # nginx нь 10MB-аас том биеийг backend хүртэл НЭВТРҮҮЛДЭГГҮЙ (413, HTML хариу)
+    # тул энд мөн 10MB-аар таслаж, ойлгомжтой мессеж өгнө
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(400, f"Файл хэт том ({len(raw) / 1048576:.1f}MB) — дээд хязгаар 10MB. "
+                                 "Огнооны мужаар хувааж экспортлох, эсвэл Excel дээр нээгээд "
+                                 "«Save As → .csv» болгож оруулна уу (хэмжээ олон дахин багасна).")
+    try:
+        tax, diag = _vr.parse_tax_export(file.filename or "", raw,
+                                         {"ddtd": col_ddtd, "dt": col_dt, "amount": col_amount})
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        # Гэнэтийн алдаа 500 болж, UI дээр «Алдаа гарлаа» гэсэн бүрхэг мессеж
+        # болж хувирдаг байв. Оношилгооны хэрэгсэл тул алдааны ТӨРЛИЙГ хэлнэ
+        # (бүтэн traceback нь journalctl-д).
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(400, f"Файл задлахад алдаа гарлаа: {type(e).__name__}: {str(e)[:200]}")
     # ─── Түрээслэгчээр хязгаарлах (сонгосон бол) ───────────────────────────
     tenant, scope_ids = None, None
     if tenant_id:
@@ -1117,8 +1131,14 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
          .filter(Payment.paid_at >= lo, Payment.paid_at < hi))
     q = (q.filter(ParkingSession.site_id.in_(scope_ids)) if scope_ids is not None
          else _flt(q, ParkingSession.site_id, _scope(user)))
-    ours = q.all()
-    shift, matched, ddtd_equal, un_ours = _vr.best_shift(tax, ours, shifts, tol)
+    try:
+        ours = q.all()
+        shift, matched, ddtd_equal, un_ours = _vr.best_shift(tax, ours, shifts, tol)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
+                                 f"{type(e).__name__}: {str(e)[:200]}")
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
