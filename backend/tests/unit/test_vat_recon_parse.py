@@ -265,3 +265,22 @@ def test_pos_groups_finds_cash_register_tail():
     g = pos_groups(ids)
     assert g == {"10002990": 90, "10045952": 10}
     assert pos_groups([]) == {}
+
+
+def test_mixed_timezones_per_cash_register():
+    """ТЕГ-ийн НЭГ экспорт дотор цагийн бүс ХОЛИЛДОЖ ирдэг (2026-08-24 нотлогдсон):
+    QPay-ийн касс UTC-ээр, msgbill-ийн касс УБ локал (+8ц) цагаар. Нэг ерөнхий
+    шилжилт сонговол нөгөө кассын БҮХ мөр «манайд алга» болно."""
+    ours = [(_Rec(1000 + i), _Pay(BASE + timedelta(minutes=i)), "1234УБА", "Хангарьд")
+            for i in range(20)]
+    rows = []
+    for i in range(10):                       # QPay касс — UTC
+        rows.append(["7524322", "0152000200900009726%08d10014863" % i,
+                     (BASE + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"), 1000 + i])
+    for i in range(10, 20):                   # msgbill касс — УБ локал (+8ц)
+        rows.append(["7524322", "0152000200900009726%08d10045952" % i,
+                     (BASE + timedelta(minutes=i, hours=8)).strftime("%Y-%m-%d %H:%M:%S"), 1000 + i])
+    tax, _ = parse_tax_export("teg.xlsx", _xlsx(rows, ["ТТД", "ДДТД", "Огноо", "Нийт дүн"]))
+    r = best_shift(tax, ours, [0.0, -8.0], 3)
+    assert r["group_shifts"] == {"10014863": 0.0, "10045952": -8.0}
+    assert r["matched"] == 20 and r["unmatched_ours"] == []

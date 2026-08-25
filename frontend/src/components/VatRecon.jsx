@@ -185,6 +185,15 @@ export default function VatRecon({ tenants = [] }) {
             <div className="text-[11px] text-slate-400 space-y-0.5">
               <div>ТЕГ файлын касс (ДДТД-ийн сүүлийн 8 орон): {Object.entries(recon.tax_pos)
                 .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ')}</div>
+              {/* Касс бүрийн цагийн шилжилт — ТЕГ-ийн нэг экспорт дотор цагийн
+                  бүс ХОЛИЛДОЖ ирдэг (QPay UTC, msgbill УБ локал +8ц) */}
+              {Object.values(recon.group_shifts || {}).some((v) => v !== 0) && (
+                <div className="text-amber-400">
+                  ⚠ Файл дотор цагийн бүс холилдсон — касс бүрд тусад нь тааруулав: {
+                    Object.entries(recon.group_shifts).map(([k, v]) =>
+                      `…${k}: ${v === 0 ? 'UTC' : `${v > 0 ? '+' : ''}${v}ц`}`).join(' · ')}
+                </div>
+              )}
               <div>Манай баримтын касс: {Object.entries(recon.ours_pos || {})
                 .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ') || '—'}</div>
               {Object.keys(recon.unmatched_tax_pos || {}).length > 0 && (

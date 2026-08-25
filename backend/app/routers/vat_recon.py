@@ -331,9 +331,15 @@ def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
     for t in tax:
         t["used"] = False
         t.pop("ours", None)
-    off = timedelta(hours=shift)
+    for t in tax:
+        t.setdefault("shift", shift)
     matched, ddtd_equal, un_ours, cancelled = 0, 0, [], 0
     by_provider: dict[str, dict] = {}
+
+    def when(t):
+        """Мөр бүрийн цаг өөрийн КАССЫН шилжилтээр (файл дотор холилдож ирдэг)."""
+        return t["dt"] + timedelta(hours=t["shift"])
+
     for rec, pay, plate, site_name in ours:
         if pay.paid_at is None:
             continue
@@ -341,9 +347,9 @@ def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
             cancelled += 1          # ТЕГ-т цуцлагдсан тул файлд байхгүй нь ХЭВИЙН
             continue
         cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
-                and abs((t["dt"] + off - pay.paid_at).total_seconds()) <= tol]
+                and abs((when(t) - pay.paid_at).total_seconds()) <= tol]
         if cand:
-            best = min(cand, key=lambda x: abs((x["dt"] + off - pay.paid_at).total_seconds()))
+            best = min(cand, key=lambda x: abs((when(x) - pay.paid_at).total_seconds()))
             best["used"] = True
             best["ours"] = (rec, pay, plate, site_name)
             matched += 1
@@ -372,9 +378,8 @@ def clip_to_file(tax: list, ours: list, shift: float, tol: int) -> tuple[list, i
     татдаг. Тэр нөөц дэх баримтуудыг «манайд бий, ТЕГ-д алга» гэж тоолох нь
     ХУДАЛ — файл тэр хугацааг огт хамраагүй байхад «зөрүү» болж харагдана.
     (2026-08-25: 121 «зөрүү»-гийн ихэнх нь яг энэ нөөцийн баримтууд байв.)"""
-    off = timedelta(hours=shift)
-    lo = min(t["dt"] for t in tax) + off - timedelta(seconds=tol)
-    hi = max(t["dt"] for t in tax) + off + timedelta(seconds=tol)
+    times = [t["dt"] + timedelta(hours=t.get("shift", shift)) for t in tax]
+    lo, hi = min(times) - timedelta(seconds=tol), max(times) + timedelta(seconds=tol)
     inside = [o for o in ours if o[1].paid_at is not None and lo <= o[1].paid_at <= hi]
     return inside, len(ours) - len(inside)
 
@@ -386,31 +391,61 @@ def best_shift(tax: list, ours: list, candidates: list[float], tol: int) -> dict
 
     Шилжилтийг сонгосны ДАРАА манай талыг файлын хамрах хугацаанд тайрч,
     эцсийн тулгалтыг тэр багц дээр хийнэ."""
-    shift, best_matched = candidates[0], -1
-    for sh in candidates:
-        m = match_pass(tax, ours, sh, tol)["matched"]
-        if m > best_matched:
-            shift, best_matched = sh, m
+    # ── Цагийн шилжилтийг КАСС (POS) тус бүрээр тодорхойлно ──────────────────
+    # 2026-08-25: ТЕГ-ийн нэг экспорт дотор ЦАГИЙН БҮС ХОЛИЛДОЖ ирдэг нь
+    # батлагдав — QPay-ийн касс UTC-ээр, msgbill-ийн касс УБ локал цагаар
+    # (+8ц) бичигдсэн. Нэг ерөнхий шилжилт сонговол нөгөө кассын БҮХ мөр
+    # «манайд алга» болж 76 хуурамч зөрүү гардаг байв.
+    tail = pos_tail_len([t["ddtd"] for t in tax])
+    groups: dict[str, list] = {}
+    for t in tax:
+        groups.setdefault(t["ddtd"][-tail:] if tail else "*", []).append(t)
+    for key, rows in groups.items():
+        best_sh, best_n = candidates[0], -1
+        for sh in candidates:
+            for x in rows:          # ЗӨВХӨН энэ бүлгийнх — өмнөх бүлгийн
+                x["shift"] = sh     # шилжилтийг дарж бичихгүй
+            n = match_pass(rows, ours, sh, tol)["matched"]
+            if n > best_n:
+                best_sh, best_n = sh, n
+        for x in rows:
+            x["group"] = key
+            x["shift"] = best_sh
+    shift = min((t["shift"] for t in tax), key=lambda v: abs(v)) if tax else candidates[0]
     inside, outside = clip_to_file(tax, ours, shift, tol)
     res = match_pass(tax, inside, shift, tol)     # сонгосон шилжилтийг дахин тавина
     return {**res, "shift": shift, "ours_in_window": len(inside), "outside_window": outside,
-            "inside": inside}
+            "inside": inside,
+            "group_shifts": {k: rows[0]["shift"] for k, rows in groups.items()}}
 
 
-def pos_groups(ids: list[str]) -> dict:
-    """ДДТД-үүдийг КАССЫН (POS) дугаараар нь бүлэглэнэ.
+def pos_tail_len(ids: list[str]) -> int | None:
+    """ДДТД-ийн төгсгөл дэх КАССЫН дугаарын уртыг өгөгдлөөс олно.
 
-    Кассын дугаар нь ДДТД-ийн ТӨГСГӨЛД байдаг ба урт нь тогтмол биш. Тиймээс
-    «сүүлийн 8 орон» гэж таамаглахгүй — ялгаатай утгын тоо цөөн хэвээр байх
-    ХАМГИЙН УРТ төгсгөлийг сонгоно (нэг өдрийн экспортод 1-5 касс л байдаг)."""
+    Шалгуур: бүлэг цөөн (≤6) БӨГӨӨД бүлэг бүрд дунджаар 4+ мөр ноогдоно.
+    Эс бөгөөс дарааллын дугаарыг «касс» гэж андуурч мөр бүрийг тусад нь
+    бүлэглэнэ. Тохирох урт олдоогүй бол None — бүх мөр НЭГ бүлэг."""
+    ids = [i for i in ids if i]
+    if len(ids) < 8:
+        return None
+    found = None
+    for ln in range(6, 13):
+        n = len({i[-ln:] for i in ids})
+        if n <= 6 and n * 4 <= len(ids):
+            found = ln
+    return found
+
+
+def pos_groups(ids: list[str], tail: int | None = None) -> dict:
+    """ДДТД-үүдийг кассын дугаараар бүлэглэнэ (харуулах зориулалттай).
+
+    tail: бүх файлаас тооцсон урт. Дэд багц (ж: таараагүй мөрүүд) дээр дахин
+    тооцвол өөр урт гарч, харьцуулах боломжгүй болно."""
     ids = [i for i in ids if i]
     if not ids:
         return {}
-    best = 6
-    for ln in range(6, 13):
-        if len({i[-ln:] for i in ids}) <= max(6, len(ids) // 50):
-            best = ln
-    return dict(Counter(i[-best:] for i in ids))
+    ln = tail or pos_tail_len(ids)
+    return dict(Counter(i[-ln:] for i in ids)) if ln else {"(нэг бүлэг)": len(ids)}
 
 
 # «ТЕГ-д бий, манайд алга» мөрийн ШАЛТГААНЫГ манай ТӨЛБӨРИЙН бүртгэлээр тайлах.

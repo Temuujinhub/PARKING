@@ -1144,6 +1144,7 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
                                  f"{type(e).__name__}: {str(e)[:200]}")
     shift, matched, un_ours = r["shift"], r["matched"], r["unmatched_ours"]
+    _tail = _vr.pos_tail_len([t["ddtd"] for t in tax])
     left = [t for t in tax if not t["used"]]
     # «ТЕГ-д бий, манайд алга» мөрүүдийг манай ТӨЛБӨРийн бүртгэлээр тайлна:
     # баримтын бүртгэл байхгүй ч төлбөр нь байвал → баримт үүссэн боловч манайд
@@ -1197,10 +1198,13 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # ДДТД-ийн СҮҮЛИЙН 8 орон = баримт гаргасан КАССЫН (POS) дугаар. Файлд
         # хэдэн өөр касс байна, тэдгээрийн аль нь манайх вэ гэдгийг харуулна —
         # «энэ 82 мөр манай аль gateway-ээр гарсан бэ» гэдгийн шууд хариу.
-        "tax_pos": _vr.pos_groups([t["ddtd"] for t in tax]),
-        "unmatched_tax_pos": _vr.pos_groups([t["ddtd"] for t in left]),
+        "tax_pos": _vr.pos_groups([t["ddtd"] for t in tax], _tail),
+        "unmatched_tax_pos": _vr.pos_groups([t["ddtd"] for t in left], _tail),
         "ours_pos": _vr.pos_groups([rec.ebarimt_id for rec, *_ in r["inside"]
-                                    if rec.status != "CANCELLED"]),
+                                    if rec.status != "CANCELLED"], _tail),
+        # Касс бүрийн ЦАГИЙН ШИЛЖИЛТ — ТЕГ-ийн нэг экспорт дотор цагийн бүс
+        # холилдож ирдэг (QPay UTC, msgbill УБ локал). Хэрэглэгчид ХАРАГДАХ ёстой.
+        "group_shifts": r.get("group_shifts", {}),
         "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
         "unmatched_ours_total": len(un_ours),
         "unmatched_tax": sorted(tax_explained, key=lambda x: x["dt"])[:200],
