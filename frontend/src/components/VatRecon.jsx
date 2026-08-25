@@ -162,6 +162,47 @@ export default function VatRecon({ tenants = [] }) {
             <span className="text-amber-400">Манайд бий/ТЕГ-д алга: <b className="font-mono">{recon.unmatched_ours_total}</b></span>
             <span className="text-amber-400">ТЕГ-д бий/манайд алга: <b className="font-mono">{recon.unmatched_tax_total}</b></span>
           </div>
+          {/* Хоёр «зөрүү» хоорондоо ТААРАХ ЁСГҮЙ — эдгээр нь тулгалтын хүрээнээс
+              гадуур үлдсэн, огт өөр шалтгаантай баримтууд. Тэр шалтгааныг задалж
+              харуулна (өмнө нь зөвхөн эцсийн тоо харагдаж, «яагаад?» нь далд байв) */}
+          {(recon.outside_window > 0 || recon.cancelled > 0) && (
+            <div className="text-xs text-slate-400 flex flex-wrap gap-4">
+              {recon.outside_window > 0 && (
+                <span title="Асуулга нь цагийн шилжилтэд зориулж ±9 цагийн нөөцтэй татдаг. Файл тэр хугацааг хамраагүй тул эдгээр нь зөрүү БИШ.">
+                  Файлын хамрах хугацаанаас гадуур: <b className="font-mono">{recon.outside_window}</b> (тооцоогүй)
+                </span>
+              )}
+              {recon.cancelled > 0 && (
+                <span title="Цуцлагдсан баримт ТЕГ-д байхгүй нь хэвийн">
+                  Цуцлагдсан: <b className="font-mono">{recon.cancelled}</b> (алгассан)
+                </span>
+              )}
+            </div>
+          )}
+          {recon.matched > 0 && (
+            <div className="rounded-lg border border-surface-border/60 p-3 space-y-2">
+              <div className="text-xs font-semibold">
+                ДДТД манайх ↔ ТЕГ-ийнх:{' '}
+                <b className={recon.ddtd_equal === recon.matched ? 'text-accent' : 'text-amber-400'}>
+                  {recon.ddtd_equal} / {recon.matched} ижил
+                </b>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Тулгалт ДДТД-ээр хийгддэггүй (цаг+дүнгээр) — энэ мөр нь «манай хадгалсан
+                дугаар ТЕГ-ийнхтэй таарч байна уу» гэдгийг ХЭМЖИНЭ.
+              </div>
+              {Object.entries(recon.ddtd_by_provider || {}).map(([prov, st]) => (
+                <div key={prov} className="text-[11px] font-mono">
+                  <span className="text-slate-300">{prov}</span>: {st.equal}/{st.matched} ижил
+                  {st.sample && (
+                    <div className="pl-3 text-slate-500 break-all">
+                      манайх: {st.sample.ours}<br />ТЕГ:&nbsp;&nbsp;&nbsp; {st.sample.tax}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {d && (
             <div className="text-xs text-slate-500 font-mono">
               {d.file} · {d.kind} · {d.bytes ? `${(d.bytes / 1024).toFixed(0)}KB · ` : ''}

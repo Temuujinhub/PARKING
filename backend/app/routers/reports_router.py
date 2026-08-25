@@ -1092,9 +1092,13 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         raise HTTPException(400, f"Файл хэт том ({len(raw) / 1048576:.1f}MB) — дээд хязгаар 10MB. "
                                  "Огнооны мужаар хувааж экспортлох, эсвэл Excel дээр нээгээд "
                                  "«Save As → .csv» болгож оруулна уу (хэмжээ олон дахин багасна).")
+    import asyncio as _aio
     try:
-        tax, diag = _vr.parse_tax_export(file.filename or "", raw,
-                                         {"ddtd": col_ddtd, "dt": col_dt, "amount": col_amount})
+        # openpyxl parse нь sync — thread дээр ажиллуулж event loop-ыг блоклохгүй
+        # (60,000 мөрт файл дээр /api/health 2мс → 5.2с болж хаалт/LPR царцаж байв)
+        tax, diag = await _aio.to_thread(
+            _vr.parse_tax_export, file.filename or "", raw,
+            {"ddtd": col_ddtd, "dt": col_dt, "amount": col_amount})
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -1133,21 +1137,27 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
          else _flt(q, ParkingSession.site_id, _scope(user)))
     try:
         ours = q.all()
-        shift, matched, ddtd_equal, un_ours = _vr.best_shift(tax, ours, shifts, tol)
+        r = await _aio.to_thread(_vr.best_shift, tax, ours, shifts, tol)
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
                                  f"{type(e).__name__}: {str(e)[:200]}")
+    shift, matched, un_ours = r["shift"], r["matched"], r["unmatched_ours"]
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
-        return _vr.reconcile_excel(tax, ours, un_ours, tol, _cfg.tz_offset_hours,
-                                   tenant.name if tenant else "Бүх зогсоол", shift)
+        return await _aio.to_thread(
+            _vr.reconcile_excel, tax, ours, un_ours, tol, _cfg.tz_offset_hours,
+            tenant.name if tenant else "Бүх зогсоол", shift)
     left = [t for t in tax if not t["used"]]
     return {
-        "tax_total": len(tax), "ours_total": len(ours), "matched": matched,
-        "ddtd_equal": ddtd_equal, "tz_shift": shift, "tol": tol,
+        "tax_total": len(tax), "ours_total": r["ours_in_window"], "matched": matched,
+        "ddtd_equal": r["ddtd_equal"], "tz_shift": shift, "tol": tol,
+        # Тулгалтын хүрээнээс ГАДУУР үлдсэн манай баримтууд — «зөрүү» БИШ:
+        # файл тэр хугацааг хамраагүй, эсвэл баримт нь цуцлагдсан
+        "outside_window": r["outside_window"], "cancelled": r["cancelled"],
+        "ddtd_by_provider": r["by_provider"],
         "tenant": tenant.name if tenant else None,
         "diag": diag,
         "tax_sources": dict(Counter(t["src"] for t in tax)),

@@ -321,17 +321,24 @@ def _no_rows_message(diag: dict, rows: list, data_from: int, skip: Counter) -> s
 
 # ──────────────────────────── Тулгалт ──────────────────────────────────────
 
-def match_pass(tax: list, ours: list, shift: float, tol: int) -> tuple[int, int, list]:
-    """Нэг цагийн шилжилтээр тулгана. Буцаана: (таарсан, ДДТД ижил, тохироогүй манайх).
-    ДДТД-ээр тулгаж БОЛОХГҮЙ — суваг бүр (QPay, msgbill) операторын кодтой билл
-    буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог."""
+def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
+    """Нэг цагийн шилжилтээр тулгана.
+
+    ДДТД-ЭЭР ТУЛГАДАГГҮЙ — суваг бүр (QPay, msgbill) операторын кодтой билл
+    буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог.
+    Гэхдээ таарсан хос бүрийн хоёр ДДТД-г ХАРЬЦУУЛЖ, сувгаар нь тоолно —
+    «манай дугаар ТЕГ-ийнхтэй таарч байна уу» гэдгийг хэмжих цорын ганц зам."""
     for t in tax:
         t["used"] = False
         t.pop("ours", None)
     off = timedelta(hours=shift)
-    matched, ddtd_equal, un_ours = 0, 0, []
+    matched, ddtd_equal, un_ours, cancelled = 0, 0, [], 0
+    by_provider: dict[str, dict] = {}
     for rec, pay, plate, site_name in ours:
-        if rec.status == "CANCELLED" or pay.paid_at is None:
+        if pay.paid_at is None:
+            continue
+        if rec.status == "CANCELLED":
+            cancelled += 1          # ТЕГ-т цуцлагдсан тул файлд байхгүй нь ХЭВИЙН
             continue
         cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
                 and abs((t["dt"] + off - pay.paid_at).total_seconds()) <= tol]
@@ -340,27 +347,53 @@ def match_pass(tax: list, ours: list, shift: float, tol: int) -> tuple[int, int,
             best["used"] = True
             best["ours"] = (rec, pay, plate, site_name)
             matched += 1
-            ddtd_equal += int(rec.ebarimt_id == best["ddtd"])
+            same = rec.ebarimt_id == best["ddtd"]
+            ddtd_equal += int(same)
+            prov = rec.provider or "POSAPI"
+            st = by_provider.setdefault(prov, {"matched": 0, "equal": 0, "sample": None})
+            st["matched"] += 1
+            st["equal"] += int(same)
+            if st["sample"] is None and not same:
+                # Ялгаатай хосын ЖИШЭЭ — хоёр дугаарыг зэрэгцүүлж харуулна
+                st["sample"] = {"ours": rec.ebarimt_id or "", "tax": best["ddtd"]}
         else:
             un_ours.append({"paid_at": pay.paid_at.isoformat(), "plate": plate,
                             "site_name": site_name, "amount": float(rec.amount),
                             "status": rec.status, "provider": rec.provider or "POSAPI",
                             "ebarimt_id": rec.ebarimt_id})
-    return matched, ddtd_equal, un_ours
+    return {"matched": matched, "ddtd_equal": ddtd_equal, "unmatched_ours": un_ours,
+            "cancelled": cancelled, "by_provider": by_provider}
 
 
-def best_shift(tax: list, ours: list, candidates: list[float], tol: int):
+def clip_to_file(tax: list, ours: list, shift: float, tol: int) -> tuple[list, int]:
+    """Манай баримтуудыг ФАЙЛЫН хамрах хугацаанд тайрна.
+
+    Асуулга нь цагийн шилжилт (0 / −TZ) аль нь ч таарахаар ±9 цагийн НӨӨЦТЭЙ
+    татдаг. Тэр нөөц дэх баримтуудыг «манайд бий, ТЕГ-д алга» гэж тоолох нь
+    ХУДАЛ — файл тэр хугацааг огт хамраагүй байхад «зөрүү» болж харагдана.
+    (2026-08-25: 121 «зөрүү»-гийн ихэнх нь яг энэ нөөцийн баримтууд байв.)"""
+    off = timedelta(hours=shift)
+    lo = min(t["dt"] for t in tax) + off - timedelta(seconds=tol)
+    hi = max(t["dt"] for t in tax) + off + timedelta(seconds=tol)
+    inside = [o for o in ours if o[1].paid_at is not None and lo <= o[1].paid_at <= hi]
+    return inside, len(ours) - len(inside)
+
+
+def best_shift(tax: list, ours: list, candidates: list[float], tol: int) -> dict:
     """Файлын цаг UTC уу, УБ-ын локал уу гэдгийг ТААРАЛТААР нь өөрөө сонгоно.
     (Урьд нь tz_shift=0 тогтмол байсан тул локал цагтай экспорт 0 таарч,
-    «бүгд зөрж байна» гэж харагддаг байв.)"""
-    best = (None, -1, 0, [])
+    «бүгд зөрж байна» гэж харагддаг байв.)
+
+    Шилжилтийг сонгосны ДАРАА манай талыг файлын хамрах хугацаанд тайрч,
+    эцсийн тулгалтыг тэр багц дээр хийнэ."""
+    shift, best_matched = candidates[0], -1
     for sh in candidates:
-        m, eq, un = match_pass(tax, ours, sh, tol)
-        if m > best[1]:
-            best = (sh, m, eq, un)
-    shift = best[0] if best[0] is not None else candidates[0]
-    matched, ddtd_equal, un_ours = match_pass(tax, ours, shift, tol)  # сонгосон нь дахин тавина
-    return shift, matched, ddtd_equal, un_ours
+        m = match_pass(tax, ours, sh, tol)["matched"]
+        if m > best_matched:
+            shift, best_matched = sh, m
+    inside, outside = clip_to_file(tax, ours, shift, tol)
+    res = match_pass(tax, inside, shift, tol)     # сонгосон шилжилтийг дахин тавина
+    return {**res, "shift": shift, "ours_in_window": len(inside), "outside_window": outside}
 
 
 def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,

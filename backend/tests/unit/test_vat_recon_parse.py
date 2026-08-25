@@ -161,8 +161,8 @@ def test_tz_shift_auto(file_shift, expect):
              (BASE + timedelta(minutes=i, hours=file_shift)).strftime("%Y-%m-%d %H:%M:%S"), 1500]
             for i in range(5)]
     tax, _ = parse_tax_export("teg.xlsx", _xlsx(rows, ["ТТД", "ДДТД", "Огноо", "Нийт дүн"]))
-    shift, matched, _, un_ours = best_shift(tax, ours, [0.0, -8.0], 3)
-    assert (shift, matched, un_ours) == (expect, 5, [])
+    r = best_shift(tax, ours, [0.0, -8.0], 3)
+    assert (r["shift"], r["matched"], r["unmatched_ours"]) == (expect, 5, [])
 
 
 def test_cancelled_receipts_not_matched():
@@ -173,8 +173,8 @@ def test_cancelled_receipts_not_matched():
     rows = [["7524322", "0152000200900009726000000000000990",
              BASE.strftime("%Y-%m-%d %H:%M:%S"), 1500]]
     tax, _ = parse_tax_export("teg.xlsx", _xlsx(rows, ["ТТД", "ДДТД", "Огноо", "Нийт дүн"]))
-    _, matched, _, un_ours = best_shift(tax, ours, [0.0], 3)
-    assert matched == 0 and un_ours == []
+    r = best_shift(tax, ours, [0.0], 3)
+    assert r["matched"] == 0 and r["unmatched_ours"] == [] and r["cancelled"] == 1
 
 
 def test_cell_helpers():
@@ -182,3 +182,38 @@ def test_cell_helpers():
     assert as_ddtd("12345") is None            # богино дугаар ДДТД биш
     assert as_dt("буруу") is None
     assert as_num("") is None and as_num("1 500") == 1500.0
+
+
+def test_outside_file_window_not_counted_as_diff():
+    """Асуулга ±9ц нөөцтэй татдаг тул файлын хамраагүй хугацааны баримтууд
+    «манайд бий, ТЕГ-д алга» болж ХУДАЛ зөрүү үүсгэдэг байв (2026-08-25)."""
+    ours = [(_Rec(1500), _Pay(BASE + timedelta(minutes=i)), "1234УБА", "Хангарьд")
+            for i in range(3)]
+    ours += [(_Rec(1500), _Pay(BASE - timedelta(hours=6)), "9999УБА", "Хангарьд"),
+             (_Rec(2000), _Pay(BASE + timedelta(hours=6)), "8888УБА", "Хангарьд")]
+    rows = [["7524322", "015200020090000972600%09d0990" % i,
+             (BASE + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"), 1500]
+            for i in range(3)]
+    tax, _ = parse_tax_export("teg.xlsx", _xlsx(rows, ["ТТД", "ДДТД", "Огноо", "Нийт дүн"]))
+    r = best_shift(tax, ours, [0.0], 3)
+    assert r["matched"] == 3
+    assert r["unmatched_ours"] == []      # 6 цагийн зайны 2 баримт зөрүү БИШ
+    assert r["outside_window"] == 2
+    assert r["ours_in_window"] == 3
+
+
+def test_ddtd_compared_per_provider():
+    """Таарсан хос бүрийн ДДТД-г сувгаар нь харьцуулна (ТЕГ-ийнхтэй ижил үү)."""
+    same = _Rec(1500); same.provider = "MSGBILL"; same.ebarimt_id = "015200020090000972600000000000990"
+    diff = _Rec(2000); diff.provider = "QPAY"; diff.ebarimt_id = "029100244106001097270149910045952"
+    ours = [(same, _Pay(BASE), "1111УБА", "Хангарьд"),
+            (diff, _Pay(BASE + timedelta(minutes=1)), "2222УБА", "Хангарьд")]
+    rows = [["7524322", same.ebarimt_id, BASE.strftime("%Y-%m-%d %H:%M:%S"), 1500],
+            ["7524322", "015200020090000972600000000001990",
+             (BASE + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"), 2000]]
+    tax, _ = parse_tax_export("teg.xlsx", _xlsx(rows, ["ТТД", "ДДТД", "Огноо", "Нийт дүн"]))
+    r = best_shift(tax, ours, [0.0], 3)
+    assert r["matched"] == 2 and r["ddtd_equal"] == 1
+    assert r["by_provider"]["MSGBILL"]["equal"] == 1
+    assert r["by_provider"]["QPAY"]["equal"] == 0
+    assert r["by_provider"]["QPAY"]["sample"]["tax"].endswith("1990")
