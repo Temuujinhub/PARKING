@@ -1,5 +1,6 @@
 """Тайлан: dashboard статистик, зогсоолын орлого, Excel экспорт, НӨАТ баримт, лог.
 Excel workbook угсрах код: reports_excel.py (энд endpoint-ууд нь нимгэн wrapper)."""
+from collections import Counter
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -1027,7 +1028,8 @@ async def vat_info(db: Session = Depends(get_db), user: User = Depends(require("
     if operator_sites(user) is not None:
         # Хариуцах зогсоолтой (tenant) хэрэглэгч — глобал PosAPI (EasyParking-ийн ТТД)
         # мэдээлэл хамаагүй тул хоосон буцаана; тэдний e-Barimt QPay/msgbill-ээр үүсдэг
-        return {"warnings": [], "scoped": True, "channels": channels}
+        return {"warnings": [], "scoped": True, "channels": channels,
+                "tenants": _vat_tenants(db, user)}
     warnings = []
     if channels["mock_receipts"]:
         warnings.append("MOCK баримт асаалттай (PARKING_EBARIMT_MOCK_RECEIPTS=true) — "
@@ -1043,75 +1045,91 @@ async def vat_info(db: Session = Depends(get_db), user: User = Depends(require("
             warnings.append(f"Илгээгдээгүй {info.get('unsentCount')} баримт байна — "
                             "3 хоногийн дотор илгээх хуультай.")
     return {**info, "warnings": warnings, "channels": channels,
+            "tenants": _vat_tenants(db, user),
             "qpay_ebarimt": channels["qpay"], "local_posapi_mock": settings.ebarimt_mock}
 
 
+def _vat_tenants(db, user) -> list[dict]:
+    """ТЕГ тулгалтад сонгох түрээслэгчид. ТЕГ портал ТТД тус бүрээр экспорт өгдөг
+    тул «хэний баримттай тулгах вэ» гэдгийг заах ёстой. Зөвхөн зогсоолтой (тиймээс
+    баримттай) түрээслэгчийг, хэрэглэгчийн эрхийн хүрээнд буцаана. /api/admin/tenants
+    нь SUPER_ADMIN-only тул санхүүгийн хэрэглэгч тэндээс авч чадахгүй."""
+    from ..models import Tenant
+    allowed = operator_sites(user)
+    q = db.query(Tenant.id, Tenant.name, Tenant.ebarimt_merchant_tin,
+                 func.count(ParkingSite.id)).join(
+        ParkingSite, ParkingSite.tenant_id == Tenant.id)
+    if allowed is not None:
+        q = q.filter(ParkingSite.id.in_(allowed))
+    rows = q.group_by(Tenant.id, Tenant.name, Tenant.ebarimt_merchant_tin).order_by(Tenant.name).all()
+    return [{"id": i, "name": n, "tin": tin or "", "site_count": int(c)} for i, n, tin, c in rows]
+
+
 @router.post("/vat-reconcile")
-async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: int = 3,
-                        excel: bool = False, db: Session = Depends(get_db),
+async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = None, tol: int = 3,
+                        excel: bool = False, tenant_id: str | None = None,
+                        col_ddtd: str | None = None, col_dt: str | None = None,
+                        col_amount: str | None = None, db: Session = Depends(get_db),
                         user: User = Depends(require("vat", "reports"))):
-    """ТЕГ-ийн мерчант порталын баримтын экспортыг (xlsx) манай баримттай тулгана.
+    """ТЕГ-ийн мерчант порталын баримтын экспортыг (xlsx/csv) манай баримттай тулгана.
 
     ДДТД-ээр тулгаж БОЛОХГҮЙ: суваг бүр (QPay, msgbill/Онлайм) операторын кодтой
     билл буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог
-    (2026-08-19 нотлогдсон). Тиймээс (цаг UTC ± tol сек, дүн)-ээр тулгана.
-    tz_shift: ТЕГ файлын цагт нэмэх цаг (файл UTC бол 0, локал цаг бол -8)."""
-    import io as _io
-    from collections import Counter
-    from datetime import timedelta as _td
-    import openpyxl as _xl
-    from ..models import VatReceipt
-    try:
-        ws = _xl.load_workbook(_io.BytesIO(await file.read()), read_only=True).active
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"xlsx уншиж чадсангүй: {str(e)[:120]}")
-    tax = []
-    for r in ws.iter_rows(values_only=True):
-        # Толгой/хоосон мөр алгасна; ДДТД=33 оронтой тоо, огноо parse болдог байх
-        try:
-            ddtd = str(r[1] or "").strip()
-            if not (ddtd.isdigit() and len(ddtd) >= 30):
-                continue
-            dt = datetime.strptime(str(r[2])[:19], "%Y-%m-%d %H:%M:%S") + _td(hours=tz_shift)
-            tax.append({"ddtd": ddtd, "dt": dt, "amount": float(r[3] or 0),
-                        "src": str(r[12] or "") if len(r) > 12 else "", "used": False})
-        except Exception:  # noqa: BLE001
-            continue
-    if not tax:
-        raise HTTPException(400, "ТЕГ файлаас баримт олдсонгүй (ДДТД/Огноо багана таарахгүй байна)")
-    lo = min(t["dt"] for t in tax) - _td(hours=1)
-    hi = max(t["dt"] for t in tax) + _td(hours=1)
-    q = (db.query(VatReceipt, Payment, ParkingSession.plate_number)
+    (2026-08-19 нотлогдсон). Тиймээс (цаг ± tol сек, дүн)-ээр тулгана.
+
+    tenant_id: ТЕГ портал нь ТТД тус бүрээр экспорт өгдөг тул тулгалтыг ЗӨВХӨН
+    тухайн түрээслэгчийн зогсоолуудын баримттай хийнэ (эс бөгөөс бусад ТТД-ийн
+    баримт «ТЕГ-д алга» болж хуурамч зөрүү харагдана).
+    tz_shift: ТЕГ файлын цагт нэмэх цаг. Хоосон = 0 ба −TZ хоёрыг туршиж
+    ИЛҮҮ ТААРСАНЫГ нь автоматаар сонгоно (файл UTC/локал аль нь ч байж болно).
+    col_*: багана автоматаар танигдаагүй үед хэрэглэгчийн гараар заасан үсэг."""
+    from ..models import Tenant, VatReceipt
+    from . import vat_recon as _vr
+    raw = await file.read()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(400, "Файл хэт том (20MB-аас их). Огнооны мужаар хувааж экспортлоно уу.")
+    tax, diag = _vr.parse_tax_export(file.filename or "", raw,
+                                     {"ddtd": col_ddtd, "dt": col_dt, "amount": col_amount})
+    # ─── Түрээслэгчээр хязгаарлах (сонгосон бол) ───────────────────────────
+    tenant, scope_ids = None, None
+    if tenant_id:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            raise HTTPException(404, "Түрээслэгч олдсонгүй.")
+        scope_ids = [r[0] for r in db.query(ParkingSite.id)
+                     .filter(ParkingSite.tenant_id == tenant_id).all()]
+        if not scope_ids:
+            raise HTTPException(400, f"«{tenant.name}»-д зогсоол оноогоогүй байна — "
+                                     "Админ → Түрээслэгч хэсэгт зогсоолыг оноож өгнө үү.")
+        allowed = operator_sites(user)
+        if allowed is not None:
+            scope_ids = [s for s in scope_ids if s in set(allowed)]
+            if not scope_ids:
+                raise HTTPException(403, "Энэ түрээслэгчийн мэдээлэл харах эрхгүй.")
+    # Аль ч цагийн шилжилтэд баримт багтахаар цонхыг өргөсгөж татна
+    shifts = [0.0, -float(_cfg.tz_offset_hours)] if tz_shift is None else [float(tz_shift)]
+    pad = timedelta(hours=max(abs(s) for s in shifts) + 1)
+    lo, hi = min(t["dt"] for t in tax) - pad, max(t["dt"] for t in tax) + pad
+    q = (db.query(VatReceipt, Payment, ParkingSession.plate_number, ParkingSite.name)
          .join(Payment, VatReceipt.payment_id == Payment.id)
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+         .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
          .filter(Payment.paid_at >= lo, Payment.paid_at < hi))
-    q = _flt(q, ParkingSession.site_id, _scope(user))
+    q = (q.filter(ParkingSession.site_id.in_(scope_ids)) if scope_ids is not None
+         else _flt(q, ParkingSession.site_id, _scope(user)))
     ours = q.all()
-    matched, ddtd_equal, un_ours = 0, 0, []
-    for rec, pay, plate in ours:
-        if rec.status == "CANCELLED" or pay.paid_at is None:
-            continue
-        cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
-                and abs((t["dt"] - pay.paid_at).total_seconds()) <= tol]
-        if cand:
-            best = min(cand, key=lambda x: abs((x["dt"] - pay.paid_at).total_seconds()))
-            best["used"] = True
-            best["ours"] = (rec, pay, plate)   # excel нэгтгэлд хэрэглэнэ
-            matched += 1
-            ddtd_equal += int(rec.ebarimt_id == best["ddtd"])
-        else:
-            un_ours.append({"paid_at": pay.paid_at.isoformat(), "plate": plate,
-                            "amount": float(rec.amount), "status": rec.status,
-                            "provider": rec.provider or "POSAPI",
-                            "ebarimt_id": rec.ebarimt_id})
-    left = [t for t in tax if not t["used"]]
+    shift, matched, ddtd_equal, un_ours = _vr.best_shift(tax, ours, shifts, tol)
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
-        return _reconcile_excel(tax, ours, un_ours, tol)
+        return _vr.reconcile_excel(tax, ours, un_ours, tol, _cfg.tz_offset_hours,
+                                   tenant.name if tenant else "Бүх зогсоол", shift)
+    left = [t for t in tax if not t["used"]]
     return {
         "tax_total": len(tax), "ours_total": len(ours), "matched": matched,
-        "ddtd_equal": ddtd_equal,
+        "ddtd_equal": ddtd_equal, "tz_shift": shift, "tol": tol,
+        "tenant": tenant.name if tenant else None,
+        "diag": diag,
         "tax_sources": dict(Counter(t["src"] for t in tax)),
         "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
         "unmatched_ours_total": len(un_ours),
@@ -1119,94 +1137,10 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float = 0, tol: 
                            "src": t["src"], "ddtd": t["ddtd"]}
                           for t in sorted(left, key=lambda x: x["dt"])[:100]],
         "unmatched_tax_total": len(left),
-        "note": "Тулгалт (цаг UTC ±%dс, дүн)-ээр. ДДТД ижил байх шаардлагагүй — суваг ба ТЕГ өөр дугаарладаг." % tol,
+        "note": ("Тулгалт (цаг ±%dс, дүн)-ээр%s. ДДТД ижил байх шаардлагагүй — "
+                 "суваг ба ТЕГ өөр дугаарладаг."
+                 % (tol, "" if shift == 0 else f", файлын цагт {shift:+g}ц нэмсэн")),
     }
-
-
-def _reconcile_excel(tax: list, ours: list, un_ours: list, tol: int):
-    """Тулгалтын нэгтгэсэн xlsx: (1) ТЕГ+манай mөр зэрэгцээ, (2) манайд бий/ТЕГ-д алга,
-    (3) дүгнэлт. Огноог UTC+8 (Улаанбаатар)-аар харуулна."""
-    import io as _io
-    from collections import Counter
-    from datetime import timedelta as _td
-    from urllib.parse import quote
-    import openpyxl as _xl
-    from fastapi.responses import StreamingResponse
-    from openpyxl.styles import Font, PatternFill
-
-    wb = _xl.Workbook()
-    bold = Font(bold=True)
-    warn = PatternFill("solid", fgColor="FFF2CC")
-    ok_f = PatternFill("solid", fgColor="E2EFDA")
-
-    ws = wb.active
-    ws.title = "Тулгалт"
-    ws.append(["ТЕГ огноо (УБ цаг)", "Дүн ₮", "ТЕГ ДДТД", "ТЕГ эх сурвалж",
-               "Тулгалт", "Машины дугаар", "Зогсоол", "Манай суваг", "Манай ДДТД",
-               "Сугалаа", "Манай төлөв", "Төлсөн (УБ цаг)"])
-    for c in ws[1]:
-        c.font = bold
-    for t in sorted(tax, key=lambda x: x["dt"]):
-        o = t.get("ours")
-        row = [(t["dt"] + _td(hours=8)).strftime("%Y-%m-%d %H:%M:%S"), t["amount"],
-               t["ddtd"], t["src"]]
-        if o:
-            rec, pay, plate = o
-            row += ["ТААРСАН", plate or "", getattr(getattr(pay, "session", None), "site", None)
-                    and pay.session.site.name or "", rec.provider or "POSAPI",
-                    rec.ebarimt_id or "", rec.lottery_code or "", rec.status,
-                    (pay.paid_at + _td(hours=8)).strftime("%Y-%m-%d %H:%M:%S") if pay.paid_at else ""]
-        else:
-            row += ["МАНАЙД АЛГА", "", "", "", "", "", "", ""]
-        ws.append(row)
-        if not o:
-            for c in ws[ws.max_row]:
-                c.fill = warn
-
-    ws2 = wb.create_sheet("Манайд бий - ТЕГ-д алга")
-    ws2.append(["Төлсөн (УБ цаг)", "Машины дугаар", "Дүн ₮", "Суваг", "Манай төлөв", "Манай ДДТД",
-                "Тайлбар"])
-    for c in ws2[1]:
-        c.font = bold
-    for r in sorted(un_ours, key=lambda x: x["paid_at"]):
-        note = ("MOCK/амжилтгүй баримт" if r["status"] != "SENT" else
-                "Monnis өөрийн ТТД байж болно" if r["provider"] == "QPAY" else "")
-        dt = datetime.fromisoformat(r["paid_at"]) + timedelta(hours=8)
-        ws2.append([dt.strftime("%Y-%m-%d %H:%M:%S"), r["plate"] or "", r["amount"],
-                    r["provider"], r["status"], r["ebarimt_id"] or "", note])
-
-    ws3 = wb.create_sheet("Дүгнэлт")
-    matched = sum(1 for t in tax if t.get("ours"))
-    lines = [
-        ("ТЕГ файлын баримт", len(tax)),
-        ("Манай баримт (тухайн хугацаанд)", len(ours)),
-        ("Таарсан (цаг ±%dс + дүн)" % tol, matched),
-        ("ТЕГ-д бий, манайд алга", len(tax) - matched),
-        ("Манайд бий, ТЕГ-д алга", len(un_ours)),
-        ("", ""),
-        ("ТЕГ эх сурвалжаар:", ""),
-        *[(f"  {k}", v) for k, v in Counter(t["src"] for t in tax).items()],
-        ("", ""),
-        ("ТАЙЛБАР: ДДТД хоорондоо таарахгүй нь ХЭВИЙН — QPay/msgbill операторын кодтой", ""),
-        ("билл буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн дугаарлалтаар бүртгэдэг.", ""),
-        ("Тулгалтыг цаг (UTC) + дүнгээр хийсэн.", ""),
-    ]
-    for a, b in lines:
-        ws3.append([a, b])
-    ws3["A1"].font = bold
-    for wsx in (ws, ws2):
-        for col, w in zip("ABCDEFGHIJKL", (20, 10, 36, 16, 13, 14, 16, 11, 36, 12, 10, 20)):
-            wsx.column_dimensions[col].width = w
-    ws3.column_dimensions["A"].width = 70
-
-    buf = _io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    day = (min(t["dt"] for t in tax) + timedelta(hours=8)).strftime("%Y%m%d") if tax else "x"
-    fname = f"ebarimt-tulgalt-{day}.xlsx"
-    return StreamingResponse(
-        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={fname}; filename*=UTF-8''{quote(fname)}"})
 
 
 @router.post("/vat-send")
@@ -1225,18 +1159,33 @@ async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("
 
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
-                 limit: int = 200, db: Session = Depends(get_db),
+                 q: str | None = None, limit: int = 200, db: Session = Depends(get_db),
                  user: User = Depends(require("vat", "reports"))):
+    """НӨАТ баримтын жагсаалт. `q` — хайлт: машины дугаар, ДДТД, сугалааны код,
+    зогсоолын нэр, суваг, төлөв, эсвэл ЯГ дүн (жишээ: 1500). Хайлт нь `limit`-ээс
+    ӨМНӨ ажиллана — тиймээс сүүлийн 200-д багтаагүй хуучин баримт ч олдоно."""
     start, end = _range(date_from, date_to)
     # Дугаар/зогсоолыг хамт өгнө — «энэ баримт аль машин, аль зогсоолынх вэ»
     # гэдэг UI дээр харагдахгүй байсан (нэг query, session→site join)
-    q = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
-         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
-         .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end))
+    query = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
+             .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+             .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+             .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end))
     # Tenant хэрэглэгч зөвхөн өөрийн зогсоолын баримт харна (session-гүй баримт орохгүй)
-    q = _flt(q, ParkingSession.site_id, _scope(user))
-    rows = q.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
+    query = _flt(query, ParkingSession.site_id, _scope(user))
+    if q and q.strip():
+        from sqlalchemy import or_
+        term = q.strip()
+        like = f"%{term}%"
+        conds = [ParkingSession.plate_number.ilike(like), VatReceipt.ebarimt_id.ilike(like),
+                 VatReceipt.lottery_code.ilike(like), ParkingSite.name.ilike(like),
+                 VatReceipt.status.ilike(like), VatReceipt.provider.ilike(like)]
+        # Цэвэр тоо бичвэл ДҮНГЭЭР ч хайна (ж: 1500 → 1,500₮-ийн баримтууд)
+        num = term.replace(",", "").replace(" ", "")
+        if num.replace(".", "", 1).isdigit() and len(num) <= 12:
+            conds.append(VatReceipt.amount == float(num))
+        query = query.filter(or_(*conds))
+    rows = query.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
     return [to_dict(r, extra={"plate_number": plate, "site_name": site_name})
             for r, plate, site_name in rows]
 

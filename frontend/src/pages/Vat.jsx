@@ -1,10 +1,13 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, Ban, FileCheck2, QrCode, RefreshCw, Send } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { AlertTriangle, Ban, QrCode, RefreshCw, Search, Send, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, DateRange, Modal, Table, useToast } from '../components/ui'
+import VatRecon from '../components/VatRecon'
 import { toDateInput } from '../validation'
+
+const TABS = [['receipts', 'Баримт'], ['recon', 'ТЕГ тулгалт']]
 
 export default function Vat() {
   // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
@@ -15,45 +18,22 @@ export default function Vat() {
   const [qrReceipt, setQrReceipt] = useState(null)
   const [retrying, setRetrying] = useState(null)
   const [cancelling, setCancelling] = useState(null)
+  const [tab, setTab] = useState('receipts')
+  const [q, setQ] = useState('')          // хайлтын талбар (бичиж байгаа)
+  const [term, setTerm] = useState('')    // сервер рүү илгээсэн (debounce-той)
 
   const [sending, setSending] = useState(false)
-  const [recon, setRecon] = useState(null)          // ТЕГ тулгалтын үр дүн
-  const [reconBusy, setReconBusy] = useState(false)
-  const fileRef = useRef(null)
   const toast = useToast()
 
-  // ТЕГ-ийн мерчант порталын xlsx экспортыг манай баримттай тулгах.
-  // ДДТД-ээр тулгадаггүй (суваг ба ТЕГ өөр дугаарладаг) — цаг(UTC)+дүнгээр.
-  const reconcile = async (f) => {
-    if (!f) return
-    setReconBusy(true)
-    try {
-      const fd = new FormData()
-      fd.append('file', f)
-      const data = await api('/api/reports/vat-reconcile', { method: 'POST', formData: fd })
-      setRecon({ ...data, _file: f })   // Excel татахад ижил файлыг дахин илгээнэ
-    } catch (e) { toast(e.message, 'error') } finally {
-      setReconBusy(false)
-      if (fileRef.current) fileRef.current.value = ''
-    }
-  }
+  // Бичиж дуустал хүлээгээд (350мс) сервер рүү нэг л удаа хайна
+  useEffect(() => {
+    const t = setTimeout(() => setTerm(q.trim()), 350)
+    return () => clearTimeout(t)
+  }, [q])
 
-  // Санхүүд илгээх НЭГТГЭСЭН Excel — ТЕГ мөр бүрийн хажууд манай баримт
-  const reconExcel = async () => {
-    if (!recon?._file) return
-    try {
-      const fd = new FormData()
-      fd.append('file', recon._file)
-      const blob = await api('/api/reports/vat-reconcile?excel=1', { method: 'POST', formData: fd, blob: true })
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = 'ebarimt-tulgalt.xlsx'
-      a.click()
-      URL.revokeObjectURL(a.href)
-    } catch (e) { toast(e.message, 'error') }
-  }
-
-  const { data: rows, reload: reloadRows } = useFetch(`/api/reports/vat-receipts?date_from=${from}&date_to=${to}`, { initial: [] })
+  const { data: rows, loading, reload: reloadRows } = useFetch(
+    `/api/reports/vat-receipts?date_from=${from}&date_to=${to}${term ? `&q=${encodeURIComponent(term)}` : ''}`,
+    { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
 
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
@@ -100,21 +80,24 @@ export default function Vat() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Ибаримт (НӨАТ)</h1>
         <div className="flex items-center gap-2">
-          <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />
-          <input ref={fileRef} type="file" accept=".xlsx" className="hidden"
-            onChange={(e) => reconcile(e.target.files?.[0])} />
-          <button className="btn-secondary" disabled={reconBusy}
-            onClick={() => fileRef.current?.click()}
-            title="ТЕГ-ийн мерчант порталын баримтын xlsx экспортыг манай бүртгэлтэй тулгана (цаг+дүнгээр)">
-            <FileCheck2 size={15} /> {reconBusy ? 'Тулгаж байна…' : 'ТЕГ тулгалт'}
-          </button>
-          {info?.channels?.posapi && (
+          {tab === 'receipts' && <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />}
+          {tab === 'receipts' && info?.channels?.posapi && (
             <button className="btn-primary" onClick={sendData} disabled={sending}
               title="Локал PosAPI-д цугларсан баримтуудыг ТЕГ-ын нэгдсэн системд илгээнэ (msgbill/QPay баримт өөрсдөө илгээгддэг)">
               <Send size={15} /> {sending ? 'Илгээж байна…' : 'Мэдээ илгээх'}
             </button>
           )}
         </div>
+      </div>
+
+      <div className="flex gap-1 border-b border-surface-border/60 overflow-x-auto" role="tablist">
+        {TABS.map(([v, l]) => (
+          <button key={v} role="tab" aria-selected={tab === v} onClick={() => setTab(v)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer
+              ${tab === v ? 'border-accent text-accent' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>
+            {l}
+          </button>
+        ))}
       </div>
 
       {/* e-Barimt-ийн 2 сувгийн тайлбар — түр нуусан (хэрэгтэй үед буцааж асаана) */}
@@ -145,6 +128,25 @@ export default function Vat() {
           {info.channels?.mock_receipts && <span className="text-amber-400 text-xs font-semibold">MOCK баримт асаалттай!</span>}
         </div>
       )}
+      {tab === 'recon' && <VatRecon tenants={info?.tenants || []} />}
+
+      {tab === 'receipts' && (<>
+      <div className="card flex flex-wrap gap-2 py-3 items-center">
+        <div className="relative flex-1 min-w-56">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <input className="input pl-9 pr-9" value={q} onChange={(e) => setQ(e.target.value)}
+            aria-label="Баримт хайх"
+            placeholder="Дугаар, ДДТД, сугалаа, зогсоол, суваг, төлөв, дүнгээр хайх…" />
+          {q && (
+            <button className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200"
+              onClick={() => setQ('')} aria-label="Хайлт цэвэрлэх"><X size={15} /></button>
+          )}
+        </div>
+        <span className="text-xs text-slate-500">
+          {loading ? 'Хайж байна…' : `${rows.length} баримт${term ? ` · «${term}»` : ''}`}
+        </span>
+      </div>
+
       <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'Үйлдэл']} empty={rows.length === 0}>
         {rows.map((r) => (
           <tr key={r.id}>
@@ -190,44 +192,7 @@ export default function Vat() {
           </tr>
         ))}
       </Table>
-
-      <Modal open={!!recon} onClose={() => setRecon(null)} title="ТЕГ тулгалтын дүн" wide>
-        {recon && (
-          <div className="space-y-3 text-sm">
-            <div className="flex flex-wrap gap-4">
-              <span>ТЕГ файлд: <b className="font-mono">{recon.tax_total}</b></span>
-              <span>Манайд (тухайн хугацаанд): <b className="font-mono">{recon.ours_total}</b></span>
-              <span className="text-accent">Таарсан: <b className="font-mono">{recon.matched}</b></span>
-              <span className="text-amber-400">Манайд бий/ТЕГ-д алга: <b className="font-mono">{recon.unmatched_ours_total}</b></span>
-              <span className="text-amber-400">ТЕГ-д бий/манайд алга: <b className="font-mono">{recon.unmatched_tax_total}</b></span>
-            </div>
-            <button className="btn-primary py-1.5 text-sm" onClick={reconExcel}>
-              Нэгтгэсэн Excel татах (санхүүд илгээх)
-            </button>
-            <div className="text-xs text-slate-500">{recon.note} · ТЕГ эх сурвалж: {Object.entries(recon.tax_sources || {}).map(([k, v]) => `${k}: ${v}`).join(', ')}</div>
-            {recon.unmatched_ours?.length > 0 && (
-              <div>
-                <div className="font-semibold text-xs mb-1">Манайд бий, ТЕГ-д алга (эхний {recon.unmatched_ours.length}):</div>
-                <div className="max-h-48 overflow-auto text-xs font-mono space-y-0.5">
-                  {recon.unmatched_ours.map((r, i) => (
-                    <div key={i}>{r.paid_at?.slice(0, 19)} {r.plate || '—'} {fmt(r.amount)}₮ {r.provider} {r.status}</div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {recon.unmatched_tax?.length > 0 && (
-              <div>
-                <div className="font-semibold text-xs mb-1">ТЕГ-д бий, манайд алга (эхний {recon.unmatched_tax.length}) — өөр систем/POS байж болно:</div>
-                <div className="max-h-48 overflow-auto text-xs font-mono space-y-0.5">
-                  {recon.unmatched_tax.map((r, i) => (
-                    <div key={i}>{r.dt?.slice(11, 19)} {fmt(r.amount)}₮ {r.src} {r.ddtd}</div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </Modal>
+      </>)}
 
       <Modal open={!!qrReceipt} onClose={() => setQrReceipt(null)} title="e-Barimt баримтын QR">
         {qrReceipt && (
