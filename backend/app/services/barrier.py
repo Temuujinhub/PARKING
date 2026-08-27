@@ -270,7 +270,7 @@ class DahuaRpc:
         return res
 
 
-def _resolve_device(db: Session, device: Device) -> tuple[str | None, Device | None]:
+def _resolve_device(db: Session, device: Device, quiet: bool = False) -> tuple[str | None, Device | None]:
     """Команд илгээх IP. Бүх-нэг-дор ITC камер хаалтаа өөрийн реле (NO1/NO2)-ээр
     нээдэг тул хаалт төхөөрөмжид IP байхгүй бол тухайн эгнээний камерын IP-г ашиглана.
 
@@ -289,31 +289,110 @@ def _resolve_device(db: Session, device: Device) -> tuple[str | None, Device | N
     # ижил төрлийн камерын реле рүү очно. Эс бол эгнээний дугаар давхцахад
     # дотоод гарах командыг ГАДНА гарах камер гүйцэтгэж, машин төлбөр төлөлгүй
     # зогсоолоос шууд гарах эрсдэлтэй.
+    cams = relay_pool(db, device)
+    best = pick_relay(device, cams)
+    if best is None:
+        return None, None
+    same_lane = [c for c in cams if c.lane_no == device.lane_no]
+    if len(same_lane) > 1 and not quiet:
+        log.warning("%s (%s, эгнээ %s/%s): ижил эгнээнд %d камер бүртгэлтэй — «%s» (%s)-г "
+                    "сонголоо. Тохиргоо → Төхөөрөмж дээр эгнээ/чиглэлийг ялгана уу: %s",
+                    device.name, device.id, device.lane_no, device.lane_dir, len(same_lane),
+                    best.name, best.ip_address,
+                    ", ".join(f"{c.name}({c.ip_address},{c.lane_dir})" for c in same_lane))
+    return best.ip_address, best
+
+
+def is_relay_candidate(device: Device, cam: Device) -> bool:
+    """Энэ камер тухайн хаалтын реле болж ЧАДАХ уу — цэвэр дүрэм.
+
+    • УСТГАСАН камерыг ХЭЗЭЭ Ч сонгохгүй: устгал нь зөөлөн (status='deleted') тул
+      шүүхгүй бол админ UI-аас устгасан хуучин бүртгэл хаалтыг чимээгүй барьсаар
+      байдаг (2026-08-07 Туушин: устгасан 10.0.111.10 хэвээр сонгогдож байв).
+    • ДОТООД (давхар зогсоолын) хаалт нь ГАДНАХААС бие даасан: команд нь заавал
+      ижил төрлийн камерын реле рүү очно. Эс бол эгнээний дугаар давхцахад
+      дотоод гарах командыг ГАДНА гарах камер гүйцэтгэж, машин төлбөр төлөлгүй
+      зогсоолоос шууд гарах эрсдэлтэй.
+    """
+    return (cam.device_type == "camera" and cam.status != "deleted"
+            and bool(cam.nested_inner) == bool(device.nested_inner)
+            and bool(cam.ip_address))
+
+
+def relay_pool(db: Session, device: Device) -> list[Device]:
+    """Энэ хаалтын реле болж БОЛОХ камерууд (тодорхой эрэмбэтэй).
+
+    Шүүлтийг SQL-д биш `is_relay_candidate`-д хийнэ — дүрэм НЭГ газар байж,
+    тестээр бүрэн хамрагдана. Нэг зогсоолын камер цөөхөн тул зардал мэдэгдэхгүй.
+    """
     cams = db.query(Device).filter(
         Device.site_id == device.site_id, Device.device_type == "camera",
-        Device.status != "deleted",
-        Device.nested_inner.is_(bool(device.nested_inner)),
-        Device.ip_address.isnot(None), Device.ip_address != "",
-    ).order_by(Device.created_at, Device.id).all()   # тодорхой эрэмбэ — доор үзнэ үү
+    ).order_by(Device.created_at, Device.id).all()
+    return [c for c in cams if is_relay_candidate(device, c)]
+
+
+def pick_relay(device: Device, cams: list[Device]) -> Device | None:
+    """ЦЭВЭР сонголт: `relay_pool`-ийн камеруудаас аль нь энэ хаалтыг нээх вэ.
+
+    DB-гүй тул тестээр бүрэн хамрагдана (tests/unit/test_relay_resolve.py).
+    `cams` нь ижил зогсоол + ижил `nested_inner` + IP-тэй камерууд байх ёстой.
+    """
     # 1) Ижил эгнээний (lane_no) камер — хамгийн зөв. Нэг эгнээнд олон камер
     # бүртгэлтэй байвал ЧИГЛЭЛ (lane_dir) таарсныг нь эхэлж авна: өмнө нь эрэмбэгүй
     # `same_lane[0]` байсан тул дуудалт бүрд ӨӨР камер сонгогдож, нэг удаа
     # ажиллаад дараагийнд нь унадаг «санамсаргүй» хэв маяг үүсгэж байв.
     same_lane = [c for c in cams if c.lane_no == device.lane_no]
     if same_lane:
-        best = next((c for c in same_lane if c.lane_dir == device.lane_dir), same_lane[0])
-        if len(same_lane) > 1:
-            log.warning("%s (%s, эгнээ %s/%s): ижил эгнээнд %d камер бүртгэлтэй — «%s» (%s)-г "
-                        "сонголоо. Тохиргоо → Төхөөрөмж дээр эгнээ/чиглэлийг ялгана уу: %s",
-                        device.name, device.id, device.lane_no, device.lane_dir, len(same_lane),
-                        best.name, best.ip_address,
-                        ", ".join(f"{c.name}({c.ip_address},{c.lane_dir})" for c in same_lane))
-        return best.ip_address, best
+        return next((c for c in same_lane if c.lane_dir == device.lane_dir), same_lane[0])
     # 2) Зогсоолд ЯГ НЭГ камертай (нэг all-in-one төхөөрөмж орох/гарах хоёуланд) бол түүнийг
     if len(cams) == 1:
-        return cams[0].ip_address, cams[0]
+        return cams[0]
     # 3) Олон камертай ч энэ эгнээнийх алга — буруу хаалт нээхээс сэргийлж унана
-    return None, None
+    return None
+
+
+def relay_note(db: Session, device: Device) -> str | None:
+    """ХААЛТ команд явуулах реле олж чадах эсэх — тохиргооны эрүүл мэндийн шалгалт.
+
+    Яагаад хэрэгтэй вэ: IP-гүй хаалт нь ижил `nested_inner` + ижил эгнээний
+    камерын реле рүү команд явуулдаг (`_resolve_device`). Тэр хосолол таарахаа
+    болиход команд ОГТ ҮҮСДЭГГҮЙ — `barrier_commands`-д мөр ч үлдэхгүй тул логоос
+    ч, тайлангаас ч харагдахгүй. Жолооч л мэднэ: «хаалт нээгдэхгүй».
+
+    2026-08-26 Рашбулаг ЭТТ: доторх 2 камерын `nested_inner` админ UI-аас
+    санамсаргүй унтарснаар доторх 2 хаалт 33 цаг чимээгүй үхсэн (0 команд),
+    30 гомдол ирсэн. Ямар ч дохио байгаагүй тул шалтгааныг олоход өдөр зарцуулав.
+    Энэ функц тэр төлөвийг Тохиргоо → Төхөөрөмж дээр УЛААНААР харуулна.
+
+    Буцаах: асуудалгүй бол None, эс бол UI-д харуулах тайлбар.
+    """
+    if device.device_type != "barrier" or device.status == "deleted":
+        return None
+    if device.ip_address:
+        return None                      # өөрийн IP-тэй — реле хайх шаардлагагүй
+    if _resolve_device(db, device, quiet=True)[0]:
+        return None
+    # ХАРААХАН СУУЛГААГҮЙ зогсоолыг анхааруулахгүй: камерууд бүртгэлтэй ч IP нь
+    # хоосон бол тоног төхөөрөмж ирээгүй гэсэн үг — улаан тэмдэг тавибал шинэ
+    # зогсоол бүр «эвдэрсэн» мэт харагдаж, дохио шуугиан болно. Зогсоолд IP-тэй
+    # камер НЭГ Ч БАЙХГҮЙ бол чимээгүй өнгөрнө.
+    if not db.query(Device.id).filter(
+            Device.site_id == device.site_id, Device.device_type == "camera",
+            Device.status != "deleted", Device.ip_address.isnot(None),
+            Device.ip_address != "").first():
+        return None
+    lane_mn = "орох" if device.lane_dir == "entry" else "гарах"
+    inner_mn = "ДОТООД (давхар зогсоолын) " if device.nested_inner else ""
+    return (
+        f"Энэ хаалт команд явуулах реле олохгүй байна — машин ирэхэд ХААЛТ "
+        f"НЭЭГДЭХГҮЙ, командын бүртгэл ч үлдэхгүй.\n\n"
+        f"Хаалт өөрийн IP-гүй тул {device.lane_no}-р эгнээний {inner_mn}камерын "
+        f"реле рүү команд явуулах ёстой. Тийм камер бүртгэлгүй байна.\n\n"
+        f"Засах: {device.lane_no}-р эгнээнд {lane_mn} чиглэлийн {inner_mn}камер "
+        f"бүртгэх, ЭСВЭЛ хаалтын эгнээг камерынхтай тааруулах."
+        + ("\n\nДотоод камерын «дотоод» тэмдэглэгээ (nested_inner) унтарсан "
+           "эсэхийг ЭХЛЭЭД шалгана уу — хамгийн түгээмэл шалтгаан нь тэр."
+           if device.nested_inner else ""))
 
 
 def _resolve_ip(db: Session, device: Device) -> str | None:

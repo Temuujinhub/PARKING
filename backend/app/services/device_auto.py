@@ -111,4 +111,24 @@ def ensure_lane_barriers(db: Session) -> dict:
         db.commit()
         log.info(f"хаалт баталгаажуулалт: {restored} сэргээв, {created} шинээр үүсгэв, "
                  f"{moved} зөөв")
-    return {"restored": restored, "created": created, "moved": moved}
+    # Хосолол дууссаны ДАРАА реле олдохгүй үлдсэн хаалтыг ЧАНГА зарлана.
+    # Ийм хаалт машин ирэхэд команд ч үүсгэдэггүй тул `barrier_commands`-аас
+    # хэзээ ч харагдахгүй — цорын ганц дохио нь энэ лог ба UI-ийн улаан тэмдэг
+    # (2026-08-26 Рашбулаг ЭТТ: доторх 2 хаалт 33 цаг чимээгүй үхсэн).
+    broken = relay_broken(db)
+    for b in broken:
+        log.error("ХААЛТ РЕЛЕГҮЙ: «%s» (%s, эгнээ %s/%s, дотоод=%s) — машин ирэхэд "
+                  "НЭЭГДЭХГҮЙ. Тохиргоо → Төхөөрөмж дээр ижил эгнээний%s камерыг "
+                  "бүртгэ/тааруул.", b.name, b.site.name if b.site else b.site_id,
+                  b.lane_no, b.lane_dir, bool(b.nested_inner),
+                  " ДОТООД" if b.nested_inner else "")
+    return {"restored": restored, "created": created, "moved": moved,
+            "relay_broken": [b.id for b in broken]}
+
+
+def relay_broken(db: Session) -> list[Device]:
+    """Реле олдохгүй идэвхтэй хаалтууд — тохиргооны эрүүл мэндийн шалгалт."""
+    from .barrier import relay_note
+    return [b for b in db.query(Device).filter(
+        Device.device_type == "barrier", Device.status == "active").all()
+        if relay_note(db, b)]

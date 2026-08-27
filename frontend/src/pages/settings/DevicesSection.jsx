@@ -102,6 +102,10 @@ export default function DevicesSection() {
           // Хаалтыг нуусан ч ТООГ нь харуулна — «хаалт бүртгэгдсэн үү» гэдгийг
           // жагсаалтыг сунгалгүйгээр батална.
           const list = showBarriers ? all : all.filter((d) => d.device_type !== 'barrier')
+          // Реле олдохгүй хаалт = машин ирэхэд НЭЭГДЭХГҮЙ, гэвч команд ч үүсэхгүй
+          // тул лог/тайлангаас харагдахгүй. Хаалт нуугдсан үед ч заавал анзаарагдах
+          // ёстой учир зогсоолын гарчиг дээр гаргана (2026-08-26 Рашбулаг ЭТТ).
+          const broken = all.filter((d) => d.relay_missing)
           return (
             <div key={siteName} className="space-y-2">
               <div className="flex items-center gap-2 mt-3">
@@ -110,6 +114,13 @@ export default function DevicesSection() {
                   {all.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}
                   {bars ? ` · ${bars} хаалт${showBarriers ? '' : ' (авто, нуусан)'}` : ''}
                 </span>
+                {broken.length > 0 && (
+                  <button type="button" onClick={() => setShowBarriers(true)}
+                    className="text-[11px] text-red-400 bg-red-500/10 hover:bg-red-500/20 px-2 py-0.5 rounded whitespace-nowrap"
+                    title={broken.map((d) => `${d.name}:\n${d.relay_missing}`).join('\n\n')}>
+                    ⚠ {broken.length} хаалт реле олохгүй — нээгдэхгүй
+                  </button>
+                )}
               </div>
               <Table headers={['Нэр', 'Төрөл', 'Модел', 'IP', 'Эгнээ', 'Чиглэл', 'Callback түлхүүр', 'Гадны хандалт', '']}
                 empty={list.length === 0}>
@@ -123,6 +134,12 @@ export default function DevicesSection() {
                       {d.ip_conflict && (
                         <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
                           title={d.ip_conflict}>⚠ давхцал</span>
+                      )}
+                      {/* Хаалт нь IP-гүй бөгөөд ижил эгнээний камерын реле ч олдохгүй —
+                          команд ОГТ үүсэхгүй тул жолооч л мэдэх чимээгүй эвдрэл */}
+                      {d.relay_missing && (
+                        <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                          title={d.relay_missing}>⚠ реле олдохгүй — нээгдэхгүй</span>
                       )}
                       {/* Дотоод хаалт нь зогсолт эхлүүлдэггүй — жагсаалтаас шууд ялгаж харагдана */}
                       {/* Автомат нээх унтраалттай ОРОХ камер — жагсаалтаас харагдахгүй

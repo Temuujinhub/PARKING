@@ -1027,6 +1027,7 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
                 f"нь унана — эгнээ/чиглэлийг ялгана уу.")
         return "\n\n".join(notes) or None
 
+    from ..services.barrier import relay_note
     from ..services.camera_sessions import foreign_info
     out = []
     for d in devices:
@@ -1044,6 +1045,10 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         out.append(to_dict(d, extra={"site_name": d.site.name if d.site else None,
                                      "online": online,
                                      "ip_conflict": _conflict_note(d),
+                                     # Хаалт реле олохгүй = машин ирэхэд нээгдэхгүй,
+                                     # гэвч командын бүртгэл ч үүсэхгүй тул чимээгүй.
+                                     # UI-д улаанаар харуулна (2026-08-26 Рашбулаг).
+                                     "relay_missing": relay_note(db, d),
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
                                      "probe_ok_at": (who or {}).get("checked_at"),
                                      "foreign_sessions": (who or {}).get("sessions") or [],
