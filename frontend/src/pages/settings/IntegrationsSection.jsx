@@ -1,11 +1,17 @@
 // Холболт (Integrations) — гадаад холболтуудын НЭГДСЭН хэсэг: төлбөрийн данс
-// (QPay/банк/e-Barimt), гадаад API (партнер түлхүүр + баримтжуулалт), EV цэнэглэгч.
+// (QPay/банк/e-Barimt), гадаад API (партнер түлхүүр + баримтжуулалт).
+// EV цэнэглэгч ЭНД БАЙХГҮЙ: цэнэглэгч бүртгэх/удирдах цорын ганц газар нь
+// «EV цэнэглэгч» хуудас (/ev-board). Өмнө нь энд «Бүртгэлтэй цэнэглэгчид»
+// жагсаалт байсан ч тэр нь `devices` хүснэгтийн ev_charger мөрийг уншдаг
+// байсан бөгөөд бодит загвар нь `ev_chargers` (OCPP hub) — өөр хүснэгт тул
+// үргэлж хоосон харагдаж, «яагаад бүртгэсэн цэнэглэгч харагдахгүй байна вэ»
+// гэсэн ойлгомжгүй байдал үүсгэдэг байв (2026-08-27 нэгтгэв).
 // Өмнө нь QPay данс 3 газар (зогсоолын модал, түрээслэгчийн модал, .env) тарсан
 // байсныг энд нэгтгэв — данс бүрийн ард «яг аль зогсоолууд энэ данс руу төлж
 // байгаа» нь жагсаалтаар шууд харагдана. SUPER_ADMIN бүгдийг, ADMIN өөрийн хамрах
 // хүрээний зогсоол/дансыг харна (backend шүүнэ); түрээслэгчийн данс засах нь
 // зөвхөн SUPER_ADMIN.
-import { CreditCard, KeyRound, Plug, Plus, Zap } from 'lucide-react'
+import { CreditCard, KeyRound, Plug, Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../auth'
@@ -15,7 +21,6 @@ import QpayTestModal from './QpayTestModal'
 const SUBTABS = [
   ['pay', 'Төлбөрийн данс', CreditCard],
   ['api', 'Гадаад API', KeyRound],
-  ['ev', 'Цэнэглэгч', Zap],
 ]
 
 export default function IntegrationsSection() {
@@ -34,7 +39,6 @@ export default function IntegrationsSection() {
       </div>
       {sub === 'pay' && <PaymentAccountsPanel />}
       {sub === 'api' && <PartnerApiPanel />}
-      {sub === 'ev' && <ChargersPanel />}
     </div>
   )
 }
@@ -916,56 +920,3 @@ function PartnerApiPanel() {
   )
 }
 
-// ───────────────────────── EV цэнэглэгч ─────────────────────────
-
-function ChargersPanel() {
-  const [chargers, setChargers] = useState(null)
-  useEffect(() => {
-    api('/api/admin/devices')
-      .then((rows) => setChargers(rows.filter((d) => d.device_type === 'ev_charger')))
-      .catch(() => setChargers([]))
-  }, [])
-  return (
-    <div className="space-y-4">
-      <div className="card space-y-2 text-sm">
-        <h3 className="font-semibold flex items-center gap-1.5"><Zap size={15} className="text-accent" /> Цахилгаан машины цэнэглэгч</h3>
-        <p className="text-slate-400 text-xs max-w-2xl">
-          Зарчим: машин цэнэглэгчид залгагдсан хугацаанд зогсоолын төлбөрийн тоолуур
-          <b className="text-slate-300"> түр зогсоно</b> — гарахад цэнэглэсэн минут нийт
-          хугацаанаас хасагдаж бодогдоно (дамжин зогсоолын тоолуур зогсоох механизмтай
-          ижил, өдрийн дээд хязгаартай). Цэнэглэгч (эсвэл түүний удирдлагын систем)
-          залгах/салгах үедээ хоёрхон API дуудлага хийнэ.
-        </p>
-        <pre className="text-[11px] bg-surface-muted/50 rounded-lg p-2.5 overflow-x-auto font-mono">{
-`POST /api/v1/chargers/{charger_key}/plug-in   {"plate": "1234УБА"}
-POST /api/v1/chargers/{charger_key}/plug-out  {"plate": "1234УБА"}`
-        }</pre>
-        <p className="text-[11px] text-amber-400/90">
-          Энэ API дараагийн хувилбарт нэмэгдэнэ — одоогоор цэнэглэгчээ доор бүртгэж
-          бэлтгэж болно (Тохиргоо → Төхөөрөмж хэсэгт «EV цэнэглэгч» төрлөөр).
-        </p>
-      </div>
-      <div className="card">
-        <h3 className="font-semibold text-sm mb-2">Бүртгэлтэй цэнэглэгчид</h3>
-        {chargers === null ? <div className="text-xs text-slate-500">Ачаалж байна…</div>
-          : chargers.length === 0
-            ? <div className="text-xs text-slate-500">
-                Цэнэглэгч бүртгэгдээгүй — Тохиргоо → Төхөөрөмж → «Төхөөрөмж нэмэх» дээр
-                төрлийг «EV цэнэглэгч» гэж сонгоод зогсоол, нэр, IP-г нь оруулна.
-              </div>
-            : (
-              <Table headers={['Нэр', 'Зогсоол', 'IP', 'Түлхүүр']} empty={false}>
-                {chargers.map((d) => (
-                  <tr key={d.id}>
-                    <td className="td">{d.name}</td>
-                    <td className="td text-xs">{d.site_name}</td>
-                    <td className="td font-mono text-xs">{d.ip_address || '—'}</td>
-                    <td className="td font-mono text-[10px] text-slate-500">{d.device_key}</td>
-                  </tr>
-                ))}
-              </Table>
-            )}
-      </div>
-    </div>
-  )
-}

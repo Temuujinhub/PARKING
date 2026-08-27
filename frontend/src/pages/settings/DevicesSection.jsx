@@ -37,12 +37,42 @@ export default function DevicesSection() {
     } catch (err) { toast(err.message, 'error') }
   }
 
-  // Ирээдүйн өргөтгөлүүд (киоск/мэдрэгч/EV) бүртгэлийн түвшинд бэлэн — тоног
-  // төхөөрөмж суумагц бүртгээд IP-ээр нь мониторинг (health TCP) шууд ажиллана.
+  // Төрөл бүрд ЯМАР талбар хамаатай вэ. Өмнө нь бүх төрөлд бүх талбар гарч
+  // байсан тул LED дэлгэц/киоск/мэдрэгчид «эгнээ», «чиглэл», «нэвтрэлт» гэх мэт
+  // хамаагүй утга бөглөгдөж, эгнээний давхцлын шалгалт (_assert_lane_free нь
+  // зөвхөн камер/хаалтад үйлчилдэг) хүнд ойлгомжгүй байв.
+  //   lane  — эгнээ/чиглэл хамаатай (backend зөвхөн камер/хаалтад ашигладаг)
+  //   auth  — төхөөрөмжийн ӨӨРИЙН нэвтрэх нэр/нууц үг (RPC-ээр холбогддог)
+  //   nested — дотоод (давхар) зогсоолын тэмдэглэгээ
+  //   ipReq — IP заавал (эс бол огт холбогдохгүй)
+  // EV цэнэглэгч ЭНД БАЙХГҮЙ: түүнийг «EV цэнэглэгч» хуудаснаас бүртгэнэ —
+  // бодит загвар нь `ev_chargers` (OCPP hub), `devices` биш (2026-08-27 нэгтгэв).
   const TYPES = {
-    camera: 'LPR камер', barrier: 'Хаалт (barrier)', pax_terminal: 'PAX POS терминал',
-    led: 'LED дэлгэц', kiosk: 'Төлбөрийн киоск', guidance: 'Сул зайн мэдрэгч/чиглүүлэгч',
-    ev_charger: 'EV цэнэглэгч',
+    camera: { label: 'LPR камер', lane: true, auth: true, nested: true, ipReq: true,
+              hint: 'Дугаар уншаад ижил эгнээний хаалтыг өөрийн релеэрээ нээнэ.' },
+    barrier: { label: 'Хаалт (barrier)', lane: true, auth: true,
+               hint: 'Камер бүрд АВТОМАТААР үүснэ — гараар нэмэх шаардлагагүй. IP хоосон бол ижил эгнээний камерын релеэр нээгдэнэ.' },
+    pax_terminal: { label: 'PAX POS терминал', ipReq: true,
+                    hint: 'Callback түлхүүрээрээ танигдана — эгнээ/чиглэл хамаарахгүй.' },
+    led: { label: 'LED дэлгэц', ipReq: true,
+           hint: 'Дэлгэцийн текстийг камер өөрөө бичдэг (Тохиргоо → LED дэлгэц). Энд зөвхөн бүртгэл ба IP-ийн хяналт.' },
+    kiosk: { label: 'Төлбөрийн киоск', ipReq: true, hint: 'Бүртгэл ба IP-ээр амьд эсэхийг хянана.' },
+    guidance: { label: 'Сул зайн мэдрэгч/чиглүүлэгч', ipReq: true,
+                hint: 'Бүртгэл ба IP-ээр амьд эсэхийг хянана.' },
+  }
+  const spec = TYPES[editing?.device_type] || {}
+
+  /** Төрөл солиход тухайн төрөлд ХАМААРАХГҮЙ утгыг цэвэрлэнэ — үлдэгдэл утга
+      (жишээ нь LED дээр үлдсэн эгнээ 2) хожим давхцлын алдаа өгдөг. */
+  const changeType = (t) => {
+    const sp = TYPES[t] || {}
+    const next = { ...editing, device_type: t }
+    if (!sp.lane) { next.lane_no = LANE_DEFAULT.entry; next.lane_dir = 'entry' }
+    if (!sp.nested) next.nested_inner = false
+    if (!sp.auth) { next.username = ''; next.password = '' }
+    if (t !== 'camera') next.auto_open = false
+    else if (!editing.id) next.auto_open = true
+    setEditing(next)
   }
 
   const save = async (e) => {
@@ -50,6 +80,11 @@ export default function DevicesSection() {
     // IP буруу бол камер/хаалт руу холбогдох оролдлого чимээгүй бүтэлгүйтэж,
     // «хаалт нээгдэхгүй» гэсэн оношлоход хүнд гэмтэл болдог тул энд зогсооно.
     if (!isIp(editing.ip_address)) { toast(`IP хаяг буруу — ${IP_HINT}`, 'error'); return }
+    // Хаалт IP-гүй байж БОЛНО (камерын релеэр ажиллана), бусад төрөл болохгүй —
+    // IP-гүй камер/терминал бүртгэвэл чимээгүй холбогдохгүй байдалд ордог.
+    if (!editing.id && TYPES[editing.device_type]?.ipReq && !editing.ip_address) {
+      toast(`${TYPES[editing.device_type].label}-д IP хаяг заавал шаардлагатай`, 'error'); return
+    }
     try {
       const body = { ...editing, lane_no: clampNum(editing.lane_no, { min: 1, max: 16, fallback: 1 }) }
       if (editing.id) await api(`/api/admin/devices/${editing.id}`, { method: 'PUT', body })
@@ -83,6 +118,13 @@ export default function DevicesSection() {
           site_id: sites[0]?.id || '', name: '', device_type: 'camera', vendor: 'Dahua',
           model: '', ip_address: '', lane_no: LANE_DEFAULT.entry, lane_dir: 'entry', auto_open: true,
         })}><Plus size={16} /> Төхөөрөмж нэмэх</button>
+      </div>
+      {/* EV цэнэглэгч энэ жагсаалтад БАЙХГҮЙ — өөр хүснэгт (`ev_chargers`), өөр
+          урсгал (OCPP hub өөрөө зарлана). Хайж яваа хүнийг замчилна. */}
+      <div className="text-xs text-slate-500">
+        EV цэнэглэгчийг энд бүртгэхгүй — цэнэглэгч hub рүү өөрөө холбогдож,
+        {' '}<a href="/ev-board" className="text-accent hover:underline">EV цэнэглэгч</a>
+        {' '}хуудсанд «Шинэ (бүртгэлгүй)» болж гарч ирнэ. Тэндээс «Бүртгэх» дарна.
       </div>
       {/* Зогсоол тус бүрээр бүлэглэн харуулна */}
       {rows.length === 0 ? (
@@ -161,7 +203,7 @@ export default function DevicesSection() {
                         </span>
                       )}
                     </td>
-                    <td className="td text-xs">{TYPES[d.device_type] || d.device_type}</td>
+                    <td className="td text-xs">{TYPES[d.device_type]?.label || d.device_type}</td>
                     <td className="td text-xs">{d.model}</td>
                     <td className="td font-mono text-xs">{d.ip_address || '-'}</td>
                     <td className="td font-mono">{d.lane_no}</td>
@@ -218,9 +260,14 @@ export default function DevicesSection() {
               </Field>
               <Field label="Төрөл">
                 <select className="input" value={editing.device_type}
-                  onChange={(e) => setEditing({ ...editing, device_type: e.target.value })}>
-                  {Object.entries(TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  onChange={(e) => changeType(e.target.value)}>
+                  {Object.entries(TYPES).map(([v, t]) => <option key={v} value={v}>{t.label}</option>)}
+                  {/* Устгагдсан/хуучин төрлийг засах үед сонголт алга болохоос сэргийлнэ */}
+                  {!TYPES[editing.device_type] && (
+                    <option value={editing.device_type}>{editing.device_type}</option>
+                  )}
                 </select>
+                {spec.hint && <div className="text-[11px] text-slate-500 mt-1">{spec.hint}</div>}
               </Field>
               <Field label="Зогсоол" required>
                 <select className="input" value={editing.site_id} required
@@ -232,13 +279,14 @@ export default function DevicesSection() {
                 <input className="input" value={editing.model || ''} placeholder="ITC436 / DZBL-A / A9000"
                   onChange={(e) => setEditing({ ...editing, model: e.target.value })} />
               </Field>
-              <Field label="IP хаяг">
+              <Field label="IP хаяг" required={!!spec.ipReq}>
                 <input className={`input font-mono${isIp(editing.ip_address) ? '' : ' input-error'}`}
                   value={editing.ip_address || ''} placeholder="192.168.1.108" inputMode="decimal" maxLength={15}
                   aria-invalid={!isIp(editing.ip_address)}
                   onChange={(e) => setEditing({ ...editing, ip_address: normalizeIp(e.target.value) })} />
                 {!isIp(editing.ip_address) && <div className="hint-error">{IP_HINT}</div>}
               </Field>
+              {spec.lane && (<>
               <Field label="Эгнээ (lane)">
                 <input className="input" type="number" min="1" max="16" step="1" value={editing.lane_no}
                   onChange={(e) => setEditing({ ...editing, lane_no: e.target.value })} />
@@ -264,6 +312,7 @@ export default function DevicesSection() {
                   <option value="both">Хоёулаа</option>
                 </select>
               </Field>
+              </>)}
             </div>
             {editing.device_type === 'camera' && editing.lane_dir === 'entry' && (
               <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -272,7 +321,10 @@ export default function DevicesSection() {
                 Дугаар уншмагц хаалтыг автоматаар нээх
               </label>
             )}
-            {/* Нарийн тохиргоонууд эвхэгддэг — модал богино, түгээмэл талбарууд ил */}
+            {/* Нарийн тохиргоонууд эвхэгддэг — модал богино, түгээмэл талбарууд ил.
+                Нэвтрэлт нь зөвхөн RPC-ээр холбогддог төхөөрөмжид (камер/хаалт) хамаатай —
+                киоск/мэдрэгч/LED-д харуулбал бөглөх ёстой юм шиг ойлгогдоно. */}
+            {spec.auth && (
             <details className="rounded-lg border border-slate-700 px-3 py-2"
               open={!!(editing.username || editing.password_set)}>
               <summary className="cursor-pointer text-sm font-medium py-1">
@@ -299,11 +351,11 @@ export default function DevicesSection() {
                 тохиргоо (.env) үйлчилнэ. Зогсоол бүрийн камер өөр нууц үгтэй бол энд бичнэ.
                 {editing.password_set && ' Нууц үгийг хоосон болгож хадгалвал устана.'}
               </div>
-            </details>
+            </details>)}
             {/* Давхар зогсоол НЭГ зогсоол дотор: доторх талбайн орох/гарах камер.
                 Session нээхгүй/хаахгүй — зөвхөн төлбөрийн тоолуурыг зогсоож/
                 үргэлжлүүлнэ. Зогсоолыг хоёр болгож салгах шаардлагагүй. */}
-            {editing.device_type === 'camera' && (
+            {spec.nested && (
               <details className="rounded-lg border border-slate-700 px-3 py-2"
                 open={!!editing.nested_inner}>
                 <summary className="cursor-pointer text-sm font-medium py-1">
