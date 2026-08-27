@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
+    BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
     UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -315,6 +315,8 @@ class ParkingSession(Base):
     # удаа орж болно), paused_since = ОДОО дотор байгаа бол орсон цаг.
     paused_minutes = Column(Integer, nullable=False, default=0, server_default=text("0"))
     paused_since = Column(DateTime, nullable=True)
+    # §5.1: төлбөр (бүхэлдээ/хэсэгчлэн) данснаас хасагдсан — тайланд ялгана
+    paid_from_wallet = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     entry_snapshot = Column(String(255), nullable=True)  # орох камерын зураг (snapshot_dir доторх зам)
     exit_snapshot = Column(String(255), nullable=True)   # гарах камерын зураг
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -336,8 +338,13 @@ class ParkingSession(Base):
 class Payment(Base):
     __tablename__ = "payments"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
-    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=False, index=True)
-    provider = Column(String(30), nullable=False)        # QPAY, POS, CASH
+    # §5.1: данс цэнэглэх (WALLET_TOPUP) төлбөр зогсолтод харьяалагдахгүй тул nullable
+    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True, index=True)
+    # Төлбөрийн ТӨРӨЛ (§5.1): PARKING | WALLET_TOPUP | EV — тайлан, ээлж, e-Barimt-д ялгана
+    kind = Column(String(20), nullable=False, default="PARKING", server_default=text("'PARKING'"), index=True)
+    # WALLET_TOPUP болон данснаас төлсөн төлбөрийн данс
+    wallet_id = Column(UUID(as_uuid=False), ForeignKey("wallets.id"), nullable=True, index=True)
+    provider = Column(String(30), nullable=False)        # QPAY, POS, CASH, WALLET, SITE_WALLET, EP_WALLET
     payment_method = Column(String(30), nullable=False)  # QR, CARD, CASH
     # Эх сурвалж (QPay-д): POS=кассын пос дээр, QR=жолооч утаснаасаа. Тооцоонд ялгана.
     source = Column(String(10), nullable=True)
@@ -376,7 +383,8 @@ class VatReceipt(Base):
     __tablename__ = "vat_receipts"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=False)
-    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=False)
+    # EV цэнэглэлтийн баримт зогсолтгүй тул nullable (§5.1-тэй ижил зарчим)
+    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True)
     ebarimt_id = Column(String(120), nullable=True)
     lottery_code = Column(String(60), nullable=True)
     amount = Column(Numeric(12, 2), nullable=False)
@@ -594,3 +602,136 @@ class PartnerKey(Base):
     revoked_at = Column(DateTime, nullable=True)
     created_by = Column(String(60), default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EV цэнэглэлт + Данс (wallet) — EV_CHARGING_PLAN.md §5
+# Данс нь ТҮРЭЭСЛЭГЧИЙН хүрээнд (§1.1): нэг жолооч 2 операторын зогсоол
+# ашиглавал 2 данстай. Ledger нь append-only — устгах/засахгүй.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class Wallet(Base):
+    """Жолоочийн данс — машины дугаар + утасны дугаараар танигдана (§1).
+    balance нь КЭШ; үнэн нь wallet_ledger-ийн нийлбэр (tools/wallet_audit.py
+    өдөр бүр тулгана). Үлдэгдэл өөрчлөх бүх үйлдэл services/wallet.py-ээр
+    (нэг транзакц, SELECT … FOR UPDATE)."""
+    __tablename__ = "wallets"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
+    plate_number = Column(String(20), nullable=False, index=True)  # normalize_plate хэлбэрээр
+    phone = Column(String(20), nullable=False, default="")
+    name = Column(String(120), nullable=False, default="")
+    balance = Column(Numeric(12, 2), nullable=False, default=0, server_default=text("0"))
+    status = Column(String(20), nullable=False, default="ACTIVE")  # ACTIVE, BLOCKED
+    # Нийтийн хуудасны (/wallet/:token) таамаглагдашгүй токен
+    public_token = Column(String(64), unique=True, nullable=False, default=uid)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("tenant_id", "plate_number", name="uq_wallet_tenant_plate"),)
+
+
+class WalletLedger(Base):
+    """Дансны хөдөлгөөн — ЗӨВХӨН НЭМЭХ (append-only, §1). Мөр бүр
+    balance_after-ийг хадгална: аудит ба тулгалтад ашиглана."""
+    __tablename__ = "wallet_ledger"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    wallet_id = Column(UUID(as_uuid=False), ForeignKey("wallets.id"), nullable=False)
+    direction = Column(String(6), nullable=False)   # CREDIT, DEBIT
+    amount = Column(Numeric(12, 2), nullable=False)
+    balance_after = Column(Numeric(12, 2), nullable=False)
+    # TOPUP | CHARGE_HOLD | CHARGE_RELEASE | CHARGE_SETTLE | PARKING | CASH_OUT | ADJUST
+    kind = Column(String(20), nullable=False)
+    ref_type = Column(String(30), nullable=True)    # payment, charge_session, parking_session
+    ref_id = Column(String(60), nullable=True)
+    operator_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_ledger_wallet_created", "wallet_id", "created_at"),)
+
+
+class EvPricePlan(Base):
+    """EV тариф — 1 Wh = 1₮ default (§2). price_per_wh Numeric: ирээдүйд
+    1.2₮/Wh г.м болж болно, кодод тогтмол бичихгүй."""
+    __tablename__ = "ev_price_plans"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)
+    name = Column(String(120), nullable=False, default="Үндсэн")
+    price_per_wh = Column(Numeric(8, 4), nullable=False, default=1)
+    night_price_per_wh = Column(Numeric(8, 4), nullable=True)
+    night_from = Column(String(5), nullable=True)   # "22:00" (локал цаг)
+    night_to = Column(String(5), nullable=True)     # "07:00"
+    min_amount = Column(Numeric(12, 2), nullable=False, default=1000)
+    max_amount = Column(Numeric(12, 2), nullable=False, default=200000)
+    idle_grace_min = Column(Integer, nullable=False, default=10)
+    idle_fee_per_min = Column(Numeric(12, 2), nullable=False, default=0)
+    # Зогсоолын төлбөрөөс чөлөөлөх горим (§6.3): PAUSE|FREE_MINUTES|DISCOUNT|NONE
+    parking_exempt_mode = Column(String(20), nullable=False, default="NONE")
+    parking_exempt_cap_min = Column(Integer, nullable=False, default=120)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class EvCharger(Base):
+    """Цэнэглэгчийн БИЗНЕС бүртгэл (core тал). Техник төлөв нь hub дээр —
+    services/ev_hub.py-ээр асуудаг. cp_id нь hub-ийн cp_id-тэй ижил."""
+    __tablename__ = "ev_chargers"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False, index=True)
+    cp_id = Column(String(60), unique=True, nullable=False, index=True)
+    name = Column(String(120), nullable=False, default="")
+    # QR стикерийн богино түлхүүр (§7.1): /ev/{charger_key}{connector}
+    charger_key = Column(String(20), unique=True, nullable=False)
+    connector_count = Column(Integer, nullable=False, default=2)
+    price_plan_id = Column(UUID(as_uuid=False), ForeignKey("ev_price_plans.id"), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    site = relationship("ParkingSite", lazy="joined")
+    price_plan = relationship("EvPricePlan", lazy="joined")
+
+
+class ChargeSession(Base):
+    """Нэг цэнэглэлт — МӨНГӨНИЙ бүртгэл (core тал). Урсгал §6.1:
+    PENDING_START → RUNNING → STOPPED → SETTLED; эхлээгүй бол CANCELLED.
+    ocpp_tx_id UNIQUE — офлайнаас давхар StopTransaction ирэхэд DB түвшинд
+    давхар тооцоо боломжгүй (§6.5)."""
+    __tablename__ = "charge_sessions"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    charger_id = Column(UUID(as_uuid=False), ForeignKey("ev_chargers.id"), nullable=False, index=True)
+    connector_id = Column(Integer, nullable=False, default=1)
+    wallet_id = Column(UUID(as_uuid=False), ForeignKey("wallets.id"), nullable=False, index=True)
+    plate_number = Column(String(20), nullable=False, index=True)
+    phone = Column(String(20), nullable=False, default="")
+    # OCPP idTag — санамсаргүй, нэг удаагийн (RemoteStart→Authorize гинжийг холбоно)
+    id_tag = Column(String(40), unique=True, nullable=False)
+    # Нийтийн амьд явцын хуудасны токен
+    public_token = Column(String(64), unique=True, nullable=False, default=uid)
+    authorized_amount = Column(Numeric(12, 2), nullable=False)   # hold хийсэн дүн
+    price_per_wh = Column(Numeric(8, 4), nullable=False)         # эхлэхэд ТҮГЖИГДСЭН үнэ (§2)
+    wh_limit = Column(Integer, nullable=False)                   # authorized_amount // price_per_wh
+    ocpp_tx_id = Column(Integer, unique=True, nullable=True, index=True)
+    meter_start_wh = Column(BigInteger, nullable=True)
+    meter_stop_wh = Column(BigInteger, nullable=True)
+    energy_wh = Column(BigInteger, nullable=True)
+    last_energy_wh = Column(BigInteger, nullable=False, default=0)  # амьд явц (MeterValues-ээс)
+    max_power_w = Column(Numeric(12, 2), nullable=True)
+    soc_start = Column(Numeric(5, 2), nullable=True)
+    soc_end = Column(Numeric(5, 2), nullable=True)
+    last_soc = Column(Numeric(5, 2), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
+    stop_reason = Column(String(60), nullable=True)
+    watchdog_stop_sent = Column(Boolean, nullable=False, default=False)  # 98% команд илгээсэн үү
+    energy_amount = Column(Numeric(12, 2), nullable=True)        # energy_wh × price_per_wh
+    total_amount = Column(Numeric(12, 2), nullable=True)
+    status = Column(String(20), nullable=False, default="PENDING_START", index=True)
+    parking_session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True)
+    vat_receipt_id = Column(UUID(as_uuid=False), ForeignKey("vat_receipts.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    charger = relationship("EvCharger", lazy="joined")
+    wallet = relationship("Wallet", lazy="joined")

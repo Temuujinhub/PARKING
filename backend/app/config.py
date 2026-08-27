@@ -587,6 +587,29 @@ class Settings(BaseSettings):
                     out[key.strip()] = name.strip().upper()
         return out
 
+
+    # ── EV Hub (тусдаа WSS сервер, EVrepo) ─────────────────────────────────
+    # Hub нь OCPP терминаци хийдэг; core (энэ систем) данс/тооцоог хийнэ.
+    # evhub_api_key    = hub-ийн EVHUB_INTERNAL_API_KEY (core → hub команд)
+    # evhub_events_key = hub-ийн EVHUB_CORE_API_KEY (hub → core үйл явдал)
+    evhub_url: str = ""                    # ж: http://202.21.117.180:8080
+    evhub_api_key: str = ""
+    evhub_events_key: str = ""
+    evhub_timeout_sec: float = 8.0
+    # «Дүн дуустал» хамгаалалт (§6.4): wh_limit-ийн энэ хувьд зогсоох команд
+    ev_watchdog_ratio: float = 0.98
+    # RemoteStart-аас хойш StartTransaction ирэхгүй бол hold буцаах хугацаа (§6.4)
+    ev_start_timeout_sec: int = 90
+    ev_min_topup: int = 1000               # QPay-ийн доод дүн (₮)
+
+    # ── Гадаад wallet-ууд (төлбөрийн хэрэгсэл) ────────────────────────────
+    # site.easy-parking.mn — үндсэн системийн данс (API-аар холбогдоно)
+    site_wallet_url: str = ""              # ж: https://site.easy-parking.mn/api/wallet
+    site_wallet_api_key: str = ""
+    # wallet.easy-parking.mn — хөгжүүлж буй өөрийн wallet систем
+    ep_wallet_url: str = ""                # ж: https://wallet.easy-parking.mn/api/v1
+    ep_wallet_api_key: str = ""
+
     class Config:
         env_file = ".env"
         env_prefix = "PARKING_"

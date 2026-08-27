@@ -1199,6 +1199,23 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return await _close_and_open(db, device, session, now, fee, source="auto_exit",
                                      allow_open=allow_open)
 
+    # ── Данснаас автомат хасалт (EV_CHARGING_PLAN.md §6.2) ────────────────
+    # Үлдэгдэл ХҮРЭЛЦВЭЛ: хасаад шууд нээнэ — жолооч юу ч хийхгүй.
+    # ХҮРЭЛЦЭХГҮЙ бол: байгааг нь хасаад үлдсэн дүнд ердийн QR урсгал.
+    # Данс нь EV-ээс хамааралгүй бие даасан боломж — бүх жолоочид ажиллана.
+    if due > 0:
+        try:
+            deducted, covered = await _wallet_auto_deduct(db, session, due)
+        except Exception:  # noqa: BLE001 — данс унасан ч гарах урсгал зогсохгүй
+            log.exception("wallet auto-deduct алдаа: session=%s", session.id)
+            deducted, covered = 0.0, False
+        if covered:
+            # _finalize_paid дотор session PAID + хаалт + e-Barimt бүгд хийгдсэн
+            return {"action": "paid_from_wallet", "session_id": session.id,
+                    "plate": plate, "amount": deducted}
+        if deducted:
+            due = amount_due(db, session, fee)
+
     # Төлбөртэй — төлбөр хүлээнэ
     session.status = "AWAITING_PAYMENT"
     session.duration_minutes = fee["duration_minutes"]
@@ -1420,3 +1437,87 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
         "session_id": session.id, "plate": session.plate_number,
         "exit_deadline": session.exit_deadline.isoformat(),
     })
+
+
+async def _wallet_auto_deduct(db: Session, session: ParkingSession,
+                              due: float) -> tuple[float, bool]:
+    """Гарах хаалтан дээрх дансны автомат хасалт (EV_CHARGING_PLAN.md §6.2).
+
+    Дараалал: (1) дотоод данс — хэсэгчилсэн хасалт зөвшөөрнө;
+              (2) гадаад wallet-ууд (site/wallet.easy-parking.mn) — зөвхөн
+                  БҮТЭН дүн хүрэлцэх үед (хоёр системийн хооронд хэсэгчилсэн
+                  тооцоо нийлүүлэх эрсдэлээс зайлсхийнэ).
+
+    → (хассан дүн, бүтэн төлөгдсөн эсэх). Бүтэн төлөгдсөн үед _finalize_paid
+    дотор session PAID + хаалт + e-Barimt бүгд хийгдсэн байна.
+    Физик нотолгоо (§1.2): энэ функц зөвхөн ГАРАХ КАМЕРТ дугаар уншигдсаны
+    дараа дуудагддаг тул хангагдсан."""
+    from decimal import Decimal
+    from .models import Wallet
+    from .services import wallet as wallet_svc
+    from .services.wallet_providers import external_providers
+    from .routers import payments_router as pr
+
+    site = db.get(ParkingSite, session.site_id)
+    tenant_id = site.tenant_id if site else None
+    plate = normalize_plate(session.plate_number)
+
+    # ── 1. Дотоод данс ──
+    w = wallet_svc.find_wallet(db, tenant_id, plate)
+    if w and w.status == "ACTIVE" and float(w.balance or 0) > 0:
+        balance = float(w.balance)
+        take = min(balance, due)
+        covered = take >= due - 0.01
+        # Payment-ийг эхлээд PENDING-ээр үүсгэж (дүн нь _create_payment-ийн
+        # дотоод дүрмээр), дараа нь данснаас хасна — нэг транзакцид.
+        payment = pr._create_payment(db, session, provider="WALLET",
+                                     method="WALLET", include_debts=False)
+        if not covered:
+            payment.amount = Decimal(str(round(take)))
+            r = settings.vat_rate
+            payment.vat_amount = Decimal(str(round(take * r / (1 + r))))
+        payment.kind = "PARKING"
+        payment.wallet_id = w.id
+        payment.source = "WALLET"
+        wallet_svc.debit_parking(db, w.id, float(payment.amount), session.id,
+                                 note=f"гарах хаалт {plate}")
+        session.paid_from_wallet = True
+        db.commit()
+        if covered:
+            await pr._finalize_paid(db, payment)
+            db.commit()
+            log.info("данснаас БҮТЭН төлөгдөв: %s %s₮ (үлдэгдэл %s₮)",
+                     plate, float(payment.amount), float(w.balance))
+            return float(payment.amount), True
+        # Хэсэгчилсэн: төлбөрийг PAID болгоод (finalize ХИЙХГҮЙ — хаалт нээхгүй)
+        payment.status = "PAID"
+        payment.paid_at = datetime.utcnow()
+        db.commit()
+        log.info("данснаас ХЭСЭГЧЛЭН: %s %s₮/%s₮", plate, take, due)
+        return take, False
+
+    # ── 2. Гадаад wallet-ууд (бүтэн дүн л) ──
+    for provider in external_providers():
+        try:
+            info = await provider.balance(plate)
+            if not info.get("found") or float(info.get("balance") or 0) < due:
+                continue
+            payment = pr._create_payment(db, session, provider=provider.name,
+                                         method="WALLET", include_debts=False)
+            payment.kind = "PARKING"
+            payment.source = "WALLET"
+            db.commit()
+            res = await provider.debit(plate, float(payment.amount),
+                                       ref=f"parking-{payment.id}",
+                                       note=f"Зогсоол {site.name if site else ''}")
+            payment.provider_payment_id = res.get("tx_id") or None
+            session.paid_from_wallet = True
+            db.commit()
+            await pr._finalize_paid(db, payment)
+            db.commit()
+            log.info("%s-ээс БҮТЭН төлөгдөв: %s %s₮", provider.name, plate, due)
+            return float(payment.amount), True
+        except Exception as e:  # noqa: BLE001 — нэг provider унавал дараагийнх
+            log.warning("%s auto-deduct алдаа (%s) — алгасав", provider.name, e)
+            db.rollback()
+    return 0.0, False

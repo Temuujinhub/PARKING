@@ -22,6 +22,10 @@ import Invoices from './pages/Invoices'
 import Tariffs from './pages/Tariffs'
 import Users from './pages/Users'
 import Vat from './pages/Vat'
+import Wallets from './pages/Wallets'
+import EvBoard from './pages/ev/EvBoard'
+import EvCharge from './pages/ev/EvCharge'
+import EvWallet from './pages/ev/EvWallet'
 
 function Protected({ module, children }) {
   const { user, loading, can } = useAuth()
@@ -52,6 +56,9 @@ export default function App() {
               боломжгүй тул эдгээр замыг мөн ижил хуудсаар үйлчилнэ */}
           <Route path="/checkout/:siteRef" element={<Pay />} />
           <Route path="/check-cost/:siteRef" element={<Pay />} />
+          {/* Public — EV цэнэглэгчийн QR + жолоочийн данс (§4.4) */}
+          <Route path="/ev/:key" element={<EvCharge />} />
+          <Route path="/wallet/:token" element={<EvWallet />} />
           <Route path="/login" element={<Login />} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route index element={<Home />} />
@@ -72,6 +79,8 @@ export default function App() {
             <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
             <Route path="health" element={<Protected module="health"><Health /></Protected>} />
+            <Route path="ev-board" element={<Protected module="devices"><EvBoard /></Protected>} />
+            <Route path="wallets" element={<Protected module="cashier"><Wallets /></Protected>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

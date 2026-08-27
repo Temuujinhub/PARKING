@@ -26,6 +26,47 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-08-27 — ⚡ EV Шат 2+3: ДАНС (wallet) + hub интеграци + гарах хаалтны автомат хасалт (feat)
+
+EV_CHARGING_PLAN.md-ийн Шат 2 (данс) ба Шат 3-ын core тал бүрэн хэрэгжив.
+Hub (OCPP WSS сервер) нь ТУСДАА repo болов: **github.com/Temuujinhub/EVrepo** —
+шинэ WSS сервер (172.16.100.32) дээр ажиллана; core-той REST API-аар холбогдоно
+(архитектурын өөрчлөлт: төлөвлөгөөний `backend/hub/`-ийн оронд 2 repo, 2 сервер).
+
+**Backend:**
+- `wallets` + `wallet_ledger` (append-only, FOR UPDATE) — `services/wallet.py`
+  үлдэгдлийн ЦОРЫН ГАНЦ өөрчлөгч; DEBIT хэзээ ч сөрөг болгохгүй.
+- `services/ev_billing.py` — Wh→₮ бүхэл тооцоо, hold→release→settle (§1.3),
+  98% watchdog + SetChargingProfile (§6.4), 90с эхлэхгүй бол hold буцаана.
+  Жолоочоос ХЭЗЭЭ Ч authorized_amount-аас илүү нэхэхгүй.
+- `services/ev_hub.py` — hub клиент; `routers/ev_router.py` — админ/нийтийн/
+  интеграцийн API (§8); `routers/wallet_router.py` — данс + QPay topup
+  (Payment.kind=WALLET_TOPUP, session_id NULL — §5.1).
+- Гарах хаалт: **данснаас автомат хасалт** (§6.2) — үлдэгдэл хүрэлцвэл
+  `_finalize_paid` урсгалаар шууд нээгдэнэ (e-Barimt-тай); хүрэлцэхгүй бол
+  хэсэгчлэн хасаад үлдсэнд QR. `ParkingSession.paid_from_wallet` туг.
+- Гадаад wallet-ууд: `services/wallet_providers.py` — site.easy-parking.mn ба
+  wallet.easy-parking.mn НЭГДСЭН гэрээгээр (balance/debit/credit, идемпотент
+  ref) холбогдоно; .env-д URL+түлхүүр тавимагц гарах хаалтны хасалтад орно.
+- Миграци: payments.kind/wallet_id, session_id nullable, vat_receipts.session_id
+  nullable; `tools/wallet_audit.py` — өдрийн ledger↔balance тулгалт.
+
+**Frontend:** `/ev/:key` (жолоочийн QR урсгал), `/wallet/:token` (данс, topup),
+`/ev-board` (админ амьд самбар, devices эрх), `/wallets` (касс: хайлт, гар
+засвар, бэлнээр буцаах — audit log-той).
+
+**Шалгалт:** unit 217 (шинэ 13) + hub 15; E2E симулятор: auto-register →
+физик шалгалт → hold → RemoteStart → амьд явц → зогсоолт → settle/release →
+ledger тулгалт → давхар event idempotent — 25/25 ✓; watchdog 98% ✓.
+
+Тохиргоо (core .env): `PARKING_EVHUB_URL`, `PARKING_EVHUB_API_KEY`,
+`PARKING_EVHUB_EVENTS_KEY` — EVrepo-ийн README-г үзнэ үү.
+
+| Төрөл | Commit | TEST | PROD |
+|---|---|---|---|
+| feat | (энэ commit) | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+
+
 ## 2026-08-25 — ⚡ EV төлөвлөгөө v2: ДАНС + тусдаа WSS hub (docs)
 
 Төлөвлөгөө цэвэр техникийн болж дахин бичигдэв (эрх зүй/өртгийн судалгаа хасагдав —

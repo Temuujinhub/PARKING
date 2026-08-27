@@ -1,7 +1,7 @@
 import {
   Activity, Banknote, Car, ChevronDown, ClipboardList, DoorOpen, FileText, History, KeyRound,
   LayoutDashboard, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Percent, ReceiptText,
-  ScrollText, Settings, ShieldAlert, Sun, Tag, Users, Wallet,
+  ScrollText, Settings, ShieldAlert, Sun, Tag, Users, Wallet, Zap,
 } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
@@ -20,6 +20,7 @@ const NAV = [
       { to: '/check', label: 'Шалгах', icon: Car, module: 'check' },
       { to: '/history', label: 'Түүх', icon: History, module: 'history' },
       { to: '/compensations', label: 'Ээлж хаах', icon: LogOut, module: 'compensations' },
+      { to: '/wallets', label: 'Жолоочийн данс', icon: Wallet, module: 'cashier' },
     ],
   },
   {
@@ -38,6 +39,7 @@ const NAV = [
     group: 'Админ', icon: Settings, children: [
       { to: '/settings', label: 'Тохиргоо', icon: Settings, module: 'settings' },
       { to: '/barriers', label: 'Хаалтны удирдлага', icon: DoorOpen, module: 'barriers' },
+      { to: '/ev-board', label: 'EV цэнэглэгч', icon: Zap, module: 'devices' },
       { to: '/users', label: 'Ажилтан', icon: Users, module: 'users' },
       { to: '/logs', label: 'Лог', icon: ScrollText, module: 'logs' },
       { to: '/health', label: 'Системийн эрүүл мэнд', icon: Activity, module: 'health' },

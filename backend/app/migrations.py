@@ -272,6 +272,17 @@ MIGRATIONS = [
     """UPDATE parking_sessions SET exit_confirmed = true
        WHERE exit_time IS NOT NULL AND exit_confirmed = false
          AND exit_snapshot IS NOT NULL AND exit_snapshot <> ''""",
+
+    # v2.0 — EV цэнэглэлт + Данс (EV_CHARGING_PLAN.md §5.1)
+    # Шинэ хүснэгтүүд (wallets, wallet_ledger, ev_chargers, ev_price_plans,
+    # charge_sessions) нь create_all-оор үүснэ; энд зөвхөн БАЙГАА хүснэгтийн засвар.
+    "ALTER TABLE payments ALTER COLUMN session_id DROP NOT NULL",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS kind VARCHAR(20) NOT NULL DEFAULT 'PARKING'",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS wallet_id UUID REFERENCES wallets(id)",
+    "CREATE INDEX IF NOT EXISTS ix_payments_kind ON payments (kind)",
+    "CREATE INDEX IF NOT EXISTS ix_payments_wallet_id ON payments (wallet_id)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paid_from_wallet BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE vat_receipts ALTER COLUMN session_id DROP NOT NULL",
 ]
 
 

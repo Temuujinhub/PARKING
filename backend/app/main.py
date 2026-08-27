@@ -27,8 +27,9 @@ if not settings.debug:
         log.warning("PARKING_ALLOW_SIMULATE=true — /api/lpr/simulate нээлттэй. Production-д унтраана уу.")
 from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
-    dr_router, health_router, integration_router, legacy_router, lpr_router, payments_router,
-    public_router, reports_router, sessions_router, billing_router,
+    dr_router, ev_router, health_router, integration_router, legacy_router, lpr_router,
+    payments_router, public_router, reports_router, sessions_router, billing_router,
+    wallet_router,
 )
 from .ws import manager
 
@@ -69,7 +70,8 @@ app.add_middleware(
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
-          health_router, integration_router, legacy_router, dr_router, billing_router):
+          health_router, integration_router, legacy_router, dr_router, billing_router,
+          ev_router, wallet_router):
     app.include_router(r.router)
 
 
@@ -239,6 +241,11 @@ async def start_vat_auto_send():
     # Жолооч Pay хуудсаа хаасан/webhook алдагдсан PENDING QPay төлбөрийг сэргээх
     from .services.qpay_recheck import supervisor as qpay_recheck_supervisor
     _bg_task(qpay_recheck_supervisor(), "qpay-recheck")
+
+    # EV: RemoteStart-аас хойш 90с-д эхлээгүй цэнэглэлтийн hold-ыг буцаана (§6.4)
+    if settings.evhub_url:
+        from .services.ev_billing import stale_start_supervisor
+        _bg_task(stale_start_supervisor(), "ev-stale-starts")
 
 
 @app.on_event("shutdown")
