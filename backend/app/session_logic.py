@@ -1384,34 +1384,38 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
 def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | None:
     """Тухайн lane-ийн barrier төхөөрөмжийг олно (ижил lane_no, эсвэл эхний barrier)."""
-    q = db.query(Device).filter(
-        Device.site_id == site_id, Device.device_type == "barrier", Device.status == "active",
-    )
-    # ДОТООД (давхар зогсоолын) хаалт нь гаднахаас БИЕ ДААСАН — хооронд нь солиж
-    # болохгүй. Доторх камерын команд гадна хаалтыг нээвэл машин зогсоолоос
-    # шууд гарч, төлбөр төлөхгүй өнгөрнө.
-    q = q.filter(Device.nested_inner.is_(bool(near_device.nested_inner)))
-    barrier = q.filter(Device.lane_no == near_device.lane_no,
-                       Device.lane_dir == near_device.lane_dir).first()
+    # Хосолгох дүрэм НЭГ газар: `barrier_matches_camera` — хаалт ҮҮСГЭХ
+    # (`ensure_lane_barriers`) болон хаалт ОЛОХ (энд) хоёр ижил дүрмээр явна.
+    # Хоёр нь зөрвөл «үүссэн хаалтаа өөрөө олохгүй» гэсэн чимээгүй анги үүсдэг.
+    # Дүрэм: ижил ЭГНЭЭ + чиглэл (эсвэл "both") + ижил дотоод/гадна. Дотоод
+    # (давхар зогсоолын) хаалт нь гаднахаас БИЕ ДААСАН — доторх камерын команд
+    # гадна хаалтыг нээвэл машин төлбөр төлөхгүй зогсоолоос шууд гарна.
+    from .services.device_auto import barrier_matches_camera
+    bars = db.query(Device).filter(
+        Device.site_id == site_id, Device.device_type == "barrier",
+        Device.status == "active",
+    ).order_by(Device.created_at, Device.id).all()
+    barrier = next((b for b in bars if barrier_matches_camera(near_device, b)), None)
     if barrier:
         return barrier
-    # Эгнээгээр таарсангүй — ЧИГЛЭЛ нь ЗӨРЧИХГҮЙ хаалтаар л нөхнө. Өмнө нь дурын
-    # эхний хаалтыг (`q.first()`) буцаадаг байсан тул ГАРАХ уншилтын команд
-    # ОРОХ хаалт руу явж, жолоочийн өмнөх хаалт хөдөлдөггүй байв — «уншигдсан
-    # хэрнээ нээгдэхгүй» гэдгийн чимээгүй эх үүсвэр.
-    # «Хоёулаа» (both) хаалтыг зөвшөөрнө — нэг хаалт орох/гарахыг хоёуланг нь
-    # барьдаг зогсоолууд байгаа тул түүнийг таслах нь машиныг гацаана.
-    barrier = q.filter(Device.lane_dir.in_([near_device.lane_dir, "both"])).first()
-    if barrier:
-        log.warning("%s (эгнээ %s/%s): яг тэр эгнээнд хаалт алга — «%s» (эгнээ %s)-г "
-                    "ашиглалаа. Тохиргоо → Төхөөрөмж дээр эгнээг тааруулна уу.",
-                    near_device.name, near_device.lane_no, near_device.lane_dir,
-                    barrier.name, barrier.lane_no)
-        return barrier
-    log.error("%s (эгнээ %s/%s, дотоод=%s): нээх хаалт ОЛДСОНГҮЙ — машин гацна. "
-              "Тохиргоо → Төхөөрөмж дээр энэ чиглэлд хаалт бүртгэнэ үү.",
+    # ӨӨР ЭГНЭЭНИЙ хаалт руу ХЭЗЭЭ Ч үсрэхгүй. Өмнө нь чиглэл таарсан ЭХНИЙ
+    # хаалтыг буцаадаг байсан нь машин ирээгүй газар хаалт нээх ХОЁР УДААГИЙН
+    # ослын шууд шалтгаан болсон:
+    #   • 2026-08-26 Рашбулаг ЭТТ — `nested_inner` санамсаргүй унтарснаар доторх
+    #     камерын уншилт ГУДАМЖНЫ хаалтыг 197 удаа нээсэн (жолоочдын гомдол).
+    #   • 2026-08-28 Маршил — эгнээ 3,4-т хаалт огт үүсээгүй тул эгнээ 3-ын
+    #     уншилт эгнээ 1-ийн хаалтыг нээх байсан (`6254d23`-аар хаалт нь үүсдэг
+    #     болсон ч энэ үсрэлт өөрөө хэвээр байв).
+    # Одоо `ensure_lane_barriers` идэвхтэй камер бүрд ижил эгнээний хаалтыг
+    # баталгаажуулдаг тул энэ салаа нь ЗӨВХӨН тохиргоо эвдэрсэн үед л хүрнэ —
+    # тэр үед БУРУУ хаалт нээхээс ЮУ Ч ХИЙХГҮЙ нь дээр (буруу нээлт = төлбөргүй
+    # гарах / гудамжинд хий нээлт, харин нээхгүй нь = лог + улаан анхааруулга).
+    log.error("%s (эгнээ %s/%s, дотоод=%s): ЭНЭ ЭГНЭЭНД хаалт бүртгэгдээгүй — "
+              "команд илгээхгүй (өөр эгнээний хаалт нээхээс сэргийлэв). Тохиргоо → "
+              "Төхөөрөмж дээр эгнээ %s-д %s хаалт нэмнэ үү.",
               near_device.name, near_device.lane_no, near_device.lane_dir,
-              bool(near_device.nested_inner))
+              bool(near_device.nested_inner), near_device.lane_no,
+              "орох" if near_device.lane_dir == "entry" else "гарах")
     return None
 
 
