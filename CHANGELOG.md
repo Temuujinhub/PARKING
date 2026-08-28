@@ -54,7 +54,7 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 | Огноо | Төрөл | Commit | TEST | PROD |
 |---|---|---|---|---|
-| 2026-08-28 | feat | `PENDING5` | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| 2026-08-28 | feat | `88ebebc` | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
 
 ---
 
