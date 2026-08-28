@@ -23,6 +23,10 @@ from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
 
 log = logging.getLogger("parking.payments")
 
+# QPay-ийн `sender_invoice_no` талбарын дээд урт (v2 API). Хэтэрвэл HTTP 400
+# `MAX_LENGTH` — нэхэмжлэл огт үүсэхгүй.
+QPAY_INVOICE_NO_MAX = 45
+
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
 
@@ -98,12 +102,44 @@ def _ebarimt_err(e: Exception) -> str:
     return str(e)[:200]
 
 
+def _fit_bytes(text: str, budget: int) -> str:
+    """UTF-8-аар `budget` байтад багтахаар ТЭМДЭГТЭЭР тайрна (тэмдэгт хагалахгүй).
+    Монгол улсын дугаарын кирилл үсэг бүр 2 байт эзэлдэг тул байтаар хэмжинэ."""
+    if budget <= 0:
+        return ""
+    while text and len(text.encode()) > budget:
+        text = text[:-1]
+    return text
+
+
 def _invoice_no(session: ParkingSession) -> str:
     """QPay/санхүүд харагдах гүйлгээний дугаар — машины дугаарыг шингээнэ
-    (банкны хуулга, QPay порталтай тулгахад дугаараар олоход амар)."""
+    (банкны хуулга, QPay порталтай тулгахад дугаараар олоход амар).
+
+    ХЯЗГААР (2026-08-28-нд production дээр илэрсэн): QPay `sender_invoice_no`-г
+    **45 тэмдэгтээс** урт бол HTTP 400 `MAX_LENGTH` гэж татгалзаж, нэхэмжлэл ОГТ
+    үүсэхгүй. Өмнөх хувилбар нь урт ямар гарахыг огт шалгадаггүй байсан:
+
+        PARK_IKH_MONGOL_RESTORANT-0128УНМ-20260828-A1B2C3  → 49 тэмдэгт ❌
+
+    Улмаар «Их Монгол ресторан» зогсоолын БҮХ жолооч QR-аар төлж чадахгүй, зөвхөн
+    кассаар төлдөг болсон (нэг цагт 36 бүтэлгүйтэл). Бусад зогсоол нь кодоороо
+    богино учраас (хамгийн урт нь `PARK_BSB_MEBEL` — 38 тэмдэгт) огт мэдэгдээгүй.
+    Өөрөөр хэлбэл энэ нь «урт кодтой зогсоол нэмэх хүртэл нам гүм хэвтэх» алдаа
+    байсан — тиймээс шинэ зогсоол бүрд дахин гарахгүйн тулд урт нь ЭНД баталгаажна.
+
+    Тайрах эрэмбэ: сүүл (огноо + санамсаргүй 6 тэмдэгт) нь давхцлаас хамгаалдаг
+    тул ХЭЗЭЭ Ч тайрахгүй; машины дугаар нь тулгалтын гол түлхүүр тул дараагийн
+    ээлжинд; зогсоолын код л богиносно (эхний үсгүүд нь таних хэмжээнд үлдэнэ)."""
     site_code = session.site.site_code if session.site else "SITE"
     plate = re.sub(r"[^0-9A-ZА-ЯЁӨҮ]", "", (session.plate_number or "").upper())[:12]
-    return f"{site_code}-{plate}-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+    tail = f"-{datetime.utcnow():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"  # 16 ASCII байт
+    budget = QPAY_INVOICE_NO_MAX - len(tail)
+    plate = _fit_bytes(plate, budget)
+    site = _fit_bytes(site_code, budget - len(plate.encode()) - 1) if plate else \
+        _fit_bytes(site_code, budget)
+    head = f"{site}-{plate}" if site and plate else (site or plate or "INV")
+    return f"{head}{tail}"
 
 
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
@@ -623,8 +659,16 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         _log_qpay_failure(db, session, acc, "NETWORK",
                           {"error": f"{type(e).__name__}: {e}"[:200],
                            "amount": float(payment_amount)})
-        raise HTTPException(502, "QPay хариу өгсөнгүй (сүлжээ) — QR үүсгэж чадаагүй. "
+        # 503 = ТҮР ЗУУРЫН. Frontend зөвхөн үүнд автоматаар дахин оролддог;
+        # QPay-ийн татгалзал (502) нь дахин оролдоход ижил хариу өгнө.
+        raise HTTPException(503, "QPay хариу өгсөнгүй (сүлжээ) — QR үүсгэж чадаагүй. "
                                  "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+    except ValueError as e:  # талбарын хязгаар (sender_invoice_no гэх мэт)
+        log.error("QPay invoice талбар буруу (%s): %s", session.plate_number, e)
+        db.rollback()
+        _log_qpay_failure(db, session, acc, "BAD_FIELD", {"error": str(e)[:200]})
+        raise HTTPException(502, "Нэхэмжлэлийн талбар буруу — QR үүсгэж чадаагүй. "
+                                 "Кассаар төлнө үү.")
     except KeyError as e:  # QPay 200 буцаасан ч хүлээгдсэн талбар алга
         log.error("QPay invoice хариу дутуу (%s): талбар %s алга", session.plate_number, e)
         db.rollback()

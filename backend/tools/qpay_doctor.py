@@ -144,8 +144,39 @@ def check_failures(db, days: int):
               f"{d.get('reason')} {str(d.get('body') or d.get('error') or '')[:90]}")
 
 
+def check_invoice_numbers(db):
+    """Гүйлгээний дугаарын урт — QPay 45 тэмдэгтээс урт бол ТАТГАЛЗДАГ.
+
+    2026-08-28-нд яг энэ шалтгаанаар «Их Монгол ресторан»-ы бүх жолооч QR-аар
+    төлж чадахгүй байв. Одоо урт нь кодоор автоматаар богиносгогддог тул унахгүй,
+    гэхдээ АЛЬ зогсоолын код тайрагдаж байгааг харуулна (санхүүгийн тулгалтад
+    бүтэн код харагдвал эвтэйхэн — шинэ зогсоолд богино код өгөх нь дээр)."""
+    from app.routers.payments_router import QPAY_INVOICE_NO_MAX, _invoice_no
+    head(f"3. Гүйлгээний дугаарын урт (QPay хязгаар {QPAY_INVOICE_NO_MAX})")
+
+    class _S:
+        def __init__(self, code):
+            self.site = type("X", (), {"site_code": code})()
+            self.plate_number = "0128УНМ"  # ердийн 7 тэмдэгт, кирилл (2 байт/үсэг)
+
+    rows = (db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
+            .order_by(ParkingSite.site_code).all())
+    trimmed = []
+    for site in rows:
+        no = _invoice_no(_S(site.site_code))
+        if not no.startswith(site.site_code):
+            trimmed.append((site.site_code, no))
+    if not trimmed:
+        print(f"  {OK} Бүх зогсоолын код бүтнээрээ багтаж байна ({len(rows)} зогсоол)")
+        return
+    print(f"  {WARN} {len(trimmed)} зогсоолын код богиносгогдоно "
+          f"(төлбөр ажиллана, зөвхөн дугаар нь товчилно):")
+    for code, no in trimmed:
+        print(f"      {code}  →  {no}")
+
+
 def check_pending(db):
-    head("3. Гацсан QPay төлбөр (PENDING)")
+    head("4. Гацсан QPay төлбөр (PENDING)")
     since = datetime.utcnow() - timedelta(days=1)
     n = (db.query(Payment)
          .filter(Payment.provider == "QPAY", Payment.status == "PENDING",
@@ -168,6 +199,7 @@ def main():
     try:
         failed = asyncio.run(check_accounts(db, a.invoice, a.amount))
         check_failures(db, a.days)
+        check_invoice_numbers(db)
         check_pending(db)
         head("Дүгнэлт")
         if failed:

@@ -47,6 +47,8 @@ _RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}  # түр зуурын ал�
 # Токеныг QPay-ийн хэлсэн хугацаанаас үл хамааран энэ хугацаанаас удаан
 # кэшлэхгүй (доорх `_parse_expiry`-ийн тайлбарыг үз).
 TOKEN_MAX_LIFETIME = timedelta(minutes=50)
+# QPay v2-ийн `sender_invoice_no` талбарын дээд урт.
+SENDER_INVOICE_NO_MAX = 45
 
 
 @dataclass(frozen=True)
@@ -500,6 +502,16 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
 
     Буцаах: invoice_id, qr_text, qr_image (base64 PNG), deep_link, urls (банкны жагсаалт)."""
     acc = acc or global_account()
+    # QPay-ийн талбарын хязгаар — хэтэрвэл HTTP 400 `MAX_LENGTH` болж нэхэмжлэл
+    # ОГТ үүсэхгүй (2026-08-28: «Их Монгол ресторан» кодын урт 49 тэмдэгт болж
+    # тэр зогсоолын бүх жолооч QR-аар төлж чадахгүй байв). Дугаарыг энд ЧИМЭЭГҮЙ
+    # тайрч болохгүй — DB-д хадгалсантай зөрвөл webhook тулгалт сална. Тиймээс
+    # дуудагч тал (payments_router._invoice_no) баталгаажуулах ёстой; энэ бол
+    # хэрэв тэр эвдэрвэл ЧИМЭЭГҮЙ өнгөрөхгүй байх хамгаалалт.
+    if len(sender_invoice_no) > SENDER_INVOICE_NO_MAX:
+        raise ValueError(
+            f"sender_invoice_no {len(sender_invoice_no)} тэмдэгт — QPay-ийн "
+            f"{SENDER_INVOICE_NO_MAX} тэмдэгтийн хязгаараас хэтэрлээ: {sender_invoice_no}")
     if acc.mock:
         mock_id = f"MOCK-INV-{uuid.uuid4().hex[:10].upper()}"
         return {"invoice_id": mock_id, "qr_text": f"https://qpay.mn/q/MOCK/{mock_id}",
