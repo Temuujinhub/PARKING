@@ -330,19 +330,38 @@ async def _tcp_alive(host: str, port: int = 80, timeout: float = 2.0) -> bool:
 
 
 async def _qpay_reachable() -> dict:
-    """QPay API хүрэх эсэх (бодит HTTP). Mock үед шалгахгүй."""
+    """QPay-ийн байдал.
+
+    ЧУХАЛ (2026-08-28): өмнө нь энэ шалгалт зөвхөн base_url рүү GET хийдэг
+    байсан — QPay-ийн вэб сервер амьд л бол «ok» гэж хэлнэ. Гэтэл жолооч QR
+    авч чадахгүй байгаа бодит шалтгаан нь ихэвчлэн НЭВТРЭЛТ (401 — токен
+    хүчингүй) эсвэл нэхэмжлэлийн татгалзал байдаг. Тиймээс Health хуудас
+    «QPay ok» гэж ногоон харагдаж байхад бүх зогсоол дээр QR үүсэхгүй байж
+    болдог байв. Одоо бодит дуудлагуудын үр дүнг (данс тус бүрээр) хамт өгнө:
+    `consecutive_fail > 0` бол тэр дансаар QR үүсэхгүй байна гэсэн үг."""
     if settings.qpay_mock:
         return {"ok": None, "note": "mock горим"}
     import httpx
+
+    from ..services import qpay
     url = settings.qpay_base_url
     t0 = time.time()
+    out = {"accounts": qpay.health_snapshot()}
+    broken = [a for a in out["accounts"] if a["consecutive_fail"] >= 3]
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(url)
-        return {"ok": r.status_code < 500, "status_code": r.status_code,
-                "ms": int((time.time() - t0) * 1000)}
+        out.update({"ok": r.status_code < 500 and not broken,
+                    "status_code": r.status_code,
+                    "ms": int((time.time() - t0) * 1000)})
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)[:120], "ms": int((time.time() - t0) * 1000)}
+        out.update({"ok": False, "error": str(e)[:120],
+                    "ms": int((time.time() - t0) * 1000)})
+    if broken:
+        out["error"] = (f"{len(broken)} данс дараалан унаж байна: "
+                        + "; ".join(f"{a['username']}×{a['consecutive_fail']} "
+                                    f"({a['last_error'][:80]})" for a in broken[:3]))
+    return out
 
 
 def _blocking_probe() -> dict:
@@ -441,6 +460,56 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
 # Дүн шинжилгээ 2026-07-28: асуудлыг илрүүлэхэд амжилтын %, RPC p95, LED %,
 # чимээгүй завсар хамгийн их хэрэгтэй байсан. Энэ endpoint тэдгээрийг зогсоол/
 # камер бүрээр тооцож, босго давсныг alerts болгож буцаана (Dashboard-д банер).
+
+@router.get("/qpay")
+async def qpay_accounts_health(db=Depends(get_db),
+                               user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Зогсоол бүрийн QPay данс ҮНЭХЭЭР нэвтэрч чадаж байна уу — гүнзгий шалгалт.
+
+    «Жолооч QR авч чадахгүй байна» гэсэн гомдол ирмэгц ЭНЭ endpoint нь асуултыг
+    шууд хаана: бүх зогсоолд юу, эсвэл нэг түрээслэгчийн дансанд юу? Данс бүрд
+    нэр/нууц үгээр ШИНЭЭР нэвтэрч (кэшийг тойрч) үр дүнг буцаана — нэхэмжлэл
+    үүсгэхгүй тул мөнгө хөдлөхгүй, зогсоолын бүртгэлд юу ч үлдэхгүй.
+
+    Дансаар шинээр нэвтрэх нь тухайн дансны хуучин токеныг QPay талд хүчингүй
+    болгож болзошгүй ч аюулгүй: дуудлага бүр 401 дээр өөрөө дахин нэвтэрдэг
+    болсон (services/qpay.py `_api`)."""
+    from ..models import ParkingSite
+    from ..services import qpay
+    if settings.qpay_mock:
+        return {"mock": True, "accounts": [], "note": "mock горим — шалгах зүйлгүй"}
+
+    sites = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all()
+    by_acc: dict[tuple, dict] = {}
+    for site in sites:
+        acc = qpay.account_for(site)
+        row = by_acc.setdefault(acc.cache_key, {"username": acc.username,
+                                                "invoice_code": acc.invoice_code,
+                                                "sites": [], "acc": acc})
+        row["sites"].append(site.site_code)
+    if not by_acc:  # зогсоолгүй сервер — глобал дансаа шалгана
+        acc = qpay.global_account()
+        by_acc[acc.cache_key] = {"username": acc.username, "invoice_code": acc.invoice_code,
+                                 "sites": [], "acc": acc}
+
+    out = []
+    for row in by_acc.values():
+        acc = row.pop("acc")
+        t0 = time.time()
+        try:
+            await qpay._get_token(acc, force=True)
+            row.update({"ok": True, "ms": int((time.time() - t0) * 1000)})
+        except Exception as e:  # noqa: BLE001
+            detail = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail = f"HTTP {resp.status_code} {resp.text[:160]}"
+            row.update({"ok": False, "ms": int((time.time() - t0) * 1000),
+                        "error": detail or f"{type(e).__name__}: {e}"[:200]})
+        out.append(row)
+    return {"mock": False, "all_ok": all(r["ok"] for r in out), "accounts": out,
+            "recent": qpay.health_snapshot()}
+
 
 @router.get("/anpr-bridge")
 def anpr_bridge_stats(user: User = Depends(get_current_user)):

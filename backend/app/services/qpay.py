@@ -23,7 +23,9 @@ qpay_mock=True үед бодит QPay руу хандахгүй — туршил
 Бодит: PARKING_QPAY_MOCK=false, PARKING_QPAY_SANDBOX (true/false),
        PARKING_QPAY_USERNAME/PASSWORD/INVOICE_CODE.
 """
+import asyncio
 import base64
+import logging
 import random
 import uuid
 from dataclasses import dataclass
@@ -33,6 +35,18 @@ from decimal import ROUND_DOWN, Decimal
 import httpx
 
 from ..config import settings
+
+log = logging.getLogger("parking.qpay")
+
+# ─────────────── Найдвартай байдлын тохиргоо ───────────────
+# QPay унах нь ЖОЛООЧИД шууд харагддаг (QR гарахгүй) тул нэг удаагийн саатал,
+# хүчингүй болсон токен зэргийг ДОТООДОО даван туулна.
+_MAX_ATTEMPTS = 3                                    # эхнийх + 2 давталт
+_BACKOFF_SEC = (0.4, 1.2)                            # давталт хоорондын хүлээлт
+_RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504}  # түр зуурын алдаанууд
+# Токеныг QPay-ийн хэлсэн хугацаанаас үл хамааран энэ хугацаанаас удаан
+# кэшлэхгүй (доорх `_parse_expiry`-ийн тайлбарыг үз).
+TOKEN_MAX_LIFETIME = timedelta(minutes=50)
 
 
 @dataclass(frozen=True)
@@ -141,11 +155,29 @@ def _cache(acc: QpayAccount) -> dict:
 
 
 async def _auth_basic(acc: QpayAccount) -> dict:
-    """POST /v2/auth/token — client_id:client_secret Basic auth."""
+    """POST /v2/auth/token — client_id:client_secret Basic auth.
+
+    Нэвтрэлт унавал нэхэмжлэл ОГТ үүсэхгүй тул сүлжээний түр зуурын саатал,
+    QPay-ийн 5xx-д богино хүлээлттэйгээр дахин оролдоно. Нэр/нууц үг буруу
+    (401) бол давтах утгагүй — шууд дээшээ."""
     basic = base64.b64encode(f"{acc.username}:{acc.password}".encode()).decode()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(f"{acc.base_url}/auth/token",
-                                 headers={"Authorization": f"Basic {basic}"})
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(f"{acc.base_url}/auth/token",
+                                         headers={"Authorization": f"Basic {basic}"})
+        except httpx.HTTPError as e:
+            if attempt >= _MAX_ATTEMPTS:
+                raise
+            log.warning("QPay нэвтрэлт сүлжээний алдаа (%d/%d, %s): %r",
+                        attempt, _MAX_ATTEMPTS, acc.username, e)
+            await asyncio.sleep(_backoff(attempt))
+            continue
+        if resp.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
+            log.warning("QPay нэвтрэлт → HTTP %s (%s): %d/%d дахин оролдоно",
+                        resp.status_code, acc.username, attempt, _MAX_ATTEMPTS)
+            await asyncio.sleep(_backoff(attempt))
+            continue
         resp.raise_for_status()
         return resp.json()
 
@@ -159,21 +191,148 @@ async def _auth_refresh(acc: QpayAccount) -> dict:
         return resp.json()
 
 
-async def _get_token(acc: QpayAccount | None = None) -> str:
-    """Хүчинтэй access_token буцаана. Дуусах дөхсөн бол refresh, боломжгүй бол дахин auth."""
+def _backoff(attempt: int) -> float:
+    return _BACKOFF_SEC[min(attempt, len(_BACKOFF_SEC)) - 1]
+
+
+def invalidate_token(acc: QpayAccount) -> None:
+    """Кэшлэсэн токеныг хаяна — QPay 401 буцаасан нь «энэ токеныг би аль хэдийн
+    хүчингүй болгосон» гэсэн үг тул кэшэнд хадгалах нь зөвхөн хор хөнөөлтэй."""
+    _tokens.pop(acc.cache_key, None)
+
+
+async def _get_token(acc: QpayAccount | None = None, force: bool = False) -> str:
+    """Хүчинтэй access_token буцаана. Дуусах дөхсөн бол refresh, боломжгүй бол дахин auth.
+
+    force=True үед кэш БОЛОН refresh_token-ыг үл тоомсорлож, дансны нэр/нууц
+    үгээр ШИНЭЭР нэвтэрнэ. 401-ийн дараа зөвхөн энэ л арга сэргээнэ: хүчингүй
+    болсон access-ийн хамт refresh нь ч хүчингүй болсон байдаг тул refresh-ээр
+    оролдвол дахин 401 авч, гогцоо үргэлжилнэ."""
     acc = acc or global_account()
+    if force:
+        invalidate_token(acc)
     tok = _cache(acc)
     now = datetime.utcnow()
-    if tok["access"] and tok["access_exp"] > now:
+    if not force and tok["access"] and tok["access_exp"] > now:
         return tok["access"]
-    try:
-        data = await _auth_refresh(acc) if tok["refresh"] else await _auth_basic(acc)
-    except Exception:
-        data = await _auth_basic(acc)  # refresh амжилтгүй бол шинээр
+    if force:
+        data = await _auth_basic(acc)
+    else:
+        try:
+            data = await _auth_refresh(acc) if tok["refresh"] else await _auth_basic(acc)
+        except Exception:
+            data = await _auth_basic(acc)  # refresh амжилтгүй бол шинээр
     tok["access"] = data["access_token"]
     tok["refresh"] = data.get("refresh_token", tok["refresh"])
     tok["access_exp"] = _parse_expiry(data.get("expires_in"), now)
     return tok["access"]
+
+
+# Данс тус бүрийн эрүүл мэндийн тоолуур — health хуудас болон watchdog уншина.
+_stats: dict[tuple[str, str], dict] = {}
+
+
+def _stat(acc: QpayAccount) -> dict:
+    return _stats.setdefault(acc.cache_key, {
+        "username": acc.username, "ok": 0, "fail": 0, "consecutive_fail": 0,
+        "last_error": "", "last_error_at": None, "last_ok_at": None,
+    })
+
+
+def health_snapshot() -> list[dict]:
+    """Мерчант данс бүрийн сүүлийн үеийн байдал (health endpoint уншина).
+    consecutive_fail > 0 гэдэг нь тухайн дансаар QR үүсэхгүй байна гэсэн үг."""
+    out = []
+    for st in _stats.values():
+        out.append({
+            "username": st["username"], "ok": st["ok"], "fail": st["fail"],
+            "consecutive_fail": st["consecutive_fail"],
+            "last_error": st["last_error"][:200],
+            "last_error_at": st["last_error_at"].isoformat() if st["last_error_at"] else None,
+            "last_ok_at": st["last_ok_at"].isoformat() if st["last_ok_at"] else None,
+        })
+    return sorted(out, key=lambda r: -r["consecutive_fail"])
+
+
+async def _api(method: str, path: str, acc: QpayAccount, *,
+               json: dict | None = None, timeout: float = 20.0) -> httpx.Response:
+    """QPay API руу нэг дуудлага — токен, 401 сэргээлт, түр зуурын алдааны давталттай.
+
+    ЯАГААД (2026-08-28): өмнө нь дуудлага бүр «токен ав → НЭГ УДАА POST →
+    raise_for_status» байсан. Хоёр нүх байв:
+
+      1. **401 үхлийн гогцоо.** QPay нэг мерчант дансанд нэг л access_token
+         амьд байлгадаг. Хэд хэдэн сервер (TEST + зогсоол бүрийн PROD) НЭГ
+         дансаар ажилладаг тул аль нэг нь шинэ токен авмагц бусдын кэшлэсэн
+         токен QPay талд ҮХНЭ. Кэш нь дуусах хугацаагаараа (QPay `expires_in`
+         epoch-оор ~24ц) хүчинтэй мэт харагдсаар байдаг тул дараагийн БҮХ
+         нэхэмжлэл 401 болж, тухайн серверийн БҮХ зогсоол дээр «QPay-тэй
+         холбогдож чадсангүй» гэж QR ОГТ үүсэхгүй болно — backend-ийг гараар
+         restart хийх (эсвэл 24ц өнгөрөх) хүртэл.
+      2. **Түр зуурын саатал = алдаа.** QPay-ийн 502/504 эсвэл нэг timeout
+         шууд жолоочийн нүүрэн дээр гарч, кассын дараалал үүсгэдэг байв.
+
+    Одоо: 401/403 → токеныг хаяж, ШИНЭЭР нэвтэрч дахин илгээнэ (нэг дуудлагын
+    дотор, жолооч мэдэхгүй). 408/425/429/5xx/сүлжээний алдаа → богино
+    хүлээлттэйгээр дахин илгээнэ. Бусад 4xx (ж: VAT_AMOUNT_INVALID) нь БОДИТ
+    алдаа тул давтахгүй — шууд дээшээ гаргана."""
+    url = f"{acc.base_url}{path}"
+    st = _stat(acc)
+    force_auth = False
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            token = await _get_token(acc, force=force_auth)
+        except Exception as e:
+            st["fail"] += 1
+            st["consecutive_fail"] += 1
+            st["last_error"] = f"нэвтрэлт: {type(e).__name__}: {e}"
+            st["last_error_at"] = datetime.utcnow()
+            raise
+        force_auth = False
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.request(method, url, json=json,
+                                            headers={"Authorization": f"Bearer {token}"})
+        except httpx.HTTPError as e:
+            if attempt >= _MAX_ATTEMPTS:
+                st["fail"] += 1
+                st["consecutive_fail"] += 1
+                st["last_error"] = f"{method} {path}: {type(e).__name__}: {e}"
+                st["last_error_at"] = datetime.utcnow()
+                raise
+            log.warning("QPay %s %s сүлжээний алдаа (%d/%d, %s): %r",
+                        method, path, attempt, _MAX_ATTEMPTS, acc.username, e)
+            await asyncio.sleep(_backoff(attempt))
+            continue
+        if resp.status_code in (401, 403) and attempt < _MAX_ATTEMPTS:
+            log.warning("QPay %s %s → HTTP %s (%s): токен хүчингүй болсон — "
+                        "шинээр нэвтэрч дахин илгээнэ", method, path,
+                        resp.status_code, acc.username)
+            force_auth = True
+            continue
+        if resp.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
+            log.warning("QPay %s %s → HTTP %s (%s): түр зуурын алдаа — %d/%d дахин оролдоно",
+                        method, path, resp.status_code, acc.username, attempt, _MAX_ATTEMPTS)
+            await asyncio.sleep(_backoff(attempt))
+            continue
+        if resp.status_code >= 400:
+            st["fail"] += 1
+            st["consecutive_fail"] += 1
+            st["last_error"] = f"{method} {path}: HTTP {resp.status_code} {resp.text[:200]}"
+            st["last_error_at"] = datetime.utcnow()
+            # Дараалсан бүтэлгүйтэл = тухайн дансаар ХЭН Ч төлж чадахгүй байна.
+            # Ганц алдаа биш, ХЭВ ШИНЖ болмогц лог дээр тод анхааруулна (Health
+            # хуудас мөн улаан болно) — жолооч гомдол мэдүүлэхээс өмнө барихын тулд.
+            if st["consecutive_fail"] in (3, 10, 50):
+                log.error("QPay данс «%s» ДАРААЛАН %d удаа унав — энэ дансны бүх "
+                          "зогсоол дээр QR үүсэхгүй байна. Сүүлийн алдаа: %s",
+                          acc.username, st["consecutive_fail"], st["last_error"])
+            resp.raise_for_status()
+        st["ok"] += 1
+        st["consecutive_fail"] = 0
+        st["last_ok_at"] = datetime.utcnow()
+        return resp
+    raise RuntimeError("_api: давталт дуусав")  # pragma: no cover
 
 
 def _parse_expiry(raw, now: datetime) -> datetime:
@@ -190,7 +349,11 @@ def _parse_expiry(raw, now: datetime) -> datetime:
         exp = datetime.utcfromtimestamp(val)
     else:  # харьцангуй секунд
         exp = now + timedelta(seconds=val)
-    return exp - timedelta(seconds=60)
+    # 60с аюулгүйн зай + ДЭЭД ХЯЗГААР. QPay «24 цаг хүчинтэй» гэж хэлдэг ч нэг
+    # дансыг олон сервер хуваалцахад хуучин токеныг ЧИМЭЭГҮЙ хүчингүй болгодог.
+    # Хязгаар нь хамгийн муудаа 50 минутын дотор өөрөө эдгээх хоёр дахь давхарга
+    # (эхнийх нь `_api`-ийн 401 сэргээлт — тэр нь эхний хүсэлт дээрээ засна).
+    return min(exp - timedelta(seconds=60), now + TOKEN_MAX_LIFETIME)
 
 
 def _vat_units(price: float) -> int:
@@ -225,8 +388,29 @@ def build_lines(items: list[dict], acc: QpayAccount | None = None) -> list[dict]
     """
     acc = acc or global_account()
     vat_able = acc.tax_type == "1"
-    totals = [round(float(it["unit_price"]), 2) * float(it.get("quantity", 1) or 1)
-              for it in items]
+
+    # 0₮ мөрийг ОГТ илгээхгүй. Бодит тохиолдол: үнэгүй хугацаанд багтсан ч
+    # ӨМНӨХ ӨРТЭЙ машинд «одоогийн төлбөр 0₮» + «өр N₮» гэсэн хоёр мөр үүсдэг
+    # бөгөөд QPay 0 дүнтэй мөрийг татгалздаг → QR огт үүсэхгүй. 0₮ мөрийг хаях
+    # нь нийт дүнг өөрчлөхгүй тул аюулгүй. Сөрөг дүн бол логикийн алдаа —
+    # QPay руу илгээхээс өмнө энд барина.
+    priced = []
+    for it in items:
+        price = round(float(it["unit_price"]), 2)
+        qty = float(it.get("quantity", 1) or 1)
+        total = round(price * qty, 4)
+        if total < 0:
+            raise ValueError(
+                f"Нэхэмжлэлийн мөр сөрөг дүнтэй: {str(it.get('description'))[:60]} = {total}")
+        if total == 0:
+            log.info("QPay нэхэмжлэлээс 0₮ мөрийг хаялаа: %s",
+                     str(it.get("description"))[:60])
+            continue
+        priced.append((it, price, qty, total))
+    if not priced:
+        raise ValueError("Нэхэмжлэлийн бүх мөр 0₮ — QPay нэхэмжлэл үүсгэх боломжгүй")
+    items = [it for (it, _, _, _) in priced]
+    totals = [t for (_, _, _, t) in priced]
 
     # QPay нь НӨАТ-ыг МӨР БҮРЭЭР шалгадаг — мөрийн дүнгээс өөрөө бодоод
     # илгээсэнтэй маань тулгана. Тиймээс мөр бүрийнхийг ТУСАД НЬ бодно.
@@ -321,7 +505,6 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
         return {"invoice_id": mock_id, "qr_text": f"https://qpay.mn/q/MOCK/{mock_id}",
                 "qr_image": "", "deep_link": f"qpay://q?invoice={mock_id}", "urls": [], "mock": True}
 
-    token = await _get_token(acc)
     payload = {
         "invoice_code": acc.invoice_code,
         "sender_invoice_no": sender_invoice_no,
@@ -335,11 +518,8 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
     }
     if receiver_data:
         payload["invoice_receiver_data"] = receiver_data
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(f"{acc.base_url}/invoice",
-                                 json=payload, headers={"Authorization": f"Bearer {token}"})
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await _api("POST", "/invoice", acc, json=payload, timeout=20.0)
+    data = resp.json()
 
     urls = data.get("urls") or []
     deep_link = pick_qpay_deeplink(urls)
@@ -361,16 +541,10 @@ async def check_payment(invoice_id: str, acc: QpayAccount | None = None) -> dict
     acc = acc or global_account()
     if acc.mock:
         return {"paid": False, "mock": True}
-    token = await _get_token(acc)
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{acc.base_url}/payment/check",
-            json={"object_type": "INVOICE", "object_id": invoice_id,
-                  "offset": {"page_number": 1, "page_limit": 100}},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await _api("POST", "/payment/check", acc, timeout=15.0,
+                      json={"object_type": "INVOICE", "object_id": invoice_id,
+                            "offset": {"page_number": 1, "page_limit": 100}})
+    data = resp.json()
     paid_amount = float(data.get("paid_amount") or 0)
     rows = data.get("rows", []) or []
     # QPay-ийн payment_id — e-Barimt үүсгэхэд шаардлагатай (эхний амжилттай гүйлгээнээс)
@@ -402,16 +576,12 @@ async def create_ebarimt(payment_id: str, receiver_type: str = "CITIZEN",
     if acc.mock:
         return _mock_ebarimt()
 
-    token = await _get_token(acc)
     payload = {"payment_id": payment_id, "ebarimt_receiver_type": receiver_type}
     if receiver:
         payload["ebarimt_receiver"] = receiver
     payload["district_code"] = district_code or acc.district_code
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(f"{acc.base_url}/ebarimt_v3/create",
-                                 json=payload, headers={"Authorization": f"Bearer {token}"})
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await _api("POST", "/ebarimt_v3/create", acc, json=payload, timeout=20.0)
+    data = resp.json()
     return _normalize_ebarimt(data)
 
 
@@ -424,11 +594,12 @@ async def cancel_ebarimt(payment_id: str, note: str = "Гүйлгээ буцаа
     acc = acc or global_account()
     if acc.mock:
         return True
-    token = await _get_token(acc)
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.request("DELETE", f"{acc.base_url}/ebarimt_v3/{payment_id}",
-                                    json={"note": note},
-                                    headers={"Authorization": f"Bearer {token}"})
+    try:
+        resp = await _api("DELETE", f"/ebarimt_v3/{payment_id}", acc,
+                          json={"note": note}, timeout=15.0)
+    except httpx.HTTPError as e:
+        log.warning("e-Barimt цуцлах амжилтгүй (%s): %r", payment_id, e)
+        return False
     return resp.status_code in (200, 204)
 
 
@@ -437,10 +608,11 @@ async def cancel_payment(payment_id: str, acc: QpayAccount | None = None) -> boo
     acc = acc or global_account()
     if acc.mock:
         return True
-    token = await _get_token(acc)
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.delete(f"{acc.base_url}/payment/cancel/{payment_id}",
-                                   headers={"Authorization": f"Bearer {token}"})
+    try:
+        resp = await _api("DELETE", f"/payment/cancel/{payment_id}", acc, timeout=15.0)
+    except httpx.HTTPError as e:
+        log.warning("QPay гүйлгээ цуцлах амжилтгүй (%s): %r", payment_id, e)
+        return False
     return resp.status_code in (200, 204)
 
 

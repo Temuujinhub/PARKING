@@ -17,9 +17,21 @@ async function publicApi(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.detail || 'Алдаа гарлаа')
+  if (!res.ok) {
+    // HTTP статусыг алдаанд хавсаргана — дуудагч тал «түр зуурын алдаа» (502/504)
+    // болон «бодит татгалзал» (400/429)-ыг ялгаж, зөвхөн эхнийхийг нь дахин
+    // оролдоход хэрэгтэй.
+    const err = new Error(data.detail || 'Алдаа гарлаа')
+    err.status = res.status
+    throw err
+  }
   return data
 }
+
+// Түр зуурын гэж үзэх алдаа: QPay/сүлжээний талын саатал. 400 (session төлөв),
+// 404, 429 (throttle) зэрэг нь дахин оролдоход ижил хариу өгнө — давтахгүй.
+const isTransient = (e) => !e?.status || [502, 503, 504].includes(e.status)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // Алдааны мөр — БҮХ дэлгэцэд нэг загвараар. Өмнө нь зөвхөн хайлтын дэлгэцэд
 // харагддаг байсан тул «QPay-ээр төлөх» дарахад нэхэмжлэл үүсэхгүй (429/502/400)
@@ -117,7 +129,20 @@ export default function Pay() {
     try {
       const body = { session_id: session.session_id }
       if (vatType === 'ORG') body.customer_tin = orgTin.trim()
-      const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
+      // Backend өөрөө QPay руу 3 удаа оролддог (401 дээр шинээр нэвтэрч).
+      // Энэ нь СҮҮЛЧИЙН давхарга: тэр ч амжилтгүй болбол жолоочийг «дахин
+      // дарна уу» гэж албадалгүй, 1.5с-ийн дараа нэг удаа чимээгүй дахина.
+      // (Хэрэв эхний оролдлого сервер дээр PENDING нэхэмжлэл үүсгээд хариу нь
+      // алдагдсан бол backend түүнийг олж дахин ашиглана — давхар нэхэмжлэл
+      // үүсэхгүй.)
+      let inv
+      try {
+        inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
+      } catch (e1) {
+        if (!isTransient(e1)) throw e1
+        await sleep(1500)
+        inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
+      }
       setPayment(inv)
       // Утасны qPay хэтэвч рүү шилжүүлнэ — зөвхөн qPay-ийн өөрийн deeplink байвал,
       // зөвхөн утсан дээр (өмнө нь banks жагсаалтын эхний дурын апп руу үсэрдэг байсан)

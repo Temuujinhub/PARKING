@@ -479,6 +479,35 @@ def _throttle_qpay(request: Request, name: str, limit: int = 30):
         raise HTTPException(429, "Хэт олон хүсэлт — түр хүлээгээд дахин оролдоно уу")
 
 
+def _log_qpay_failure(db: Session, session: ParkingSession, acc, reason: str,
+                      detail: dict) -> None:
+    """QPay нэхэмжлэл бүтэлгүйтсэнийг өгөгдлийн санд үлдээнэ.
+
+    ЯАГААД: алдаа гармагц `db.rollback()` хийдэг тул хагас үүссэн Payment мөр
+    устаж, DB-д ЯМАР Ч ул мөр үлддэггүй байв. Улмаар «хэдэн жолооч, аль зогсоол
+    дээр, хэдэн удаа төлж чадсангүй» гэдэг хойшоо ХЭМЖИГДЭХГҮЙ (зөвхөн
+    journalctl, тэр нь хэдхэн хоногийн дараа устдаг). Одоо audit_logs-д
+    `QPAY_INVOICE_FAIL` гэж бичигдэнэ:
+
+        SELECT date_trunc('hour', created_at) h, detail->>'site' site,
+               detail->>'reason' reason, count(*)
+          FROM audit_logs WHERE action='QPAY_INVOICE_FAIL'
+         GROUP BY 1,2,3 ORDER BY 1 DESC;
+    """
+    try:
+        db.add(AuditLog(
+            username="system", action="QPAY_INVOICE_FAIL", entity="session",
+            entity_id=session.id,
+            detail={"reason": reason,
+                    "plate": session.plate_number,
+                    "site": (session.site.site_code if session.site else ""),
+                    "qpay_user": getattr(acc, "username", ""), **detail}))
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.warning("QPay алдааг audit_logs-д бүртгэж чадсангүй: %r", e)
+        db.rollback()
+
+
 # ─────────────────────────── QPay ───────────────────────────
 @router.post("/qpay/invoice")
 async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_db)):
@@ -539,17 +568,33 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     # e-Barimt нэхэмжлэхийн мөрүүд — session-ий төлбөр нэг мөр, өр тус бүр тусдаа мөр
     linked_comps = getattr(payment, "_debt_comps", [])
     debt_total = sum(float(c.amount) for c in linked_comps)
-    line_items = [{
-        "description": f"Зогсоолын үйлчилгээ — {session.plate_number}",
-        "unit_price": float(payment.amount) - debt_total, "quantity": 1,
-    }]
+    # Үнэгүй хугацаанд багтсан ч ӨМНӨХ ӨРТЭЙ машины «одоогийн төлбөр» 0₮ болно.
+    # 0₮ мөрийг QPay татгалздаг (QR огт үүсэхгүй) тул огт нэмэхгүй — нийт дүн
+    # өөрчлөгдөхгүй, зөвхөн өрийн мөрүүд үлдэнэ.
+    session_part = round(float(payment.amount) - debt_total, 2)
+    line_items = []
+    if session_part > 0:
+        line_items.append({
+            "description": f"Зогсоолын үйлчилгээ — {session.plate_number}",
+            "unit_price": session_part, "quantity": 1,
+        })
     for comp in linked_comps:
         line_items.append({
             "description": f"Өмнөх өр ({comp.created_at:%Y-%m-%d}) — {comp.plate_number}",
             "unit_price": float(comp.amount), "quantity": 1,
         })
     acc = qpay.account_for(session.site)
-    lines = qpay.build_lines(line_items, acc)
+    # rollback хийсний дараа payment мөр устдаг тул дүнг УРЬДЧИЛАН авч үлдэнэ
+    # (алдааны бүртгэлд «хэдэн төгрөгийн төлбөр бүтсэнгүй» гэдэг чухал).
+    payment_amount = float(payment.amount)
+    try:
+        lines = qpay.build_lines(line_items, acc)
+    except ValueError as e:  # 0₮/сөрөг мөр — QPay руу илгээх утгагүй
+        log.error("QPay нэхэмжлэлийн мөр буруу (%s): %s", session.plate_number, e)
+        db.rollback()
+        _log_qpay_failure(db, session, acc, "BAD_LINES", {"error": str(e)[:200]})
+        raise HTTPException(502, "Нэхэмжлэлийн дүн буруу — QR үүсгэж чадаагүй. "
+                                 "Кассаар төлнө үү.")
     # QPay унах нь ЖОЛООЧИД харагддаг алдаа — «QR гарахгүй байна» гомдол. Өмнө нь
     # raise_for_status()/timeout нь endpoint-оос шууд гарч 500 болдог байсан:
     # (а) жолоочид ойлгомжгүй, (б) rollback болохоор DB-д ЯМАР Ч ул мөр үлддэггүй
@@ -567,16 +612,23 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): HTTP %s — %s",
                   session.plate_number, acc.username, e.response.status_code, body_txt)
         db.rollback()
+        _log_qpay_failure(db, session, acc, "HTTP",
+                          {"status": e.response.status_code, "body": body_txt,
+                           "amount": float(payment_amount)})
         raise HTTPException(502, "QPay-тэй холбогдож чадсангүй — QR үүсгэж чадаагүй. "
                                  "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
     except httpx.HTTPError as e:  # timeout, DNS, холболт тасрах
         log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): %r", session.plate_number, acc.username, e)
         db.rollback()
+        _log_qpay_failure(db, session, acc, "NETWORK",
+                          {"error": f"{type(e).__name__}: {e}"[:200],
+                           "amount": float(payment_amount)})
         raise HTTPException(502, "QPay хариу өгсөнгүй (сүлжээ) — QR үүсгэж чадаагүй. "
                                  "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
     except KeyError as e:  # QPay 200 буцаасан ч хүлээгдсэн талбар алга
         log.error("QPay invoice хариу дутуу (%s): талбар %s алга", session.plate_number, e)
         db.rollback()
+        _log_qpay_failure(db, session, acc, "BAD_RESPONSE", {"missing_field": str(e)[:60]})
         raise HTTPException(502, "QPay-ээс ирсэн хариу дутуу байна — QR үүсгэж чадаагүй. "
                                  "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
     payment.provider_invoice_id = inv["invoice_id"]

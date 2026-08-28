@@ -316,6 +316,14 @@ export default function Health() {
           ) : (
             <div className="text-red-400 text-sm flex items-center gap-2"><Dot ok={false} /> {d.integrations?.qpay?.error || 'Хүрэхгүй'}</div>
           )}
+          {/* Мерчант данс тус бүрийн бодит дуудлагын үр дүн. «QPay сайт нээгдэж
+              байна» гэдэг нь жолооч QR авч чадна гэсэн үг БИШ — 401/татгалзал
+              нь дансны түвшинд болдог тул тусад нь харуулна. */}
+          {(d.integrations?.qpay?.accounts || []).filter((a) => a.consecutive_fail > 0).map((a) => (
+            <div key={a.username} className="text-xs text-red-400/90 mt-1.5">
+              {a.username}: дараалан {a.consecutive_fail} удаа унав — {a.last_error}
+            </div>
+          ))}
         </div>
         <div className="card">
           <div className="flex items-center gap-2 text-slate-400 text-sm mb-2"><Wifi size={16} /> WebSocket</div>
