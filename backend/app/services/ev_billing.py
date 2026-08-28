@@ -22,6 +22,7 @@ from ..config import settings
 from ..models import ChargeSession, EvCharger, EvPricePlan, Payment, Wallet
 from ..session_logic import normalize_plate
 from . import ev_hub
+from . import qpay
 from . import wallet as wallet_svc
 
 log = logging.getLogger("parking.ev_billing")
@@ -260,7 +261,9 @@ async def on_tx_stopped(db: Session, payload: dict):
         payment = Payment(
             session_id=None, kind="EV", wallet_id=session.wallet_id,
             provider="WALLET", payment_method="WALLET", source="EV",
-            sender_invoice_no=f"EV-{session.id[:8]}-{session.ocpp_tx_id}",
+            # QPay-ийн 45 байтын хязгаар (цэнэглэгчийн ocpp_tx_id урт байж болно)
+            sender_invoice_no=qpay.fit_bytes(
+                f"EV-{session.id[:8]}-{session.ocpp_tx_id}", qpay.SENDER_INVOICE_NO_MAX),
             amount=actual, vat_amount=_vat_of(actual), status="PAID",
             paid_at=datetime.utcnow(),
             raw_payload={"charge_session_id": session.id,

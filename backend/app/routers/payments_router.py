@@ -25,7 +25,8 @@ log = logging.getLogger("parking.payments")
 
 # QPay-ийн `sender_invoice_no` талбарын дээд урт (v2 API). Хэтэрвэл HTTP 400
 # `MAX_LENGTH` — нэхэмжлэл огт үүсэхгүй.
-QPAY_INVOICE_NO_MAX = 45
+QPAY_INVOICE_NO_MAX = qpay.SENDER_INVOICE_NO_MAX
+_fit_bytes = qpay.fit_bytes
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -100,16 +101,6 @@ def _ebarimt_err(e: Exception) -> str:
         except Exception:  # noqa: BLE001
             return e.response.text[:200]
     return str(e)[:200]
-
-
-def _fit_bytes(text: str, budget: int) -> str:
-    """UTF-8-аар `budget` байтад багтахаар ТЭМДЭГТЭЭР тайрна (тэмдэгт хагалахгүй).
-    Монгол улсын дугаарын кирилл үсэг бүр 2 байт эзэлдэг тул байтаар хэмжинэ."""
-    if budget <= 0:
-        return ""
-    while text and len(text.encode()) > budget:
-        text = text[:-1]
-    return text
 
 
 def _invoice_no(session: ParkingSession) -> str:

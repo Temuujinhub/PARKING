@@ -89,7 +89,11 @@ async def public_wallet_topup(token: str, body: dict, request: Request,
     payment = Payment(
         session_id=None, kind="WALLET_TOPUP", wallet_id=w.id,
         provider="QPAY", payment_method="QR", source="QR",
-        sender_invoice_no=f"WT-{w.plate_number}-{secrets.token_hex(4).upper()}",
+        # Урт нь QPay-ийн 45 байтын хязгаарт багтана — дугаар нь дипломат/урт
+        # форматтай байж болно, кирилл үсэг 2 байт (2026-08-28-ны сургамж).
+        sender_invoice_no=(qpay.fit_bytes(f"WT-{w.plate_number}",
+                                          qpay.SENDER_INVOICE_NO_MAX - 9)
+                           + f"-{secrets.token_hex(4).upper()}"),
         amount=amount, vat_amount=0, status="PENDING",
         raw_payload={"webhook_token": webhook_token})
     db.add(payment)

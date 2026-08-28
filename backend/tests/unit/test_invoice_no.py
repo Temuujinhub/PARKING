@@ -102,3 +102,34 @@ def test_service_rejects_oversized_number():
     from app.services import qpay
     with pytest.raises(ValueError, match="sender_invoice_no"):
         asyncio.run(qpay.create_invoice("X" * 46, "d", "t", "cb", []))
+
+
+# ─────────── Бусад гүйлгээний дугаарууд ч ижил хязгаарт орно ───────────
+# 2026-08-28: зөвхөн зогсоолын төлбөрийг зассан бол хангалтгүй байв. Ижил
+# загварын дугаарыг өөр 3 газар угсардаг бөгөөд админы «Данс шалгах» нь яг 45
+# дээр зогсож байсан — 26 тэмдэгтийн кодтой зогсоол нэмэхэд чимээгүй унах байв.
+from app.services import qpay  # noqa: E402
+
+SITE_CODE_MAX = 30  # schemas.SiteCreate.site_code
+
+
+def test_admin_qpay_test_invoice_fits():
+    """Админы «Данс шалгах»: TEST-{код}-{14 оронтой цаг}."""
+    stamp = "-20260828071600"
+    for code in ("A" * SITE_CODE_MAX, "PARK_IKH_MONGOL_RESTORANT", "KH"):
+        no = qpay.fit_bytes(f"TEST-{code}",
+                            qpay.SENDER_INVOICE_NO_MAX - len(stamp)) + stamp
+        assert len(no.encode()) <= qpay.SENDER_INVOICE_NO_MAX, no
+
+
+def test_wallet_topup_invoice_fits():
+    """Данс цэнэглэх: WT-{дугаар}-{8 HEX}. Дугаар нь урт/кирилл байж болно."""
+    for plate in ("0128УНМ", "А" * 20, "1234ABC"):
+        no = qpay.fit_bytes(f"WT-{plate}", qpay.SENDER_INVOICE_NO_MAX - 9) + "-A1B2C3D4"
+        assert len(no.encode()) <= qpay.SENDER_INVOICE_NO_MAX, no
+
+
+def test_ev_invoice_fits():
+    """EV цэнэглэлт: EV-{session 8}-{ocpp_tx_id} — tx_id урт байж болно."""
+    no = qpay.fit_bytes(f"EV-{'a' * 8}-{'9' * 40}", qpay.SENDER_INVOICE_NO_MAX)
+    assert len(no.encode()) <= qpay.SENDER_INVOICE_NO_MAX

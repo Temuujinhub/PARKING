@@ -51,6 +51,19 @@ TOKEN_MAX_LIFETIME = timedelta(minutes=50)
 SENDER_INVOICE_NO_MAX = 45
 
 
+def fit_bytes(text: str, budget: int) -> str:
+    """UTF-8-аар `budget` байтад багтахаар ТЭМДЭГТЭЭР тайрна (тэмдэгт хагалахгүй).
+
+    Монгол дугаарын кирилл үсэг бүр 2 байт эзэлдэг тул зөвхөн `len()`-ээр
+    хэмжвэл хязгаараас халих эрсдэлтэй. QPay-ийн хэмжих нэгж (тэмдэгт үү, байт
+    уу) баримтжаагүй тул хоёуланг нь хангахын тулд байтаар барина."""
+    if budget <= 0:
+        return ""
+    while text and len(text.encode()) > budget:
+        text = text[:-1]
+    return text
+
+
 @dataclass(frozen=True)
 class QpayAccount:
     """Нэг QPay мерчант данс. Зогсоол бүр өөрийн гэрээтэй байж болно — төлбөр нь

@@ -526,7 +526,12 @@ async def qpay_test_invoice(site_id: str, body: dict, db: Session = Depends(get_
         raise HTTPException(400, "QPay туршилтын (mock) горимд байна — бодит данс "
                                  "тохируулаагүй тул шалгах боломжгүй.")
 
-    invoice_no = f"TEST-{site.site_code}-{datetime.utcnow():%Y%m%d%H%M%S}"
+    # ЯГ ижил хязгаар энд ч үйлчилнэ (2026-08-28): `TEST-{25 тэмдэгт код}-{14}`
+    # нь яг 45 болж ирмэг дээр зогсож байсан — 26 тэмдэгтийн кодтой зогсоол
+    # нэмэхэд админы «Данс шалгах» товч чимээгүй унах байв. Урт нь баталгаажна.
+    _stamp = f"-{datetime.utcnow():%Y%m%d%H%M%S}"
+    invoice_no = qpay_svc.fit_bytes(
+        f"TEST-{site.site_code}", qpay_svc.SENDER_INVOICE_NO_MAX - len(_stamp)) + _stamp
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={invoice_no}"
     lines = qpay_svc.build_lines([{
         "description": f"Дансны туршилт — {site.name}",
