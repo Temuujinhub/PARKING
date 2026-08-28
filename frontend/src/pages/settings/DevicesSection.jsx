@@ -24,6 +24,32 @@ export default function DevicesSection() {
   // төрүүлдэг. Хаалтыг Хаалтны удирдлага хуудаснаас нээж/хаана. Оношилгоонд
   // (өнчин/давхар хаалт) хэрэгтэй үед доорх сэлгүүрээр гаргана.
   const [showBarriers, setShowBarriers] = useState(false)
+  // Дахин холбох / reboot явж байхад товчийг түгжинэ — давхар дарахад камер
+  // руу зэрэг хоёр RPC очиж, хоёулаа удаашрана (Dahua ITC цөөн холболттой).
+  const [busy, setBusy] = useState(null)
+
+  // Стримийг дахин холбох — камерыг унтраахгүй тул эрсдэлгүй, эхний алхам.
+  const reconnect = async (d) => {
+    setBusy(d.id)
+    try {
+      const r = await api(`/api/admin/devices/${d.id}/reconnect`, { method: 'POST' })
+      toast(r.detail || 'Дахин холбохоор тэмдэглэв')
+    } catch (e) { toast(e.message || 'Дахин холбоход алдаа гарлаа', 'error') } finally { setBusy(null) }
+  }
+
+  // Reboot — камер 1-2 минут ажиллахгүй тул ЗААВАЛ баталгаажуулна.
+  const rebootCam = async (d) => {
+    if (!window.confirm(`«${d.name}» камерыг reboot хийх үү?\n\nКамер 1-2 минут `
+      + 'ажиллахгүй — тэр хугацаанд машин уншигдахгүй, хаалт гараар нээгдэнэ. '
+      + 'Эхлээд «Дахин холбох»-ыг оролдсон эсэхээ шалгаарай.')) return
+    setBusy(d.id)
+    try {
+      const r = await api(`/api/admin/devices/${d.id}/reboot`, { method: 'POST' })
+      toast(r.detail, r.ok ? 'success' : 'error')
+      load()
+    } catch (e) { toast(e.message || 'Reboot хийхэд алдаа гарлаа', 'error') } finally { setBusy(null) }
+  }
+
   const load = (withDeleted = showDeleted) =>
     api(`/api/admin/devices${withDeleted ? '?include_deleted=true' : ''}`).then(setRows)
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
@@ -148,6 +174,9 @@ export default function DevicesSection() {
           // тул лог/тайлангаас харагдахгүй. Хаалт нуугдсан үед ч заавал анзаарагдах
           // ёстой учир зогсоолын гарчиг дээр гаргана (2026-08-26 Рашбулаг ЭТТ).
           const broken = all.filter((d) => d.relay_missing)
+          // Камер онлайн мөртлөө ANPR суваг тасарсан — машин ирэхэд сервер
+          // МЭДЭХГҮЙ тул хаалт нээгдэхгүй, командын бүртгэл ч үүсэхгүй.
+          const silent = all.filter((d) => d.anpr_silent)
           return (
             <div key={siteName} className="space-y-2">
               <div className="flex items-center gap-2 mt-3">
@@ -156,6 +185,12 @@ export default function DevicesSection() {
                   {all.length} төхөөрөмж{cams ? ` · ${cams} камер` : ''}
                   {bars ? ` · ${bars} хаалт${showBarriers ? '' : ' (авто, нуусан)'}` : ''}
                 </span>
+                {silent.length > 0 && (
+                  <span className="text-[11px] text-red-400 bg-red-500/10 px-2 py-0.5 rounded whitespace-nowrap cursor-help"
+                    title={silent.map((d) => `${d.name}:\n${d.anpr_silent}`).join('\n\n')}>
+                    ⚠ {silent.length} камер дугаар уншихаа больсон
+                  </span>
+                )}
                 {broken.length > 0 && (
                   <button type="button" onClick={() => setShowBarriers(true)}
                     className="text-[11px] text-red-400 bg-red-500/10 hover:bg-red-500/20 px-2 py-0.5 rounded whitespace-nowrap"
@@ -195,6 +230,14 @@ export default function DevicesSection() {
                           title="«Автомат нээх» унтраалттай: энэ камерт машин уншигдахад хаалт АВТОМАТААР нээгдэхгүй. Оператор гараар нээх шаардлагатай болно. Засах → «Автомат нээх»-ийг асаана уу.">
                           ⚠ авто-нээлт унтраалттай
                         </span>
+                      )}
+                      {/* Камер ОНЛАЙН мөртлөө дугаар илгээхээ больсон (хөрш камер
+                          уншсаар байхад) — deadman ч, camera_health ч хардаггүй
+                          3 дахь гэмтэл. Жолоочид «уншуулсан хэрнээ нээгдэхгүй»
+                          гэж мэдрэгддэг (2026-08-28 аудит). */}
+                      {d.anpr_silent && (
+                        <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                          title={d.anpr_silent}>⚠ дугаар уншихаа больсон</span>
                       )}
                       {d.nested_inner && (
                         <span className="ml-1.5 text-[10px] text-sky-400 bg-sky-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
@@ -237,6 +280,17 @@ export default function DevicesSection() {
                         <button className="btn-primary py-1 text-xs" onClick={() => restore(d)}>Сэргээх</button>
                       ) : (
                         <>
+                          {/* Дугаар уншихаа больсон камерт: эхлээд стримийг дахин
+                              холбоно (эрсдэлгүй), засрахгүй бол reboot. Автомат
+                              reboot зориудаар унтраалттай — богино тасалдалд хортой. */}
+                          {d.device_type === 'camera' && d.anpr_silent && (
+                            <>
+                              <button className="btn-secondary py-1 text-xs mr-1" disabled={busy === d.id}
+                                onClick={() => reconnect(d)}>Дахин холбох</button>
+                              <button className="btn-secondary py-1 text-xs mr-1 text-amber-400" disabled={busy === d.id}
+                                onClick={() => rebootCam(d)}>Reboot</button>
+                            </>
+                          )}
                           <button className="btn-secondary py-1 text-xs mr-1" onClick={() => setEditing(d)}>Засах</button>
                           <button className="btn-danger py-1 text-xs" onClick={() => remove(d)}>Устгах</button>
                         </>

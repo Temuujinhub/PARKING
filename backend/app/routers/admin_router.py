@@ -1032,6 +1032,7 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
                 f"нь унана — эгнээ/чиглэлийг ялгана уу.")
         return "\n\n".join(notes) or None
 
+    from ..services.anpr_watch import anpr_note
     from ..services.barrier import relay_note
     from ..services.camera_sessions import foreign_info
     out = []
@@ -1054,6 +1055,10 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
                                      # гэвч командын бүртгэл ч үүсэхгүй тул чимээгүй.
                                      # UI-д улаанаар харуулна (2026-08-26 Рашбулаг).
                                      "relay_missing": relay_note(db, d),
+                                     # Камер ОНЛАЙН мөртлөө дугаар илгээхээ больсон
+                                     # (хөрш камер уншсаар байхад) — 2 watchdog-ийн
+                                     # аль нь ч хардаггүй 3 дахь гэмтэл (2026-08-28).
+                                     "anpr_silent": anpr_note(db, d),
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
                                      "probe_ok_at": (who or {}).get("checked_at"),
                                      "foreign_sessions": (who or {}).get("sessions") or [],
@@ -1204,6 +1209,63 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
         ensure_lane_barriers(db)
     db.commit()
     return to_dict(device)
+
+
+@router.post("/devices/{device_id}/reconnect")
+async def reconnect_device_stream(device_id: str, db: Session = Depends(get_db),
+                                  user: User = Depends(require("settings", "barriers"))):
+    """Камерын ANPR event стримийг ЯГ ОДОО дахин холбуулна (reboot БИШ).
+
+    «Камер онлайн мөртлөө дугаар уншихаа больсон» үед эхлээд үүнийг оролдоно —
+    камерыг унтраахгүй тул эрсдэлгүй, 1-2 секундэд сэргэнэ. Стрим өөрөө ч 15
+    минут тутам дахин холбогддог (`stream_idle`) ч оператор хүлээхгүйгээр
+    шахаж болно."""
+    from ..services.cgi_poller import force_reconnect
+    device = db.get(Device, device_id)
+    if not device or device.device_type != "camera":
+        raise HTTPException(404, "Камер олдсонгүй")
+    force_reconnect(device.id)
+    db.add(AuditLog(username=user.username, action="CAMERA_RECONNECT", entity="device",
+                    entity_id=device_id, detail={"ip": device.ip_address or ""}))
+    db.commit()
+    return {"ok": True,
+            "detail": f"«{device.name}» стримийг дахин холбохоор тэмдэглэв — "
+                      f"1-2 минутын дараа «Сүүлд дугаар уншсан» цагийг шалгана уу."}
+
+
+@router.post("/devices/{device_id}/reboot")
+async def reboot_device(device_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(require("settings", "barriers"))):
+    """Камерыг ГАРААР reboot хийх (magicBox.reboot). 1-2 минут ажиллахгүй.
+
+    ЗӨВХӨН гараар: автомат reboot зориудаар унтраалттай (`camera_auto_reboot`)
+    — богино, өөрөө сэргэдэг тасалдалд reboot хортой. Дахин холбох оролдлого
+    үр дүнгүй болсны ДАРАА ашиглана. Бүх reboot AuditLog-д үлдэнэ."""
+    from ..services.camera_recovery import reboot_camera
+    from ..services.device_auth import camera_credentials
+    device = db.get(Device, device_id)
+    if not device or device.device_type != "camera":
+        raise HTTPException(404, "Камер олдсонгүй")
+    if not device.ip_address:
+        raise HTTPException(400, "IP хаяг бүртгэгдээгүй байна")
+    # Хаалт нээхийг ХҮЛЭЭЖ буй үед reboot хийвэл машин гацна (camera_health-ийн
+    # дүрэмтэй ижил хамгаалалт).
+    pending = (db.query(BarrierCommand)
+               .filter(BarrierCommand.status == "PENDING",
+                       BarrierCommand.created_at >= datetime.utcnow() - timedelta(minutes=2))
+               .first())
+    if pending:
+        raise HTTPException(409, "Яг одоо хаалтын команд хүлээгдэж байна — "
+                                 "хэдэн секундын дараа дахин оролдоно уу")
+    err = await reboot_camera(device.ip_address, camera_credentials(device))
+    db.add(AuditLog(username=user.username, action="CAMERA_REBOOT", entity="device",
+                    entity_id=device_id,
+                    detail={"ip": device.ip_address, "manual": True, "result": err or "OK"}))
+    db.commit()
+    if err:
+        return {"ok": False, "detail": f"Reboot илгээгдсэнгүй — {err}. Камер бүрэн "
+                                       f"унтарсан бол цахилгааныг нь салгаж залгана уу."}
+    return {"ok": True, "detail": f"«{device.name}» reboot хүлээн авлаа — 1-2 минутад сэргэнэ."}
 
 
 @router.post("/devices/{device_id}/test-connection")
