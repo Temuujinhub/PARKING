@@ -37,6 +37,22 @@ def fetch_camera_model(ip: str, device=None) -> str | None:
     return None
 
 
+def barrier_matches_camera(cam: Device, bar: Device) -> bool:
+    """Энэ хаалт тэр камерын ХОС мөн үү — цэвэр дүрэм (DB-гүй, тестээр хамрагдана).
+
+    Гурван шинж ЦӨМ таарна: чиглэл, ЭГНЭЭ, дотоод/гадна. Нэг хаалтаар орох/гарах
+    ХОЁУЛАНГ барьдаг зогсоолын `lane_dir="both"` хаалтыг зөвшөөрнө — эс бол тэнд
+    хэрэггүй хоёр дахь хаалт үүснэ. Эгнээг тусгайлан
+    онцлох шалтгаан: 2 эгнээнээс олон эгнээтэй зогсоолд зөвхөн чиглэлээр
+    тааруулбал эгнээ 3-ын камер эгнээ 1-ийн хаалтыг «өөрийнх» гэж үзэж,
+    шинэ хаалт үүсэхгүй өнгөрдөг (2026-08-28 Маршил).
+    """
+    return (bar.device_type == "barrier"
+            and bar.lane_dir in (cam.lane_dir, "both")
+            and bar.lane_no == cam.lane_no
+            and bool(bar.nested_inner) == bool(cam.nested_inner))
+
+
 def ensure_lane_barriers(db: Session) -> dict:
     """Идэвхтэй камер бүрд ижил зогсоол+эгнээний идэвхтэй barrier байлгана.
     Буцаана: {"restored": n, "created": n, "moved": n} — лог/мэдээлэлд."""
@@ -44,49 +60,55 @@ def ensure_lane_barriers(db: Session) -> dict:
     cams = db.query(Device).filter(Device.device_type == "camera",
                                    Device.status == "active").all()
     for c in cams:
-        # Ижил ЧИГЛЭЛД (орох/гарах) идэвхтэй хаалт байвал хангалттай — lane_no
-        # таарахгүйгээс давхар хаалт үүсгэхээ больсон (2026-08-02: TESTZOGSOOL-д
-        # орох/гарах бүрд 2 хаалт үүсчихсэн байсан). Ихэнх зогсоол нэг чиглэлд
-        # нэг хаалттай (камер+хаалт+LED цогц төхөөрөмж).
+        # ЭГНЭЭ БҮРД өөрийн хаалт: камер бүр өөрийн эгнээний хаалттай хосолно.
         #
-        # ГАДНАХ: ДОТООД (давхар зогсоолын) камерт энэ дүрэм ҮЙЛЧЛЭХГҮЙ — доторх
-        # хаалт нь гаднахаас БИЕ ДААСАН физик хаалт тул өөрийн эгнээнд өөрийн
-        # хаалттай байх ёстой. Тиймээс ижил nested_inner + ижил эгнээгээр хайна.
-        _match = [Device.site_id == c.site_id, Device.device_type == "barrier",
-                  Device.lane_dir == c.lane_dir,
-                  Device.nested_inner.is_(bool(c.nested_inner))]
-        if c.nested_inner:
-            _match.append(Device.lane_no == c.lane_no)
-        active_bar = db.query(Device).filter(*_match, Device.status == "active").first()
-        if active_bar:
+        # ТҮҮХ: 2026-08-02-т lane_no тулгалтыг ХАССАН байсан — TESTZOGSOOL дээр
+        # нэг чиглэлд 2 хаалт үүсчихсэн тул. Гэвч жинхэнэ шалтгаан нь НЭГ эгнээнд
+        # олон камер байсан явдал байв (Рашбулаг ЭТТ: 1/entry дээр 3 камер) бөгөөд
+        # түүнийг 2026-08-07-нд нэмсэн доорх `db.flush()` аль хэдийн зассан: эхний
+        # камер хаалтаа үүсгээд flush хийхэд ижил эгнээний дараагийн камер түүнийг
+        # ОЛНО. Тиймээс lane_no тулгалт давхардал үүсгэхээ больсон.
+        #
+        # Тулгалтгүй үлдээсэн нь 2 эгнээнээс ОЛОН эгнээтэй зогсоолыг эвддэг:
+        # эгнээ 3-т камер нэмэхэд «эгнээ 1-д орох хаалт байна» гээд хаалт ҮҮСГЭХГҮЙ
+        # өнгөрдөг (2026-08-28 Маршил: 4 камер — 2 хаалт, Хаалтны удирдлагад
+        # эгнээ 3,4 огт харагдахгүй). Улмаар `_find_barrier` эгнээ 3-ын уншилтаар
+        # эгнээ 1-ийн хаалтыг нээж, машингүй газар хаалт хөдөлдөг.
+        site_bars = db.query(Device).filter(
+            Device.site_id == c.site_id, Device.device_type == "barrier",
+        ).order_by(Device.created_at, Device.id).all()
+        if any(b.status == "active" and barrier_matches_camera(c, b) for b in site_bars):
             continue
-        # 0) ДОТООД камерын ЭГНЭЭГ СОЛИХОД хаалт нь ард нь дагаж явна.
-        # Өмнө нь эгнээгээр таардаггүй болмогц ШИНЭ хаалт үүсгэдэг байсан тул
-        # хуучин эгнээнд өнчин «Дотор орох хаалт (авто)» үлдэж, админ гараар
-        # устгах шаардлагатай болдог байв (2026-08-07 Рашбулаг ЭТТ: эгнээ 2
-        # болон 3 дээр хоёр ширхэг үүссэн). Тухайн чиглэлд ИДЭВХТЭЙ ДОТООД
-        # камергүй үлдсэн дотоод хаалтыг ШИНЭЭР үүсгэхийн оронд зөөнө.
-        if c.nested_inner:
-            orphan = next(
-                (b for b in db.query(Device).filter(
-                    Device.site_id == c.site_id, Device.device_type == "barrier",
-                    Device.lane_dir == c.lane_dir, Device.nested_inner.is_(True),
-                    Device.status == "active").all()
-                 if not db.query(Device).filter(
-                     Device.site_id == c.site_id, Device.device_type == "camera",
-                     Device.nested_inner.is_(True), Device.status == "active",
-                     Device.lane_dir == b.lane_dir, Device.lane_no == b.lane_no).first()),
-                None)
-            if orphan is not None:
-                log.info("хаалт «%s» эгнээ %s → %s руу зөөв (камер шилжсэн)",
-                         orphan.name, orphan.lane_no, c.lane_no)
-                orphan.lane_no = c.lane_no
-                db.flush()
-                moved += 1
-                continue
+        # 0) Камерын ЭГНЭЭГ СОЛИХОД хаалт нь ард нь дагаж явна.
+        # Эгнээгээр таардаггүй болмогц ШИНЭ хаалт үүсгэвэл хуучин эгнээнд өнчин
+        # «Орох хаалт (авто)» үлдэж, админ гараар устгах шаардлагатай болдог
+        # (2026-08-07 Рашбулаг ЭТТ: эгнээ 2 болон 3 дээр хоёр ширхэг үүссэн).
+        # Тухайн чиглэлд ИДЭВХТЭЙ камергүй үлдсэн хаалтыг үүсгэхийн оронд зөөнө.
+        # 2026-08-28: lane_no тулгалт бүх камерт үйлчилдэг болсон тул энэ зөөлт
+        # ч зөвхөн nested биш, БҮХ камерт хэрэгтэй — эс бол эгнээ сольсон ердийн
+        # зогсоол бүрд өнчин хаалт хуримтлагдана.
+        orphan = next(
+            (b for b in db.query(Device).filter(
+                Device.site_id == c.site_id, Device.device_type == "barrier",
+                Device.lane_dir == c.lane_dir,
+                Device.nested_inner.is_(bool(c.nested_inner)),
+                Device.status == "active").all()
+             if not db.query(Device).filter(
+                 Device.site_id == c.site_id, Device.device_type == "camera",
+                 Device.nested_inner.is_(bool(c.nested_inner)),
+                 Device.status == "active",
+                 Device.lane_dir == b.lane_dir, Device.lane_no == b.lane_no).first()),
+            None)
+        if orphan is not None:
+            log.info("хаалт «%s» эгнээ %s → %s руу зөөв (камер шилжсэн)",
+                     orphan.name, orphan.lane_no, c.lane_no)
+            orphan.lane_no = c.lane_no
+            db.flush()
+            moved += 1
+            continue
         # 1) Устгагдсан хос байвал сэргээнэ (device_key, тохиргоо хэвээр)
-        deleted_bar = (db.query(Device).filter(*_match, Device.status == "deleted")
-                       .order_by(Device.created_at.desc()).first())
+        deleted_bar = next((b for b in reversed(site_bars)
+                            if b.status == "deleted" and barrier_matches_camera(c, b)), None)
         if deleted_bar:
             deleted_bar.status = "active"
             restored += 1
