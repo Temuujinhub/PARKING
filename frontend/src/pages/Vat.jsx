@@ -35,6 +35,11 @@ export default function Vat() {
     `/api/reports/vat-receipts?date_from=${from}&date_to=${to}${term ? `&q=${encodeURIComponent(term)}` : ''}`,
     { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
+  // Бүтэлгүйтлийг ШАЛТГААНААР бүлэглэсэн нэгтгэл. Мөр тус бүрийн алдаа доорх
+  // хүснэгтэд харагддаг ч 500+ ИЖИЛ алдаа хуудаслалттай жагсаалтад хэв маяг
+  // болж харагддаггүй — прод дээр ийм хоёр тасалдал 24-48 цаг анзаарагдаагүй
+  // (msgbill квот 85ш, QPay «ТТД бүртгэлгүй» 588ш). 2026-08-28.
+  const { data: fails, reload: reloadFails } = useFetch('/api/reports/vat-failures?days=7', { initial: [] })
 
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
   // QPay талд «И баримт» тохиргоо идэвхжсэний дараа хуучин баримтуудыг нөхөхөд.
@@ -130,6 +135,31 @@ export default function Vat() {
       )}
       {tab === 'recon' && <VatRecon tenants={info?.tenants || []} />}
 
+      {tab === 'receipts' && fails.length > 0 && (
+        <div className="card space-y-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={15} className="text-amber-400" />
+            <h3 className="font-semibold text-slate-200">Бүтэлгүйтсэн баримт — шалтгаанаар (сүүлийн 7 хоног)</h3>
+            <button className="btn-secondary py-0.5 text-xs ml-auto" onClick={reloadFails}>Шинэчлэх</button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Нэг шалтгаан олон зуун баримтыг зогсоож болно. Дүн нь ДДТД ҮҮСЭЭГҮЙ гүйлгээний нийлбэр —
+            шалтгааныг зассаны дараа доорх жагсаалтаас «Дахин үүсгэх»-ээр нөхнө.
+          </p>
+          <Table headers={['Суваг', 'Тоо', 'Дүн', 'Эхэлсэн', 'Сүүлийн', 'Алдаа']} empty={false}>
+            {fails.map((f, i) => (
+              <tr key={i}>
+                <td className="td text-xs font-medium">{f.provider}</td>
+                <td className="td font-mono text-right">{fmt(f.count)}</td>
+                <td className="td font-mono text-right whitespace-nowrap">{fmt(f.amount)}₮</td>
+                <td className="td text-xs whitespace-nowrap">{fmtDate(f.first_at)}</td>
+                <td className="td text-xs whitespace-nowrap">{fmtDate(f.last_at)}</td>
+                <td className="td text-[11px] text-amber-400 break-words max-w-[28rem]">{f.error}</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      )}
       {tab === 'receipts' && (<>
       <div className="card flex flex-wrap gap-2 py-3 items-center">
         <div className="relative flex-1 min-w-56">

@@ -1341,6 +1341,36 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
     return {"dry_run": dry, "requested": len(ids), "ok": done, "failed": failed, "items": out}
 
 
+@router.get("/vat-failures")
+def vat_failures(days: int = 7, db: Session = Depends(get_db),
+                 user: User = Depends(require("vat", "reports"))):
+    """Бүтэлгүйтсэн баримтуудыг АЛДААНЫ ШАЛТГААНААР бүлэглэж буцаана.
+
+    Юуны учир (2026-08-28): алдааны текст `receipt_url`-д хадгалагддаг ба мөр
+    тус бүрд харагддаг ч, 500+ ижил алдаа хуудаслалттай хүснэгтэд ХЭВ МАЯГ
+    болж харагддаггүй. Прод дээр яг ийм хоёр тасалдал 24-48 цаг анзаарагдалгүй
+    өнгөрсөн:
+      • msgbill 429 «Сарын eBarimt хязгаар (500) дүүрсэн» — 85 баримт
+      • QPay «түрээслэгчийн жагсаалтанд ТТД бүртгэлгүй» — 588 баримт
+    Хоёулаа НЭГ шалтгаантай байсан тул бүлэглээд харвал шууд илэрнэ.
+    """
+    from sqlalchemy import func
+    days = max(1, min(int(days or 7), 90))
+    start = datetime.utcnow() - timedelta(days=days)
+    q = (db.query(VatReceipt.provider, VatReceipt.receipt_url,
+                  func.count().label("n"), func.min(VatReceipt.created_at).label("first_at"),
+                  func.max(VatReceipt.created_at).label("last_at"),
+                  func.sum(VatReceipt.amount).label("amount"))
+         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
+    q = _flt(q, ParkingSession.site_id, _scope(user))
+    rows = (q.group_by(VatReceipt.provider, VatReceipt.receipt_url)
+            .order_by(func.count().desc()).limit(20).all())
+    return [{"provider": p or "?", "error": (e or "(алдаа бичигдээгүй)")[:400], "count": n,
+             "first_at": f.isoformat(), "last_at": l.isoformat(), "amount": float(a or 0)}
+            for p, e, n, f, l, a in rows]
+
+
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  q: str | None = None, limit: int = 200, db: Session = Depends(get_db),
