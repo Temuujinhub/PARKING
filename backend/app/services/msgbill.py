@@ -365,6 +365,52 @@ def verify_signature(raw_body: bytes, signature: str | None, secrets_: list[tupl
     return None
 
 
+QUOTA_CODE = "RECEIPT_QUOTA_EXCEEDED"
+_QUOTA_LIMIT_RE = re.compile(r"\((\d{2,7})\)")
+
+
+def parse_quota_limit(text: str | None) -> int | None:
+    """429-ийн мессежээс сарын хязгаарыг сугална: «…хязгаар (500) дүүрсэн…» → 500.
+
+    Хязгаар нь msgbill-ийн ТАРИФААС хамаардаг тул бид өөрсдөө мэдэхгүй — цорын
+    ганц эх сурвалж нь татгалзсан хариу. Олдохгүй бол None (UI зөвхөн ашигласан
+    тоог харуулна)."""
+    if not text:
+        return None
+    m = _QUOTA_LIMIT_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def quota_state(db) -> dict:
+    """Сарын баримтын квотын төлөв — Тохиргоо → Холболт дээр УЛААНААР харуулна.
+
+    Юуны учир (2026-08-27, прод): 11:15-т квот (500) дүүрч, түүнээс хойш 24
+    цагийн турш 85 баримт ЧИМЭЭГҮЙ бүтэлгүйтсэн. Алдаа `receipt_url`-д
+    бичигдсээр байсан ч ямар ч дохио байгаагүй тул хэн ч анзаараагүй — ДДТД
+    үүсээгүй 85 гүйлгээ хуримтлагдсан. Энэ функц түүнийг НЭГ хараад мэдэгдэнэ.
+    """
+    from datetime import datetime, timedelta
+
+    from ..models import VatReceipt
+    if db is None:
+        return {}
+    now = datetime.utcnow()
+    month0 = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    sent = (db.query(VatReceipt).filter(VatReceipt.provider == "MSGBILL",
+                                        VatReceipt.status == "SENT",
+                                        VatReceipt.created_at >= month0).count())
+    blocked = (db.query(VatReceipt)
+               .filter(VatReceipt.provider == "MSGBILL", VatReceipt.status == "FAILED",
+                       VatReceipt.created_at >= now - timedelta(hours=24),
+                       VatReceipt.receipt_url.ilike("%429%"))
+               .order_by(VatReceipt.created_at).all())
+    limit = parse_quota_limit(blocked[0].receipt_url) if blocked else None
+    return {"month_sent": sent, "quota_limit": limit,
+            "quota_blocked": len(blocked),
+            "quota_blocked_since": blocked[0].created_at.isoformat() if blocked else None,
+            "quota_message": (blocked[-1].receipt_url or "")[:200] if blocked else None}
+
+
 def status_info(db=None) -> dict:
     """Тохиргоо → Холболт → e-Barimt хэсэгт харуулах глобал төлөв (нууц задлахгүй)."""
     cfg = global_config(db)
@@ -384,4 +430,6 @@ def status_info(db=None) -> dict:
         "key_hint": (key[:9] + "…" + key[-4:]) if len(key) > 16 else ("тохируулсан" if key else None),
         "methods": sorted(enabled_methods(db)),
         "base_url": settings.msgbill_base_url,
+        # Сарын квот дүүрвэл БҮХ зогсоолын ДДТД зогсоно — чимээгүй өнгөрөх ёсгүй
+        **quota_state(db),
     }

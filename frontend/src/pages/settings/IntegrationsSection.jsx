@@ -647,9 +647,38 @@ function MsgbillPanel({ mb, isSuper, onChanged }) {
         локал PosAPI шаардлагагүй. Түлхүүрийн шатлал: түрээслэгчийн өөрийн → глобал (.env).
         Өөрийн QPay данстай түрээслэгч глобал түлхүүр рүү УНАХГҮЙ (өөр ТТД-ээр баримт гарахаас сэргийлнэ).
       </p>
+      {/* Сарын баримтын квот. 2026-08-27: квот (500) 11:15-т дүүрч, 24 цагийн
+          турш 85 баримт ЧИМЭЭГҮЙ бүтэлгүйтэж бүх зогсоолын ДДТД зогссон —
+          алдаа DB-д бичигдсээр байсан ч дохио байгаагүй тул хэн ч анзаараагүй. */}
+      {mb.quota_blocked > 0 && (
+        <div className="rounded border border-red-500/40 bg-red-500/10 p-2.5 text-red-300">
+          <div className="font-semibold">⛔ msgbill сарын баримтын квот дүүрсэн — ДДТД үүсэхээ больсон</div>
+          <div className="mt-1 text-red-200/80">
+            {new Date(mb.quota_blocked_since + 'Z').toLocaleString()}-аас хойш{' '}
+            <b>{mb.quota_blocked}</b> баримт бүтэлгүйтэв. Энэ нь БҮХ зогсоолд нөлөөлнө.
+          </div>
+          <div className="mt-1 text-red-200/60">{mb.quota_message}</div>
+          <div className="mt-1 text-red-200/60">
+            Засах: msgbill.mn → Billing → eBarimt API-аас шатлалаа ахиулна. Дараа нь
+            бүтэлгүйтсэн баримтуудыг Ибаримт хуудаснаас «Дахин үүсгэх»-ээр нөхнө.
+          </div>
+        </div>
+      )}
+      {mb.quota_limit > 0 && !mb.quota_blocked && mb.month_sent >= mb.quota_limit * 0.8 && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-amber-300">
+          ⚠ Энэ сард {mb.month_sent}/{mb.quota_limit} баримт ашиглалаа
+          ({Math.round(100 * mb.month_sent / mb.quota_limit)}%). Квот дүүрвэл бүх
+          зогсоолын ДДТД зогсоно — шатлалаа урьдчилан ахиулна уу.
+        </div>
+      )}
       <div className="flex items-center justify-between border-b border-surface-border/40 pb-1.5">
         <div>
           <span className="text-slate-400 mr-2">Глобал (EasyParking):</span>
+          {mb.month_sent > 0 && (
+            <span className="text-slate-500 mr-2">
+              [энэ сард {mb.month_sent}{mb.quota_limit ? `/${mb.quota_limit}` : ''} баримт]
+            </span>
+          )}
           {mb.configured
             ? <><span className="text-accent">тохируулсан</span> <span className="font-mono text-slate-400">{mb.key_hint}</span>
                 <span className="text-slate-500 ml-1">({mb.source === 'db' ? 'UI-аас' : '.env'})</span>
