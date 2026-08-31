@@ -35,6 +35,7 @@ const badgeColors = {
   MANUAL_CLOSED: 'bg-purple-500/15 text-purple-400',
   PENDING: 'bg-amber-500/15 text-amber-400',
   FAILED: 'bg-red-500/15 text-red-400',
+  SKIPPED: 'bg-slate-500/15 text-slate-400',
   SUCCESS: 'bg-accent/15 text-accent',
   SENT: 'bg-accent/15 text-accent',
   REVIEW: 'bg-red-500/15 text-red-400',
@@ -44,6 +45,7 @@ const badgeLabels = {
   OPEN: 'Зогсож байна', AWAITING_PAYMENT: 'Төлбөр хүлээж буй', PAID: 'Төлсөн',
   CLOSED: 'Гарсан', FREE: 'Үнэгүй гарсан', MANUAL_CLOSED: 'Гарах уншилтгүй',
   PENDING: 'Хүлээгдэж буй', FAILED: 'Амжилтгүй', SUCCESS: 'Амжилттай', SENT: 'Илгээсэн',
+  SKIPPED: 'Илгээгээгүй',
   REVIEW: 'Шалгах шаардлагатай', active: 'Идэвхтэй', CANCELLED: 'Цуцалсан', CANCEL_PENDING: 'Цуцлалт хүлээгдэж буй',
 }
 

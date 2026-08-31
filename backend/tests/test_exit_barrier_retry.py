@@ -38,8 +38,10 @@ if not db.query(RegisteredDriver).filter(RegisteredDriver.plate_number==PLATE).f
 db.commit()
 
 def barrier_opens_since(t0):
+    # SKIPPED = cooldown-ы бүртгэлийн мөр (аудит A10) — илгээгдсэн команд биш
     return (db.query(BarrierCommand)
-            .filter(BarrierCommand.command=="open", BarrierCommand.created_at >= t0)
+            .filter(BarrierCommand.command=="open", BarrierCommand.created_at >= t0,
+                    BarrierCommand.status != "SKIPPED")
             .count())
 
 async def main():

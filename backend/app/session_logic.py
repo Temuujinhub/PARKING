@@ -75,6 +75,44 @@ _TYPE_MN = {"sedan": "суудлын", "suv": "жийп", "bus": "автобус
             "car": "суудлын", "saloon": "суудлын", "pickup": "пикап"}
 
 
+def extract_confidence(event: dict, cand: dict | None = None) -> float:
+    """Уншилтын БОДИТ итгэлцүүрийг (%) камерын event-ээс олно.
+
+    Dahua TrafficJunction push-ийн жинхэнэ утга нь `Object.Confidence`
+    (ObjectType=="Plate") талбарт байдаг. Өмнө нь зөвхөн Plate/TrafficCar
+    дотроос хайгаад олдохгүй болохоор нь 100 гэж бүртгэдэг байсан тул
+    `lpr_min_confidence` шүүлтүүр түүхэндээ НЭГ Ч уншилт татгалзаж байгаагүй
+    (2026-08-29 аудит: 8/21–26-ны 19,959 уншилтын 16.7% нь бодитоор 80%-иас
+    доогуур байж «100» гэж бүртгэгджээ). Одоо жинхэнэ утгыг хадгалснаар
+    History/Logs дээр % харагдаж, босгыг өгөгдөлд тулгуурлан тохируулна.
+
+    Хайх дараалал: тухайн дугаар олдсон бүтэц (cand) → event.Object
+    (ObjectType=="Plate") → event-ийн дээд түвшин → 100 (мэдээлэлгүй).
+    0 буюу мужаас гадуурх утгыг «мэдээлэлгүй» гэж үзнэ — Confidence=0-ээр
+    бодит уншилтыг татгалзуулж хаалт гацаахгүй."""
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if 0 < f <= 100 else None
+
+    if isinstance(cand, dict):
+        v = _num(cand.get("Confidence") or cand.get("Accuracy"))
+        if v is not None:
+            return v
+    if isinstance(event, dict):
+        obj = event.get("Object")
+        if isinstance(obj, dict) and obj.get("ObjectType") == "Plate":
+            v = _num(obj.get("Confidence"))
+            if v is not None:
+                return v
+        v = _num(event.get("Confidence") or event.get("Accuracy"))
+        if v is not None:
+            return v
+    return 100.0
+
+
 def extract_vehicle_info(raw: dict) -> tuple[str | None, str | None]:
     """Камерын event-ээс машины ӨНГӨ ба ТӨРЛИЙГ гаргана (Dahua-ийн олон түлхүүр).
     Дугаар буруу уншигдсан үед машиныг таних нэмэлт шинж — оператор snapshot-той
@@ -461,6 +499,25 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     return 0.0
 
 
+def _skip_command(db: Session, barrier: Device, session_id: str | None,
+                  source: str, plate: str, why: str) -> None:
+    """Команд ЗОРИУД илгээгдээгүйг barrier_commands-д SKIPPED мөрөөр үлдээнэ.
+
+    Өмнө нь cooldown/in-flight алгасалтууд ямар ч ул мөргүй байсан тул
+    «уншилт бий, команд алга» гэсэн байдал оношлогдохгүй цоорхой байв
+    (2026-08-29 аудит: Хангарьд 6 хоногт 694 нээлт өмнөхөөсөө 15с дотор —
+    cooldown-ы ирмэг байнга хүрдэг зогсоолд ийм чимээгүй алгасалт олон).
+    SKIPPED мөр нь:
+      • cooldown-ы хайлтад ТООЦОГДОХГҮЙ (тэнд status='SUCCESS' шүүлттэй)
+      • barrier_sweep-ийн «саяхан команд явсан» шалгалтад тооцогдоно —
+        энэ нь зөв: SKIPPED гарч байгаа нь гарцад хөдөлгөөн байгаагийн шинж
+        тул авто хаах цэвэрлэгээ түр хойшлох ёстой."""
+    db.add(BarrierCommand(device_id=barrier.id, session_id=session_id,
+                          command="open", command_source=source, status="SKIPPED",
+                          response_text=f"{plate}: {why}" if plate else why,
+                          executed_at=datetime.utcnow(), duration_ms=0))
+
+
 async def ensure_entry_barrier(db: Session, device: Device, plate: str,
                                session_id: str | None = None,
                                registered=None, screen_text: str = "") -> bool:
@@ -479,12 +536,15 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     barrier = _find_barrier(db, device.site_id, device)
     if not barrier:
         return False
+    source = "whitelist" if registered else "auto_entry"
     # ЯГ ОДОО явж буй команд байвал давтахгүй: DB-ийн cooldown нь SUCCESS болсныг
     # л хайдаг тул хараахан дуусаагүй командыг олж хардаггүй. Үр дүнд нэг камерт
     # хоёр RPC зэрэг очиж хоёулаа удаашрана (production: ганц команд 87-410мс,
     # давхацсан үед 749-985мс, нэг тохиолдолд хоёул 15 СЕКУНДЭД timeout болсон).
     from .services.barrier import open_in_flight
     if open_in_flight(barrier.id):
+        _skip_command(db, barrier, session_id, source, plate,
+                      "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
         return True
     # Саяхан амжилттай нээсэн бол дахин команд илгээхгүй (командын үер үүсгэхгүй)
     cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
@@ -495,8 +555,11 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
                       BarrierCommand.created_at >= cooldown)
               .first())
     if recent:
-        return True   # хаалт нээлттэй байгаа — дахин нээх шаардлагагүй
-    source = "whitelist" if registered else "auto_entry"
+        # Хаалт нээлттэй байгаа — дахин нээх шаардлагагүй, гэхдээ ул мөр үлдээнэ
+        _skip_command(db, barrier, session_id, source, plate,
+                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      "нээгдсэн — команд давтсангүй")
+        return True
     # Дэлгэцийг хаалттай ХАМТ (нэг сессээр) бичнэ — тусад нь нэвтрэхгүй
     cmd = await open_barrier(db, barrier, session_id, source, plate=plate,
                              screen_text=screen_text)
@@ -527,6 +590,9 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
                          BarrierCommand.created_at >= cooldown)
                  .first())
     if recent_ok:
+        _skip_command(db, barrier, None, "exit_retry", plate,
+                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      "нээгдсэн — команд давтсангүй")
         return True
 
     # ГЭРЭЭТ машин ЯМАГТ гарна — төлбөр авдаггүй тул өр (ихэвчлэн орох уншилт
@@ -566,6 +632,8 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     # ганц команд 87-410мс, давхацсан үед 749-985мс, нэг удаа хоёул 15с timeout).
     from .services.barrier import open_in_flight
     if open_in_flight(barrier.id):
+        _skip_command(db, barrier, session.id if session else None, "exit_retry",
+                      plate, "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
         return True
     cmd = await open_barrier(db, barrier, session.id if session else None,
                              "exit_retry", plate=plate)
@@ -592,6 +660,8 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
         return False
     from .services.barrier import open_in_flight
     if open_in_flight(barrier.id):
+        _skip_command(db, barrier, session_id, source, plate,
+                      "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
         return True
     cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
     recent_ok = (db.query(BarrierCommand)
@@ -601,6 +671,9 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
                          BarrierCommand.created_at >= cooldown)
                  .first())
     if recent_ok:
+        _skip_command(db, barrier, session_id, source, plate,
+                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      "нээгдсэн — команд давтсангүй")
         return True
     cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
     if cmd.status != "SUCCESS":
@@ -672,11 +745,20 @@ async def entry_hold_expire(session_id: str, device_id: str, hold_seconds: int, 
 
 
 async def handle_entry(db: Session, device: Device, plate: str, confidence: float, raw: dict,
-                       allow_open: bool = True) -> dict:
+                       allow_open: bool = True, burst_merge: bool = True) -> dict:
     """Орох камерын event: session нээж, barrier нээнэ (blacklist биш бол).
 
     allow_open=False: дараалалд ХОЦОРСОН event — бүртгэлийг хэвийн хийнэ, харин
-    хаалт НЭЭХГҮЙ (машиныг гараар оруулчихсан байхад хоосон зам руу онгойхгүй)."""
+    хаалт НЭЭХГҮЙ (машиныг гараар оруулчихсан байхад хоосон зам руу онгойхгүй).
+
+    burst_merge=False: log_tail шиг НӨХӨН тоглуулж буй уншилтад. Burst цонх
+    (entry_burst_seconds) нь СЕРВЕРИЙН цагаар «6 секундэд хаалтаар 2 машин
+    орохгүй» гэсэн ФИЗИКИЙН таамагт тулгуурладаг — харин логоос дараалан
+    тоглуулсан уншилтууд серверийн цагаар хэдхэн мс зайтай ч БОДИТ хугацаагаараа
+    минутаар зөрүүтэй ӨӨР машинууд байж болно. Тэднийг нэгтгэвэл өмнөх машины
+    session-ий дугаарыг дараагийнхаар дарж бичнэ (2026-08-16 прод: 42 уншилт →
+    20 plate_autocorrect). Дугаарын давхар уншилтын dedup (lpr_dedup_seconds)
+    хэвээр үйлчилнэ."""
     site_id = device.site_id
     now = datetime.utcnow()
 
@@ -736,7 +818,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                           LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
                           LprEvent.accepted.is_(True),
                           LprEvent.created_at >= now - timedelta(seconds=settings.entry_burst_seconds))
-                  .order_by(LprEvent.created_at.desc()).first())
+                  .order_by(LprEvent.created_at.desc()).first()) if burst_merge else None
     if burst_prev:
         if is_valid_plate(plate) and not get_open_session(db, plate, site_id):
             prev_session = get_open_session(db, burst_prev.plate_number, site_id)

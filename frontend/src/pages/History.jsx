@@ -113,7 +113,28 @@ export default function History() {
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
           <tr key={s.id} className="hover:bg-surface-muted/30">
-            <td className="td font-mono font-bold">{s.plate_number}</td>
+            <td className="td font-mono font-bold">
+              {s.plate_number}
+              {/* Камерын таних итгэлцүүр (орох → гарах). 2026-08-29 хүртэл
+                  бүх уншилт «100» гэж бүртгэгддэг байсан тул хуучин мөрөнд
+                  100/100 харагдана — бодит хэмжилт үүнээс хойш эхэлсэн. */}
+              {(s.confidence_entry != null || s.confidence_exit != null) && (
+                <div className="font-normal text-[10px] tabular-nums"
+                  title="Камерын дугаар таних итгэлцүүр: орох → гарах (%)">
+                  {[s.confidence_entry, s.confidence_exit].map((c, i) => (
+                    <span key={i}>
+                      {i > 0 && <span className="text-slate-600"> → </span>}
+                      {c == null ? <span className="text-slate-600">—</span> : (
+                        <span className={c < 60 ? 'text-red-400'
+                          : c < 85 ? 'text-amber-400' : 'text-slate-500'}>
+                          {Math.round(c)}%
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </td>
             <td className="td">{s.site_name}</td>
             <td className="td font-mono text-xs">{fmtDate(s.entry_time)}</td>
             <td className="td font-mono text-xs">{fmtDate(s.exit_time)}</td>

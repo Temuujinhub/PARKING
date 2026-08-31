@@ -21,7 +21,8 @@ from .device_auth import camera_credentials
 from .snapshot import offer_stream_image
 from ..database import SessionLocal
 from ..models import Device, LprEvent
-from ..session_logic import handle_entry, handle_exit, handle_inner_pass, normalize_plate
+from ..session_logic import (extract_confidence, handle_entry, handle_exit,
+                             handle_inner_pass, normalize_plate)
 
 log = logging.getLogger("parking.cgi_poller")
 
@@ -142,11 +143,9 @@ def _plate_from(data: dict) -> tuple[str, float]:
         if isinstance(c, dict):
             num = c.get("PlateNumber") or c.get("PlateNo") or c.get("plateNumber")
             if num:
-                try:
-                    conf = float(c.get("Confidence") or c.get("Accuracy") or data.get("Confidence") or 100)
-                except (ValueError, TypeError):
-                    conf = 100.0
-                return str(num), conf
+                # БОДИТ итгэлцүүр: жинхэнэ утга Object.Confidence-д байдаг
+                # (аудит 2026-08-29 — өмнө нь олдохгүй тул үргэлж 100 болдог байв)
+                return str(num), extract_confidence(data, c)
     return "", 0.0
 
 

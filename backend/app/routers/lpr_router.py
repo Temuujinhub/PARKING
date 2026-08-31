@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import Device, LprEvent
-from ..session_logic import (handle_entry, handle_exit, handle_inner_pass,
+from ..session_logic import (extract_confidence, handle_entry, handle_exit, handle_inner_pass,
                              normalize_plate, strip_images)
 
 log = logging.getLogger("parking.lpr")
@@ -97,12 +97,10 @@ def _extract_plate(event: dict) -> tuple[str, float]:
             continue
         num = c.get("PlateNumber") or c.get("PlateNo") or c.get("plateNumber")
         if num:
-            conf = c.get("Confidence") or c.get("Accuracy") or event.get("Confidence") or 100
-            try:
-                conf = float(conf)
-            except (ValueError, TypeError):
-                conf = 100.0
-            return str(num), conf
+            # БОДИТ итгэлцүүр: TrafficCar-т Confidence байдаггүй — жинхэнэ утга
+            # Object.Confidence-д (аудит 2026-08-29: олдохгүй болохоор нь 100
+            # тавьдаг байсан тул шүүлтүүр огт ажилладаггүй байв)
+            return str(num), extract_confidence(event, c)
     return "", 0.0
 
 

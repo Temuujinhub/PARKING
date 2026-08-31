@@ -76,9 +76,12 @@ db.commit()
 
 
 def open_cmds():
+    # ЗӨВХӨН бодитоор илгээгдсэн командыг тоолно — cooldown/in-flight алгасалт
+    # одоо SKIPPED мөр үлдээдэг (аудит A10), тэр нь «илгээгдсэн команд» биш.
     return (db.query(BarrierCommand)
             .filter(BarrierCommand.device_id == bar.id,
-                    BarrierCommand.command == "open").count())
+                    BarrierCommand.command == "open",
+                    BarrierCommand.status != "SKIPPED").count())
 
 
 try:

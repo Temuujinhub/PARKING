@@ -44,6 +44,10 @@ log = logging.getLogger("parking.log_tail")
 # device_id → сүүлд боловсруулсан бичлэгүүдийн түлхүүр (санах ойд, хязгаартай)
 _seen: dict[str, set] = {}
 _SEEN_MAX = 400
+# Нэг мөчлөгт боловсруулах уншилтын дээд тоо — камерын ачаалал/командын үерийн
+# runaway хамгаалалт. 20с мөчлөгт 10 машин = 30 машин/мин — бодит урсгалд
+# хүрдэггүй тоо. Илүүдэл нь хаягдахгүй, дараагийн мөчлөгүүдэд үргэлжилнэ.
+_MAX_PER_CYCLE = 10
 # device_id → сүүлийн амжилттай таталтын monotonic үе (лог хэт бичихгүйн тулд)
 _last_pull: dict[str, float] = {}
 
@@ -120,10 +124,30 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
     now = datetime.now(timezone.utc)
     tol = timedelta(minutes=settings.log_tail_skew_tolerance_min)
     win = timedelta(minutes=settings.log_tail_window_min)
+    # Камерын нэгдсэн RPC дараалалд орно. Өмнө нь энэ таталт түгжээгүй, тусдаа
+    # шинэ TCP клиентээр 20с тутам явдаг байсан — log_tail нь яг ЧИМЭЭГҮЙ
+    # (ихэвчлэн аль хэдийн ядарсан) камер дээр л ажилладаг тул ядарсан камерыг
+    # нэмж ачаалж, тэр агшинд ирсэн хаалтны командтай өрсөлддөг байв (2026-08-29
+    # аудит: Соёлын төвийн доройтсон камер дээр 3 өдөр дараалан PoolTimeout/
+    # timeout — бүх алдаа log_tail идэвхтэй ажиллаж байх үеийнх). Одоо:
+    #   • хаалтны команд хүлээгдэж/явж байвал энэ мөчлөгийг АЛГАСНА
+    #   • «өвчтэй» (саяхан timeout болсон) камерыг амраана
+    #   • таталт хуваалцсан keep-alive клиентээр, _rpc_lock дараалалд явна
+    from .barrier import (_rpc_lock, barrier_is_waiting, camera_client,
+                          camera_sick_remaining, note_rpc_done)
+    if barrier_is_waiting(ip) or camera_sick_remaining(ip):
+        log.debug("%s (%s): хаалтны команд явж байна/камер амарч байна — "
+                  "энэ мөчлөгийг алгасав", name, ip)
+        return 0
     try:
-        recs = await asyncio.wait_for(
-            fetch_snap_events(ip, creds[0], creds[1], now - win - tol, now + tol),
-            timeout=settings.log_tail_timeout_sec)
+        async with _rpc_lock(ip):
+            try:
+                recs = await asyncio.wait_for(
+                    fetch_snap_events(ip, creds[0], creds[1], now - win - tol,
+                                      now + tol, client=camera_client(ip)),
+                    timeout=settings.log_tail_timeout_sec)
+            finally:
+                note_rpc_done(ip)
     except Exception as e:  # noqa: BLE001 — камер завгүй байж болно, дараагийн мөчлөгт
         log.debug("%s (%s): лог татагдсангүй — %s", name, ip, type(e).__name__)
         return 0
@@ -167,53 +191,61 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
         return 0
 
     seen = _seen[device_id]
-    # ── ЗӨВХӨН ШИНЭХЭН, ЗӨВХӨН НЭГ ──────────────────────────────────────────
-    # Хуучин уншилт нь `camera_sync`-ийн ажил (тэр цагийг нь зөв бичдэг). Энд
-    # ЗӨВХӨН саяхны уншилтыг авна — хаалт нээх утга нь тэр л уншилтад байна.
-    # Мөн мөчлөг тутамд НЭГ л уншилт: burst цонх (6с) нь серверийн цагаар
-    # ажилладаг тул хэд хэдэн уншилтыг зэрэг өгвөл дахин нийлүүлнэ.
-    fresh_cut = datetime.utcnow() - timedelta(seconds=settings.log_tail_fresh_sec)
+    # ── ЗӨВХӨН ШИНЭХЭНИЙГ, ГЭХДЭЭ БҮГДИЙГ ──────────────────────────────────
+    # Хуучин уншилт нь `camera_sync`-ийн ажил (тэр цагийг нь зөв бичдэг).
+    # Өмнө нь мөчлөг тутамд ЗӨВХӨН ХАМГИЙН СҮҮЛИЙН уншилтыг боловсруулж,
+    # өмнөхийг нь _seen-д тэмдэглээд ХАЯДАГ байв — 20 секундэд 2+ машин ирвэл
+    # эхнийх нь session ч, төлбөр ч үгүй ор мөргүй алга болно (2026-08-29
+    # аудит: 8/21–26-д 10 зогсоол дээр ийм 438 сэргээлтийн дор хаяж хэсэг нь
+    # хаягдаж байсан). Одоо шинэхэн уншилт БҮГДИЙГ он цагийн дарааллаар
+    # боловсруулна:
+    #   • ХААЛТ нээх эрх зөвхөн ХАМГИЙН СҮҮЛИЙН уншилтад (7aca3ce-гийн
+    #     «хуучин уншилтад хаалт нээхгүй» дүрэм хэвээр) — өмнөх машинууд
+    #     аль хэдийн орсон/гарсан байх магадлалтай тул зөвхөн бүртгэнэ
+    #   • handle_entry-д burst_merge=False: 6с burst цонх СЕРВЕРИЙН цагаар
+    #     ажилладаг тул дараалан тоглуулсан ӨӨР машинуудыг «нэг машин» гэж
+    #     нийлүүлж дугаар дардаг байсан (2026-08-16: 42 уншилт → 20
+    #     plate_autocorrect) — тоглуулалтад энэ таамаг хүчингүй
     todo = [r for r in rows if _key(r[1], r[0]) not in seen]
-    if len(todo) > 1:
-        # ЧИМЭЭГҮЙ БҮҮ ХАЯ: эдгээр нь бодит машинууд бөгөөд энд боловсруулагдахгүй
-        # бол хаалт нь нээгдэхгүй, session нь үүсэхгүй. Дараалал үүсч байгаа нь
-        # мөчлөг хэт удаан эсвэл урсгал их гэсэн дохио — тоогоор нь харуулна.
-        log.warning("[лог-нөөц] %s: нэг мөчлөгт %d уншилт хуримтлагдсан — зөвхөн "
-                    "хамгийн сүүлийнхийг боловсруулна, үлдсэн %d нь ХАЯГДАНА (%s)",
-                    name, len(todo), len(todo) - 1,
-                    ", ".join(p for _t, p, _r in todo[:-1])[:200])
-    for t, plate, raw in todo[:-1]:
-        # Хуучирсан/илүү уншилтыг ДАХИН авахгүйгээр тэмдэглээд өнгөрнө
-        _remember(device_id, _key(plate, t))
-    rows = todo[-1:] if todo else []
-    if rows:
+    if len(todo) > _MAX_PER_CYCLE:
+        # Runaway хамгаалалт. Илүүдлийг ХАЯХГҮЙ — _seen-д тэмдэглэхгүй орхивол
+        # дараагийн мөчлөг (20с) үргэлжлүүлж авна. Жолооч гарцад хүлээж байж
+        # болох ХАМГИЙН СҮҮЛИЙН уншилтыг энэ мөчлөгтөө заавал багтаана.
+        log.warning("[лог-нөөц] %s: %d уншилт хуримтлагдсан — энэ мөчлөгт %d-г нь "
+                    "боловсруулж, үлдсэнийг дараагийн мөчлөгүүдэд үргэлжлүүлнэ",
+                    name, len(todo), _MAX_PER_CYCLE)
+        todo = todo[:_MAX_PER_CYCLE - 1] + todo[-1:]
+    rows = []
+    for t, plate, raw in todo:
         # Бичлэгийн НАС нь КАМЕРЫН цагаар хэмжигдэнэ. Камерын цаг серверийнхээс
         # гулссан бол энэ харьцуулалт утгагүй болно — тиймээс ХОЁР ТАЛААС нь
         # шалгана:
         #   • хэт ХУУЧИН  → camera_sync хариуцна (тэр цагийг нь зөв бичдэг)
         #   • ИРЭЭДҮЙН   → камерын цаг гулссан (ж: камер УБ локал цагаар, сервер
-        #     UTC-ээр явж байна). Өмнө нь зөвхөн «хуучин»-г шалгадаг байсан тул
-        #     ирээдүйн огноотой бичлэг ХЭЗЭЭ Ч хуучин гэж тооцогдохгүй, 6 цагийн
-        #     өмнөх уншилт «шинэхэн» гэж орж ирээд ХААЛТЫГ НЭЭДЭГ байв
-        #     (2026-08-22 Рашбулаг: дотоод камер +8ц, 19:5x-ийн уншилтууд шөнийн
-        #     01:5x-д тоглогдож эзэнгүй хаалт нээсэн).
-        age = (datetime.utcnow() - rows[0][0]).total_seconds()
+        #     UTC-ээр явж байна). Ирээдүйн огноотой бичлэг «хуучин» гэж хэзээ ч
+        #     тооцогдохгүй тул шалгахгүй бол 6 цагийн өмнөх уншилт «шинэхэн»
+        #     болж ХААЛТ НЭЭДЭГ байв (2026-08-22 Рашбулаг: дотоод камер +8ц,
+        #     19:5x-ийн уншилтууд шөнийн 01:5x-д тоглогдож эзэнгүй хаалт нээсэн).
+        age = (datetime.utcnow() - t).total_seconds()
         if age > settings.log_tail_fresh_sec:
-            _remember(device_id, _key(rows[0][1], rows[0][0]))
-            log.debug("%s: сүүлийн бичлэг хэт хуучин (%s) — camera_sync хариуцна",
-                      name, rows[0][0])
-            rows = []
+            _remember(device_id, _key(plate, t))
+            log.debug("%s: бичлэг хэт хуучин (%s) — camera_sync хариуцна", name, t)
         elif age < -settings.log_tail_clock_skew_max_sec:
-            _remember(device_id, _key(rows[0][1], rows[0][0]))
+            _remember(device_id, _key(plate, t))
             log.warning("[лог-нөөц] %s: КАМЕРЫН ЦАГ ГУЛССАН — бичлэгийн огноо %s нь "
                         "серверийн цагаас %d минут ИРЭЭДҮЙД байна. Бичлэгийн бодит "
                         "нас тодорхойгүй тул хаалт НЭЭХГҮЙ (camera_sync хариуцна). "
                         "Камерын NTP/цагийн бүсийг тааруулна уу.",
-                        name, rows[0][0], int(-age / 60))
-            rows = []
+                        name, t, int(-age / 60))
+        else:
+            rows.append((t, plate, raw))
 
     done = 0
-    for t, plate, raw in rows:
+    for _i, (t, plate, raw) in enumerate(rows):
+        # Хаалт нээх эрх: мөчлөгийн завсар бага (allow_open) БА хамгийн
+        # сүүлийн уншилт. Өмнөх уншилтуудын машид гарцаас холдсон байх
+        # магадлалтай — тэдэнд хаалт нээвэл эзэнгүй онгорхой хаалт үүснэ.
+        _open_this = allow_open and _i == len(rows) - 1
         _remember(device_id, _key(plate, t))
         db = SessionLocal()
         try:
@@ -231,23 +263,24 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
                     LprEvent.created_at >= fresh).first():
                 continue
             raw_ev = {"log_tail": True, "camera_time": t.isoformat(),
-                      "TrafficCar": {"PlateNumber": plate}, "opened": allow_open}
+                      "TrafficCar": {"PlateNumber": plate}, "opened": _open_this}
             if device.nested_inner:
                 res = await handle_inner_pass(db, device, plate, 100.0, raw_ev,
-                                              allow_open=allow_open)
+                                              allow_open=_open_this)
             elif device.lane_dir == "exit":
                 res = await handle_exit(db, device, plate, 100.0, raw_ev,
-                                        allow_open=allow_open)
+                                        allow_open=_open_this)
             else:
                 res = await handle_entry(db, device, plate, 100.0, raw_ev,
-                                         allow_open=allow_open)
+                                         allow_open=_open_this, burst_merge=False)
             done += 1
             log.warning("[лог-нөөц] %s %s → %s (стрим чимээгүй байсан тул "
                         "камерын логоос авав)%s", device.lane_dir, plate,
                         res.get("action", "?"),
-                        "" if allow_open else
-                        f" [мөчлөгийн завсар {gap:.0f}с — уншилт хуучин байж "
-                        f"болзошгүй тул ХААЛТ НЭЭГЭЭГҮЙ]")
+                        "" if _open_this else
+                        (f" [мөчлөгийн завсар {gap:.0f}с — уншилт хуучин байж "
+                         f"болзошгүй тул ХААЛТ НЭЭГЭЭГҮЙ]" if not allow_open
+                         else " [дараалалд хоцорсон уншилт — хаалт нээгээгүй]"))
         except Exception as e:  # noqa: BLE001 — нэг уншилт бусдыг зогсоохгүй
             log.error("[лог-нөөц] %s боловсруулах алдаа: %r", plate, e)
         finally:
