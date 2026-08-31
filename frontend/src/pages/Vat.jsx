@@ -40,6 +40,31 @@ export default function Vat() {
   // болж харагддаггүй — прод дээр ийм хоёр тасалдал 24-48 цаг анзаарагдаагүй
   // (msgbill квот 85ш, QPay «ТТД бүртгэлгүй» 588ш). 2026-08-28.
   const { data: fails, reload: reloadFails } = useFetch('/api/reports/vat-failures?days=7', { initial: [] })
+  const [bulking, setBulking] = useState(false)
+
+  // Бүтэлгүйтсэн баримтуудыг БӨӨНӨӨР нөхөх. Нэг гадны шалтгаанаар олон зуун
+  // баримт зэрэг унадаг тул нэг нэгээр дарж нөхөх боломжгүй. Төлбөрийг ДАХИН
+  // АВАХГҮЙ — зөвхөн ДДТД үүсгэнэ.
+  const retryAll = async () => {
+    setBulking(true)
+    try {
+      const pre = await api('/api/reports/vat-retry-failed', {
+        method: 'POST', body: { days: 7, limit: 500, dry: true } })
+      if (!pre.candidates) { toast('Нөхөх баримт олдсонгүй'); return }
+      if (!window.confirm(`${pre.candidates} төлбөрийн ДДТД-г дахин үүсгэх үү?\n\n`
+        + 'Төлбөрийг ДАХИН АВАХГҮЙ — зөвхөн баримт үүснэ. ДДТД аль хэдийн үүссэн '
+        + 'баримтыг алгасна. Квот дүүрвэл тэр дороо зогсоно.\n\n'
+        + 'Гадны шалтгааныг (квот/ТТД бүртгэл) ЗАССАН эсэхээ эхлээд шалгаарай — '
+        + 'эс бол бүгд дахин унана.')) return
+      const r = await api('/api/reports/vat-retry-failed', {
+        method: 'POST', body: { days: 7, limit: 500 } })
+      const top = Object.entries(r.errors || {}).sort((a, b) => b[1] - a[1])[0]
+      toast(`${r.ok} баримт үүсэв · ${r.failed} унав · ${r.skipped} алгасав`
+        + (r.stopped ? ` — ${r.stopped}` : top ? ` · «${top[0].slice(0, 70)}»` : ''),
+        r.ok ? 'success' : 'error')
+      reloadFails(); reloadRows(); reloadInfo()
+    } catch (e) { toast(e.message || 'Бөөнөөр нөхөхөд алдаа гарлаа', 'error') } finally { setBulking(false) }
+  }
 
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
   // QPay талд «И баримт» тохиргоо идэвхжсэний дараа хуучин баримтуудыг нөхөхөд.
@@ -140,7 +165,13 @@ export default function Vat() {
           <div className="flex items-center gap-2">
             <AlertTriangle size={15} className="text-amber-400" />
             <h3 className="font-semibold text-slate-200">Бүтэлгүйтсэн баримт — шалтгаанаар (сүүлийн 7 хоног)</h3>
-            <button className="btn-secondary py-0.5 text-xs ml-auto" onClick={reloadFails}>Шинэчлэх</button>
+            <div className="ml-auto flex gap-1.5">
+              <button className="btn-primary py-0.5 text-xs" disabled={bulking} onClick={retryAll}
+                title="Бүх бүтэлгүйтсэн баримтын ДДТД-г дахин үүсгэнэ. Төлбөрийг ДАХИН АВАХГҮЙ. Шалтгааныг зассаны ДАРАА дарна уу.">
+                {bulking ? 'Үүсгэж байна…' : 'Бүгдийг дахин үүсгэх'}
+              </button>
+              <button className="btn-secondary py-0.5 text-xs" onClick={reloadFails}>Шинэчлэх</button>
+            </div>
           </div>
           <p className="text-xs text-slate-500">
             Нэг шалтгаан олон зуун баримтыг зогсоож болно. Дүн нь ДДТД ҮҮСЭЭГҮЙ гүйлгээний нийлбэр —

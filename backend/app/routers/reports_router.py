@@ -1371,6 +1371,84 @@ def vat_failures(days: int = 7, db: Session = Depends(get_db),
             for p, e, n, f, l, a in rows]
 
 
+@router.post("/vat-retry-failed")
+async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_db),
+                           user: User = Depends(require("vat", "reports"))):
+    """Бүтэлгүйтсэн баримтуудыг БӨӨНӨӨР дахин үүсгэнэ. Төлбөрийг ДАХИН АВАХГҮЙ.
+
+    Хэрэглээ: нэг гадны шалтгаанаар (msgbill квот дүүрэх, QPay-ийн ТТД бүртгэл
+    унах) олон зуун баримт зэрэг унадаг. Шалтгааныг зассаны дараа тэдгээрийг
+    нэг нэгээр нь дарж нөхөх боломжгүй — 2026-08-27-нд ганц тасалдлаас 85,
+    QPay-гээс 588 баримт хуримтлагдсан.
+
+    body: {days=7, provider?, limit=100, dry=false}
+      dry=true  — ЮУ Ч ҮҮСГЭХГҮЙ, зөвхөн хэдэн баримт оролдохыг тоолно.
+
+    Хамгаалалт:
+      • `retry_ebarimt` өөрөө ДДТД-тэй баримтыг алгасдаг (давхардал үүсэхгүй)
+        ба msgbill-д өмнө илгээсэн rcp_ дугаарын төлөвийг эхлээд асуудаг.
+      • ДАРААЛЖ явна, хооронд нь завсарлагатай — ТЕГ/msgbill-ийг цохихгүй.
+      • КВОТ дүүрвэл (429) ТЭР ДОРОО ЗОГСОНО: цаашид оролдох нь утгагүй бөгөөд
+        бүтэлгүйтлийн тоог л хийсвэрээр өсгөнө.
+      • Оператор зөвхөн ӨӨРИЙН зогсоолын баримтыг нөхнө (_scope).
+    """
+    import asyncio
+
+    from .payments_router import _lock_payment, retry_ebarimt
+    body = body or {}
+    days = max(1, min(int(body.get("days") or 7), 90))
+    limit = max(1, min(int(body.get("limit") or 100), 500))
+    dry = bool(body.get("dry"))
+    provider = (body.get("provider") or "").strip().upper() or None
+    start = datetime.utcnow() - timedelta(days=days)
+
+    q = (db.query(VatReceipt)
+         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
+    if provider:
+        q = q.filter(VatReceipt.provider == provider)
+    q = _flt(q, ParkingSession.site_id, _scope(user))
+    recs = q.order_by(VatReceipt.created_at).limit(limit).all()
+    # Нэг төлбөрт олон бүтэлгүй мөр байж болно — төлбөр бүрд НЭГ л оролдоно
+    pay_ids, seen = [], set()
+    for r in recs:
+        if r.payment_id and r.payment_id not in seen:
+            seen.add(r.payment_id)
+            pay_ids.append(r.payment_id)
+    if dry:
+        return {"dry": True, "candidates": len(pay_ids), "rows": len(recs), "days": days,
+                "provider": provider}
+
+    out = {"total": len(pay_ids), "ok": 0, "skipped": 0, "failed": 0,
+           "stopped": None, "errors": {}}
+    for pid in pay_ids:
+        payment = _lock_payment(db, pid)
+        if payment is None:
+            out["skipped"] += 1
+            continue
+        try:
+            res = await retry_ebarimt(db, payment)
+        except Exception as e:  # noqa: BLE001 — нэг баримтын алдаа бөөнийг зогсоохгүй
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        db.commit()
+        if res.get("ok"):
+            out["ok"] += 1
+        else:
+            err = (res.get("error") or "?")[:200]
+            out["failed"] += 1
+            out["errors"][err] = out["errors"].get(err, 0) + 1
+            # Квот/эрхийн алдаа = БҮХ дараагийнх нь ч унана — үргэлжлүүлэх нь утгагүй
+            if "429" in err or "хязгаар" in err or "QUOTA" in err.upper():
+                out["stopped"] = "Квот дүүрсэн тул зогслоо — шатлалаа ахиулаад дахин ажиллуулна уу"
+                break
+        await asyncio.sleep(0.3)      # ТЕГ/msgbill-ийг цохихгүй
+    db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_BULK", entity="vat",
+                    entity_id=provider or "ALL",
+                    detail={k: v for k, v in out.items() if k != "errors"}))
+    db.commit()
+    return out
+
+
 @router.get("/vat-receipts")
 def vat_receipts(date_from: str | None = None, date_to: str | None = None,
                  q: str | None = None, limit: int = 200, db: Session = Depends(get_db),
