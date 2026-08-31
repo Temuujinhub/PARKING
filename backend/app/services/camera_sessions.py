@@ -87,8 +87,10 @@ async def _fetch_log_entries(rpc: DahuaRpc) -> tuple[bool, dict]:
     """Сүүлийн цагийн Login/Logout бичлэгүүд: (user, ip) -> сүүлийн цаг.
     Цагийн муж: camera_who туршилтаар серверийн datetime.now()-д суурилсан муж
     ажиллаж байсан тул мөн адил; төгсгөлд +1ц маржин (камерын цагийн зөрүүд)."""
-    end = datetime.now() + timedelta(hours=1)
-    start = datetime.now() - timedelta(minutes=settings.camera_sessions_window_min)
+    # to_camera_epoch нь UTC хүлээдэг — серверийн TZ UTC биш болмогц
+    # datetime.now() чимээгүй эвдэрнэ (2026-08-31 цагийн аудит)
+    end = datetime.utcnow() + timedelta(hours=1)
+    start = datetime.utcnow() - timedelta(minutes=settings.camera_sessions_window_min)
     cond = {"StartTime": start.strftime("%Y-%m-%d %H:%M:%S"),
             "EndTime": end.strftime("%Y-%m-%d %H:%M:%S"),
             "Translate": True, "Types": ["Login", "Logout"]}

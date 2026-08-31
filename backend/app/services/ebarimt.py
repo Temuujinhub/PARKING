@@ -22,6 +22,7 @@ from datetime import datetime
 import httpx
 
 from ..config import settings
+from ..timeutil import local_str
 
 # ТЕГ-ын шаардлага №11: "QR код хадгалахгүй" — qrData-г DB-д хадгалахгүй,
 # зөвхөн түр санах ойд (1 цаг) байршуулж баримт үзүүлэх/хэвлэхэд ашиглана.
@@ -53,7 +54,7 @@ def _mock_receipt() -> dict:
         "billId": bill_id,
         "lottery": lottery,
         "qrData": bill_id + lottery[:6],
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "date": local_str(),
         "mock": True,
     }
 
@@ -190,7 +191,7 @@ async def get_information() -> dict:
             "posId": 10000001, "posNo": settings.ebarimt_pos_no,
             "operatorTin": settings.ebarimt_merchant_tin or "0000000",
             "leftLotteries": 9500,          # үлдсэн сугалааны тоо
-            "lastSentDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "lastSentDate": local_str(),
             "unsentCount": 0,               # илгээгдээгүй баримтын тоо
             "mock": True,
         }

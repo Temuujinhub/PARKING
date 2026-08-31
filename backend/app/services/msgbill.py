@@ -36,6 +36,7 @@ from datetime import datetime
 import httpx
 
 from ..config import settings
+from ..timeutil import local_str
 
 log = logging.getLogger("parking.msgbill")
 
@@ -221,7 +222,9 @@ def normalize(data: dict) -> dict:
         "billId": data.get("receipt_no") if state == "CREATED" else None,
         "lottery": data.get("lottery"),
         "qrData": data.get("qr_data"),
-        "date": data.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # УБ-ын хананы цаг: UTC сервер дээр datetime.now() нь УБ-аас 8ц хоцорсон
+        # огноо өгдөг латент алдаа байсан (2026-08-31 цагийн аудит)
+        "date": data.get("created_at") or local_str(),
         "msgbillId": data.get("id"),
         "state": state,
         "error": err,

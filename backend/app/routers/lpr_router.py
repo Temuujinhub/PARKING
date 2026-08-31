@@ -150,6 +150,11 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         return {"ok": False, "error": "camera not registered", "ip": client_ip}
 
     device.last_seen = datetime.utcnow()
+    # Цагийн зөрүүг пассив хэмжинэ (ITSAPI push-д RealUTC ирвэл)
+    from ..services.clock_drift import note_event as _drift_note_event
+    for _ev in events:
+        if isinstance(_ev, dict):
+            _drift_note_event(device.id, _ev)
     # Multipart-аар ирсэн зургийг event бүрт base64-оор шингээнэ — snapshot.cgi татах
     # шаардлагагүйгээр (найдвартай) яг event-ийн зураг хадгалагдана.
     if image:
@@ -229,6 +234,11 @@ async def simulate_lpr(body: dict, db: Session = Depends(get_db)):
     conf = float(body.get("confidence", 99))
     raw = {"simulated": True}
     device.last_seen = datetime.utcnow()
+    # Цагийн зөрүүг пассив хэмжинэ (ITSAPI push-д RealUTC ирвэл)
+    from ..services.clock_drift import note_event as _drift_note_event
+    for _ev in events:
+        if isinstance(_ev, dict):
+            _drift_note_event(device.id, _ev)
     # Бодит callback-той ижил хугацааны хэмжилт — оношилгоонд simulate-аар
     # хэмжсэн үзүүлэлт бодитыг төлөөлнө
     _t0 = _time.monotonic()

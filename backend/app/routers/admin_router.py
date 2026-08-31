@@ -1033,6 +1033,7 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
         return "\n\n".join(notes) or None
 
     from ..services.anpr_watch import anpr_note
+    from ..services.clock_drift import device_drift as clock_device_drift
     from ..services.barrier import relay_note
     from ..services.camera_sessions import foreign_info
     out = []
@@ -1059,6 +1060,11 @@ def list_devices(site_id: str | None = None, include_deleted: bool = False,
                                      # (хөрш камер уншсаар байхад) — 2 watchdog-ийн
                                      # аль нь ч хардаггүй 3 дахь гэмтэл (2026-08-28).
                                      "anpr_silent": anpr_note(db, d),
+                                     # Камерын цагийн зөрүү — RealUTC пассив
+                                     # хэмжилт (2026-08-31: Рашбулагийн 4 камер
+                                     # 46м-2ц түрүүлснийг хэн ч мэдээгүй байсан)
+                                     "clock_drift": (clock_device_drift(d.id)
+                                                     if d.device_type == "camera" else None),
                                      "last_plate_at": last_plate.isoformat() if last_plate else None,
                                      "probe_ok_at": (who or {}).get("checked_at"),
                                      "foreign_sessions": (who or {}).get("sessions") or [],

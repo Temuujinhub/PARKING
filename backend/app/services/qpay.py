@@ -662,4 +662,4 @@ def _mock_ebarimt() -> dict:
     qr = "".join(random.choices("0123456789", k=160))
     return {"status": "SUCCESS", "billId": receipt_id, "id": str(uuid.uuid4()),
             "lottery": lottery, "qrData": qr,
-            "date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000Z"), "mock": True, "raw": {}}
+            "date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"), "mock": True, "raw": {}}

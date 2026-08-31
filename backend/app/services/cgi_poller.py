@@ -375,6 +375,9 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
                             reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=data))
             db.commit()
             return
+        # Цагийн зөрүүг эвэнт бүрээс пассив хэмжинэ (RealUTC — камерын өөрийн UTC)
+        from .clock_drift import note_event as _drift_note_event
+        _drift_note_event(device.id, data)
         # Шийдвэрийг ЗААВАЛ логлоно — push горимын lpr_router шиг. Үгүй бол
         # «гарах уншилт яагаад хаалт нээгээгүй вэ» гэдгийг лог дээрээс мөшгих
         # аргагүй байв (2026-07-28 Monnis-ийн оношилгооны цоорхой).

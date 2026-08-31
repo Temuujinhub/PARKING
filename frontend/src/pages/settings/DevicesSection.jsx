@@ -235,6 +235,17 @@ export default function DevicesSection() {
                           уншсаар байхад) — deadman ч, camera_health ч хардаггүй
                           3 дахь гэмтэл. Жолоочид «уншуулсан хэрнээ нээгдэхгүй»
                           гэж мэдрэгддэг (2026-08-28 аудит). */}
+                      {/* Камерын цагийн зөрүү — RealUTC пассив хэмжилт.
+                          Босго давбал УЛААН (нөхөлт/тайлан/тулгалт гажина),
+                          15с-аас дээш бол шар «мөлхөж буй drift» анхааруулга */}
+                      {d.clock_drift && Math.abs(d.clock_drift.drift_sec) >= 15 && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${d.clock_drift.note
+                            ? 'bg-red-500/15 text-red-400' : 'bg-amber-500/15 text-amber-400'}`}
+                          title={d.clock_drift.note
+                            || `Камерын цаг ${d.clock_drift.text} (${d.clock_drift.n} эвэнтээр хэмжив)`}>
+                          🕐 {d.clock_drift.text}
+                        </span>
+                      )}
                       {d.anpr_silent && (
                         <span className="ml-1.5 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
                           title={d.anpr_silent}>⚠ дугаар уншихаа больсон</span>
