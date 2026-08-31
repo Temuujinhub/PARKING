@@ -54,6 +54,8 @@ const STATUSES = [
   // Nested зогсоолтой газарт (Рашбулаг ЭТТ): доторх зогсоолд орж, төлбөрийн
   // тоолуур нь зогссон машинууд. Төлбөр яагаад бага байсныг тайлбарлана.
   ['INNER', 'Дотор зогссон'],
+  // Төлөв биш — төлөгдөөгүй нөхөн төлбөртэй (өртэй) дугаарын түүхийг шүүнэ
+  ['DEBT', 'Өртэй машин'],
 ]
 
 export default function History() {
@@ -71,6 +73,7 @@ export default function History() {
     if (!v) return
     // «Дотор зогссон» нь төлөв биш — тусдаа шүүлтүүр (аль хэдийн гарсан ч харагдана)
     if (k === 'status' && v === 'INNER') params.set('inner', 'ever')
+    else if (k === 'status' && v === 'DEBT') params.set('debt', '1')
     else params.set(k, v)
   })
   const { data, reload } = useFetch(`/api/sessions?${params}`, { initial: { total: 0, rows: [] } })
@@ -152,7 +155,17 @@ export default function History() {
               )}
             </td>
             <td className="td font-mono font-semibold">{s.total_fee !== null ? `${fmt(s.total_fee)}₮` : '-'}</td>
-            <td className="td"><PaymentCell s={s} /></td>
+            <td className="td">
+              <PaymentCell s={s} />
+              {/* Дугаарын ард төлөгдөөгүй нөхөн төлбөр (аль ч зогсоолын) —
+                  «Өртэй машин» шүүлтүүрт хэдээр өртэйг нь шууд харна */}
+              {s.debt && (
+                <div className="text-[10px] text-red-400"
+                  title={`Төлөгдөөгүй нөхөн төлбөр ${s.debt.count} ширхэг — Нэхэмжлэл хуудаснаас дэлгэрэнгүй`}>
+                  өр {fmt(s.debt.amount)}₮{s.debt.count > 1 ? ` (${s.debt.count})` : ''}
+                </div>
+              )}
+            </td>
             <td className="td text-xs">{s.discount_name || '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
             <td className="td"><ClosedByCell s={s} /></td>

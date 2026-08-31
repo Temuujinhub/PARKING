@@ -122,6 +122,7 @@ def list_sessions(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
     date_from: str | None = None, date_to: str | None = None,
     limit: int = 100, offset: int = 0, with_fee: bool = False, inner: str | None = None,
+    debt: int = 0,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
@@ -138,6 +139,13 @@ def list_sessions(
         q = q.filter(ParkingSession.site_id == site_id)
     elif site_ids:
         q = q.filter(ParkingSession.site_id.in_(site_ids))
+    if debt:
+        # «Өртэй машин» — ТӨЛӨГДӨӨГҮЙ нөхөн төлбөртэй дугаарын түүх. Өр нь
+        # дугаарт (зогсоолоос үл хамааран) хамаардаг тул _attach_debt-тэй ижил
+        # дүрмээр глобал хайна; мөр бүрийн улаан «өр N₮» нь _attach_debt-ээс ирнэ.
+        q = q.filter(ParkingSession.plate_number.in_(
+            db.query(Compensation.plate_number)
+            .filter(Compensation.status == "PENDING")))
     if status:
         q = q.filter(ParkingSession.status.in_(status.split(",")))
     if plate:
