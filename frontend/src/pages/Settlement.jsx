@@ -1,7 +1,7 @@
 // Санхүүгийн мөнгөн тооцоо — pos-Карт/pos-QPay/QR-QPay/Бэлэн; зөвхөн бэлэнг санхүү тулгана
 import { Download, Lock, Unlock } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, fmt } from '../api'
+import { api, fmt, preferredSite, rememberSite } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, DateRange, Table, useToast } from '../components/ui'
 import { clampNum, toDateInput } from '../validation'
@@ -17,7 +17,7 @@ export default function Settlement() {
   const [edit, setEdit] = useState({}) // {date: {cash, transfer}} — баталгаажуулах дүнгүүд
 
   const { data: sites } = useFetch('/api/admin/sites', { initial: [], silent: true })
-  useEffect(() => { if (sites.length && !siteId) setSiteId(sites[0].id) }, [sites]) // анхны зогсоол сонгох
+  useEffect(() => { if (sites.length && !siteId) setSiteId(preferredSite(sites)) }, [sites]) // сүүлд сонгосон (эсвэл эхний) зогсоол
   const { data: settlement, reload: load } = useFetch(
     siteId ? `/api/reports/settlement?site_id=${siteId}&date_from=${from}&date_to=${to}` : null,
     { initial: { rows: [] } })
@@ -58,7 +58,7 @@ export default function Settlement() {
           <p className="text-sm text-slate-400">Системийн борлуулалт ба дансны баталгаажсан дүнг өдрөөр тулгана</p>
         </div>
         <div className="flex items-center gap-2">
-          <select className="input w-auto" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
+          <select className="input w-auto" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           <DateRange from={from} to={to} setFrom={setFrom} setTo={setTo} />

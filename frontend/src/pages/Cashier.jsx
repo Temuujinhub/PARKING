@@ -3,7 +3,7 @@
 import { AlertTriangle, CarFront, FlaskConical, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fmt, wsConnect } from '../api'
+import { api, fmt, preferredSite, rememberSite, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
 import CashierStats from './cashier/CashierStats'
@@ -46,7 +46,8 @@ export default function Cashier() {
       const scoped = user?.role === 'OPERATOR' && user?.site_id
         ? s.filter((x) => x.id === user.site_id) : s
       setSites(scoped)
-      if (scoped.length) setSiteId(scoped[0].id)
+      // Сүүлд сонгосон зогсоолыг сэргээнэ — refresh хийхэд эхний (NIC) рүү үсрэхгүй
+      if (scoped.length) setSiteId(preferredSite(scoped))
     })
     api('/api/admin/discounts').then((d) => setDiscounts(d.filter((x) => x.is_active))).catch(() => {})
     loadShift()
@@ -241,7 +242,7 @@ export default function Cashier() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Касс</h1>
         <div className="flex items-center gap-3">
-          <select className="input w-56" value={siteId} onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол сонгох">
+          <select className="input w-56" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {testMode && (

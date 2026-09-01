@@ -5,6 +5,18 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (t) => localStorage.setItem(TOKEN_KEY, t)
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 
+// Сүүлд сонгосон зогсоол — refresh хийхэд жагсаалтын ЭХНИЙ зогсоол (NIC г.м)
+// руу үсэрдэг байсныг зогсооно: сонголтыг localStorage-д хадгалж сэргээнэ.
+const SITE_KEY = 'parking_site_id'
+export const rememberSite = (id) => { try { if (id) localStorage.setItem(SITE_KEY, id) } catch {} }
+export const preferredSite = (sites) => {
+  try {
+    const saved = localStorage.getItem(SITE_KEY)
+    if (saved && sites.some((s) => s.id === saved)) return saved
+  } catch {}
+  return sites[0]?.id || ''
+}
+
 export async function api(path, { method = 'GET', body, form, formData, blob } = {}) {
   const headers = {}
   const token = getToken()

@@ -5,7 +5,7 @@
 // хоосон бол глобал .env-ийн template-ууд хэвээр үйлчилнэ.
 import { Monitor } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api } from '../../api'
+import { api, preferredSite, rememberSite } from '../../api'
 import { useToast } from '../../components/ui'
 
 const ENTRY_TYPES = [
@@ -84,7 +84,7 @@ export default function ScreenSection() {
   useEffect(() => {
     api('/api/admin/sites').then((rows) => {
       setSites(rows)
-      if (rows.length && !siteId) setSiteId(rows[0].id)
+      if (rows.length && !siteId) setSiteId(preferredSite(rows))
     })
   }, [])
 
@@ -124,7 +124,7 @@ export default function ScreenSection() {
     <div className="space-y-4">
       <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm text-slate-300">Зогсоол:</label>
-        <select value={siteId} onChange={(e) => setSiteId(e.target.value)} className="input w-64">
+        <select value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} className="input w-64">
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
         </select>
       </div>

@@ -1,7 +1,7 @@
 // Хаалтны удирдлага — төхөөрөмжийн статус, гараар нээх/хаах, командын лог
 import { DoorClosed, DoorOpen, PlugZap, RefreshCw, ShieldAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, fmtDate } from '../api'
+import { api, fmtDate, preferredSite, rememberSite } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, Table, useToast } from '../components/ui'
 
@@ -38,7 +38,7 @@ export default function Barriers() {
   const { data: sites } = useFetch('/api/admin/sites', { initial: [] })
   const [siteId, setSiteId] = useState('')
   // Эхний зогсоолыг автоматаар сонгоно (оператор 1 зогсоолтой тул шууд өөрийнх нь гарна)
-  useEffect(() => { if (!siteId && sites.length) setSiteId(sites[0].id) }, [sites])
+  useEffect(() => { if (!siteId && sites.length) setSiteId(preferredSite(sites)) }, [sites])
   const { data: devices, reload: reloadDevices } = useFetch('/api/admin/devices', { initial: [] })
   // ЗААВАЛ site_id-тай: зогсоол бүрт «Орох хаалт (авто)» гэсэн ИЖИЛ нэртэй хаалт
   // байдаг тул шүүлтгүй лог нь өөр зогсоолын командыг энэ зогсоолынх мэт харуулж,
@@ -94,7 +94,7 @@ export default function Barriers() {
 
       {/* Зогсоол сонгох — сонгосон зогсоолын хаалт/камерууд л харагдана */}
       {sites.length > 1 && (
-        <select className="input max-w-xs" value={siteId} onChange={(e) => setSiteId(e.target.value)}
+        <select className="input max-w-xs" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }}
           aria-label="Зогсоол сонгох">
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
         </select>
