@@ -42,6 +42,9 @@ ROLE_PERMISSIONS = {
     # төлбөрийг хянадаг оператор: кассын эрх + «Дансаар» (pay_transfer) төлбөр
     # баталгаажуулах. free_exit ОРООГҮЙ — хаалт дур мэдэн нээхгүй.
     "ONLINE_OPERATOR": {"cashier", "check", "history", "compensations", "pay_transfer"},
+    # POS — кассын ажилтан: зөвхөн төлбөр авах + дугаар шалгах. Түүх/тайлан,
+    # нөхөн төлбөр, «Дансаар» эрх байхгүй — хамгийн явцуу үйл ажиллагааны роль.
+    "POS": {"cashier", "check"},
 }
 
 # UI-ийн чекбокс матриц + create/update_user validation-д ашиглах бүх модуль

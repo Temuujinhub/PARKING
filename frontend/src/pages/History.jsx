@@ -1,8 +1,9 @@
 // Түүх — бүх session-ийн жагсаалт, шүүлтүүр
-import { RotateCcw } from 'lucide-react'
+import { FileSpreadsheet, RotateCcw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useAuth } from '../auth'
+import { useDownload } from '../hooks/useDownload'
 import { useFetch } from '../hooks/useFetch'
 import { SnapshotButton } from '../components/Snapshot'
 import { Badge, DateRange, Table, useToast } from '../components/ui'
@@ -61,6 +62,7 @@ const STATUSES = [
 export default function History() {
   const { user } = useAuth()
   const toast = useToast()
+  const dl = useDownload()
   const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(user?.role)
   const [filters, setFilters] = useState({ site_id: '', status: '', plate: '', date_from: '', date_to: '' })
   const [page, setPage] = useState(0)
@@ -91,9 +93,28 @@ export default function History() {
   // Шүүлтүүр өөрчлөгдвөл эхний хуудас руу (path өөрчлөгдмөгц автоматаар дахин татна)
   useEffect(() => { setPage(0) }, [filters])
 
+  // Шүүлтүүрийн ҮР ДҮНГ БҮХЭЛД НЬ (хуудаслалтгүй) Excel болгож татна
+  const exportExcel = () => {
+    const p = new URLSearchParams()
+    Object.entries(filters).forEach(([k, v]) => {
+      if (!v) return
+      if (k === 'status' && v === 'INNER') p.set('inner', 'ever')
+      else if (k === 'status' && v === 'DEBT') p.set('debt', '1')
+      else p.set(k, v)
+    })
+    const day = new Date().toISOString().slice(0, 10)
+    dl(`/api/sessions/excel?${p}`, `tuuh_${day}.xlsx`)
+  }
+
   return (
     <div className="space-y-5">
-      <h1 className="text-2xl font-bold">Түүх</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Түүх</h1>
+        <button className="btn-secondary" onClick={exportExcel}
+          title="Одоогийн шүүлтүүрийн бүх мөрийг Excel болгож татна">
+          <FileSpreadsheet size={16} /> Excel татах
+        </button>
+      </div>
       <div className={`card grid grid-cols-2 gap-3 ${sites.length > 1 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'}`}>
         {sites.length > 1 && (
           <select className="input" value={filters.site_id} onChange={(e) => setFilters({ ...filters, site_id: e.target.value })} aria-label="Зогсоол">

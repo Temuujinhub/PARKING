@@ -13,11 +13,12 @@ const ROLES = {
   HR: 'Хүний нөөц (ажилтан)',
   OPERATOR: 'Оператор (касс, зогсоол)',
   ONLINE_OPERATOR: 'Онлайн оператор (касс + дансаар, оффисоос)',
+  POS: 'POS (зөвхөн касс + шалгах)',
 }
 // UI-аас үүсгэж болох эрхүүд — SUPER_ADMIN-ыг оруулахгүй (зөвхөн DB-ээр)
 const CREATABLE_ROLES = {
   ADMIN: ROLES.ADMIN, FINANCE: ROLES.FINANCE, HR: ROLES.HR, OPERATOR: ROLES.OPERATOR,
-  ONLINE_OPERATOR: ROLES.ONLINE_OPERATOR,
+  ONLINE_OPERATOR: ROLES.ONLINE_OPERATOR, POS: ROLES.POS,
 }
 
 // Хуудас/модулийн эрхийн матриц — backend auth.ALL_MODULES-тай ижил түлхүүрүүд
@@ -52,6 +53,7 @@ const ROLE_DEFAULTS = {
   // бодит эрх нь 5 болж «Дансаар» товч чекбоксгүйгээр гарч ирдэг байв.
   OPERATOR: ['cashier', 'check', 'history', 'compensations', 'pay_transfer'],
   ONLINE_OPERATOR: ['cashier', 'check', 'history', 'compensations', 'pay_transfer'],
+  POS: ['cashier', 'check'],
 }
 const isDefaultPerms = (role, perms) => {
   const d = new Set(ROLE_DEFAULTS[role] || [])

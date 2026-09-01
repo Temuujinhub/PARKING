@@ -11,8 +11,8 @@ from ..database import get_db
 from ..services.device_auth import camera_credentials
 from ..models import (AuditLog, Compensation, Device, LprEvent, ParkingSession, Payment, User)
 from ..serializers import to_dict
-from ..session_logic import (close_session_forced, get_open_session, normalize_plate,
-                             session_fee_info)
+from ..session_logic import (amount_due, close_session_forced, get_open_session,
+                             normalize_plate, paid_total, session_fee_info)
 from ..services.barrier import open_barrier
 from ..ws import manager
 
@@ -22,8 +22,20 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict:
     extra = {"site_name": s.site.name if s.site else None,
              "discount_name": s.discount.name if s.discount else None}
-    if with_fee and s.status in ("OPEN", "AWAITING_PAYMENT"):
-        extra["fee"] = session_fee_info(db, s)
+    # PAID (төлсөн ч ГАРААГҮЙ) session-д мөн төлбөрийг бодно: grace дууссаны
+    # дараа зогссоор байгаа машины нэмэлт төлбөр Касс/Шалгах дээр огт
+    # харагддаггүй байв — гарах камерт дахин уншигдтал «0₮» гэж зогсдог
+    # (2026-09-01 гомдол: «төлснөөс 30 мин өнгөрсөн ч төлбөр бодогдохгүй»).
+    paid_overstay = (s.status == "PAID" and s.exit_time is None
+                     and s.exit_deadline is not None
+                     and datetime.utcnow() > s.exit_deadline)
+    if with_fee and (s.status in ("OPEN", "AWAITING_PAYMENT") or paid_overstay):
+        fee = session_fee_info(db, s)
+        extra["fee"] = fee
+        paid = paid_total(db, s)
+        if paid > 0:
+            extra["paid_total"] = paid
+            extra["amount_due"] = amount_due(db, s, fee)
     return to_dict(s, extra=extra)
 
 
@@ -117,14 +129,10 @@ def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
     return dicts
 
 
-@router.get("")
-def list_sessions(
-    site_id: str | None = None, status: str | None = None, plate: str | None = None,
-    date_from: str | None = None, date_to: str | None = None,
-    limit: int = 100, offset: int = 0, with_fee: bool = False, inner: str | None = None,
-    debt: int = 0,
-    db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
-):
+def _sessions_query(db: Session, user: User, site_id, status, plate,
+                    date_from, date_to, inner, debt):
+    """Түүхийн жагсаалт + Excel экспортын НЭГ шүүлтүүр — хоёр endpoint яг ижил
+    үр дүн өгнө (экспорт нь дэлгэцэн дээр харагдаж буйгаа л татна)."""
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession)
     if inner:
@@ -154,10 +162,78 @@ def list_sessions(
         q = q.filter(ParkingSession.entry_time >= datetime.fromisoformat(date_from))
     if date_to:
         q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(date_to) + timedelta(days=1))
+    return q
+
+
+@router.get("")
+def list_sessions(
+    site_id: str | None = None, status: str | None = None, plate: str | None = None,
+    date_from: str | None = None, date_to: str | None = None,
+    limit: int = 100, offset: int = 0, with_fee: bool = False, inner: str | None = None,
+    debt: int = 0,
+    db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
+):
+    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
     total = q.count()
     rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
     out = _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])
     return {"total": total, "rows": _attach_close_info(db, out)}
+
+
+# Түүх хуудасны шүүсэн үр дүнг Excel болгож татна. /{session_id} route-аас
+# ӨМНӨ бүртгэгдэх ёстой тул энд байрлана.
+@router.get("/excel")
+def sessions_excel(
+    site_id: str | None = None, status: str | None = None, plate: str | None = None,
+    date_from: str | None = None, date_to: str | None = None,
+    inner: str | None = None, debt: int = 0,
+    db: Session = Depends(get_db), user: User = Depends(require("history")),
+):
+    """Түүхийн шүүлтүүрийн үр дүнг бүхэлд нь (дээд тал нь 20000 мөр) Excel-ээр."""
+    from .reports_excel import TZ, _xlsx
+    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
+    rows = q.order_by(ParkingSession.entry_time.desc()).limit(20000).all()
+
+    # Төлбөрийн хэрэгслүүд — нэг query-гээр бүх session-ий PAID төлбөрийг авна
+    pay_label = {"QPAY": "QPay QR", "POS": "Карт (ПОС)", "CASH": "Бэлэн",
+                 "TRANSFER": "Дансаар", "WALLET": "Данс (хэтэвч)"}
+    pays: dict[str, list] = {}
+    if rows:
+        ids = [s.id for s in rows]
+        for p in (db.query(Payment)
+                  .filter(Payment.session_id.in_(ids), Payment.status == "PAID").all()):
+            pays.setdefault(p.session_id, []).append(p)
+
+    status_label = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
+                    "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй",
+                    "MANUAL_CLOSED": "Гарах уншилтгүй"}
+
+    def _loc(dt):
+        return (dt + TZ).strftime("%Y-%m-%d %H:%M") if dt else ""
+
+    data = []
+    for s in rows:
+        plist = pays.get(s.id, [])
+        data.append([
+            s.plate_number,
+            s.site.name if s.site else "",
+            _loc(s.entry_time), _loc(s.exit_time),
+            int(s.duration_minutes or 0),
+            float(s.total_fee or 0),
+            float(sum(float(p.amount) for p in plist)),
+            ", ".join(pay_label.get(p.provider, p.provider) for p in plist),
+            s.discount.name if s.discount else "",
+            status_label.get(s.status, s.status),
+            (s.note or "")[:200],
+        ])
+    total_row = ["Нийт", "", "", "", "", sum(r[5] for r in data),
+                 sum(r[6] for r in data), "", "", f"{len(data)} мөр", ""]
+    return _xlsx(
+        "tuuh", "Түүх",
+        ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа (мин)", "Дүн (₮)",
+         "Төлсөн (₮)", "Төлбөрийн хэрэгсэл", "Хөнгөлөлт", "Төлөв", "Тэмдэглэл"],
+        data, widths=[11, 18, 17, 17, 13, 12, 12, 20, 14, 16, 30],
+        total_row=total_row)
 
 
 @router.get("/check")

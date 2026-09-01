@@ -66,6 +66,16 @@ export default function PaymentPanel({
             <span className="text-slate-400">НӨАТ (10%)</span><span className="font-mono text-right">{fmt(fee?.vat_amount)}₮</span>
             <span className="text-slate-300 font-semibold">Нийт дүн</span>
             <span className="font-mono text-right text-xl font-bold text-accent">{fmt(fee?.total_fee)}₮</span>
+            {/* Төлснөөс хойш зогссоор байгаа машин: өмнө төлсөн дүнг хасаад
+                зөвхөн ҮЛДЭГДЛИЙГ нэхэмжилнэ (grace хэтэрсэн тохиолдол) */}
+            {selected.paid_total > 0 && (
+              <>
+                <span className="text-slate-400">Өмнө төлсөн</span>
+                <span className="font-mono text-right text-emerald-400">-{fmt(selected.paid_total)}₮</span>
+                <span className="text-slate-300 font-semibold">Төлөх үлдэгдэл</span>
+                <span className="font-mono text-right text-xl font-bold text-amber-400">{fmt(selected.amount_due)}₮</span>
+              </>
+            )}
           </div>
           {/* Камерын зураг — машин таарч байгааг нүдээр баталгаажуулна */}
           <div className="grid grid-cols-2 gap-2">
