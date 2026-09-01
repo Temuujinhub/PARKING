@@ -1990,6 +1990,37 @@ def put_exit_rules(body: dict, db: Session = Depends(get_db),
     return rules
 
 
+@router.get("/driver-type/rules")
+def get_driver_type_rules_api(db: Session = Depends(get_db),
+                              user: User = Depends(require("drivers"))):
+    """«Шөнө үнэгүй» (NIGHT) төрлийн глобал цагийн цонх — Бүртгэлтэй машин
+    хуудас харуулахад ашиглана."""
+    from ..services.app_settings import get_driver_type_rules, night_window
+    rules = get_driver_type_rules(db)
+    f, u = night_window(db)
+    # effective — буруу тохиргоонд БОДИТООР үйлчлэх утга (default руу унасан ч)
+    return {**rules, "effective_from": f, "effective_until": u}
+
+
+@router.put("/driver-type/rules")
+def put_driver_type_rules(body: dict, db: Session = Depends(get_db),
+                          user: User = Depends(require("settings"))):
+    """Шөнийн цонхыг өөрчлөх — биллингд шууд нөлөөлөх тул зөвхөн тохиргооны эрхтэн."""
+    import re as _re
+    for k in ("night_from", "night_until"):
+        v = str((body or {}).get(k, "")).strip()
+        if v and not _re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", v):
+            raise HTTPException(400, f"{k}: цаг «HH:MM» хэлбэртэй байх ёстой (ж: 21:00)")
+    if (body.get("night_from") or "") == (body.get("night_until") or "") and body.get("night_from"):
+        raise HTTPException(400, "Эхлэх, дуусах цаг ижил байж болохгүй")
+    from ..services.app_settings import night_window, set_driver_type_rules
+    rules = set_driver_type_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "driver_type_rules", "-", rules)
+    db.commit()
+    f, u = night_window(db)
+    return {**rules, "effective_from": f, "effective_until": u}
+
+
 @router.post("/autoclose/run")
 def run_autoclose_now(db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):

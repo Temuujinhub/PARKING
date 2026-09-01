@@ -18,6 +18,10 @@ const CONTRACT_TYPES = {
   // Том зогсоол доторх жижиг зогсоолын машин — гадна зогсоолоор ТӨЛБӨРГҮЙ
   // дамжин өнгөрч, тайланд «Дамжин» гэж ялгарна.
   TRANSIT: 'Дамжин (доторх зогсоолын машин)',
+  // Зөвхөн ШӨНИЙН цагт үнэгүй — цонхыг глобал тохиргооноос (🌙) авна, жолооч
+  // бүр дээр цаг бөглөх шаардлагагүй тул Excel импортод тохиромжтой. Тухайн
+  // жолоочид free_from/free_until тавьбал глобал цонхыг дарна.
+  NIGHT: 'Шөнө үнэгүй (глобал цонхоор)',
 }
 
 // Excel импортын цонх — эхлээд УРЬДЧИЛАН ХАРНА (dry-run), дараа нь баталгаажуулж оруулна.
@@ -148,6 +152,20 @@ export default function Drivers() {
   const [companies, setCompanies] = useState([])
   const [editing, setEditing] = useState(null)
   const [importing, setImporting] = useState(false)
+  // «Шөнө үнэгүй» төрлийн глобал цонх (Тохиргооны эрхтэй хүн 🌙-оор өөрчилнө)
+  const [nightRules, setNightRules] = useState(null)
+  const [nightEdit, setNightEdit] = useState(null)   // {night_from, night_until}
+  const loadNight = () => api('/api/admin/driver-type/rules').then(setNightRules).catch(() => {})
+  const nightLabel = nightRules
+    ? `${nightRules.effective_from}–${nightRules.effective_until}` : '…'
+
+  const saveNight = async () => {
+    try {
+      setNightRules(await api('/api/admin/driver-type/rules', { method: 'PUT', body: nightEdit }))
+      setNightEdit(null)
+      toast('Шөнийн цонх хадгалагдлаа — дараагийн төлбөрийн тооцооноос үйлчилнэ')
+    } catch (e) { toast(e.message, 'error') }
+  }
 
   const load = () => {
     const p = new URLSearchParams()
@@ -158,7 +176,7 @@ export default function Drivers() {
     api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
-  useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => { load(); loadNight(); api('/api/admin/sites').then(setSites) }, [])
   useEffect(() => { load() }, [company, siteFilter, typeFilter])
 
   const remove = async (d) => {
@@ -241,7 +259,48 @@ export default function Drivers() {
           ))}
         </select>
         <span className="text-xs text-slate-400">{rows.length} машин</span>
+        {/* «Шөнө үнэгүй» төрлийн глобал цонх — импортоор орсон NIGHT машинд
+            ЯГ ЭНЭ цаг үйлчилж байгааг ил харуулна */}
+        <button type="button"
+          className="text-xs text-slate-400 hover:text-accent cursor-pointer whitespace-nowrap"
+          title="«Шөнө үнэгүй» төрлийн машинд үйлчлэх цагийн цонх — дарж өөрчилнө (тохиргооны эрх шаардана)"
+          onClick={() => setNightEdit({
+            night_from: nightRules?.effective_from || '21:00',
+            night_until: nightRules?.effective_until || '08:00',
+          })}>
+          🌙 Шөнө: {nightLabel}
+        </button>
       </div>
+
+      <Modal open={!!nightEdit} onClose={() => setNightEdit(null)} title="«Шөнө үнэгүй» төрлийн цонх">
+        {nightEdit && (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-400">
+              «Шөнө үнэгүй» төрөлтэй БҮХ машинд (өөр дээр нь цонх заагаагүй бол)
+              энэ цонх үйлчилнэ. Дуусах цаг эхлэхээсээ БАГА бол шөнө дамнана
+              (ж: 21:00 → 08:00). Цонхны гаднах зогссон хугацаа энгийн тарифаар бодогдоно.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Эхлэх цаг" required>
+                <input className="input" type="time" value={nightEdit.night_from}
+                  onChange={(e) => setNightEdit({ ...nightEdit, night_from: e.target.value })} />
+              </Field>
+              <Field label="Дуусах цаг" required>
+                <input className="input" type="time" value={nightEdit.night_until}
+                  onChange={(e) => setNightEdit({ ...nightEdit, night_until: e.target.value })} />
+              </Field>
+            </div>
+            {nightEdit.night_from && nightEdit.night_from === nightEdit.night_until && (
+              <div className="text-xs text-amber-400">⚠ Эхлэх, дуусах цаг ижил байж болохгүй</div>
+            )}
+            <button className="btn-primary w-full justify-center" onClick={saveNight}
+              disabled={!nightEdit.night_from || !nightEdit.night_until
+                || nightEdit.night_from === nightEdit.night_until}>
+              Хадгалах
+            </button>
+          </div>
+        )}
+      </Modal>
       <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Төлөв', '']}
         empty={rows.length === 0} maxH="68vh">
         {rows.map((d, i) => (
@@ -259,6 +318,12 @@ export default function Drivers() {
                 <div className="text-[10px] text-amber-300"
                   title="Зөвхөн энэ цонхонд үнэгүй — гаднах цаг төлбөртэй">
                   ⏱ {d.free_from}–{d.free_until} үнэгүй
+                </div>
+              )}
+              {d.contract_type === 'NIGHT' && !(d.free_from && d.free_until) && (
+                <div className="text-[10px] text-sky-300"
+                  title="Глобал шөнийн цонх үйлчилнэ — 🌙 товчоор өөрчилнө">
+                  🌙 {nightLabel} үнэгүй
                 </div>
               )}
               {!!d.free_first_minutes && (
@@ -341,7 +406,9 @@ export default function Drivers() {
               {/* Үнэгүй цагийн цонх: хоёуланг нь тохируулбал ЗӨВХӨН энэ цонхонд
                   үнэгүй (ж: сургуулийн гэрээт 08:00-18:00), гаднах цаг төлбөртэй.
                   Хоосон = бүх цагт үнэгүй (хуучин зан). */}
-              <Field label="Үнэгүй эхлэх цаг (хоосон = бүх цагт)">
+              <Field label={editing.contract_type === 'NIGHT'
+                ? `Үнэгүй эхлэх цаг (хоосон = глобал 🌙 ${nightLabel})`
+                : 'Үнэгүй эхлэх цаг (хоосон = бүх цагт)'}>
                 <input className="input" type="time" value={editing.free_from || ''}
                   onChange={(e) => setEditing({ ...editing, free_from: e.target.value || null })} />
               </Field>

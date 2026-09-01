@@ -226,7 +226,10 @@ class RegisteredDriver(Base):
     plate_number = Column(String(20), nullable=False, index=True)
     full_name = Column(String(120), default="")
     phone = Column(String(20), default="")
-    contract_type = Column(String(20), nullable=False, default="MONTHLY")  # MONTHLY, CONTRACT, VIP, STAFF
+    # MONTHLY, CONTRACT, VIP, STAFF, SPECIAL, TRANSIT, NIGHT («Шөнө үнэгүй» —
+    # жолоочид цонх заагаагүй бол app_settings driver_type_rules-ийн глобал
+    # шөнийн цонх үйлчилнэ, 2026-09-01)
+    contract_type = Column(String(20), nullable=False, default="MONTHLY")
     site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)  # null = түрээслэгчийн бүх зогсоол
     # site_id NULL үед АЛЬ түрээслэгчийн бүх зогсоолд эрхтэйг заана — түрээслэгч
     # ДАМНАН үнэгүй нэвтрэхийг хориглоно (2026-08-01). NULL/NULL = хуучин суулгац.

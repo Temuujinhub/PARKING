@@ -52,16 +52,27 @@ def free_window_minutes(entry: datetime, until: datetime,
     "HH:MM") цонхтой давхцах минут — гэрээт машины «үнэгүй цагийн цонх»-д
     хамаарах хугацааг тоолоход хэрэглэнэ.
 
-    Цонх шөнө дамнахгүй (from < until) гэж үзнэ; буруу утгад 0 буцаана —
-    төлбөрийн тооцоо унахгүй, зүгээр л цонх үйлчлэхгүй."""
+    from < until — өдрийн цонх (08:00–18:00 г.м).
+    from > until — ШӨНӨ ДАМНАСАН цонх (21:00–08:00): орой [from, 24:00) +
+    өглөө [00:00, until) хоёр хэсэгт задарч өдөр бүрд тоологдоно
+    («Шөнө үнэгүй» гэрээний төрөлд, 2026-09-01). Өмнө нь from > until үед 0
+    буцаадаг байсан тул шөнийн цонх ЧИМЭЭГҮЙ үйлчлэхгүй, машин бүрэн
+    төлбөртэй болдог байв.
+    Буруу утга / from == until → 0 (төлбөрийн тооцоо унахгүй, цонх үйлчлэхгүй)."""
     try:
         fh, fm = (int(x) for x in (w_from or "").split(":"))
         uh, um = (int(x) for x in (w_until or "").split(":"))
     except (ValueError, AttributeError):
         return 0
     start_min, end_min = fh * 60 + fm, uh * 60 + um
-    if not (0 <= start_min < end_min <= 24 * 60):
+    day_min = 24 * 60
+    if not (0 <= start_min <= day_min and 0 <= end_min <= day_min) or start_min == end_min:
         return 0
+    # Өдөр доторх интервалууд: энгийн цонх нэг, шөнө дамнасан нь хоёр хэсэгтэй
+    if start_min < end_min:
+        parts = [(start_min, end_min)]
+    else:
+        parts = [(start_min, day_min), (0, end_min)]
     tz = timedelta(hours=tz_hours)
     lo, hi = entry + tz, until + tz
     if hi <= lo:
@@ -69,10 +80,11 @@ def free_window_minutes(entry: datetime, until: datetime,
     total = 0
     day = lo.replace(hour=0, minute=0, second=0, microsecond=0)
     while day < hi:
-        s = max(lo, day + timedelta(minutes=start_min))
-        e = min(hi, day + timedelta(minutes=end_min))
-        if e > s:
-            total += int((e - s).total_seconds() // 60)
+        for a, b in parts:
+            s = max(lo, day + timedelta(minutes=a))
+            e = min(hi, day + timedelta(minutes=b))
+            if e > s:
+                total += int((e - s).total_seconds() // 60)
         day += timedelta(days=1)
     return total
 

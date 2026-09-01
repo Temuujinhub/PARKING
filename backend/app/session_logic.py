@@ -418,10 +418,20 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     # үнэгүй биш — цонхтой давхцсан минут тоолуураас хасагдаж, гаднах хугацаа
     # энгийнээр бодогдоно. Цонхгүй гэрээт хуучин шигээ бүх цагт үнэгүй.
     registered_free = registered
-    if drv is not None and drv.free_from and drv.free_until:
-        from .billing import free_window_minutes
-        registered_free = False
-        paused += free_window_minutes(s.entry_time, at, drv.free_from, drv.free_until)
+    if drv is not None:
+        w_from, w_until = drv.free_from, drv.free_until
+        # «Шөнө үнэгүй» (NIGHT) төрөл: жолооч дээр цонх заагаагүй бол ГЛОБАЛ
+        # шөнийн цонх (Тохиргоо, default 21:00–08:00) үйлчилнэ. Импортоор
+        # NIGHT төрлөөр оруулсан машин цонхгүйдээ «бүх цагт үнэгүй» болчихвий
+        # гэсэн хамгаалалт — night_window буруу тохиргоонд ч default буцаадаг.
+        if (getattr(drv, "contract_type", "") == "NIGHT"
+                and not (w_from and w_until) and db is not None):
+            from .services.app_settings import night_window
+            w_from, w_until = night_window(db)
+        if w_from and w_until:
+            from .billing import free_window_minutes
+            registered_free = False
+            paused += free_window_minutes(s.entry_time, at, w_from, w_until)
 
     # ГЭРЭЭНИЙ НӨХЦӨЛ: эхний N минут үнэгүй (60=1 цаг, 120=2 цаг) — бүрэн үнэгүй
     # биш, N минутыг хугацаанаас хасаад илүү гарсныг энгийн тарифаар бодно.
@@ -638,9 +648,14 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
 
     session, _fuzzy = match_open_session(db, plate, device.site_id)
     entitled = False
-    if registered and not getattr(registered, "free_first_minutes", None):
-        # Бүрэн үнэгүй гэрээт — ямагт гарна. Харин «эхний N минут үнэгүй»
-        # нөхцөлтэй гэрээт төлбөртэй байж болох тул доорх fee шалгалтаар орно.
+    # Бүрэн үнэгүй гэрээт — ямагт гарна. Харин НӨХЦӨЛТЭЙ гэрээт («эхний N
+    # минут үнэгүй», цагийн цонхтой, «Шөнө үнэгүй») төлбөртэй байж болох тул
+    # доорх fee шалгалтаар орно (session_fee_info бүх нөхцөлийг өөрөө бодно).
+    _conditional = registered is not None and bool(
+        getattr(registered, "free_first_minutes", None)
+        or (registered.free_from and registered.free_until)
+        or getattr(registered, "contract_type", "") == "NIGHT")
+    if registered and not _conditional:
         entitled = True
     elif session:
         if session.status == "PAID" and (not session.exit_deadline or now <= session.exit_deadline):

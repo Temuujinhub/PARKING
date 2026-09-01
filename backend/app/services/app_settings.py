@@ -15,6 +15,7 @@ OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
 ENTRYPLATE_KEY = "entry_plate_rules"
 EXITRULES_KEY = "exit_rules"
+DRIVERTYPE_KEY = "driver_type_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
@@ -112,6 +113,15 @@ DEFAULTS: dict[str, dict] = {
         "no_session_fee": 2000,
         # Зогсоол бүрийн давхарга: {site_id: дүн}. Хоосон = глобал дүн.
         "site_overrides": {},
+    },
+    DRIVERTYPE_KEY: {
+        # «Шөнө үнэгүй» (NIGHT) гэрээний төрлийн ГЛОБАЛ цагийн цонх (УБ цагаар,
+        # "HH:MM"). from > until = шөнө дамнасан цонх (billing.free_window_minutes
+        # дэмждэг). Жолооч бүр дээр free_from/free_until тавьсан бол тэр нь
+        # энэ глобал цонхыг ДАРНА. Excel импортоор олон машиныг NIGHT төрлөөр
+        # оруулахад ажилтан цаг бөглөх шаардлагагүй болгох зорилготой (2026-09-01).
+        "night_from": "21:00",
+        "night_until": "08:00",
     },
     CAMHEALTH_KEY: {
         # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).
@@ -246,6 +256,28 @@ def no_session_exit_fee(db, site_id: str | None) -> int:
         return max(0, int(float(raw)))
     except (TypeError, ValueError):
         return 0
+
+
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+
+
+def get_driver_type_rules(db) -> dict:
+    return get_rules(db, DRIVERTYPE_KEY)
+
+
+def set_driver_type_rules(db, values: dict, username: str) -> dict:
+    return set_rules(db, DRIVERTYPE_KEY, values, username)
+
+
+def night_window(db) -> tuple[str, str]:
+    """NIGHT төрлийн хүчинтэй цонх — буруу/дутуу тохиргоонд default (21:00–08:00)
+    руу унана: биллинг хэзээ ч «цонхгүй = бүх цагт үнэгүй» болж алдахгүй."""
+    r = get_rules(db, DRIVERTYPE_KEY)
+    f = str(r.get("night_from") or "").strip()
+    u = str(r.get("night_until") or "").strip()
+    if _HHMM.match(f) and _HHMM.match(u) and f != u:
+        return f, u
+    return "21:00", "08:00"
 
 
 def get_camsync_rules(db) -> dict:

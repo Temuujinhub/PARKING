@@ -655,7 +655,7 @@ _STATUS_MN = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр �
               "MANUAL_CLOSED": "Гарах уншилтгүй"}
 
 _CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP", "STAFF": "Ажилтан",
-                "SPECIAL": "Тусгай", "TRANSIT": "Дамжин"}
+                "SPECIAL": "Тусгай", "TRANSIT": "Дамжин", "NIGHT": "Шөнө үнэгүй"}
 
 
 def _company_sessions(db, user, company: str, start, end, sid):
