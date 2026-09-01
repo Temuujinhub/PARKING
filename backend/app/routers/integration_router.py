@@ -157,6 +157,65 @@ def find_sessions(plate: str, site_code: str = "",
     return {"sessions": [_session_payload(db, s) for s in sessions]}
 
 
+@router.get("/recent-exits")
+def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
+                           include_completed: bool = False,
+                           db: Session = Depends(get_db),
+                           partner: PartnerAuth = Depends(require_partner)):
+    """БҮХ зогсоолын сүүлийн гарцын урсгал (Easy Wallet-ийн хүсэлтээр, 2026-09-01).
+
+    Гарах камерт сүүлийн `minutes` (1..60, default 5) минутад уншигдаад ТӨЛБӨР
+    ХҮЛЭЭЖ буй машинууд — wallet апп хэрэглэгчийнхээ машиныг гарц дээр ирмэгц
+    таньж, төлбөрийн санал шууд харуулахад зориулав. Мөр бүрд `amount_due`
+    (нэхэмжлэх дүн) явна; төлөх бол ердийн POST /payments → /confirm урсгал.
+
+    include_completed=true — мөн хугацаанд ГАРЧ ДУУССАН (төлөгдсөн/үнэгүй)
+    машинуудыг `completed` жагсаалтаар нэмж өгнө (тайлан/нотолгооны хэрэглээ).
+
+    Түлхүүр зогсоолоор хязгаарлагдсан бол зөвхөн тэр зогсоолынх; site_code-оор
+    нэг зогсоол руу шүүж болно. 30с тутам polling-д зориулагдсан (rate limit-д
+    багтана); мөрүүд exit уншилтын цагаар шинээс хуучин руу эрэмбэлэгдэнэ.
+    """
+    minutes = max(1, min(int(minutes or 5), 60))
+    since = datetime.utcnow() - timedelta(minutes=minutes)
+    site_ids = None
+    if site_code:
+        site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
+        if not site:
+            raise HTTPException(404, "Зогсоол олдсонгүй")
+        _check_site_scope(partner, site.id)
+        site_ids = [site.id]
+    elif partner.site_id:
+        site_ids = [partner.site_id]
+
+    def _rows(statuses):
+        q = (db.query(ParkingSession)
+             .filter(ParkingSession.status.in_(statuses),
+                     # Гарах уншилттай (exit камерт танигдсан) машинууд л —
+                     # exit_time нь гарах оролдлогын цаг; хуучин бичлэгт updated_at
+                     ParkingSession.exit_device_id.isnot(None),
+                     func.coalesce(ParkingSession.exit_time,
+                                   ParkingSession.updated_at) >= since))
+        if site_ids:
+            q = q.filter(ParkingSession.site_id.in_(site_ids))
+        return (q.order_by(func.coalesce(ParkingSession.exit_time,
+                                         ParkingSession.updated_at).desc())
+                .limit(200).all())
+
+    def _row(s: ParkingSession) -> dict:
+        exit_at = s.exit_time or s.updated_at
+        return _session_payload(db, s) | {
+            "exit_read_at": exit_at.isoformat() if exit_at else None,
+            "exit_time": s.exit_time.isoformat() if s.exit_time else None,
+        }
+
+    out = {"minutes": minutes,
+           "waiting": [_row(s) for s in _rows(["AWAITING_PAYMENT"])]}
+    if include_completed:
+        out["completed"] = [_row(s) for s in _rows(["PAID", "CLOSED", "FREE"])]
+    return out
+
+
 @router.post("/payments")
 def create_payment_intent(body: dict, db: Session = Depends(get_db),
                           partner: PartnerAuth = Depends(require_partner)):

@@ -112,7 +112,36 @@ async def run():
     cleanup(plates3)
 
 
+async def run_multilane():
+    # ─── Кейс 4: ХОЁР ЭГНЭЭГЭЭР ЗЭРЭГ орсон 2 ӨӨР машин нэгтгэгдЭХГҮЙ ──────
+    # (2026-09-01, Маршилын 2 орох эгнээний туршилтаар илэрсэн: burst цонх
+    # зогсоол даяар хайдаг байсан тул хажуу эгнээний машиныг «нэг машин» гэж
+    # үзэж эхний session-ий дугаарыг дарж бичдэг байв. Одоо burst НЭГ КАМЕРЫН
+    # хүрээнд л нэгтгэнэ.)
+    print("Хоёр эгнээний зэрэг орох 2 өөр машин:")
+    settings.entry_burst_seconds = 6
+    cam2 = Device(site_id=site.id, name="Тест орох камер 2", device_type="camera",
+                  lane_dir="entry", lane_no=2, device_key=f"BURSTTEST{uuid.uuid4().hex[:6]}",
+                  status="active", auto_open=False)
+    db.add(cam2)
+    db.commit()
+    plates4 = ["7771АБГ", "7772ВЖЗ"]
+    cleanup(plates4)
+    r1 = await handle_entry(db, cam, "7771АБГ", 100.0, {})
+    r2 = await handle_entry(db, cam2, "7772ВЖЗ", 100.0, {})
+    check("хоёулаа тусдаа session үүсгэв (autocorrect БИШ)",
+          r1["action"] == "entry" and r2["action"] == "entry")
+    db.expire_all()
+    live = open_sessions(plates4)
+    check("2 тусдаа session, дугаарууд хэвээр",
+          len(live) == 2 and {s.plate_number for s in live} == set(plates4))
+    cleanup(plates4)
+    db.query(Device).filter(Device.id == cam2.id).delete()
+    db.commit()
+
+
 asyncio.run(run())
+asyncio.run(run_multilane())
 db.query(Device).filter(Device.id == cam.id).delete()
 db.commit()
 db.close()

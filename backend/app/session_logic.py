@@ -850,9 +850,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # орохгүй) — огт өөр уншигдсан ч шинэ session ҮҮСГЭХГҮЙ. Шинэ уншилт зөв
     # форматтай бол өмнөх session-ий дугаарыг сүүлийн (хамгийн ойрын, ихэвчлэн
     # хамгийн зөв) уншилтаар засна: 1101ЭН → 1310ХЭН → 7370ХЭН гэж нийлдэг.
+    # ЗӨВХӨН ЭНЭ КАМЕРЫН (device_id) уншилтуудаас burst хайна. «6 секундэд
+    # хаалтаар 2 машин орохгүй» гэсэн физикийн таамаг НЭГ эгнээнд л үнэн —
+    # өмнө нь зогсоол даяар хайдаг байсан тул 2+ орох эгнээтэй зогсоолд (Маршил)
+    # хоёр эгнээгээр ЗЭРЭГ орсон хоёр ӨӨР машиныг «нэг машин» гэж нэгтгэж,
+    # эхний машины session-ий дугаарыг хоёр дахь машинаар ДАРЖ бичдэг байв
+    # (2026-09-01 туршилтаар батлагдсан: эхний машин бүртгэлгүй үлдэж, гарахдаа
+    # «бүртгэлгүй гарах»/суурь хураамж болно).
     burst_prev = (db.query(LprEvent)
-                  .filter(LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
-                          LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
+                  .filter(LprEvent.device_id == device.id, LprEvent.lane_dir == "entry",
                           LprEvent.accepted.is_(True),
                           LprEvent.created_at >= now - timedelta(seconds=settings.entry_burst_seconds))
                   .order_by(LprEvent.created_at.desc()).first()) if burst_merge else None
@@ -1171,6 +1177,16 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # энэ алдаа аль хэдийн зассан, гарах талд үлдсэн байсан).
         # Тиймээс ГАРАХ ЭРХТЭЙ (гэрээт/төлсөн/үнэгүй) машинд хаалтыг дахин нээнэ.
         opened = await ensure_exit_barrier_if_cleared(db, device, plate) if allow_open else False
+        # ЭГНЭЭ СОЛИЛТ: dedup нь зогсоол даяар тул машин гарах-1-д уншигдаад
+        # 30с дотор гарах-2 руу шилжвэл exit_device_id хуучин эгнээгээ зааж,
+        # төлбөр төлөгдмөгц БУРУУ ТАЛЫН хаалт онгойдог байв (2026-09-01
+        # Маршилын 2 гарцын туршилтаар батлагдсан). Яг таарсан (fuzzy биш)
+        # нээлттэй session-ий гарах төхөөрөмжийг ОДОО уншсан камераар шинэчилнэ.
+        _s = get_open_session(db, plate, site_id)
+        if _s is not None and _s.exit_device_id and _s.exit_device_id != device.id:
+            log.info("[exit] %s эгнээ солив: exit_device %s → %s (dedup дотор)",
+                     plate, _s.exit_device_id, device.id)
+            _s.exit_device_id = device.id
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 

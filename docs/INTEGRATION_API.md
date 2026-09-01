@@ -45,6 +45,33 @@ site_code өгөхгүй бол бүх зогсоолоос хайна. Хари
   "is_free": false, "status": "AWAITING_PAYMENT", "paid": false}]}
 ```
 
+### 2.1 GET /api/v1/recent-exits — бүх зогсоолын гарцын урсгал (2026-09-01)
+
+`?minutes=5` (1..60, default 5) — сүүлийн N минутад гарах камерт уншигдаад
+**төлбөр хүлээж буй** машинууд, бүх зогсоолоос (түлхүүр зогсоолоор
+хязгаарлагдсан бол зөвхөн тэр). Wallet апп хэрэглэгчийн машиныг гарц дээр
+ирмэгц таньж төлбөрийн санал харуулахад зориулагдсан; 30 секунд тутам
+polling хийхэд тохиромжтой.
+
+Нэмэлт параметр: `site_code=NIC` — нэг зогсоол руу шүүх;
+`include_completed=true` — мөн хугацаанд гарч дууссан (төлөгдсөн/үнэгүй)
+машинуудыг `completed` жагсаалтаар нэмж өгнө.
+
+```json
+{"minutes": 5,
+ "waiting": [{
+   "session_id": "...", "plate_number": "1234УБА",
+   "site_code": "NIC", "site_name": "NIC зогсоол",
+   "entry_time": "2026-09-01T04:30:00", "duration_minutes": 95,
+   "total_fee": 2000, "amount_due": 2000, "is_free": false,
+   "status": "AWAITING_PAYMENT", "paid": false,
+   "exit_read_at": "2026-09-01T06:05:12",   // гарах камерт уншигдсан цаг
+   "exit_time": "2026-09-01T06:05:12"}]}
+```
+
+Төлөх бол мөр бүрийн `session_id`-гаар ердийн урсгал: POST /payments →
+/confirm (хаалт автоматаар нээгдэнэ).
+
 ### 3. POST /api/v1/payments — төлбөрийн intent
 
 Body: `{"session_id": "..."}` → `{"payment_id": "...", "amount": 2000, "status": "PENDING"}`
