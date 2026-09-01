@@ -1449,16 +1449,14 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
     return out
 
 
-@router.get("/vat-receipts")
-def vat_receipts(date_from: str | None = None, date_to: str | None = None,
-                 q: str | None = None, limit: int = 200, db: Session = Depends(get_db),
-                 user: User = Depends(require("vat", "reports"))):
-    """НӨАТ баримтын жагсаалт. `q` — хайлт: машины дугаар, ДДТД, сугалааны код,
-    зогсоолын нэр, суваг, төлөв, эсвэл ЯГ дүн (жишээ: 1500). Хайлт нь `limit`-ээс
-    ӨМНӨ ажиллана — тиймээс сүүлийн 200-д багтаагүй хуучин баримт ч олдоно."""
+def _vat_receipts_query(db, user, date_from, date_to, q=None, plate=None, ddtd=None,
+                        lottery=None, site=None, provider=None, status=None,
+                        amount=None):
+    """Жагсаалт + Excel экспортын НЭГ шүүлтүүр. Багана тус бүрийн параметр
+    (plate/ddtd/lottery/site/provider/status/amount) нь `q` глобал хайлттай
+    ХАМТ (AND) үйлчилнэ — 2026-09-01: нэг талбарт бүгдийг холиход зогсоолын
+    нэр дугаартай, дүн ДДТД-тэй андуурагдаж олддог байсныг салгав."""
     start, end = _range(date_from, date_to)
-    # Дугаар/зогсоолыг хамт өгнө — «энэ баримт аль машин, аль зогсоолынх вэ»
-    # гэдэг UI дээр харагдахгүй байсан (нэг query, session→site join)
     query = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
              .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
              .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
@@ -1477,9 +1475,58 @@ def vat_receipts(date_from: str | None = None, date_to: str | None = None,
         if num.replace(".", "", 1).isdigit() and len(num) <= 12:
             conds.append(VatReceipt.amount == float(num))
         query = query.filter(or_(*conds))
+    if plate and plate.strip():
+        query = query.filter(ParkingSession.plate_number.ilike(f"%{plate.strip()}%"))
+    if ddtd and ddtd.strip():
+        query = query.filter(VatReceipt.ebarimt_id.ilike(f"%{ddtd.strip()}%"))
+    if lottery and lottery.strip():
+        query = query.filter(VatReceipt.lottery_code.ilike(f"%{lottery.strip()}%"))
+    if site and site.strip():
+        query = query.filter(ParkingSite.name.ilike(f"%{site.strip()}%"))
+    if provider and provider.strip():
+        query = query.filter(VatReceipt.provider == provider.strip().upper())
+    if status and status.strip():
+        query = query.filter(VatReceipt.status == status.strip().upper())
+    if amount not in (None, ""):
+        try:
+            query = query.filter(VatReceipt.amount == float(str(amount).replace(",", "")))
+        except ValueError:
+            pass
+    return query
+
+
+@router.get("/vat-receipts")
+def vat_receipts(date_from: str | None = None, date_to: str | None = None,
+                 q: str | None = None, plate: str | None = None, ddtd: str | None = None,
+                 lottery: str | None = None, site: str | None = None,
+                 provider: str | None = None, status: str | None = None,
+                 amount: str | None = None,
+                 limit: int = 200, db: Session = Depends(get_db),
+                 user: User = Depends(require("vat", "reports"))):
+    """НӨАТ баримтын жагсаалт. Багана тус бүрийн шүүлтүүр (plate/ddtd/lottery/
+    site/provider/status/amount) + `q` глобал хайлт. Шүүлт `limit`-ээс ӨМНӨ
+    ажиллана — тиймээс сүүлийн 200-д багтаагүй хуучин баримт ч олдоно."""
+    query = _vat_receipts_query(db, user, date_from, date_to, q, plate, ddtd,
+                                lottery, site, provider, status, amount)
     rows = query.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
-    return [to_dict(r, extra={"plate_number": plate, "site_name": site_name})
-            for r, plate, site_name in rows]
+    return [to_dict(r, extra={"plate_number": plate_, "site_name": site_name})
+            for r, plate_, site_name in rows]
+
+
+@router.get("/vat-receipts/excel")
+def vat_receipts_excel(date_from: str | None = None, date_to: str | None = None,
+                       q: str | None = None, plate: str | None = None,
+                       ddtd: str | None = None, lottery: str | None = None,
+                       site: str | None = None, provider: str | None = None,
+                       status: str | None = None, amount: str | None = None,
+                       db: Session = Depends(get_db),
+                       user: User = Depends(require("vat", "reports"))):
+    """Ибаримтын жагсаалтыг (одоогийн шүүлтүүрээр, дээд тал нь 20000 мөр)
+    Excel болгож татна — ТЕГ тулгалт/нягтлан бодогчид өгөх тайлан."""
+    query = _vat_receipts_query(db, user, date_from, date_to, q, plate, ddtd,
+                                lottery, site, provider, status, amount)
+    rows = query.order_by(VatReceipt.created_at.desc()).limit(20000).all()
+    return _excel.vat_receipts_excel(rows)
 
 
 def _scoped_usernames(db, user) -> list[str] | None:

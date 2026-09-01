@@ -1,13 +1,22 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, Ban, QrCode, RefreshCw, Search, Send, X } from 'lucide-react'
+import { AlertTriangle, Ban, FileSpreadsheet, QrCode, RefreshCw, Send, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
+import { useDownload } from '../hooks/useDownload'
 import { useFetch } from '../hooks/useFetch'
 import { Badge, DateRange, Modal, Table, useToast } from '../components/ui'
 import VatRecon from '../components/VatRecon'
 import { toDateInput } from '../validation'
 
 const TABS = [['receipts', 'Баримт'], ['recon', 'ТЕГ тулгалт']]
+
+// Багана тус бүрийн шүүлтүүр — нэг талбарт бүгдийг холиход зогсоолын нэр
+// дугаартай, дүн ДДТД-тэй андуурагдаж олддог байсныг салгав (2026-09-01)
+const EMPTY_FILTERS = { plate: '', ddtd: '', lottery: '', site: '', provider: '', status: '', amount: '' }
+const STATUS_OPTS = [['', 'Төлөв: бүгд'], ['SENT', 'Илгээсэн'], ['FAILED', 'Амжилтгүй'],
+  ['PENDING', 'Хүлээгдэж буй'], ['CANCELLED', 'Цуцалсан'], ['CANCEL_PENDING', 'Цуцлалт хүлээгдэж буй']]
+const PROVIDER_OPTS = [['', 'Суваг: бүгд'], ['QPAY', 'QPay'], ['MSGBILL', 'msgbill.mn'],
+  ['POSAPI', 'PosAPI'], ['TERMINAL', 'POS терминал']]
 
 export default function Vat() {
   // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
@@ -19,20 +28,26 @@ export default function Vat() {
   const [retrying, setRetrying] = useState(null)
   const [cancelling, setCancelling] = useState(null)
   const [tab, setTab] = useState('receipts')
-  const [q, setQ] = useState('')          // хайлтын талбар (бичиж байгаа)
-  const [term, setTerm] = useState('')    // сервер рүү илгээсэн (debounce-той)
+  const [f, setF] = useState(EMPTY_FILTERS)         // бичиж байгаа шүүлтүүрүүд
+  const [applied, setApplied] = useState(EMPTY_FILTERS)  // сервер рүү илгээсэн (debounce)
 
   const [sending, setSending] = useState(false)
   const toast = useToast()
+  const dl = useDownload()
 
   // Бичиж дуустал хүлээгээд (350мс) сервер рүү нэг л удаа хайна
   useEffect(() => {
-    const t = setTimeout(() => setTerm(q.trim()), 350)
+    const t = setTimeout(() => setApplied(f), 350)
     return () => clearTimeout(t)
-  }, [q])
+  }, [f])
+
+  const filterQS = Object.entries(applied)
+    .filter(([, v]) => String(v).trim())
+    .map(([k, v]) => `&${k}=${encodeURIComponent(String(v).trim())}`).join('')
+  const hasFilter = filterQS !== ''
 
   const { data: rows, loading, reload: reloadRows } = useFetch(
-    `/api/reports/vat-receipts?date_from=${from}&date_to=${to}${term ? `&q=${encodeURIComponent(term)}` : ''}`,
+    `/api/reports/vat-receipts?date_from=${from}&date_to=${to}${filterQS}`,
     { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
   // Бүтэлгүйтлийг ШАЛТГААНААР бүлэглэсэн нэгтгэл. Мөр тус бүрийн алдаа доорх
@@ -192,20 +207,49 @@ export default function Vat() {
         </div>
       )}
       {tab === 'receipts' && (<>
-      <div className="card flex flex-wrap gap-2 py-3 items-center">
-        <div className="relative flex-1 min-w-56">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <input className="input pl-9 pr-9" value={q} onChange={(e) => setQ(e.target.value)}
-            aria-label="Баримт хайх"
-            placeholder="Дугаар, ДДТД, сугалаа, зогсоол, суваг, төлөв, дүнгээр хайх…" />
-          {q && (
-            <button className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200"
-              onClick={() => setQ('')} aria-label="Хайлт цэвэрлэх"><X size={15} /></button>
-          )}
+      <div className="card space-y-2 py-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">
+          <input className="input font-mono uppercase" value={f.plate} maxLength={10}
+            onChange={(e) => setF({ ...f, plate: e.target.value })}
+            aria-label="Дугаараар шүүх" placeholder="Дугаар…" />
+          <input className="input font-mono" value={f.ddtd}
+            onChange={(e) => setF({ ...f, ddtd: e.target.value })}
+            aria-label="ДДТД-ээр шүүх" placeholder="ДДТД (billId)…" />
+          <input className="input font-mono" value={f.lottery}
+            onChange={(e) => setF({ ...f, lottery: e.target.value })}
+            aria-label="Сугалааны кодоор шүүх" placeholder="Сугалаа…" />
+          <input className="input" value={f.site}
+            onChange={(e) => setF({ ...f, site: e.target.value })}
+            aria-label="Зогсоолоор шүүх" placeholder="Зогсоол…" />
+          <select className="input" value={f.provider} aria-label="Сувгаар шүүх"
+            onChange={(e) => setF({ ...f, provider: e.target.value })}>
+            {PROVIDER_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <select className="input" value={f.status} aria-label="Төлөвөөр шүүх"
+            onChange={(e) => setF({ ...f, status: e.target.value })}>
+            {STATUS_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <input className="input font-mono" type="number" min="0" value={f.amount}
+            onChange={(e) => setF({ ...f, amount: e.target.value })}
+            aria-label="Яг дүнгээр шүүх" placeholder="Дүн (яг)…" />
         </div>
-        <span className="text-xs text-slate-500">
-          {loading ? 'Хайж байна…' : `${rows.length} баримт${term ? ` · «${term}»` : ''}`}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-500">
+            {loading ? 'Хайж байна…' : `${rows.length} баримт${hasFilter ? ' (шүүлттэй)' : ''}`}
+          </span>
+          {hasFilter && (
+            <button className="btn-secondary py-0.5 px-2 text-xs"
+              onClick={() => setF(EMPTY_FILTERS)} aria-label="Шүүлтүүр цэвэрлэх">
+              <X size={13} /> Цэвэрлэх
+            </button>
+          )}
+          <button className="btn-secondary py-0.5 px-2 text-xs ml-auto"
+            title="Одоогийн шүүлтүүрийн бүх мөрийг (дэлгэцийн хязгаараас үл хамааран) Excel болгож татна"
+            onClick={() => dl(`/api/reports/vat-receipts/excel?date_from=${from}&date_to=${to}${filterQS}`,
+              `ebarimt_${from}_${to}.xlsx`)}>
+            <FileSpreadsheet size={13} /> Excel татах
+          </button>
+        </div>
       </div>
 
       <Table headers={['Дугаар', 'Зогсоол', 'ДДТД (billId)', 'Сугалааны код', 'Дүн', 'НӨАТ', 'Огноо', 'Төлөв', 'Шалтгаан', 'Үйлдэл']} empty={rows.length === 0}>

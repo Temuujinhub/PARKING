@@ -273,3 +273,35 @@ def barrier_commands_excel(cmds, plates, dev, src_mn):
     return _xlsx("haalt_komand", "Хаалтны команд",
                  ["Огноо", "Дугаар", "Команд", "Эх сурвалж", "Төлөв", "Хаалт", "Оператор", "Хариу"],
                  rows, widths=[20, 12, 10, 22, 10, 16, 14, 30])
+
+
+def vat_receipts_excel(rows):
+    """Ибаримтын жагсаалтын Excel — (VatReceipt, plate, site_name) кортежууд.
+
+    Төлөв/суваг монголоор, огноо локал цагаар. «Шалтгаан» багана нь FAILED/
+    CANCELLED баримтын алдааны текст (receipt_url-д хадгалагддаг)."""
+    status_mn = {"SENT": "Илгээсэн", "FAILED": "Амжилтгүй", "PENDING": "Хүлээгдэж буй",
+                 "CANCELLED": "Цуцалсан", "CANCEL_PENDING": "Цуцлалт хүлээгдэж буй"}
+    provider_mn = {"QPAY": "QPay", "MSGBILL": "msgbill.mn", "POSAPI": "PosAPI",
+                   "TERMINAL": "POS терминал"}
+    data = []
+    for r, plate, site_name in rows:
+        failed = r.status in ("FAILED", "CANCELLED", "CANCEL_PENDING")
+        data.append([
+            plate or "", site_name or "",
+            r.ebarimt_id or "", r.lottery_code or "",
+            float(r.amount or 0), float(r.vat_amount or 0),
+            (r.created_at + TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            provider_mn.get(r.provider, r.provider or ""),
+            status_mn.get(r.status, r.status),
+            r.customer_tin or "",
+            (r.receipt_url or "")[:250] if failed else "",
+        ])
+    total_row = ["Нийт", "", "", "", sum(d[4] for d in data), sum(d[5] for d in data),
+                 "", "", f"{len(data)} мөр", "", ""]
+    return _xlsx(
+        "ebarimt", "Ибаримт",
+        ["Дугаар", "Зогсоол", "ДДТД (billId)", "Сугалаа", "Дүн (₮)", "НӨАТ (₮)",
+         "Огноо", "Суваг", "Төлөв", "ААН ТТД", "Шалтгаан/алдаа"],
+        data, widths=[11, 16, 36, 16, 11, 10, 20, 12, 16, 13, 45],
+        total_row=total_row)
