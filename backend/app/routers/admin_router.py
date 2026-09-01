@@ -625,6 +625,108 @@ async def qpay_test_check(site_id: str, body: dict, db: Session = Depends(get_db
     return out
 
 
+@router.post("/qpay/ebarimt-diag")
+async def qpay_ebarimt_diag(body: dict, db: Session = Depends(get_db),
+                            user: User = Depends(require_role("SUPER_ADMIN"))):
+    """QPay e-Barimt тасалдлын гүн оношилгоо (2026-09-01, «ТТД бүртгэлгүй» алдаа).
+
+    Юу хийдэг: НЭГ төлбөр дээр (анхдагчаар хамгийн сүүлийн FAILED QPAY баримт)
+      1. манай төлбөр/баримтын бичлэг + цагууд
+      2. QPay payment/check-ийн ТҮҮХИЙ хариу (тэдний талын бичлэг, цаг,
+         e-Barimt талбарууд — алдаатай create-д баримт ҮҮССЭН эсэхийн ул мөр)
+      3. body.create=true үед ebarimt_v3/create-г ДАХИН дуудаж түүхий хариуг
+         БҮРЭН (статус код + body) буцаана. Амжилтвал VatReceipt-ийг SENT
+         болгож хэвийн нөхөлт болно; unav391 алдаа бол бүрэн body-г барина
+         (_ebarimt_err зөвхөн message талбарыг үлдээдэг байсан).
+
+    Аюулгүй байдал: SUPER_ADMIN-only; нууц үг/токен хариунд ОРОХГҮЙ (зөвхөн
+    merchant username). create=true нэг дуудлагад НЭГ л оролдлого хийнэ.
+    """
+    from datetime import datetime as _dt
+
+    from ..models import Payment, VatReceipt
+    from ..services import qpay as qpay_svc
+
+    out: dict = {"server_utc": _dt.utcnow().isoformat()}
+    payment_id = (body.get("payment_id") or "").strip() or None
+    if payment_id:
+        payment = db.get(Payment, payment_id)
+    else:
+        rec0 = (db.query(VatReceipt)
+                .filter(VatReceipt.status == "FAILED", VatReceipt.provider == "QPAY")
+                .order_by(VatReceipt.created_at.desc()).first())
+        payment = db.get(Payment, rec0.payment_id) if rec0 else None
+    if not payment:
+        raise HTTPException(404, "Төлбөр олдсонгүй (payment_id өг эсвэл FAILED QPAY баримт байхгүй)")
+
+    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id)
+           .order_by(VatReceipt.created_at.desc()).first())
+    out["payment"] = {
+        "id": payment.id, "amount": float(payment.amount),
+        "provider": payment.provider, "method": payment.payment_method,
+        "provider_invoice_id": payment.provider_invoice_id,
+        "provider_payment_id": payment.provider_payment_id,
+        "sender_invoice_no": payment.sender_invoice_no,
+        "customer_tin": payment.customer_tin,
+        "receiver_type": payment.ebarimt_receiver_type,
+        "created_at": payment.created_at.isoformat() if payment.created_at else None,
+        "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+    }
+    out["receipt"] = rec and {
+        "id": rec.id, "status": rec.status, "ebarimt_id": rec.ebarimt_id,
+        "error": rec.receipt_url, "created_at": rec.created_at.isoformat(),
+    }
+    site = db.get(ParkingSite, payment.session.site_id) if payment.session else None
+    acc = qpay_svc.account_for(site)
+    out["qpay_account"] = {"username": acc.username, "invoice_code": acc.invoice_code,
+                           "district_code": acc.district_code, "mock": acc.mock}
+
+    # QPay талын төлбөрийн бичлэг — тэдний цаг, төлөв, e-Barimt-ийн ул мөр
+    if payment.provider_invoice_id:
+        try:
+            chk = await qpay_svc.check_payment(payment.provider_invoice_id, acc=acc)
+            out["qpay_payment_check_raw"] = chk.get("raw")
+        except Exception as e:  # noqa: BLE001
+            out["qpay_payment_check_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
+    # Тэст create — түүхий хариуг бүрэн барина
+    if body.get("create") and payment.provider_payment_id:
+        import httpx as _httpx
+        t0 = _dt.utcnow()
+        try:
+            receiver_type = payment.ebarimt_receiver_type or (
+                "COMPANY" if payment.customer_tin else "CITIZEN")
+            eb = await qpay_svc.create_ebarimt(
+                payment.provider_payment_id, receiver_type,
+                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+                acc=acc)
+            out["create_result"] = {"ok": bool(eb.get("billId")), "raw": eb.get("raw"),
+                                    "elapsed_ms": int((_dt.utcnow() - t0).total_seconds() * 1000)}
+            if eb.get("billId") and rec:
+                rec.ebarimt_id = eb["billId"]
+                rec.lottery_code = (None if receiver_type == "COMPANY" else eb.get("lottery"))
+                rec.status = "SENT"
+                rec.receipt_url = None
+                db.commit()
+                out["create_result"]["receipt_updated"] = True
+        except _httpx.HTTPStatusError as e:
+            body_raw: object
+            try:
+                body_raw = e.response.json()
+            except Exception:  # noqa: BLE001
+                body_raw = e.response.text[:1000]
+            out["create_result"] = {"ok": False, "http_status": e.response.status_code,
+                                    "raw_body": body_raw,
+                                    "elapsed_ms": int((_dt.utcnow() - t0).total_seconds() * 1000)}
+        except Exception as e:  # noqa: BLE001
+            out["create_result"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+    _audit(db, user, "QPAY_EBARIMT_DIAG", "payment", payment.id,
+           {"create": bool(body.get("create")),
+            "result": (out.get("create_result") or {}).get("ok")})
+    db.commit()
+    return out
+
+
 # ─────────── Холболт: төлбөрийн дансдын нэгдсэн жагсаалт ───────────
 @router.get("/payment-accounts")
 def payment_accounts(db: Session = Depends(get_db),
