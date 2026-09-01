@@ -108,6 +108,8 @@ class DriverCreate(_In):
     # Үнэгүй цагийн цонх "HH:MM" (УБ) — хоёулаа байвал зөвхөн цонхонд үнэгүй
     free_from: str | None = None
     free_until: str | None = None
+    # Гэрээний нөхцөл: эхний N минут үнэгүй (60/120), илүүг тарифаар. NULL/0 = бүрэн үнэгүй
+    free_first_minutes: int | None = Field(default=None, ge=0, le=1440)
     valid_from: str | None = None   # ISO datetime — хуучин fromisoformat логик хэвээр
     valid_to: str                   # заавал (өмнө нь дутуу бол 500 өгдөг байсан)
 
@@ -124,6 +126,7 @@ class DriverUpdate(_In):
     is_active: bool | None = None
     free_from: str | None = None
     free_until: str | None = None
+    free_first_minutes: int | None = Field(default=None, ge=0, le=1440)
     valid_from: str | None = None
     valid_to: str | None = None
 

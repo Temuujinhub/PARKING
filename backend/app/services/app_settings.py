@@ -14,6 +14,7 @@ BLACKLIST_KEY = "blacklist_rules"
 OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
 ENTRYPLATE_KEY = "entry_plate_rules"
+EXITRULES_KEY = "exit_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
@@ -100,6 +101,16 @@ DEFAULTS: dict[str, dict] = {
         "policy": "hold",
         "hold_seconds": 4,       # burst цонх (6с)-оос богино байх нь зүйтэй
         # Зогсоол бүрийн давхарга: {site_id: policy}. Хоосон = глобал policy.
+        "site_overrides": {},
+    },
+    EXITRULES_KEY: {
+        # Гарах хаалтны дүрэм. no_session_fee: орох уншилтгүй, гэрээт биш машин
+        # гарцад ирвэл нэхэмжлэх СУУРЬ ХУРААМЖ (₮). 0 = унтраах (хуучин зан:
+        # операторт мэдэгдээд хүлээнэ). Registered-only болон төлбөргүй
+        # (no_charge) зогсоолд үйлчлэхгүй. Формат буруу (junk) уншилтад мөн
+        # үйлчлэхгүй — хог дугаарт нэхэмжлэл үүсгэхгүй.
+        "no_session_fee": 2000,
+        # Зогсоол бүрийн давхарга: {site_id: дүн}. Хоосон = глобал дүн.
         "site_overrides": {},
     },
     CAMHEALTH_KEY: {
@@ -213,6 +224,28 @@ def entry_plate_policy(db, site_id: str | None) -> tuple[str, int]:
     r = get_rules(db, ENTRYPLATE_KEY)
     pol = (r.get("site_overrides") or {}).get(site_id or "") or r["policy"]
     return (pol if pol in _POLICY_CHOICES else "hold"), max(1, int(r["hold_seconds"]))
+
+
+def get_exit_rules(db) -> dict:
+    return get_rules(db, EXITRULES_KEY)
+
+
+def set_exit_rules(db, values: dict, username: str) -> dict:
+    return set_rules(db, EXITRULES_KEY, values, username)
+
+
+def no_session_exit_fee(db, site_id: str | None) -> int:
+    """Тухайн зогсоолд үйлчлэх «орох уншилтгүй машины суурь хураамж» (₮).
+    site_overrides нь глобал дүнг дарна; утгууд DB-д мөр (string) хэлбэрээр
+    хадгалагдаж болох тул int руу хамгаалалттай хөрвүүлнэ. 0 = унтраалттай."""
+    r = get_rules(db, EXITRULES_KEY)
+    raw = (r.get("site_overrides") or {}).get(site_id or "")
+    if raw in (None, ""):
+        raw = r.get("no_session_fee", 0)
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def get_camsync_rules(db) -> dict:

@@ -261,6 +261,12 @@ export default function Drivers() {
                   ⏱ {d.free_from}–{d.free_until} үнэгүй
                 </div>
               )}
+              {!!d.free_first_minutes && (
+                <div className="text-[10px] text-amber-300"
+                  title="Гэрээний нөхцөл: эхний хугацаа үнэгүй, илүү гарсныг энгийн тарифаар бодно">
+                  ⏱ эхний {d.free_first_minutes / 60}ц үнэгүй
+                </div>
+              )}
             </td>
             <td className="td">{d.site_name}</td>
             <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
@@ -342,6 +348,17 @@ export default function Drivers() {
               <Field label="Үнэгүй дуусах цаг">
                 <input className="input" type="time" value={editing.free_until || ''}
                   onChange={(e) => setEditing({ ...editing, free_until: e.target.value || null })} />
+              </Field>
+              {/* Гэрээний нөхцөл: зогсолт бүрийн эхний 1-2 цаг үнэгүй, илүү
+                  гарсан хугацаа энгийн тарифаар. Хоосон = бүрэн үнэгүй. */}
+              <Field label="Гэрээний нөхцөл (үнэгүй хугацаа)">
+                <select className="input" value={editing.free_first_minutes || ''}
+                  onChange={(e) => setEditing({ ...editing, free_first_minutes: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">Бүх цагт үнэгүй</option>
+                  <option value="60">Эхний 1 цаг үнэгүй, илүүг тарифаар</option>
+                  <option value="120">Эхний 2 цаг үнэгүй, илүүг тарифаар</option>
+                  <option value="180">Эхний 3 цаг үнэгүй, илүүг тарифаар</option>
+                </select>
               </Field>
             </div>
             {formErrors(editing).length > 0 && (

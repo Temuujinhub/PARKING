@@ -171,6 +171,83 @@ function EntryPlateCard({ toast }) {
   )
 }
 
+// Гарах хаалтны дүрэм — орох уншилтгүй машины суурь хураамж (2026-09-01).
+function ExitRulesCard({ toast }) {
+  const [rules, setRules] = useState(null)
+  const [sites, setSites] = useState([])
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api('/api/admin/exit/rules').then(setRules).catch(() => {})
+    api('/api/admin/sites').then(setSites).catch(() => {})
+  }, [])
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const body = { ...rules, no_session_fee: clampNum(rules.no_session_fee, { min: 0, max: 1_000_000, fallback: 0 }) }
+      setRules(await api('/api/admin/exit/rules', { method: 'PUT', body }))
+      toast('Хадгалагдлаа — дараагийн гарах уншилтаас эхлэн үйлчилнэ')
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
+  if (!rules) return null
+  const setOverride = (siteId, v) => {
+    const o = { ...(rules.site_overrides || {}) }
+    if (v !== '') o[siteId] = v; else delete o[siteId]
+    setRules({ ...rules, site_overrides: o })
+  }
+
+  return (
+    <div className="card space-y-4">
+      <div>
+        <h2 className="font-semibold flex items-center gap-2">
+          <ScanLine size={16} className="text-accent" /> Гарах хаалтны дүрэм
+        </h2>
+        <p className="text-xs text-slate-400 mt-1">
+          <b className="text-slate-300">Бүртгэлгүй машины суурь хураамж:</b> орох
+          уншилт огт байхгүй (гэрээт биш) машин гарцад ирвэл хэзээ орсныг нь
+          мэдэхгүй тул цагаар бодох боломжгүй. Энэ дүнг нэхэмжилж LED дэлгэцэнд
+          харуулна — касс/QR-аар төлөгдмөгц хаалт нээгдэнэ. Registered-only болон
+          төлбөргүй зогсоолд үйлчлэхгүй. <b className="text-slate-300">0 = унтраах</b>
+          (хуучин зан: операторт мэдэгдээд хүлээнэ).
+        </p>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="Суурь хураамж (₮)">
+          <input className="input font-mono" type="number" min="0" max="1000000" step="500"
+            value={rules.no_session_fee}
+            onChange={(e) => setRules({ ...rules, no_session_fee: Number(e.target.value) })} />
+        </Field>
+      </div>
+      {sites.length > 0 && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-slate-300">
+            Зогсоол бүрийн ялгаатай дүн
+            {Object.keys(rules.site_overrides || {}).length > 0
+              && ` (${Object.keys(rules.site_overrides).length} зогсоолд)`}
+          </summary>
+          <div className="space-y-1.5 mt-2">
+            {sites.map((s) => (
+              <div key={s.id} className="flex items-center gap-2">
+                <span className="w-52 truncate">{s.name}</span>
+                <input className="input w-32 font-mono text-sm" type="number" min="0" max="1000000"
+                  placeholder="(ерөнхий)" value={(rules.site_overrides || {})[s.id] ?? ''}
+                  onChange={(e) => setOverride(s.id, e.target.value)} />
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button className="btn-primary" onClick={save} disabled={busy}>
+          <Save size={15} /> {busy ? 'Хадгалж байна…' : 'Хадгалах'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // Камерын лог нөхөлт — камер уншсан ч серверт бүртгэгдээгүй машиныг нөхнө.
 // WATERMARK-аар ажилладаг тул нэг event ХОЁР УДАА боловсруулагдахгүй (өмнө нь
 // 48ц-ийн логийг бүхлээр нь дахин уншиж давхар өр үүсгэсэн).
@@ -567,6 +644,7 @@ export default function AutoCloseSection() {
   return (
     <div className="space-y-4">
       <EntryPlateCard toast={toast} />
+      <ExitRulesCard toast={toast} />
       <CamHealthCard toast={toast} />
       <CamSyncCard toast={toast} />
       <OpenReasonsCard toast={toast} />

@@ -283,6 +283,13 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_payments_wallet_id ON payments (wallet_id)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS paid_from_wallet BOOLEAN NOT NULL DEFAULT false",
     "ALTER TABLE vat_receipts ALTER COLUMN session_id DROP NOT NULL",
+
+    # v2.1 — Гэрээний нөхцөл: зогсолт бүрийн эхний N минут үнэгүй (60/120),
+    # илүү гарсан хугацаа энгийн тарифаар. NULL = бүх цагт бүрэн үнэгүй (хуучин).
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS free_first_minutes INTEGER",
+    # Дүн царцсан session (орох уншилтгүй машины суурь хураамж г.м) — total_fee-г
+    # тарифаас дахин бодохгүй.
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS fee_locked BOOLEAN NOT NULL DEFAULT false",
 ]
 
 

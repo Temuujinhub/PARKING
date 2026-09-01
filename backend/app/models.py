@@ -21,6 +21,7 @@ class User(Base):
     ADMIN       — системийн тохиргоо (зогсоол, тариф, төхөөрөмж)
     FINANCE     — санхүү: тайлан, төлбөр, НӨАТ
     OPERATOR    — зогсоол дээрх ажилтан: касс, шалгах, хаалт нээх
+    POS         — кассын ажилтан: зөвхөн касс + шалгах (тайлан/түүх харахгүй)
     """
     __tablename__ = "users"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
@@ -240,6 +241,11 @@ class RegisteredDriver(Base):
     # NULL = хуучин зан төлөв: бүх цагт үнэгүй.
     free_from = Column(String(5), nullable=True)
     free_until = Column(String(5), nullable=True)
+    # Гэрээний нөхцөл: зогсолт бүрийн ЭХНИЙ N минут үнэгүй (60=1 цаг, 120=2 цаг),
+    # илүү гарсан хугацаа энгийн тарифаар бодогдоно. NULL/0 = хуучин зан төлөв:
+    # бүх цагт бүрэн үнэгүй. free_from/free_until цонхтой хамт хэрэглэж болно
+    # (хоёулаа хугацаанаас хасагдана).
+    free_first_minutes = Column(Integer, nullable=True)
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow)
     valid_to = Column(DateTime, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
@@ -309,6 +315,11 @@ class ParkingSession(Base):
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
+    # Дүн ЦАРЦСАН session: total_fee-г тарифаас ДАХИН бодохгүй, хадгалсан дүнг
+    # хэрэглэнэ. Орох уншилтгүй машины суурь хураамж (exit_rules.no_session_fee)
+    # шиг хугацаанаас хамааралгүй нэхэмжлэлд — эс бол 0 минутын session «үнэгүй»
+    # болж дараагийн уншилтад хаалт төлбөргүй нээгдэнэ.
+    fee_locked = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # ─── Дамжин зогсолт (nested) ──────────────────────────────────────────
     # Машин доторх зогсоолд байх хугацаанд энэ (гадна) session-ий төлбөрийн
     # тоолуур зогсоно. paused_minutes = хуримтлагдсан минут (машин дотогш олон

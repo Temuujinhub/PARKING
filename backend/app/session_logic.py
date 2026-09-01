@@ -375,6 +375,18 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
 def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None) -> dict:
     site: ParkingSite = s.site
     template = site.tariff_template if site else None
+    # Дүн ЦАРЦСАН session (орох уншилтгүй машины суурь хураамж г.м): тарифаас
+    # дахин бодохгүй, хадгалсан дүнг буцаана. Эс бол 0 минутын session «үнэгүй»
+    # болж дараагийн гарах уншилтад хаалт төлбөргүйгээр нээгдэнэ.
+    if getattr(s, "fee_locked", False) and s.total_fee is not None:
+        total = float(s.total_fee)
+        return {
+            "duration_minutes": int(s.duration_minutes or 0),
+            "paused_minutes": 0, "chargeable_minutes": 0,
+            "base_fee": float(s.base_fee or 0), "discount_amount": 0.0,
+            "vat_amount": float(s.vat_amount or 0), "total_fee": total,
+            "is_free": total == 0.0, "reason": "Суурь хураамж (царцсан дүн)",
+        }
     if at is None:
         # AWAITING_PAYMENT машин зогсоолд байгаа хэвээр (гарч чадаагүй) тул төлбөр
         # exit_time дээр царцахгүй — одоог хүртэл үргэлжлэн бодогдоно.
@@ -410,6 +422,13 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
         from .billing import free_window_minutes
         registered_free = False
         paused += free_window_minutes(s.entry_time, at, drv.free_from, drv.free_until)
+
+    # ГЭРЭЭНИЙ НӨХЦӨЛ: эхний N минут үнэгүй (60=1 цаг, 120=2 цаг) — бүрэн үнэгүй
+    # биш, N минутыг хугацаанаас хасаад илүү гарсныг энгийн тарифаар бодно.
+    # NULL/0 = хуучин зан төлөв (бүх цагт үнэгүй) — дээрх registered хэвээр.
+    if drv is not None and getattr(drv, "free_first_minutes", None):
+        registered_free = False
+        paused += int(drv.free_first_minutes)
 
     return calculate_fee(
         template, s.entry_time, at,
@@ -520,7 +539,8 @@ def _skip_command(db: Session, barrier: Device, session_id: str | None,
 
 async def ensure_entry_barrier(db: Session, device: Device, plate: str,
                                session_id: str | None = None,
-                               registered=None, screen_text: str = "") -> bool:
+                               registered=None, screen_text: str = "",
+                               suppress_sec: float | None = None) -> bool:
     """Орох хаалтыг нээх — ХАРИН саяхан нээсэн бол давтахгүй.
 
     Яагаад хэрэгтэй вэ: давхар уншилтын (dedup/burst) шүүлтүүрүүд нь ДАВХАР
@@ -546,8 +566,13 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
         _skip_command(db, barrier, session_id, source, plate,
                       "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
         return True
-    # Саяхан амжилттай нээсэн бол дахин команд илгээхгүй (командын үер үүсгэхгүй)
-    cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    # Саяхан амжилттай нээсэн бол дахин команд илгээхгүй (командын үер үүсгэхгүй).
+    # suppress_sec — ДАВХАР УНШИЛТЫН (dedup) зам өргөн цонх өгнө: нэг машин
+    # хаалтны өмнө 30с дотор дахин уншигдвал хаалтыг ДАХИН нээхгүй (2026-09-01
+    # хүсэлт). Хаалт нь огт нээгдээгүй (SUCCESS алга) гацсан машинд доорх
+    # retry хэвээр үйлчилнэ — өмнөх «20с гацдаг» алдаа буцаж ирэхгүй.
+    window = max(float(settings.barrier_reopen_cooldown_sec), float(suppress_sec or 0))
+    cooldown = datetime.utcnow() - timedelta(seconds=window)
     recent = (db.query(BarrierCommand)
               .filter(BarrierCommand.device_id == barrier.id,
                       BarrierCommand.command == "open",
@@ -557,7 +582,7 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     if recent:
         # Хаалт нээлттэй байгаа — дахин нээх шаардлагагүй, гэхдээ ул мөр үлдээнэ
         _skip_command(db, barrier, session_id, source, plate,
-                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      f"{window:.0f}с дотор аль хэдийн "
                       "нээгдсэн — команд давтсангүй")
         return True
     # Дэлгэцийг хаалттай ХАМТ (нэг сессээр) бичнэ — тусад нь нэвтрэхгүй
@@ -581,8 +606,14 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     if not barrier:
         return False
     now = datetime.utcnow()
-    # Саяхан АМЖИЛТТАЙ нээсэн бол хаалт нээлттэй хэвээр - команд давтахгүй
-    cooldown = now - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    # Саяхан АМЖИЛТТАЙ нээсэн бол хаалт нээлттэй хэвээр - команд давтахгүй.
+    # Энэ функц зөвхөн ДАВХАР УНШИЛТЫН (dedup) замаас дуудагддаг тул цонхыг
+    # dedup-ийн бүтэн хугацаагаар (30с) авна: нэг машин хаалтны өмнө дахин
+    # уншигдах бүрд хаалт ахин ахин нээгдэхгүй (2026-09-01 хүсэлт). Нээгдээгүй
+    # (SUCCESS алга) гацсан машинд доорх retry хэвээр үйлчилнэ.
+    window = max(float(settings.barrier_reopen_cooldown_sec),
+                 float(settings.lpr_dedup_seconds))
+    cooldown = now - timedelta(seconds=window)
     recent_ok = (db.query(BarrierCommand)
                  .filter(BarrierCommand.device_id == barrier.id,
                          BarrierCommand.command == "open",
@@ -591,7 +622,7 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
                  .first())
     if recent_ok:
         _skip_command(db, barrier, None, "exit_retry", plate,
-                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      f"{window:.0f}с дотор аль хэдийн "
                       "нээгдсэн — команд давтсангүй")
         return True
 
@@ -607,7 +638,9 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
 
     session, _fuzzy = match_open_session(db, plate, device.site_id)
     entitled = False
-    if registered:
+    if registered and not getattr(registered, "free_first_minutes", None):
+        # Бүрэн үнэгүй гэрээт — ямагт гарна. Харин «эхний N минут үнэгүй»
+        # нөхцөлтэй гэрээт төлбөртэй байж болох тул доорх fee шалгалтаар орно.
         entitled = True
     elif session:
         if session.status == "PAID" and (not session.exit_deadline or now <= session.exit_deadline):
@@ -803,7 +836,11 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         _held_dup = hold_active and not any(is_valid_plate(rp) for rp in dup_of)
         _can_open = (allow_open and not _held_dup
                      and (not restricted or find_registered(db, plate, site_id)))
-        opened = await ensure_entry_barrier(db, device, plate) if _can_open else False
+        # suppress_sec: 30с дотор аль хэдийн НЭЭГДСЭН бол дахин нээхгүй —
+        # давтан уншилт бүрд хаалт ахин онгойхгүй; нээгдээгүй гацсанд retry хэвээр
+        opened = (await ensure_entry_barrier(db, device, plate,
+                                             suppress_sec=settings.lpr_dedup_seconds)
+                  if _can_open else False)
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened,
                 "held": _held_dup}
@@ -1214,6 +1251,48 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 "registered": True, "barrier_opened": opened})
             schedule_display(device.ip_address, _bye_reg, camera_credentials(device))
             return {"action": "registered_exit", "plate": plate, "barrier_opened": opened}
+
+        # СУУРЬ ХУРААМЖ (2026-09-01): орох уншилтгүй, гэрээт БИШ машин гарцад
+        # ирвэл тогтмол дүн (exit_rules.no_session_fee, default 2000₮) нэхэмжилнэ.
+        # Хэзээ орсныг мэдэхгүй тул цагаар бодох боломжгүй — суурь хураамж нь
+        # «үнэгүй гарна» гэсэн цоорхойг хаана. Дүн ЦАРЦСАН (fee_locked) session
+        # үүсгэнэ — эс бол 0 минутын session «үнэгүй» болж хаалт шууд нээгдэнэ.
+        # Registered-only, төлбөргүй зогсоол болон формат буруу (junk) уншилтад
+        # үйлчлэхгүй; 0 = унтраах (хуучин зан: операторт мэдэгдээд хүлээнэ).
+        from .services.app_settings import no_session_exit_fee
+        _flat = no_session_exit_fee(db, site_id)
+        _site_x = db.get(ParkingSite, site_id)
+        if (_flat > 0 and is_valid_plate(plate)
+                and not (_site_x and (_site_x.registered_only
+                                      or getattr(_site_x, "no_charge", False)))):
+            _r = settings.vat_rate
+            _vat = round(_flat * _r / (1 + _r))
+            session = ParkingSession(
+                site_id=site_id, plate_number=plate, entry_time=now,
+                status="AWAITING_PAYMENT", exit_device_id=device.id,
+                confidence_exit=confidence, duration_minutes=0,
+                base_fee=_flat - _vat, vat_amount=_vat, total_fee=_flat,
+                fee_locked=True,
+                note="Орох уншилтгүй — суурь хураамж")
+            db.add(session)
+            db.commit()
+            schedule_capture(session.id, device.ip_address, plate, "exit", raw,
+                             camera_credentials(device))
+            notify(site_id, "EXIT_LPR_EVENT", {
+                "session_id": session.id, "plate": plate,
+                "entry_time": now.isoformat(), "duration_minutes": 0,
+                "total_fee": float(_flat), "amount_due": float(_flat),
+                "has_debt": bool(debts), "debt_amount": debt_amount,
+                "no_entry": True})
+            _txt = render_screen_text(settings.screen_fee_text,
+                                      amount=_flat + debt_amount, plate=plate,
+                                      duration_minutes=0)
+            schedule_display(device.ip_address, _txt,
+                             _txt if settings.screen_voice else None,
+                             camera_credentials(device))
+            log.info("[exit] орох уншилтгүй машинд суурь хураамж: %s %s₮", plate, _flat)
+            return {"action": "no_session_fee", "session_id": session.id,
+                    "plate": plate, "amount_due": float(_flat)}
 
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
         db.commit()

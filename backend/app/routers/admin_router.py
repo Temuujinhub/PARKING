@@ -112,7 +112,7 @@ def _audit(db: Session, user: User, action: str, entity: str, entity_id: str, de
 
 
 # API/UI-аас үүсгэж болох дүрүүд (SUPER_ADMIN зөвхөн DB-ээр)
-CREATABLE_ROLES = ("ADMIN", "FINANCE", "HR", "OPERATOR", "ONLINE_OPERATOR")
+CREATABLE_ROLES = ("ADMIN", "FINANCE", "HR", "OPERATOR", "ONLINE_OPERATOR", "POS")
 
 
 def _check_password(pw: str):
@@ -1639,6 +1639,7 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
         site_id=site_id, monthly_fee=body.get("monthly_fee", 0),
         free_from=_hhmm_or_400(body.get("free_from"), "free_from"),
         free_until=_hhmm_or_400(body.get("free_until"), "free_until"),
+        free_first_minutes=body.get("free_first_minutes") or None,
         valid_from=_parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow(),
         valid_to=_parse_dt(body["valid_to"], "valid_to"),
     )
@@ -1676,6 +1677,8 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
     for k in ("free_from", "free_until"):
         if k in body:
             setattr(d, k, _hhmm_or_400(body[k], k))
+    if "free_first_minutes" in body:
+        d.free_first_minutes = body["free_first_minutes"] or None
     if "site_id" in body:
         # Түрээслэгчийн харьяалал зогсоолыг нь дагана; NULL («бүх зогсоол») болгоход
         # засварлагчийн түрээслэгч (эсвэл хуучин утга) хэвээр
@@ -1863,6 +1866,24 @@ def put_entry_plate_rules(body: dict, db: Session = Depends(get_db),
     from ..services.app_settings import set_entry_plate_rules
     rules = set_entry_plate_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "entry_plate_rules", "-", rules)
+    db.commit()
+    return rules
+
+
+@router.get("/exit/rules")
+def get_exit_rules_api(db: Session = Depends(get_db),
+                       user: User = Depends(require("settings"))):
+    """Гарах хаалтны дүрэм — орох уншилтгүй машины суурь хураамж г.м."""
+    from ..services.app_settings import get_exit_rules
+    return get_exit_rules(db)
+
+
+@router.put("/exit/rules")
+def put_exit_rules(body: dict, db: Session = Depends(get_db),
+                   user: User = Depends(require("settings"))):
+    from ..services.app_settings import set_exit_rules
+    rules = set_exit_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "exit_rules", "-", rules)
     db.commit()
     return rules
 
