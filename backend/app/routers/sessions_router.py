@@ -781,7 +781,10 @@ def get_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
     path = os.path.join(cfg.snapshot_dir, rel)
     if not os.path.isfile(path):
         raise HTTPException(404, "Зургийн файл олдсонгүй")
-    return FileResponse(path, media_type="image/jpeg")
+    # Нэг замын файл хэзээ ч өөрчлөгдөхгүй (шинэ зураг = шинэ нэр) тул браузерт
+    # кэшлүүлнэ — касс нэг машиныг дахин сонгох бүрд ~600KB дахин татахгүй
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400, immutable"})
 
 
 @router.post("/{session_id}/snapshot/{kind}/backfill")

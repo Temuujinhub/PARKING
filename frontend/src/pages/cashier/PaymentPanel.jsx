@@ -79,8 +79,10 @@ export default function PaymentPanel({
           </div>
           {/* Камерын зураг — машин таарч байгааг нүдээр баталгаажуулна */}
           <div className="grid grid-cols-2 gap-2">
-            <SnapshotImg sessionId={selected.id} kind="entry" label="Орох зураг" />
-            <SnapshotImg sessionId={selected.id} kind="exit" label="Гарах зураг" />
+            <SnapshotImg sessionId={selected.id} kind="entry" label="Орох зураг"
+              eventTime={selected.entry_time} />
+            <SnapshotImg sessionId={selected.id} kind="exit" label="Гарах зураг"
+              eventTime={selected.exit_time || selected.updated_at} />
           </div>
           <Field label="Хөнгөлөлт хэрэглэх">
             <select className="input" value={selected.discount_id || ''} onChange={(e) => onApplyDiscount(e.target.value)} disabled={!canAct}>

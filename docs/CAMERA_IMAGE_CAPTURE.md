@@ -286,3 +286,28 @@ source.addEventListener('imageUpdate', (e) => {
 
 Зураг бэлэн болмогц сервер `imageUpdate` нэртэй SSE event илгээж, frontend тухайн event-ийн
 `imageUrl`-г шинэчилдэг (browser нь `<img src="/api/image/<id>">` ашиглан татаж авдаг).
+
+---
+
+## 7. PARKING backend-ийн хэрэгжилт (Python) — энэ баримттай харьцуулсан зураглал
+
+Дээрх TypeScript код нь **ANPR-Viewer** (Node) клиентийнх — лавлагаа болгож
+хадгалсан. PARKING backend яг ижил бодлогуудыг Python талдаа дараах байдлаар
+хэрэгжүүлдэг (2026-09-01-нд энэ баримтын дүрмүүдээр бүхэлд нь сайжруулав):
+
+| ANPR-Viewer (энэ баримт) | PARKING (backend/app) | Тайлбар |
+|---|---|---|
+| §1 digest client, `agent:false` | `services/barrier.camera_client` + httpx DigestAuth | PARKING эсрэгээрээ клиентийг ХУВААЛЦДАГ — камерын зэрэгцээ холболтын хязгаар дүүрвэл хаалтны команд хүлээгддэг тул |
+| §2 snapshot.cgi fallback | `services/snapshot._fetch_from_camera` | Ажилласан URL хувилбарыг цээжилдэг, дараалсан бүтэлгүйтэлд түр зогсоодог (quiet), хаалтны командад зам тавьдаг |
+| §2 `bad JPEG <1000B` шалгалт | `services/snapshot.valid_jpeg` (2026-09-01) | БҮХ эх сурвалж `_save`-ээр дамждаг тул валидаци төвлөрсөн: SOI magic + ≥1000B. Эвдэрсэн зургийг хадгалахгүй |
+| §3 snapManager attachFileProc | `services/snap_puller` — WS зам (`_ws_session`) + comet зам (`_comet_session`, SubscribeNotify type=1 + Base64) | Production дээр comet нь батлагдсан ганц суваг |
+| §3 `pendingTimer` (4с) | `_comet_one`/`_pull_one`-ийн 3с `_flush_later` (2026-09-01) | Өмнө нь burst-ийн СҮҮЛЧИЙН зураг дараагийн event иртэл `best` буферт гацдаг байв |
+| §3 fallback дараалал | стрим зураг (3с) → WS/comet хүлээлт (8с) → snapshot.cgi | `_capture_and_store`; `PARKING_SNAPSHOT_CGI_FALLBACK=false` гэж БҮҮ тавь — snapshot.cgi нь ганц найдвартай эх сурвалж хэвээр |
+| §4 memory cache (MAX_IMAGES) | Браузерын кэш: `Cache-Control: private, max-age=86400, immutable` (2026-09-01) | Замын файл өөрчлөгддөггүй (шинэ зураг = шинэ нэр) тул сервер кэш хэрэггүй |
+| §5 өдрийн хавтас, id-гаар хайх | `{snapshot_dir}/YYYYMMDD/{plate}_{HHMMSS}_{rand}_{lane}.jpg`, зам DB-д (`entry_snapshot`/`exit_snapshot`) | 2026-09-01: tmp→rename атомар бичилт + нэрэнд санамсаргүй дагавар (нэг секундын мөргөлдөөн арилсан) |
+| §6 `imageUpdate` SSE | `SNAPSHOT_READY` WS broadcast + frontend `SnapshotImg`-ийн retry (2026-09-01) | Зураг event-ээс хоцорч ирдэг тул касс 90с-ийн цонхонд өсөх зайтай дахин татдаг |
+
+Мөн ANPR-Viewer-т байхгүй нэмэлтүүд: session мөрийн түгжээтэй үеийн retry,
+давхар хадгалагдсан файлын цэвэрлэгээ (`discard_saved`), нөхөн таталт
+(RecordFinder/mediaFileFind/амьд кадр — `fetch_stored_picture`), retention
+(хугацаа + нийт GB таг), суваг тус бүрийн тоолуур (`/api/admin/cameras/snap-state`).

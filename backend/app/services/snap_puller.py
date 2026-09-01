@@ -135,9 +135,15 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                     s.exit_snapshot = rel
                 else:
                     s.entry_snapshot = rel
+                sess_id, site_id = s.id, s.site_id
                 db.commit()
                 note_source(src)
                 log.info(f"{plate_n} {lane_dir}: OK ({src}, {len(data)}b) → {rel}")
+                # UI-д «зураг бэлэн» мэдэгдэл — касс дээр нээлттэй харагдаж буй
+                # машины зураг refresh-гүйгээр гарч ирнэ
+                from ..ws import notify
+                notify(site_id, "SNAPSHOT_READY",
+                       {"session_id": sess_id, "kind": lane_dir, "plate": plate_n})
                 return
         except Exception as e:
             log.error(f"{plate_n}: session холбох алдаа: {e}")
@@ -609,6 +615,14 @@ async def _comet_one(device_id: str, ip: str, lane_dir: str,
         ts, old = best.get(plate, (0.0, b""))
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()
+        # Burst-ийн СҮҮЛЧИЙН зураг өмнө нь ДАРААГИЙН event иртэл `best`-д гацдаг
+        # байв (flush зөвхөн шинэ зураг дээр дуудагддаг тул шөнийн ганц машины
+        # зураг session-д хэдэн цагаар холбогдохгүй) — 3с дараа заавал шалгана
+        # (ANPR-Viewer клиентийн pendingTimer-тэй ижил санаа).
+        async def _flush_later():
+            await asyncio.sleep(3.0)
+            await flush_stale()
+        asyncio.create_task(_flush_later())
 
     # Бүх камер НЭГ агшинд login хийвэл камерын RPC үйлчилгээ ачаалагдаж
     # attachFileProc массаар татгалздаг (2026-08-14: 20 камерын 14 нь нэг
@@ -688,6 +702,12 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
         ts, old = best.get(plate, (0.0, b""))
         best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
         await flush_stale()
+        # comet замтай ижил: burst-ийн сүүлчийн зураг дараагийн event иртэл
+        # гацахгүйн тулд 3с дараа заавал flush хийнэ
+        async def _flush_later():
+            await asyncio.sleep(3.0)
+            await flush_stale()
+        asyncio.create_task(_flush_later())
 
     if start_delay:
         await asyncio.sleep(start_delay)

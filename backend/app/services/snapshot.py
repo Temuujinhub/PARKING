@@ -123,7 +123,7 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                 # холболтын сан дүүрч хаалтны команд ч хариу авахаа болино
                 client = camera_client(ip)
                 r = await client.get(url, auth=auth, timeout=timeout)
-                if r.status_code == 200 and r.content[:2] == b"\xff\xd8":  # JPEG magic
+                if r.status_code == 200 and valid_jpeg(r.content):
                     if attempt > 1 or url != urls[0]:
                         log.info(f"{ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
                     if st["url"] != url:
@@ -156,21 +156,61 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
     return None
 
 
+# Зургийн доод хэмжээ. ANPR-Viewer клиентийн туршлагаас (docs/CAMERA_IMAGE_CAPTURE.md):
+# камер завгүй үедээ хэдэн зуун байтын хагас/эвдэрсэн JPEG өгдөг — тэдгээрийг
+# хадгалбал кассын дэлгэцэнд «эвдэрсэн зураг» дүрс гарч, нотолгооны үнэ цэнэгүй.
+_MIN_JPEG_BYTES = 1000
+
+
+def valid_jpeg(data: bytes | None) -> bool:
+    """Бүрэн JPEG мөн эсэх: SOI эхлэл + доод хэмжээ. EOI төгсгөлийг ХАТУУ
+    шаардахгүй — зарим firmware EXIF-ийн ард padding нэмдэг ч зураг нь бүтэн."""
+    return (data is not None and len(data) >= _MIN_JPEG_BYTES
+            and data[:2] == b"\xff\xd8")
+
+
 def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
-    """Зургийг диск рүү бичээд snapshot_dir-ээс хамаарах замыг буцаана."""
+    """Зургийг диск рүү бичээд snapshot_dir-ээс хамаарах замыг буцаана.
+
+    БҮХ эх сурвалж (payload/стрим/comet/WS/snapshot.cgi/нөхөн таталт) энэ
+    функцээр дамждаг тул валидаци энд төвлөрнө:
+      • JPEG биш / хэт жижиг өгөгдлийг хадгалахгүй (эвдэрсэн зураг session-д
+        холбогдвол нотолгоо алдагдана — байхгүй нь дээр, нөхөн татаж болно)
+      • tmp файлд бичээд rename хийнэ — бичилтийн дундуур унасан ч хагас
+        файл session-д холбогдохгүй (rename нь атомар)
+      • нэрэнд богино санамсаргүй дагавар — нэг секундэд ижил дугаар хоёр
+        уншигдвал (орох+гарах камер зэрэг) файл дарж бичихгүй"""
+    if not valid_jpeg(data):
+        log.warning("%s %s: эвдэрсэн/дутуу зураг (%dб) — хадгалсангүй",
+                    plate, lane_dir, len(data or b""))
+        return None
     now = datetime.utcnow()
     day = now.strftime("%Y%m%d")
     safe_plate = _SAFE.sub("", plate.upper()) or "UNKNOWN"
-    rel = os.path.join(day, f"{safe_plate}_{now.strftime('%H%M%S')}_{lane_dir}.jpg")
+    suffix = os.urandom(2).hex()
+    rel = os.path.join(day, f"{safe_plate}_{now.strftime('%H%M%S')}_{suffix}_{lane_dir}.jpg")
     full = os.path.join(settings.snapshot_dir, rel)
     try:
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "wb") as f:
+        tmp = full + ".tmp"
+        with open(tmp, "wb") as f:
             f.write(data)
+        os.replace(tmp, full)
         return rel
     except OSError as e:
         log.error(f"хадгалж чадсангүй: {e}")
         return None
+
+
+def discard_saved(rel: str | None) -> None:
+    """Session-д холбогдоогүй (давхар болсон) зургийг диск дээрээс арилгана —
+    retention хүртэл орфон файл хэвтүүлэхгүй."""
+    if not rel:
+        return
+    try:
+        os.remove(os.path.join(settings.snapshot_dir, rel))
+    except OSError:
+        pass
 
 
 # ─── CGI event стримээр ирсэн зураг ─────────────────────────────────────────
@@ -312,6 +352,13 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
     if data is None:
         log.warning(f"{plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
         return
+    # Дискэнд бичихийн ӨМНӨ: snap_puller/comet энэ хооронд жинхэнэ event зургаа
+    # холбочихсон байж болно — тэгвэл энд юу ч бичилгүй гарна (өмнө нь давхар
+    # файл бичээд ДАРАА нь «аль хэдийн бий» гэж шалгадаг байсан тул retention
+    # хүртэл орфон файлууд хуримтлагддаг байв).
+    if await _snapshot_written(session_id, lane_dir):
+        log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
+        return
     # Дискний бичилт (≈1MB JPEG) нь SYNC — event loop дээр шууд хийвэл тэр хугацаанд
     # дараагийн машины хаалт нээх команд ХҮЛЭЭДЭГ (1 vCPU дээр мэдэгдэхүйц).
     # Тусдаа thread дээр бичнэ.
@@ -338,14 +385,22 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                 existing = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
                 if existing:
                     log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
+                    await asyncio.to_thread(discard_saved, rel)   # давхар файл үлдээхгүй
                     return
                 if lane_dir == "exit":
                     s.exit_snapshot = rel
                 else:
                     s.entry_snapshot = rel
+                site_id = s.site_id
                 db.commit()
                 note_source(source)
                 log.info(f"{plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
+                # UI-д зураг бэлэн болсныг мэдэгдэнэ (ANPR-Viewer-ийн imageUpdate
+                # SSE-тэй ижил санаа): касс дээр аль хэдийн нээгдсэн машины
+                # зургийг хуудас refresh хийлгүй харуулна
+                from ..ws import notify
+                notify(site_id, "SNAPSHOT_READY",
+                       {"session_id": session_id, "kind": lane_dir, "plate": plate})
                 return
         except OperationalError as e:
             # Түгжээ чөлөөлөгдөхийг хүлээнэ (хаалт нээх/e-Barimt дуустал)

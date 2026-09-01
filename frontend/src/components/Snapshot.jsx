@@ -4,9 +4,18 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Modal } from './ui'
 
+// Event-ээс хойш зураг ХОЦОРЧ хадгалагддаг (стрим 1-3с, snapshot.cgi fallback
+// 30с хүртэл). Энэ цонхонд 404-ийг «байхгүй» биш «хараахан ирээгүй» гэж үзэж
+// дахин оролдоно — өмнө нь касс машин сонгонгуут «Зураг хадгалагдаагүй» гэж
+// гарч, оператор refresh дардаг байв.
+const RETRY_WINDOW_MS = 90_000
+const RETRY_DELAYS = [2500, 4000, 6000, 8000, 10000]
+
 // Нэг зураг: /api/sessions/{id}/snapshot/{entry|exit}
 // Зураг байхгүй бол "Камераас татах" — камерын санах ойгоос нөхөж татна (backfill)
-export function SnapshotImg({ sessionId, kind, label }) {
+// eventTime (ISO, optional) — тухайн зургийн event цаг: СҮҮЛИЙН ҮЕИЙН event
+// дээр л дахин оролдоно, хуучин бүртгэлд шууд «байхгүй» UI гарна.
+export function SnapshotImg({ sessionId, kind, label, eventTime }) {
   const [url, setUrl] = useState(null)
   const [err, setErr] = useState(false)
   const [fetching, setFetching] = useState(false)
@@ -14,13 +23,28 @@ export function SnapshotImg({ sessionId, kind, label }) {
   const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
-    let objectUrl
+    let objectUrl, timer, dead = false, attempt = 0
     setUrl(null); setErr(false)
-    api(`/api/sessions/${sessionId}/snapshot/${kind}`, { blob: true })
-      .then((b) => { objectUrl = URL.createObjectURL(b); setUrl(objectUrl) })
-      .catch(() => setErr(true))
-    return () => objectUrl && URL.revokeObjectURL(objectUrl)
-  }, [sessionId, kind, refresh])
+    const evMs = eventTime
+      ? new Date(eventTime + (eventTime.endsWith('Z') ? '' : 'Z')).getTime() : 0
+    const isRecent = () => evMs > 0 && Date.now() - evMs < RETRY_WINDOW_MS
+    const load = () => {
+      api(`/api/sessions/${sessionId}/snapshot/${kind}`, { blob: true })
+        .then((b) => {
+          if (dead) return
+          objectUrl = URL.createObjectURL(b); setUrl(objectUrl)
+        })
+        .catch(() => {
+          if (dead) return
+          if (isRecent() && attempt < RETRY_DELAYS.length) {
+            timer = setTimeout(load, RETRY_DELAYS[attempt])
+            attempt += 1
+          } else setErr(true)
+        })
+    }
+    load()
+    return () => { dead = true; clearTimeout(timer); objectUrl && URL.revokeObjectURL(objectUrl) }
+  }, [sessionId, kind, refresh, eventTime])
 
   const backfill = () => {
     setFetching(true); setFetchErr('')
@@ -69,8 +93,8 @@ export function SnapshotButton({ session }) {
         title={`${session.plate_number} — Камерын зураг`} wide>
         {open && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <SnapshotImg sessionId={session.id} kind="entry" label="Орох" />
-            <SnapshotImg sessionId={session.id} kind="exit" label="Гарах" />
+            <SnapshotImg sessionId={session.id} kind="entry" label="Орох" eventTime={session.entry_time} />
+            <SnapshotImg sessionId={session.id} kind="exit" label="Гарах" eventTime={session.exit_time || session.updated_at} />
           </div>
         )}
       </Modal>
