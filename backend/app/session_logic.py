@@ -157,7 +157,13 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
     # Тусгай хэрэгцээт (ХБИ г.м) жагсаалт ч түрээслэгчийн хил ДОТРОО л үйлчилнэ:
     # site_id NULL + тухайн түрээслэгчийн tenant_id = түрээслэгчийн бүх зогсоол.
     # Түрээслэгч дамнасан систем-даяарх whitelist байхгүй (2026-08-09 шийдвэр).
-    return q.filter((RegisteredDriver.site_id == site_id) | all_sites_cond).first()
+    # ТОДОРХОЙ дараалал: зогсоолд тусгайлан бүртгэсэн нь «бүх зогсоол»-ынхоос
+    # түрүүлнэ, дараа нь хамгийн урт хүчинтэй. Өмнө нь `.first()` дараалалгүй
+    # байсан тул давхардсан бүртгэлээс (ж: нэг нь NIGHT, нөгөө нь CONTRACT)
+    # аль нь таарах нь санамсаргүй байв (2026-09-03).
+    return (q.filter((RegisteredDriver.site_id == site_id) | all_sites_cond)
+            .order_by(RegisteredDriver.site_id.is_(None), RegisteredDriver.valid_to.desc())
+            .first())
 
 
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:

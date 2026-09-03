@@ -23,12 +23,21 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
     e.preventDefault()
     try {
       const s = wizard.site
+      const r = wizard.rules || {}
+      // Хоосон үлдээсэн дүрэм = ерөнхий утга (давхаргад бичигдэхгүй)
+      const num = (v, max) => (v === '' || v === null || v === undefined ? undefined : clampNum(v, { min: 0, max, fallback: 0 }))
+      const payment_rules = {
+        exit_rules: { no_session_fee: num(r.no_session_fee, 1_000_000), min_stay_seconds: num(r.min_stay_seconds, 3600) },
+        entry_plate_rules: { policy: r.policy || undefined },
+        blacklist_rules: { block_exit_debt_count: num(r.block_exit_debt_count, 100) },
+      }
       const created = await api('/api/admin/sites', {
         method: 'POST',
         body: {
           ...s,
           capacity: wizard.unlimited ? 0 : clampNum(s.capacity, { min: 0, max: 100000, fallback: 0 }),
           tariff_template_id: s.tariff_template_id || null,
+          payment_rules,
         },
       })
       setWizard({ ...wizard, step: 2, created })
@@ -140,6 +149,54 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
                 Эгнээ тус бүрт нэг камер + нэг хаалт үүснэ (нийт {(wizard.entryLanes + wizard.exitLanes) * 2} төхөөрөмж).
                 Дараагийн алхамд IP хаяг оруулна.
               </div>
+
+              {/* Зогсоолын төлбөрийн дүрэм — хамгийн их асуугддаг 4 тохиргоо.
+                  Хоосон = ерөнхий утга; бүгдийг нь дараа «Төлбөрийн дүрэм» табаас
+                  зогсоол бүрээр өөрчилж болно. */}
+              <details className="rounded-lg border border-slate-700 px-3 py-2">
+                <summary className="cursor-pointer text-sm font-medium py-1">
+                  Төлбөрийн дүрэм
+                  <span className="ml-2 text-xs text-slate-500">· хоосон = ерөнхий утга, дараа нь табаас засна</span>
+                </summary>
+                <div className="mt-2 space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer select-none text-sm">
+                      <input type="checkbox" className="w-4 h-4 accent-accent" checked={!!wizard.site.registered_only}
+                        onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, registered_only: e.target.checked } })} />
+                      Зөвхөн гэрээт машин нэвтэрнэ
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer select-none text-sm">
+                      <input type="checkbox" className="w-4 h-4 accent-accent" checked={!!wizard.site.no_charge}
+                        onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, no_charge: e.target.checked } })} />
+                      Төлбөр авахгүй зогсоол
+                    </label>
+                    <Field label="Орох цаг олдоогүй машины суурь хураамж (₮)">
+                      <input className="input font-mono" type="number" min="0" max="1000000" step="500" placeholder="ерөнхий (2000)"
+                        value={wizard.rules?.no_session_fee ?? ''} onKeyDown={enterToNext}
+                        onChange={(e) => setWizard({ ...wizard, rules: { ...wizard.rules, no_session_fee: e.target.value } })} />
+                    </Field>
+                    <Field label="Эрт гарахад хаалт нээхгүй (сек)">
+                      <input className="input font-mono" type="number" min="0" max="3600" step="5" placeholder="ерөнхий (0 = унтраалттай)"
+                        value={wizard.rules?.min_stay_seconds ?? ''} onKeyDown={enterToNext}
+                        onChange={(e) => setWizard({ ...wizard, rules: { ...wizard.rules, min_stay_seconds: e.target.value } })} />
+                    </Field>
+                    <Field label="Формат буруу дугаарт орох хаалт">
+                      <select className="input" value={wizard.rules?.policy || ''} onKeyDown={enterToNext}
+                        onChange={(e) => setWizard({ ...wizard, rules: { ...wizard.rules, policy: e.target.value } })}>
+                        <option value="">ерөнхий</option>
+                        <option value="open">Шууд нээнэ</option>
+                        <option value="hold">Түр барина, дараа нь нээнэ</option>
+                        <option value="strict">Түр барина, нээхгүй</option>
+                      </select>
+                    </Field>
+                    <Field label="Хэдэн өртэй машиныг гарцад саатуулах">
+                      <input className="input font-mono" type="number" min="0" max="100" step="1" placeholder="ерөнхий (3)"
+                        value={wizard.rules?.block_exit_debt_count ?? ''} onKeyDown={enterToNext}
+                        onChange={(e) => setWizard({ ...wizard, rules: { ...wizard.rules, block_exit_debt_count: e.target.value } })} />
+                    </Field>
+                  </div>
+                </div>
+              </details>
               <button className="btn-primary w-full justify-center">Үргэлжлүүлэх →</button>
             </form>
           )}

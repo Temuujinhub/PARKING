@@ -148,8 +148,20 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
     now = datetime.utcnow()
     valid_to = now + timedelta(days=valid_days)
 
-    existing = {d.plate_number: d for d in db.query(RegisteredDriver)
-                .filter(RegisteredDriver.site_id == site_id).all()}
+    # Ижил дугаартай ХЭД ХЭДЭН мөр байж болно (хуучин давхардал): хамгийн урт
+    # хүчинтэйг нь «гол» болгож шинэчилнэ, бусдыг нь идэвхгүй болгоно — эс бол
+    # dict-д сүүлийнх нь л үлдэж, нөгөө хоёр нь хөндөгдөлгүй давхардсаар байв.
+    existing: dict[str, RegisteredDriver] = {}
+    deduped = 0
+    for d in sorted(db.query(RegisteredDriver).filter(RegisteredDriver.site_id == site_id).all(),
+                    key=lambda x: (x.is_active, x.valid_to or datetime.min), reverse=True):
+        if d.plate_number in existing:
+            if d.is_active:
+                d.is_active = False
+                d.note = f"{d.note + ' | ' if d.note else ''}импорт: давхардал — {existing[d.plate_number].id} үлдээв"[:1000]
+                deduped += 1
+            continue
+        existing[d.plate_number] = d
     created = updated = 0
     for r in rows:
         d = existing.get(r["plate"])
@@ -179,4 +191,4 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
 
     db.commit()
     return {"created": created, "updated": updated, "deactivated": deactivated,
-            "total": len(rows)}
+            "deduped": deduped, "total": len(rows)}

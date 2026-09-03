@@ -1,5 +1,5 @@
 // Төхөөрөмж — LPR камер, хаалт, POS терминал; зогсоол тус бүрээр бүлэглэн харуулна
-import { Plus } from 'lucide-react'
+import { Plus, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, Table, useToast } from '../../components/ui'
@@ -54,6 +54,25 @@ export default function DevicesSection() {
     api(`/api/admin/devices${withDeleted ? '?include_deleted=true' : ''}`).then(setRows)
   useEffect(() => { load(); api('/api/admin/sites').then(setSites) }, [])
   useEffect(() => { load(showDeleted) }, [showDeleted])
+
+  // Камер бүрд хос хаалт байгааг ОДОО баталгаажуулна — startup-ийн ensure_lane_barriers
+  // логик, идемпотент (давхардуулахгүй: устгасныг сэргээнэ, дутууг үүсгэнэ, эгнээ
+  // сольсныг зөөнө). Төлбөрийн дүрмийн «Хаалтгүй камер» зөрчлийн засвар.
+  const verifyBarriers = async () => {
+    setBusy('verify')
+    try {
+      const r = await api('/api/admin/devices/verify-barriers', { method: 'POST' })
+      const parts = []
+      if (r.created) parts.push(`${r.created} шинээр үүсгэв`)
+      if (r.restored) parts.push(`${r.restored} сэргээв`)
+      if (r.moved) parts.push(`${r.moved} эгнээ зөөв`)
+      const broken = r.relay_broken || []
+      toast((parts.length ? parts.join(', ') : 'Бүх камер хаалттайгаа хосолсон — өөрчлөлт хэрэггүй')
+        + (broken.length ? ` · РЕЛЕГҮЙ ${broken.length}: ${broken.map((b) => `${b.site} ${b.name}`).join(', ')}` : ''),
+        broken.length ? 'error' : 'success')
+      load()
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(null) }
+  }
 
   // Санамсаргүй устгасан төхөөрөмжийг status='active' болгож сэргээнэ (түлхүүр, тохиргоо хэвээр)
   const restore = async (d) => {
@@ -140,6 +159,10 @@ export default function DevicesSection() {
             Авто үүссэн хаалтыг харуулах (оношилгоонд)
           </label>
         </div>
+        <button className="btn-secondary" onClick={verifyBarriers} disabled={busy === 'verify'}
+          title="Камер бүрд хос хаалт байгааг шалгаж, дутууг давхардалгүй нөхөж үүсгэнэ">
+          <ShieldCheck size={15} /> {busy === 'verify' ? 'Шалгаж байна…' : 'Хаалтыг баталгаажуулах'}
+        </button>
         <button className="btn-primary" onClick={() => setEditing({
           site_id: sites[0]?.id || '', name: '', device_type: 'camera', vendor: 'Dahua',
           model: '', ip_address: '', lane_no: LANE_DEFAULT.entry, lane_dir: 'entry', auto_open: true,

@@ -12,7 +12,13 @@
 import { AlertTriangle, Info, RotateCcw, Save, Settings2, ShieldAlert } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
+import { useAuth } from '../../auth'
 import { useToast } from '../../components/ui'
+import OpenReasonsCard from './OpenReasonsCard'
+
+// Зогсоол сонгогчийн «ерөнхий» утга — бүх зогсоолын анхдагчийг ЭНЭ ГАЗРААС л
+// засна (өмнө нь «Авто цэвэрлэгээ» таб давхар засдаг байсныг арилгав, 2026-09-03)
+const GLOBAL = 'global'
 
 const UNIT_LABEL = { hour: 'цаг', min: 'мин', sec: 'сек', mnt: '₮', count: 'ш' }
 
@@ -35,12 +41,12 @@ const SOURCE_BADGE = {
 }
 
 /** Нэг дүрмийн мөр — үйлчилж буй утга, эх сурвалж, засварын талбар. */
-function RuleRow({ row, draft, onChange, onReset }) {
+function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
   const edited = draft !== undefined
   const shown = edited ? draft : row.value
   const locked = row.source === 'site_column'
-  const [badgeText, badgeCls] = SOURCE_BADGE[edited ? 'site' : row.source] || SOURCE_BADGE.global
-  const overridden = row.source === 'site' || edited
+  const [badgeText, badgeCls] = SOURCE_BADGE[edited && !isGlobal ? 'site' : row.source] || SOURCE_BADGE.global
+  const overridden = !isGlobal && (row.source === 'site' || edited)
 
   const control = () => {
     if (locked) {
@@ -68,7 +74,8 @@ function RuleRow({ row, draft, onChange, onReset }) {
     }
     return (
       <div className="flex items-center gap-1.5">
-        <input className="input w-28 font-mono text-sm" type="number" min="0" value={shown ?? 0}
+        <input className="input w-28 font-mono text-sm" type="number" min={row.min ?? 0}
+          max={row.max ?? undefined} value={shown ?? 0}
           onChange={(e) => onChange(Number(e.target.value))} />
         <span className="text-xs text-slate-500">{UNIT_LABEL[row.unit] || ''}</span>
       </div>
@@ -81,9 +88,14 @@ function RuleRow({ row, draft, onChange, onReset }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{row.name}</span>
           <span className={`text-[10px] px-1.5 py-0.5 rounded border ${badgeCls}`}>{badgeText}</span>
-          {!row.per_site && !locked && (
+          {!row.per_site && !locked && !isGlobal && (
             <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600/40 text-slate-500">
               зөвхөн ерөнхий
+            </span>
+          )}
+          {edited && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-300">
+              хадгалаагүй
             </span>
           )}
         </div>
@@ -117,8 +129,10 @@ function RuleRow({ row, draft, onChange, onReset }) {
   )
 }
 
-export default function PaymentRulesSection() {
+export default function PaymentRulesSection({ onGotoDevices }) {
   const toast = useToast()
+  const { user } = useAuth()
+  const canGlobal = ['SUPER_ADMIN', 'ADMIN'].includes(user?.role)
   const [index, setIndex] = useState(null)
   const [siteId, setSiteId] = useState('')
   const [report, setReport] = useState(null)
@@ -128,7 +142,8 @@ export default function PaymentRulesSection() {
   useEffect(() => {
     api('/api/admin/payment-rules').then((d) => {
       setIndex(d)
-      if (d.sites?.length) setSiteId((cur) => cur || d.sites[0].id)
+      // Эхлээд ЕРӨНХИЙ горим (бүх зогсоолын анхдагч), эрхгүй бол эхний зогсоол
+      setSiteId((cur) => cur || (canGlobal ? GLOBAL : (d.sites?.[0]?.id || '')))
     }).catch((e) => toast(e.message, 'error'))
   }, [])
 
@@ -150,6 +165,8 @@ export default function PaymentRulesSection() {
 
   const dirty = Object.values(draft).some((g) => Object.keys(g).length > 0)
 
+  const isGlobal = siteId === GLOBAL
+
   const save = async () => {
     setBusy(true)
     try {
@@ -157,12 +174,14 @@ export default function PaymentRulesSection() {
       setReport(fresh)
       setDraft({})
       api('/api/admin/payment-rules').then(setIndex).catch(() => {})
-      toast('Хадгалагдлаа — дараагийн уншилтаас эхлэн үйлчилнэ')
+      toast(isGlobal
+        ? 'Ерөнхий дүрэм хадгалагдлаа — тусгай дүрэмгүй бүх зогсоолд үйлчилнэ'
+        : 'Хадгалагдлаа — дараагийн уншилтаас эхлэн үйлчилнэ')
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
 
   if (!index) return <div className="text-sm text-slate-500">Ачаалж байна…</div>
-  if (!index.sites.length) return <div className="text-sm text-slate-500">Зогсоол алга.</div>
+  if (!index.sites.length && !canGlobal) return <div className="text-sm text-slate-500">Зогсоол алга.</div>
 
   const groups = report
     ? Object.entries(index.groups).map(([g, name]) => ([
@@ -187,13 +206,20 @@ export default function PaymentRulesSection() {
         <div className="flex flex-wrap items-center gap-2">
           <select className="input w-auto min-w-[16rem]" value={siteId}
             onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
+            {canGlobal && <option value={GLOBAL}>Ерөнхий — бүх зогсоолын анхдагч</option>}
             {index.sites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}{s.override_count ? ` — ${s.override_count} тусгай дүрэм` : ''}
               </option>
             ))}
           </select>
-          {report && (
+          {report && isGlobal && (
+            <span className="text-xs text-slate-500">
+              Энд хадгалсан утга <b className="text-slate-300">тусгай дүрэмгүй бүх зогсоолд</b> үйлчилнэ.
+              Зогсоол сонговол тэр зогсоолын давхаргыг засна.
+            </span>
+          )}
+          {report && !isGlobal && (
             <span className="text-xs text-slate-500">
               Тариф: <b className="text-slate-300">{report.tariff?.name || 'холбоогүй'}</b>
               {report.site_flags?.no_charge && ' · төлбөр авахгүй зогсоол'}
@@ -204,7 +230,7 @@ export default function PaymentRulesSection() {
       </div>
 
       {/* ── Зөрчлийн шалгалт: «төлсөн ч хаалт нээгдэхгүй» тохиолдлын урьдчилсан илрүүлэлт ── */}
-      {report && (
+      {report && !isGlobal && (
         <div className="card space-y-2">
           <h3 className="font-semibold text-sm flex items-center gap-2">
             <ShieldAlert size={15} className="text-amber-400" /> Зөрчлийн шалгалт
@@ -224,7 +250,12 @@ export default function PaymentRulesSection() {
                   <st.Icon size={14} /> {c.title}
                 </div>
                 <p className="text-xs text-slate-400 mt-1">{c.detail}</p>
-                <p className="text-xs text-slate-500 mt-1">→ {c.fix}</p>
+                <p className="text-xs text-slate-500 mt-1">→ {c.fix}
+                  {onGotoDevices && /Төхөөрөмж/.test(c.fix) && (
+                    <button type="button" className="ml-2 underline text-accent cursor-pointer"
+                      onClick={onGotoDevices}>Төхөөрөмж таб руу</button>
+                  )}
+                </p>
               </div>
             )
           })}
@@ -236,7 +267,7 @@ export default function PaymentRulesSection() {
         <div key={g} className="card">
           <h3 className="font-semibold text-sm mb-1">{name}</h3>
           {rows.map((r) => (
-            <RuleRow key={`${r.group}.${r.key}`} row={r}
+            <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal}
               draft={draft[r.group]?.[r.key] === undefined ? undefined
                 : (draft[r.group][r.key] === null ? r.global_value : draft[r.group][r.key])}
               onChange={(v) => setVal(r.group, r.key, v)}
@@ -245,8 +276,11 @@ export default function PaymentRulesSection() {
         </div>
       ))}
 
+      {/* Нээх шалтгаан — оператор төлбөргүй гаргах шалтгааны жагсаалт (систем даяар) */}
+      {report && isGlobal && <OpenReasonsCard toast={toast} />}
+
       {/* ── Энд БИШ тохируулагддаг дүрмүүд — хаанаас засахыг заана ── */}
-      {report && (
+      {report && !isGlobal && (
         <div className="card space-y-3">
           <h3 className="font-semibold text-sm">Өөр хуудсанд тохируулагддаг дүрмүүд</h3>
           <div>

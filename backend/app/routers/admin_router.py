@@ -395,6 +395,17 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
     db.add(site)
     db.flush()
     grant_site(user, site.id)  # үүсгэгчийн хамрах хүрээнд шинэ зогсоолыг нэмнэ
+    # Wizard-аас ирсэн зогсоолын төлбөрийн дүрэм (суурь хураамж, эрт гарах
+    # хамгаалалт, орох дугаарын шалгалт г.м) — Тохиргоо → Төлбөрийн дүрэм
+    # табтай ИЖИЛ давхаргад бичигдэнэ (2026-09-03).
+    if isinstance(body.get("payment_rules"), dict):
+        from ..services import app_settings as A
+        from ..services import payment_rules as PR
+        for group, values in body["payment_rules"].items():
+            if group in PR.group_names() and isinstance(values, dict):
+                A.set_site_rules(db, group, site.id, PR.clamp_values(group, values),
+                                 user.username)
+        A.invalidate_cache()
     _audit(db, user, "CREATE", "site", site.id, body)
     db.commit()
     return to_dict(site, extra={"pay_url": site_pay_url(site)})
@@ -1277,6 +1288,28 @@ def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), 
     return to_dict(device)
 
 
+@router.post("/devices/verify-barriers")
+def verify_barriers(db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+    """Камер бүрд хос хаалт байгааг ОДОО баталгаажуулна (startup-тай ижил логик).
+
+    Идемпотент: байгаа хаалтыг давхардуулахгүй — устгагдсаныг сэргээнэ, эгнээ
+    сольсныг зөөнө, огт байхгүйг л шинээр үүсгэнэ. Дараа нь реле олдохгүй
+    хаалтуудыг нэрээр нь буцаана (тэдгээр нь команд үүссэн ч хөдөлдөггүй)."""
+    from ..services.device_auto import ensure_lane_barriers
+    res = ensure_lane_barriers(db)
+    allowed = operator_sites(user)
+    broken = []
+    for bid in res.get("relay_broken", []):
+        b = db.get(Device, bid)
+        if b and (allowed is None or b.site_id in allowed):
+            broken.append({"id": b.id, "name": b.name, "site": b.site.name if b.site else "",
+                           "lane_no": b.lane_no, "lane_dir": b.lane_dir})
+    _audit(db, user, "VERIFY", "barriers", "-", {k: v for k, v in res.items() if k != "relay_broken"})
+    db.commit()
+    return {"restored": res["restored"], "created": res["created"], "moved": res["moved"],
+            "relay_broken": broken}
+
+
 @router.put("/devices/{device_id}")
 def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = Depends(get_db),
                   user: User = Depends(require("settings"))):
@@ -1670,6 +1703,79 @@ def list_drivers(q: str | None = None, company: str | None = None,
             for d in query.limit(2000).all()]
 
 
+@router.get("/drivers/duplicates")
+def driver_duplicates(db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
+    """Ижил дугаар + ижил хамрах хүрээнд ИДЭВХТЭЙ 2+ бүртгэл — жагсаалт.
+
+    Прод дээр 0023УБЭ гурван удаа (Monnis international ×2, Зоригоо захирал)
+    бүртгэгдсэн байсан (2026-09-03). Ийм үед find_registered аль нэгийг
+    санамсаргүй сонгодог — нэг нь NIGHT, нөгөө нь CONTRACT бол төлбөр
+    тодорхойгүй болно. Хуучин Excel импорт (plate→dict) ч зөвхөн нэгийг нь
+    шинэчилж, үлдсэн нь хөндөгдөлгүй үлддэг байв."""
+    from sqlalchemy import func as _f
+    allowed = operator_sites(user)
+    q = db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True))
+    if allowed:
+        q = q.filter(RegisteredDriver.site_id.in_(allowed)
+                     | (RegisteredDriver.site_id.is_(None)
+                        & (RegisteredDriver.tenant_id == user.tenant_id)))
+    groups: dict[tuple, list] = {}
+    for d in q.all():
+        # Хамрах хүрээ: зогсоолтой бол зогсоол, «бүх зогсоол» бол түрээслэгч
+        key = (d.plate_number, d.site_id or "", (d.tenant_id or "") if not d.site_id else "")
+        groups.setdefault(key, []).append(d)
+    out = []
+    for (plate, sid, _t), rows in groups.items():
+        if len(rows) < 2:
+            continue
+        site_name = rows[0].site.name if rows[0].site else "Бүх зогсоол"
+        out.append({"plate_number": plate, "site_id": sid or None, "site_name": site_name,
+                    "count": len(rows),
+                    "rows": [{"id": r.id, "company": r.company, "full_name": r.full_name,
+                              "contract_type": r.contract_type,
+                              "valid_to": r.valid_to.isoformat() if r.valid_to else None,
+                              "created_at": r.created_at.isoformat() if r.created_at else None}
+                             for r in sorted(rows, key=lambda r: (r.valid_to or datetime.min),
+                                             reverse=True)]})
+    out.sort(key=lambda g: (-g["count"], g["plate_number"]))
+    return out
+
+
+@router.post("/drivers/dedupe")
+def driver_dedupe(body: dict | None = None, db: Session = Depends(get_db),
+                  user: User = Depends(require("drivers"))):
+    """Давхардсан бүртгэлийн ХАМГИЙН УРТ ХҮЧИНТЭЙГ нь үлдээж бусдыг ИДЭВХГҮЙ
+    болгоно (устгахгүй — түүх, сэргээх боломж үлдэнэ). body.dry_run=true бол
+    зөвхөн юу болохыг буцаана. Нэгтгэхдээ хоосон нэр/байгууллагыг бусдаас нөхнө."""
+    dry = bool((body or {}).get("dry_run"))
+    if user.role not in ("ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(403, "Давхардал цэвэрлэх эрх зөвхөн админд бий.")
+    groups = driver_duplicates(db, user)
+    deactivated, kept = [], []
+    for g in groups:
+        keep_id = g["rows"][0]["id"]          # хамгийн урт хүчинтэй нь эхэнд
+        keep = db.get(RegisteredDriver, keep_id)
+        for r in g["rows"][1:]:
+            d = db.get(RegisteredDriver, r["id"])
+            if not d:
+                continue
+            if keep is not None:
+                keep.full_name = keep.full_name or d.full_name
+                keep.company = keep.company or d.company
+                keep.note = keep.note or d.note
+                keep.phone = keep.phone or d.phone
+            if not dry:
+                d.is_active = False
+                d.note = f"{d.note + ' | ' if d.note else ''}давхардал: {keep_id} үлдээв"[:1000]
+            deactivated.append({"id": d.id, "plate": d.plate_number, "company": d.company})
+        kept.append({"id": keep_id, "plate": g["plate_number"]})
+    if not dry:
+        _audit(db, user, "DEDUPE", "driver", "-", {"deactivated": len(deactivated),
+                                                     "groups": len(groups)})
+        db.commit()
+    return {"dry_run": dry, "groups": len(groups), "kept": kept, "deactivated": deactivated}
+
+
 @router.get("/drivers/companies")
 def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
     """Байгууллагын жагсаалт + машины тоо — шүүлтүүрт."""
@@ -1678,17 +1784,67 @@ def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(re
          .filter(RegisteredDriver.company.isnot(None), RegisteredDriver.company != ""))
     allowed = operator_sites(user)
     if allowed:
-        q = q.filter(RegisteredDriver.site_id.in_(allowed))
+        cond = RegisteredDriver.site_id.in_(allowed)
+        if user.tenant_id:   # жагсаалттай ижил дүрэм — «бүх зогсоолын» машин ч орно
+            cond = cond | (RegisteredDriver.site_id.is_(None)
+                           & (RegisteredDriver.tenant_id == user.tenant_id))
+        q = q.filter(cond)
     rows = q.group_by(RegisteredDriver.company).order_by(RegisteredDriver.company).all()
     return [{"company": c, "count": n} for c, n in rows]
 
 
-def _parse_dt(value: str, field: str) -> datetime:
-    """ISO огноог уншина — буруу формат 500 биш 400 өгнө."""
+def _parse_dt(value: str, field: str, end_of_day: bool = False) -> datetime:
+    """ISO огноог уншина — буруу формат 500 биш 400 өгнө.
+
+    ЗӨВХӨН ОГНОО («2027-07-28») ирвэл УБ-ын хананы өдрийн ХИЛ болгон UTC руу
+    хөрвүүлнэ: valid_from = тэр өдрийн 00:00 УБ, valid_to = 23:59:59 УБ.
+    Өмнө нь шууд 00:00 UTC (=08:00 УБ) гэж хадгалдаг тул гэрээ эхний өдрийн
+    өглөө 8 цаг хүртэл, сүүлийн өдрийн 08:00-оос хойш ХҮЧИНГҮЙ байсан —
+    жолооч сүүлчийн өдрийнхөө оройноос төлбөртэй болдог байв (2026-09-03)."""
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         raise HTTPException(400, f"{field}: огнооны формат буруу (ISO байх ёстой): {value!r}")
+    if len(value.strip()) == 10:   # зөвхөн огноо — цаггүй
+        if end_of_day:
+            dt = dt.replace(hour=23, minute=59, second=59)
+        dt -= timedelta(hours=settings.tz_offset_hours)
+    return dt
+
+
+CONTRACT_TYPES = ("MONTHLY", "CONTRACT", "VIP", "STAFF", "SPECIAL", "TRANSIT", "NIGHT")
+
+
+def _driver_validate(body: dict, existing: RegisteredDriver | None = None) -> None:
+    """Бүртгэлийн логик шалгалт — UI-аас гадна API/импортоор ч зөрчил орохгүй."""
+    ct = body.get("contract_type", existing.contract_type if existing else "MONTHLY")
+    if ct not in CONTRACT_TYPES:
+        raise HTTPException(400, f"contract_type буруу: {ct!r} — {', '.join(CONTRACT_TYPES)}")
+    f = body.get("free_from", existing.free_from if existing else None) or None
+    u = body.get("free_until", existing.free_until if existing else None) or None
+    if bool(f) != bool(u):
+        raise HTTPException(400, "Үнэгүй цагийн цонх: эхлэх, дуусах цагийг ХОЁУЛАНГ нь "
+                                 "бөглөнө (эсвэл хоёуланг нь хоосон үлдээнэ)")
+    if f and u and f == u:
+        raise HTTPException(400, "Үнэгүй цонхны эхлэх, дуусах цаг ижил байж болохгүй")
+
+
+def _driver_duplicate(db, plate: str, site_id: str | None, tenant_id: str | None,
+                      exclude_id: str | None = None) -> RegisteredDriver | None:
+    """Ижил дугаар ижил хамрах хүрээнд (зогсоол / «бүх зогсоол»+түрээслэгч)
+    ИДЭВХТЭЙ бүртгэлтэй юу. Давхардал нь find_registered-ийг тодорхойгүй
+    болгодог (аль нь таарах нь санамсаргүй) тул үүсгэхийг зогсооно."""
+    q = db.query(RegisteredDriver).filter(RegisteredDriver.plate_number == plate,
+                                          RegisteredDriver.is_active.is_(True))
+    if site_id:
+        q = q.filter(RegisteredDriver.site_id == site_id)
+    else:
+        q = q.filter(RegisteredDriver.site_id.is_(None),
+                     RegisteredDriver.tenant_id == tenant_id if tenant_id
+                     else RegisteredDriver.tenant_id.is_(None))
+    if exclude_id:
+        q = q.filter(RegisteredDriver.id != exclude_id)
+    return q.first()
 
 
 def _site_tenant(db, site_id: str | None):
@@ -1732,18 +1888,30 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
             raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоолд машин бүртгэх эрхтэй.")
         if not site_id and not user.tenant_id:
             raise HTTPException(403, "«Бүх зогсоол» бүртгэлийг түрээслэгчийн хэрэглэгч л хийнэ — зогсоолоо сонгоно уу.")
+    _driver_validate(body)
+    plate = body["plate_number"].upper().replace(" ", "")
+    tenant_id = _site_tenant(db, site_id) if site_id else user.tenant_id
+    dup = _driver_duplicate(db, plate, site_id, tenant_id)
+    if dup:
+        raise HTTPException(409, f"{plate} энэ хамрах хүрээнд аль хэдийн идэвхтэй "
+                                 f"бүртгэлтэй ({dup.company or dup.full_name or dup.contract_type}, "
+                                 f"{dup.valid_to:%Y-%m-%d} хүртэл) — давхар бүртгэл үүсгэхгүй. "
+                                 "Тэр бүртгэлийг засна уу.")
+    vf = _parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow()
+    vt = _parse_dt(body["valid_to"], "valid_to", end_of_day=True)
+    if vt < vf:
+        raise HTTPException(400, "Дуусах огноо эхлэх огнооноос өмнө байж болохгүй")
     d = RegisteredDriver(
-        plate_number=body["plate_number"].upper().replace(" ", ""),
+        plate_number=plate,
         full_name=body.get("full_name", ""), phone=body.get("phone", ""),
         company=body.get("company", ""), note=body.get("note", ""),
         contract_type=body.get("contract_type", "MONTHLY"),
-        tenant_id=_site_tenant(db, site_id) if site_id else user.tenant_id,
+        tenant_id=tenant_id,
         site_id=site_id, monthly_fee=body.get("monthly_fee", 0),
         free_from=_hhmm_or_400(body.get("free_from"), "free_from"),
         free_until=_hhmm_or_400(body.get("free_until"), "free_until"),
         free_first_minutes=body.get("free_first_minutes") or None,
-        valid_from=_parse_dt(body["valid_from"], "valid_from") if body.get("valid_from") else datetime.utcnow(),
-        valid_to=_parse_dt(body["valid_to"], "valid_to"),
+        valid_from=vf, valid_to=vt,
     )
     db.add(d)
     db.flush()
@@ -1772,6 +1940,18 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
                 raise HTTPException(403, "Зөвхөн өөрийн хариуцах зогсоол руу шилжүүлэх эрхтэй.")
             if not tgt and not user.tenant_id:
                 raise HTTPException(403, "«Бүх зогсоол» болгох эрх түрээслэгчийн хэрэглэгчид л бий.")
+    _driver_validate(body, d)
+    # Дугаар/хамрах хүрээ өөрчлөгдөж эсвэл идэвхжиж байвал давхардал шалгана
+    new_plate = (body.get("plate_number") or d.plate_number).upper().replace(" ", "")
+    new_site = body["site_id"] if "site_id" in body else d.site_id
+    new_tenant = (_site_tenant(db, new_site) if new_site else (user.tenant_id or d.tenant_id)) \
+        if "site_id" in body else d.tenant_id
+    if body.get("is_active", d.is_active):
+        dup = _driver_duplicate(db, new_plate, new_site, new_tenant, exclude_id=d.id)
+        if dup:
+            raise HTTPException(409, f"{new_plate} энэ хамрах хүрээнд өөр идэвхтэй бүртгэлтэй "
+                                     f"({dup.company or dup.full_name or dup.contract_type}) — "
+                                     "давхардуулахгүй. Нөгөөг нь идэвхгүй болгоно уу.")
     for k in ("full_name", "phone", "contract_type", "site_id", "monthly_fee",
               "is_active", "company", "note"):
         if k in body:
@@ -1787,9 +1967,12 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
         d.tenant_id = _site_tenant(db, body["site_id"]) if body["site_id"] else (user.tenant_id or d.tenant_id)
     if body.get("plate_number"):
         d.plate_number = body["plate_number"].upper().replace(" ", "")
-    for k in ("valid_from", "valid_to"):
-        if body.get(k):
-            setattr(d, k, _parse_dt(body[k], k))
+    if body.get("valid_from"):
+        d.valid_from = _parse_dt(body["valid_from"], "valid_from")
+    if body.get("valid_to"):
+        d.valid_to = _parse_dt(body["valid_to"], "valid_to", end_of_day=True)
+    if d.valid_to < d.valid_from:
+        raise HTTPException(400, "Дуусах огноо эхлэх огнооноос өмнө байж болохгүй")
     _audit(db, user, "UPDATE", "driver", driver_id, body)
     db.commit()
     return to_dict(d)
@@ -1873,6 +2056,8 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
             raise HTTPException(403, "«Бүх зогсоол» импортыг түрээслэгчийн хэрэглэгч л хийнэ "
                                      "(зогсоолоо сонгоно уу).")
 
+    if contract_type not in CONTRACT_TYPES:
+        raise HTTPException(400, f"contract_type буруу: {contract_type!r}")
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Зөвхөн .xlsx файл дэмжинэ")
     data = await file.read()
@@ -2042,35 +2227,51 @@ def payment_rules_index(db: Session = Depends(get_db),
 @router.get("/payment-rules/{site_id}")
 def payment_rules_site(site_id: str, db: Session = Depends(get_db),
                        user: User = Depends(require("settings"))):
-    """Нэг зогсоолын ҮЙЛЧИЛЖ буй дүрмүүд, эх сурвалж, ЗӨРЧЛИЙН шалгалт."""
+    """Нэг зогсоолын ҮЙЛЧИЛЖ буй дүрмүүд, эх сурвалж, ЗӨРЧЛИЙН шалгалт.
+    site_id="global" → бүх зогсоолын АНХДАГЧ (ерөнхий) утгууд."""
+    from ..services import payment_rules as PR
+    if site_id == "global":
+        return PR.global_report(db)
     enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
-    from ..services import payment_rules as PR
     return PR.site_report(db, site)
 
 
 @router.put("/payment-rules/{site_id}")
 def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_db),
                             user: User = Depends(require("settings"))):
-    """Зогсоолын давхаргыг хадгална. body = {"<бүлэг>": {"<түлхүүр>": утга|null}}.
-    null / хоосон мөр = тухайн түлхүүрийг ГЛОБАЛ утга руу нь буцаана."""
-    enforce_site(user, site_id)
-    site = db.get(ParkingSite, site_id)
-    if not site:
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    """Дүрэм хадгална. body = {"<бүлэг>": {"<түлхүүр>": утга|null}}.
+
+    site_id="global" → ЕРӨНХИЙ утга (бүх зогсоолын анхдагч; SUPER_ADMIN/ADMIN).
+    Бусад → тухайн зогсоолын давхарга; null / хоосон мөр = ерөнхий рүү буцаах.
+    Тоон утга MIN/MAX мужид шахагдана (payment_rules.clamp_values)."""
     from ..services import app_settings as A
     from ..services import payment_rules as PR
+    is_global = site_id == "global"
+    if is_global:
+        if operator_sites(user) is not None:
+            raise HTTPException(403, "Ерөнхий дүрмийг зөвхөн бүх зогсоолын эрхтэй админ өөрчилнө.")
+        site = None
+    else:
+        enforce_site(user, site_id)
+        site = db.get(ParkingSite, site_id)
+        if not site:
+            raise HTTPException(404, "Зогсоол олдсонгүй")
     saved = {}
     for group, values in (body or {}).items():
         if group not in PR.group_names() or not isinstance(values, dict):
             continue
-        saved[group] = A.set_site_rules(db, group, site_id, values, user.username)
+        values = PR.clamp_values(group, values)
+        if is_global:
+            saved[group] = A.set_rules(db, group, values, user.username)
+        else:
+            saved[group] = A.set_site_rules(db, group, site_id, values, user.username)
     _audit(db, user, "UPDATE", "payment_rules", site_id, saved)
     db.commit()
     A.invalidate_cache()
-    return PR.site_report(db, site)
+    return PR.global_report(db) if is_global else PR.site_report(db, site)
 
 
 @router.get("/driver-type/rules")

@@ -47,6 +47,9 @@ class SiteCreate(_In):
     bank_account_name: str | None = None
     screen_config: dict | None = None
     tenant_id: str | None = None
+    # Wizard: {"exit_rules": {...}, "barrier_rules": {...}, ...} — зогсоолын
+    # давхаргад (Тохиргоо → Төлбөрийн дүрэм) шууд бичигдэнэ
+    payment_rules: dict | None = None
 
 
 class SiteUpdate(SiteCreate):

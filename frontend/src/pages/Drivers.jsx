@@ -1,5 +1,5 @@
 // Бүртгэлтэй машин — гэрээт/сарын эрхтэй машинууд
-import { Plus, Search, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Plus, Search, Trash2, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useAuth } from '../auth'
@@ -154,6 +154,20 @@ export default function Drivers() {
   const [importing, setImporting] = useState(false)
   // «Шөнө үнэгүй» төрлийн глобал цонх (Тохиргооны эрхтэй хүн 🌙-оор өөрчилнө)
   const [nightRules, setNightRules] = useState(null)
+  // Давхардсан бүртгэл (ижил дугаар + ижил хамрах хүрээ, идэвхтэй 2+) — гэрээт
+  // таних логик аль нэгийг санамсаргүй сонгодог тул ил гаргаж цэвэрлүүлнэ
+  const [dups, setDups] = useState([])
+  const loadDups = () => api('/api/admin/drivers/duplicates').then(setDups).catch(() => {})
+  const dedupe = async () => {
+    const preview = await api('/api/admin/drivers/dedupe', { method: 'POST', body: { dry_run: true } }).catch((e) => { toast(e.message, 'error'); return null })
+    if (!preview) return
+    if (!window.confirm(`${preview.groups} дугаарын ${preview.deactivated.length} давхар бүртгэлийг ИДЭВХГҮЙ болгоно (устгахгүй).\n\nХамгийн урт хүчинтэйг нь үлдээж, хоосон нэр/байгууллагыг бусдаас нөхнө. Үргэлжлүүлэх үү?`)) return
+    try {
+      const r = await api('/api/admin/drivers/dedupe', { method: 'POST', body: {} })
+      toast(`${r.deactivated.length} давхар бүртгэл идэвхгүй боллоо`)
+      load(); loadDups()
+    } catch (e) { toast(e.message, 'error') }
+  }
   const [nightEdit, setNightEdit] = useState(null)   // {night_from, night_until}
   const loadNight = () => api('/api/admin/driver-type/rules').then(setNightRules).catch(() => {})
   const nightLabel = nightRules
@@ -176,7 +190,7 @@ export default function Drivers() {
     api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
-  useEffect(() => { load(); loadNight(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => { load(); loadNight(); loadDups(); api('/api/admin/sites').then(setSites) }, [])
   useEffect(() => { load() }, [company, siteFilter, typeFilter])
 
   const remove = async (d) => {
@@ -234,6 +248,24 @@ export default function Drivers() {
           <button className="btn-primary" onClick={() => setEditing(blank)}><Plus size={16} /> Бүртгэх</button>
         </div>
       </div>
+      {dups.length > 0 && (
+        <div className="card border-amber-500/40 bg-amber-500/5 py-3 flex flex-wrap items-center gap-3">
+          <AlertTriangle size={16} className="text-amber-400 shrink-0" />
+          <div className="text-sm flex-1 min-w-64">
+            <b className="text-amber-300">{dups.length} дугаар давхар бүртгэлтэй</b>
+            <span className="text-slate-400"> — ижил дугаар ижил хамрах хүрээнд 2+ идэвхтэй мөр. Ийм үед аль бүртгэл нь
+            (төрөл, цонх, хугацаа) үйлчлэх нь тодорхойгүй.</span>
+            <div className="text-xs text-slate-500 mt-1 truncate">
+              {dups.slice(0, 8).map((g) => `${g.plate_number} ×${g.count} (${g.site_name})`).join(' · ')}{dups.length > 8 ? ' …' : ''}
+            </div>
+          </div>
+          {isAdmin && (
+            <button className="btn-secondary py-1.5 text-xs whitespace-nowrap" onClick={dedupe}>
+              Давхардлыг цэвэрлэх
+            </button>
+          )}
+        </div>
+      )}
       <div className="card flex flex-wrap gap-2 py-3 items-center">
         <input className="input font-mono flex-1 min-w-48" placeholder="Дугаар, нэр, байгууллагаар хайх…"
           value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />

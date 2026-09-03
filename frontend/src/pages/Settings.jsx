@@ -1,8 +1,8 @@
-// Тохиргоо: Зогсоол / Төхөөрөмж / LED дэлгэц / Төлбөрийн дүрэм / Авто цэвэрлэгээ /
+// Тохиргоо: Зогсоол / Төхөөрөмж / LED дэлгэц / Төлбөрийн дүрэм / Автомат ажил /
 // Түрээслэгч / Холболт — хэсэг бүр settings/ доторх тусдаа файлд
 import { useState } from 'react'
 import { useAuth } from '../auth'
-import AutoCloseSection from './settings/AutoCloseSection'
+import AutomationSection from './settings/AutomationSection'
 import DevicesSection from './settings/DevicesSection'
 import IntegrationsSection from './settings/IntegrationsSection'
 import PaymentRulesSection from './settings/PaymentRulesSection'
@@ -14,8 +14,15 @@ export default function Settings() {
   const [tab, setTab] = useState('sites')
   const { user } = useAuth()
   const canIntegrations = ['SUPER_ADMIN', 'ADMIN'].includes(user?.role)
+  // Табын зохион байгуулалт (2026-09-03):
+  //   Зогсоол/Төхөөрөмж/LED — ЮУ байгаа (бүтэц)
+  //   Төлбөрийн дүрэм       — ЯАЖ шийдэх (бүх дүрэм, зогсоол бүрээр; ерөнхий горимтой)
+  //   Автомат ажил          — ард нь АЖИЛЛАДАГ зүйлс (камерын эрүүл мэнд, лог нөхөлт, цэвэрлэгээ)
+  //   Түрээслэгч/Холболт    — ХЭН, ХААШАА (данс, API)
+  // Өмнөх «Авто цэвэрлэгээ» таб нь дүрэм + автомат ажил хольсон, Төлбөрийн дүрэмтэй
+  // давхцаж байсан тул задлав.
   const tabs = [['sites', 'Зогсоол'], ['devices', 'Төхөөрөмж'], ['screen', 'LED дэлгэц'],
-    ['payrules', 'Төлбөрийн дүрэм'], ['autoclose', 'Авто цэвэрлэгээ'],
+    ['payrules', 'Төлбөрийн дүрэм'], ['automation', 'Автомат ажил'],
     // Түрээслэгч зөвхөн SUPER_ADMIN-д; Холболт (данс/API/цэнэглэгч) ADMIN-д мөн
     // харагдана (өөрийн хамрах хүрээгээр — backend шүүнэ)
     ...(user?.role === 'SUPER_ADMIN' ? [['tenants', 'Түрээслэгч']] : []),
@@ -36,8 +43,8 @@ export default function Settings() {
         canIntegrations ? () => setTab('integrations') : null} />}
       {tab === 'devices' && <DevicesSection />}
       {tab === 'screen' && <ScreenSection />}
-      {tab === 'payrules' && <PaymentRulesSection />}
-      {tab === 'autoclose' && <AutoCloseSection />}
+      {tab === 'payrules' && <PaymentRulesSection onGotoDevices={() => setTab('devices')} />}
+      {tab === 'automation' && <AutomationSection onGotoRules={() => setTab('payrules')} />}
       {tab === 'tenants' && <TenantsSection onGotoIntegrations={() => setTab('integrations')} />}
       {tab === 'integrations' && <IntegrationsSection />}
     </div>

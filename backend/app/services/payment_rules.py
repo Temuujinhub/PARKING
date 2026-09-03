@@ -183,18 +183,6 @@ CATALOG: list[dict] = [
      "desc": "Нэхэмжлэл хуудасны «Шөнийн хаалт» үйлдэлд.",
      "applies": "Шөнийн хаалт", "not_applied": "—"},
 
-    # ── Гэрээний нөхцөл ─────────────────────────────────────────────────────
-    {"group": A.DRIVERTYPE_KEY, "key": "night_from", "unit": "time",
-     "name": "«Шөнө үнэгүй» цонх — эхлэх",
-     "desc": "NIGHT төрлийн гэрээт машинд үйлчлэх үнэгүй цонхны эхлэл (УБ цаг). "
-             "Жолооч дээр өөрийн цонх заасан бол тэр нь ЭНЭ цонхыг дарна.",
-     "applies": "Төлбөр тооцох бүрд · contract_type=NIGHT",
-     "not_applied": "Жолооч дээр free_from/free_until заасан үед"},
-    {"group": A.DRIVERTYPE_KEY, "key": "night_until", "unit": "time",
-     "name": "«Шөнө үнэгүй» цонх — дуусах",
-     "desc": "from > until бол ШӨНӨ ДАМНАСАН цонх (21:00–08:00).",
-     "applies": "Төлбөр тооцох бүрд · contract_type=NIGHT",
-     "not_applied": "Жолооч дээр free_from/free_until заасан үед"},
 ]
 
 # Зогсоолын БАГАНААР тохируулагддаг (app_settings-д биш) дүрмүүд — UI-д
@@ -233,8 +221,54 @@ _GROUP_NAMES = {
     A.ENTRYPLATE_KEY: "Орох дугаарын шалгалт",
     A.BLACKLIST_KEY: "Өр ба хар жагсаалт",
     A.AUTOCLOSE_KEY: "Авто цэвэрлэгээ ба өр үүсгэх",
-    A.DRIVERTYPE_KEY: "Гэрээний нөхцөл",
 }
+
+# Тоон дүрмийн ЗӨВШӨӨРӨГДӨХ ДЭЭД хязгаар — өмнө нь зөвхөн UI (AutoCloseSection
+# BOUNDS) шахдаг байсан тул API-аар шууд бичвэл 10⁹ секундын цонх орж болох байв.
+MAX: dict[tuple[str, str], int] = {
+    (A.EXITRULES_KEY, "no_session_fee"): 1_000_000,
+    (A.EXITRULES_KEY, "min_stay_seconds"): 3600,
+    (A.EXITRULES_KEY, "fake_exit_minutes"): 1440,
+    (A.EXITRULES_KEY, "reopen_max_hours"): 720,
+    (A.BARRIER_KEY, "dedup_seconds"): 300,
+    (A.BARRIER_KEY, "entry_burst_seconds"): 60,
+    (A.BARRIER_KEY, "reopen_cooldown_sec"): 120,
+    (A.ENTRYPLATE_KEY, "hold_seconds"): 30,
+    (A.BLACKLIST_KEY, "block_exit_debt_count"): 100,
+    (A.BLACKLIST_KEY, "debt_count"): 100,
+    (A.BLACKLIST_KEY, "debt_amount"): 100_000_000,
+    (A.AUTOCLOSE_KEY, "invalid_plate_hours"): 720,
+    (A.AUTOCLOSE_KEY, "awaiting_hours"): 720,
+    (A.AUTOCLOSE_KEY, "entry_only_free_hours"): 720,
+    (A.AUTOCLOSE_KEY, "stale_hours"): 720,
+}
+MIN: dict[tuple[str, str], int] = {
+    (A.BARRIER_KEY, "dedup_seconds"): 3,
+    (A.BARRIER_KEY, "entry_burst_seconds"): 1,
+    (A.BARRIER_KEY, "reopen_cooldown_sec"): 1,
+    (A.ENTRYPLATE_KEY, "hold_seconds"): 1,
+}
+
+
+def clamp_values(group: str, values: dict) -> dict:
+    """PUT-аар ирсэн тоон утгыг [MIN, MAX] мужид шахна; None/"" (=ерөнхий рүү
+    буцаах) болон bool/мөрийг хөндөхгүй."""
+    out = {}
+    for k, v in (values or {}).items():
+        default = A.DEFAULTS.get(group, {}).get(k)
+        if (v is None or (isinstance(v, str) and not v.strip())
+                or isinstance(default, (bool, str, dict)) or default is None):
+            out[k] = v
+            continue
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            out[k] = v
+            continue
+        lo = MIN.get((group, k), 0)
+        hi = MAX.get((group, k))
+        out[k] = max(lo, min(n, hi) if hi is not None else n)
+    return out
 
 
 def group_names() -> dict:
@@ -249,6 +283,7 @@ def catalog() -> list[dict]:
         out.append({**row,
                     "group_name": _GROUP_NAMES.get(g, g),
                     "default": A._base(g)[k],
+                    "min": MIN.get((g, k), 0), "max": MAX.get((g, k)),
                     "per_site": k in A.PER_SITE.get(g, set())})
     return out
 
@@ -275,6 +310,17 @@ def _globals(db) -> dict:
 def effective(db, site_id: str | None) -> dict:
     """Бүлэг бүрийн тухайн зогсоолд ҮЙЛЧИЛЖ буй утгууд."""
     return {g: A.get_rules(db, g, site_id) for g in _GROUP_NAMES}
+
+
+def global_report(db) -> dict:
+    """«Ерөнхий» горим — бүх зогсоолын АНХДАГЧ утгууд (зогсоолын давхаргагүй).
+    Зөрчлийн шалгалт энд ХИЙГДЭХГҮЙ: тариф/төхөөрөмж зогсоол тус бүрийнх."""
+    glob = _globals(db)
+    rules = [{**row, "value": glob[row["group"]][row["key"]],
+              "global_value": glob[row["group"]][row["key"]], "source": "global"}
+             for row in catalog()]
+    return {"site_id": None, "site_name": "Ерөнхий — бүх зогсоолын анхдагч",
+            "site_flags": {}, "rules": rules, "tariff": None, "conflicts": []}
 
 
 def site_report(db, site) -> dict:
@@ -414,11 +460,37 @@ def check_conflicts(db, site, eff: dict | None = None, tariff: dict | None = Non
             "Хэт өндөр утга (>120с) тавихаас болгоомжил.")
 
     # 8. Төхөөрөмжийн талын шалтгаанууд — тохиргоо зөв ч хаалт нээгдэхгүй
-    devs = db.query(Device).filter(Device.site_id == site.id).all()
-    if not [d for d in devs if d.device_type == "barrier"]:
-        add("high", "Хаалтны төхөөрөмж бүртгэгдээгүй",
-            "Энэ зогсоолд barrier төхөөрөмж алга — ямар ч дүрмээр хаалт нээгдэхгүй.",
-            "«Төхөөрөмж» табаас хаалт нэмнэ үү.")
+    devs = db.query(Device).filter(Device.site_id == site.id,
+                                   Device.status == "active").all()
+    cams = [d for d in devs if d.device_type == "camera"]
+    bars = [d for d in devs if d.device_type == "barrier"]
+    if not cams:
+        # Камер огт бүртгэгдээгүй — зориудын (QR-only, түр) байж болно; хаалт
+        # камерын ард АВТОМАТААР үүсдэг тул энд «хаалт алга» гэж хэлэх нь буруу.
+        add("info", "Камер бүртгэгдээгүй зогсоол",
+            "Энэ зогсоолд идэвхтэй LPR камер алга — уншилт ирэхгүй тул хаалтны "
+            "дүрмүүд ажиллах зүйлгүй. Камер бүртгэмэгц хаалт нь автоматаар үүснэ.",
+            "Төхөөрөмж хэрэглэдэг зогсоол бол «Төхөөрөмж» табаас камер нэмнэ үү.")
+    else:
+        from .device_auto import barrier_matches_camera
+        unpaired = [c for c in cams if not any(barrier_matches_camera(c, b) for b in bars)]
+        if unpaired:
+            add("high", "Хаалтгүй камер байна",
+                "Дараах камерын эгнээнд идэвхтэй хаалт алга: "
+                + ", ".join(f"{c.name or c.ip_address} (эгнээ {c.lane_no}/{c.lane_dir})"
+                            for c in unpaired)
+                + " — дугаар уншсан ч нээх зүйл байхгүй.",
+                "«Төхөөрөмж» таб → «Хаалтыг баталгаажуулах» — дутуу хаалтыг "
+                "давхардалгүй нөхөж үүсгэнэ (устгасныг сэргээнэ).")
+        # Реле олдохгүй хаалт — команд үүссэн ч хөдлөхгүй
+        from .barrier import relay_note
+        dead = [b for b in bars if relay_note(db, b)]
+        if dead:
+            add("high", "Релегүй хаалт",
+                "Дараах хаалт ижил эгнээнд камергүй тул реле олдохгүй: "
+                + ", ".join(f"{b.name} (эгнээ {b.lane_no}/{b.lane_dir})" for b in dead)
+                + " — машин ирэхэд команд үүссэн ч хөдлөхгүй.",
+                "Тэр эгнээнд камер бүртгэх эсвэл хаалтын эгнээг камерынхтай тааруулна уу.")
     no_auto = [d.name or d.ip_address for d in devs
                if d.device_type == "camera" and d.lane_dir in ("entry", "both")
                and not d.auto_open]

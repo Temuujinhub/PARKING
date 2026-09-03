@@ -68,7 +68,10 @@ export default function SitesSection({ onGotoIntegrations }) {
   const openWizard = () => setWizard({
     step: 1,
     unlimited: false,
-    site: { name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: templates[0]?.id || '' },
+    site: { name: '', site_code: '', zone_code: 'A', address: '', capacity: 50, tariff_template_id: templates[0]?.id || '',
+      registered_only: false, no_charge: false },
+    // Зогсоолын төлбөрийн дүрэм — хоосон = ерөнхий утга (Төлбөрийн дүрэм таб)
+    rules: { no_session_fee: '', min_stay_seconds: '', policy: '', block_exit_debt_count: '' },
     entryLanes: 1, exitLanes: 1,
     devices: Object.fromEntries(genDevices(1, 1).map((d) => [d.key, { enabled: true, ip_address: '' }])),
     created: null,

@@ -220,7 +220,9 @@ PER_SITE: dict[str, set[str]] = {
                     "reopen_max_hours", "wallet_auto_deduct"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "reopen_cooldown_sec",
                   "exit_dedup_reopen"},
-    DRIVERTYPE_KEY: {"night_from", "night_until"},
+    # DRIVERTYPE_KEY (шөнийн цонх) ЗОРИУД байхгүй: энэ нь тодорхой МАШИНУУДАД
+    # (NIGHT төрлийн гэрээт) олгодог нөхцөл тул зогсоолд биш, Бүртгэлтэй машин
+    # хуудасны 🌙 тохиргоонд харьяалагдана (2026-09-03).
 }
 
 # Сонголттой (enum) утгын зөвшөөрөгдөх багц — (бүлэг, түлхүүр) бүрээр.
