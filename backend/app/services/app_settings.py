@@ -413,7 +413,9 @@ def entry_plate_policy(db, site_id: str | None) -> tuple[str, int]:
     Дараалал: ЗОГСООЛЫН давхарга (`_sites`) → хуучин `site_overrides` → глобал."""
     r = get_rules(db, ENTRYPLATE_KEY, site_id)
     pol = r["policy"]
-    if site_id and site_id not in (get_site_overrides(db, ENTRYPLATE_KEY) or {}):
+    # Хуучин механизм зөвхөн шинэ давхаргад ЭНЭ ТҮЛХҮҮР байхгүй үед л үйлчилнэ
+    if site_id and "policy" not in (get_site_overrides(db, ENTRYPLATE_KEY)
+                                    .get(site_id) or {}):
         pol = (r.get("site_overrides") or {}).get(site_id) or pol
     return (pol if pol in _POLICY_CHOICES else "hold"), max(1, int(r["hold_seconds"]))
 
