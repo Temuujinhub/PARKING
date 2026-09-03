@@ -69,21 +69,35 @@ def revenue_excel(data):
                  total_row=total_row)
 
 
+def _iso_local(iso: str | None) -> str:
+    """`_txn_rows`-ийн naive UTC ISO мөрийг УБ-ын хананы цаг болгон буулгана.
+
+    Өмнө нь мөрийг ШУУД зүсдэг байсан тул экспорт 8 цагаар хоцорч, банкны
+    хуулга/ТЕГ-ийн файлтай тулгахад өдрийн зааг зөрдөг байв (2026-09-03).
+    Буруу/хоосон утгад анхны мөрийг эвдэлгүй буцаана."""
+    if not iso:
+        return ""
+    try:
+        return (datetime.fromisoformat(iso) + TZ).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso.replace("T", " ")[:16]
+
+
 def transactions_excel(rows):
     """Дэлгэрэнгүй бичилтийн Excel (rows = _txn_rows-ийн гаралт)."""
-    headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа(мин)", "Машины төрөл",
+    headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Төлсөн", "Хугацаа(мин)", "Машины төрөл",
                "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)", "НӨАТ(₮)", "Нийт(₮)", "Төлсөн(₮)",
                "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
     xrows = [[r["plate_number"], r["site_name"],
-              (r["entry_time"] or "").replace("T", " ")[:16],
-              (r["exit_time"] or "").replace("T", " ")[:16], r["duration_minutes"],
+              _iso_local(r["entry_time"]), _iso_local(r["exit_time"]),
+              _iso_local(r.get("paid_at")), r["duration_minutes"],
               r["car_type"], r["discount_name"] or "", r["base_fee"], r["discount_amount"],
               r["vat_amount"], r["total_fee"], r["paid_amount"], r["provider"] or "",
               r["invoice_no"] or "",
               r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
               r["customer_tin"] or ""] for r in rows]
     return _xlsx("bichilt", "Бичилт", headers, xrows,
-                 widths=(11, 14, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 26, 15, 14, 20, 12, 12))
+                 widths=(11, 14, 17, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 26, 15, 14, 20, 12, 12))
 
 
 def settlement_excel(rows):

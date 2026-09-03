@@ -382,6 +382,25 @@ export default function Health() {
               </div>
             </div>
             <div>
+              {/* Серверийн цаг — «тайлан N цагаар зөрж байна» гомдлын эхний шалгалт.
+                  DB бүхэлдээ UTC; харуулах давхарга нь +8 нэмж УБ-ын цаг гаргана. */}
+              <div className="text-xs text-slate-500 mb-1">Серверийн цаг</div>
+              {d.clock ? (
+                <div>
+                  <span className="font-mono font-bold">{d.clock.local}</span>
+                  <div className="text-[11px] text-slate-500">
+                    УБ (UTC+{d.clock.tz_offset_hours}) · UTC {d.clock.utc}
+                  </div>
+                  {(d.clock.os_utc_skew_sec !== 0 || d.clock.os_tz !== 'Etc/UTC') && (
+                    <div className="text-[11px] text-amber-400">
+                      OS цагийн бүс {d.clock.os_tz} (зөрүү {d.clock.os_utc_skew_sec}с) —
+                      сервер UTC байх ёстой
+                    </div>
+                  )}
+                </div>
+              ) : <span className="text-slate-500">—</span>}
+            </div>
+            <div>
               <div className="text-xs text-slate-500 mb-1">Сервер сүүлд асаасан (reboot)</div>
               {sys.boot_time ? (
                 <div>

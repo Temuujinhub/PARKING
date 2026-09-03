@@ -1990,6 +1990,89 @@ def put_exit_rules(body: dict, db: Session = Depends(get_db),
     return rules
 
 
+@router.get("/barrier/rules")
+def get_barrier_rules_api(db: Session = Depends(get_db),
+                          user: User = Depends(require("settings"))):
+    """Хаалт/уншилтын цагийн цонхнууд (dedup/burst/cooldown) — ГЛОБАЛ утга."""
+    from ..services.app_settings import get_barrier_rules
+    return get_barrier_rules(db)
+
+
+@router.put("/barrier/rules")
+def put_barrier_rules(body: dict, db: Session = Depends(get_db),
+                      user: User = Depends(require("settings"))):
+    from ..services.app_settings import set_barrier_rules
+    rules = set_barrier_rules(db, body or {}, user.username)
+    _audit(db, user, "UPDATE", "barrier_rules", "-", rules)
+    db.commit()
+    return rules
+
+
+# ── ТӨЛБӨРИЙН ДҮРЭМ — нэгдсэн бүртгэл ба зогсоол бүрийн давхарга ──────────
+# «Хэт олон тохиргоо тарсан тул төлбөр төлсөн ч хаалт нээгдэхгүй болдог» гэсэн
+# асуудлын хариу (2026-09-03). Дүрэм БҮРИЙГ нэг дор жагсааж, аль нь тухайн
+# зогсоолд ҮЙЛЧИЛЖ БАЙГААГ, аль хослол нь машиныг гацаахыг шууд харуулна.
+@router.get("/payment-rules")
+def payment_rules_index(db: Session = Depends(get_db),
+                        user: User = Depends(require("settings"))):
+    """Дүрмийн бүртгэл + глобал утга + зогсоол бүрийн давхаргын хураангуй."""
+    from ..services import payment_rules as PR
+    from ..services import app_settings as A
+    allowed = operator_sites(user)
+    q = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
+    if allowed:
+        q = q.filter(ParkingSite.id.in_(allowed))
+    sites = q.order_by(ParkingSite.name).all()
+    overrides = {g: A.get_site_overrides(db, g) for g in PR.group_names()}
+    return {
+        "groups": PR.group_names(),
+        "catalog": PR.catalog(),
+        "globals": {g: A.get_rules(db, g) for g in PR.group_names()},
+        "site_column_rules": PR.SITE_COLUMN_RULES,
+        "tariff_rules": PR.TARIFF_RULES,
+        "sites": [{"id": s.id, "name": s.name, "site_code": s.site_code,
+                   "no_charge": s.no_charge, "registered_only": s.registered_only,
+                   "tariff": s.tariff_template.name if s.tariff_template else None,
+                   "override_count": sum(len(overrides[g].get(s.id) or {})
+                                         for g in overrides)}
+                  for s in sites],
+    }
+
+
+@router.get("/payment-rules/{site_id}")
+def payment_rules_site(site_id: str, db: Session = Depends(get_db),
+                       user: User = Depends(require("settings"))):
+    """Нэг зогсоолын ҮЙЛЧИЛЖ буй дүрмүүд, эх сурвалж, ЗӨРЧЛИЙН шалгалт."""
+    enforce_site(user, site_id)
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    from ..services import payment_rules as PR
+    return PR.site_report(db, site)
+
+
+@router.put("/payment-rules/{site_id}")
+def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_db),
+                            user: User = Depends(require("settings"))):
+    """Зогсоолын давхаргыг хадгална. body = {"<бүлэг>": {"<түлхүүр>": утга|null}}.
+    null / хоосон мөр = тухайн түлхүүрийг ГЛОБАЛ утга руу нь буцаана."""
+    enforce_site(user, site_id)
+    site = db.get(ParkingSite, site_id)
+    if not site:
+        raise HTTPException(404, "Зогсоол олдсонгүй")
+    from ..services import app_settings as A
+    from ..services import payment_rules as PR
+    saved = {}
+    for group, values in (body or {}).items():
+        if group not in PR.group_names() or not isinstance(values, dict):
+            continue
+        saved[group] = A.set_site_rules(db, group, site_id, values, user.username)
+    _audit(db, user, "UPDATE", "payment_rules", site_id, saved)
+    db.commit()
+    A.invalidate_cache()
+    return PR.site_report(db, site)
+
+
 @router.get("/driver-type/rules")
 def get_driver_type_rules_api(db: Session = Depends(get_db),
                               user: User = Depends(require("drivers"))):

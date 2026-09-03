@@ -3,7 +3,7 @@
 // задлав. Алдаа toast-оор харагдана (өмнө нь catch(()=>{}) чимээгүй залгидаг байсан).
 import { Download } from 'lucide-react'
 import { useState } from 'react'
-import { api, fmt, fmtDate, fmtDur } from '../api'
+import { api, fmt, fmtDate, fmtDur, fmtHM, fmtMDHM } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { useDownload } from '../hooks/useDownload'
 import { Badge, Modal, Table, useToast } from './ui'
@@ -13,7 +13,9 @@ const lastDayOf = (month) => {
   const [y, m] = month.split('-').map(Number)
   return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`
 }
-const hm = (iso) => iso ? iso.replace('T', ' ').slice(11, 16) : '—'
+// UTC → УБ цаг. Өмнө нь мөрийг шууд зүсдэг байсан тул тайлан 8 цагаар
+// хоцорч харагддаг байв (2026-09-03 засвар) — одоо api.js-ийн нэгдсэн хөрвүүлэгч.
+const hm = fmtHM
 
 // Цуглуулалтын хувь — үүссэн төлбөрөөс хэдийг нь бодитоор авсан бэ.
 // ЧУХАЛ: `collected` нь тухайн мужид ОРСОН сешнээс хураасан дүн байх ёстой.
@@ -516,8 +518,8 @@ export function TransactionsTab({ from, to, sites }) {
           <tr key={r.session_id}>
             <td className="td font-mono font-semibold">{r.plate_number}</td>
             <td className="td text-xs">{r.site_name}</td>
-            <td className="td font-mono text-xs">{(r.entry_time || '').replace('T', ' ').slice(5, 16)}</td>
-            <td className="td font-mono text-xs">{(r.exit_time || '').replace('T', ' ').slice(5, 16)}</td>
+            <td className="td font-mono text-xs">{fmtMDHM(r.entry_time)}</td>
+            <td className="td font-mono text-xs">{fmtMDHM(r.exit_time)}</td>
             <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
             <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
               {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}

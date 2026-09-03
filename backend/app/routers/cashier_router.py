@@ -124,7 +124,8 @@ def close_shift(body: dict | None = None, db: Session = Depends(get_db),
             # Өр үүсгэх эсэх — Тохиргоо → Авто цэвэрлэгээ (2026-08-21-ээс өмнө
             # хатуу бичигдсэн байсан тул ээлж хаах бүрд өр хуримтлагддаг байв)
             from ..services.app_settings import get_autoclose_rules
-            if not fee["is_free"] and get_autoclose_rules(db)["create_debt_shift_close"]:
+            if not fee["is_free"] and get_autoclose_rules(
+                    db, s.site_id)["create_debt_shift_close"]:
                 create_compensation(db, s, "shift_close", user.username)
             # Session тутамд бичнэ — эс бол Түүх дээр «хэн хаасан» нь хоосон
             # үлдэж, оператор гараар хаасан мэт харагддаг (site-ийн түвшний

@@ -112,6 +112,23 @@ export const fmtShort = (s) => {
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getMonth() + 1}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
+// Зөвхөн ЦАГ:МИН (ж: 23:07) — UTC мөрийг УБ-ын хананы цаг руу хөрвүүлнэ.
+// ЧУХАЛ: backend нь naive UTC (`2026-09-02T15:07:00`) буцаадаг тул мөрийг ШУУД
+// зүсэж болохгүй — 8 цагаар хоцорсон цаг харагдана (2026-09-03-ны тайлангийн
+// «бүх тооцоо 8 цагаар зөрж байна» гомдлын шалтгаан).
+export const fmtHM = (s) => {
+  if (!s) return '—'
+  const d = new Date(s + (s.endsWith('Z') ? '' : 'Z'))
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}`
+}
+// «сар-өдөр цаг:мин» (ж: 09-02 23:07) — мөн локал цагаар
+export const fmtMDHM = (s) => {
+  if (!s) return ''
+  const d = new Date(s + (s.endsWith('Z') ? '' : 'Z'))
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 export const fmtDur = (m) => {
   if (m === null || m === undefined) return '-'
   const h = Math.floor(m / 60), mm = m % 60

@@ -421,7 +421,26 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
     barriers = [_dev_row(d) for d in devices if d.device_type == "barrier"]
     ws_clients = sum(len(s) for s in manager.connections.values())
 
+    # ── ЦАГИЙН ТӨЛӨВ ────────────────────────────────────────────────────────
+    # «Тайлан 8 цагаар зөрж байна» гэсэн гомдол бүрд эхлээд ЭНЭ мөрийг харна:
+    # DB/дотоод тооцоо бүхэлдээ naive UTC, харуулах давхарга нь tz_offset_hours
+    # нэмж УБ-ын хананы цаг гаргана. `os_tz` нь Etc/UTC биш бол `datetime.now()`
+    # хэрэглэсэн аль нэг зам чимээгүй хазайж эхэлнэ (timeutil.py-ийн дүрэм).
+    from datetime import datetime as _dt, timedelta as _td
+    _utc = _dt.utcnow()
+    clock = {
+        "utc": _utc.strftime("%Y-%m-%d %H:%M:%S"),
+        "local": (_utc + _td(hours=settings.tz_offset_hours)).strftime("%Y-%m-%d %H:%M:%S"),
+        "tz_offset_hours": settings.tz_offset_hours,
+        "os_tz": (open("/etc/timezone").read().strip()
+                  if os.path.exists("/etc/timezone") else "?"),
+        "os_naive_now": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # OS-ийн локал цаг UTC-аас зөрвөл `datetime.now()`-той код эвдэрнэ
+        "os_utc_skew_sec": int(round((_dt.now() - _utc).total_seconds())),
+    }
+
     return {
+        "clock": clock,
         "app": {
             "name": settings.app_name,
             "version": probe["version"],

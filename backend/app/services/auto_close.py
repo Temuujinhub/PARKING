@@ -32,13 +32,18 @@ def run_once() -> int:
         # Дүрмүүд Тохиргоо → Авто цэвэрлэгээ хэсгээс (app_settings). .env-ийн
         # утга нь зөвхөн ЭХНИЙ анхдагч — админ UI-аас deploy-гүйгээр өөрчилнө.
         from .app_settings import get_autoclose_rules
-        rules = get_autoclose_rules(db)
-        if not rules["enabled"]:
+        if not get_autoclose_rules(db)["enabled"]:
             log.info("авто цэвэрлэгээ Тохиргооноос УНТРААЛТТАЙ — алгаслаа")
             return 0
         now = datetime.utcnow()
         recent_guard = now - timedelta(hours=1)
         for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
+            # Дүрмийг ЗОГСООЛ БҮРЭЭР уншина (Тохиргоо → Төлбөрийн дүрэм): нэг
+            # зогсоолын урсгалд тохирсон босго нөгөөд нь буруу байдаг —
+            # өмнө нь бүх зогсоол ганц глобал утгаар цэвэрлэгддэг байв.
+            rules = get_autoclose_rules(db, site.id)
+            if not rules["enabled"]:
+                continue          # энэ зогсоолд цэвэрлэгээ унтраалттай
             hours = site.auto_close_hours if site.auto_close_hours is not None \
                 else rules["stale_hours"]
 

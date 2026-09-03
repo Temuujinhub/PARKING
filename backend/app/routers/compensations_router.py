@@ -39,7 +39,18 @@ def _auto_blacklist(db: Session, plate: str, username: str):
     Босго нь Хар жагсаалт → Дүрэм хэсгээс өөрчлөгддөг (app_settings):
     төлөгдөөгүй өрийн ТОО эсвэл нийт ДҮН — аль нэг нь хангагдвал орно."""
     from ..services.app_settings import get_blacklist_rules
-    rules = get_blacklist_rules(db)
+    # Хамгийн сүүлийн өрийн зогсоолын дүрмээр (зогсоол бүрд өөр босго байж болно);
+    # олдохгүй бол глобал. Хар жагсаалт нь СИСТЕМ ДАЯАР үйлчилдэг тул энэ нь
+    # «аль зогсоолын босго хүрснийг» л шийднэ.
+    _last = (db.query(Compensation.session_id).filter(
+        Compensation.plate_number == plate,
+        Compensation.status == "PENDING").order_by(Compensation.created_at.desc()).first())
+    _sid = None
+    if _last and _last[0]:
+        from ..models import ParkingSession as _PS
+        _s = db.get(_PS, _last[0])
+        _sid = _s.site_id if _s else None
+    rules = get_blacklist_rules(db, _sid)
     if not rules["auto_enabled"]:
         return
     cnt = pending_count(db, plate)
@@ -268,7 +279,8 @@ async def night_close(body: dict, db: Session = Depends(get_db),
                         detail={"plate": s.plate_number}))
         # Өр үүсгэх эсэх — Тохиргоо → Авто цэвэрлэгээ (2026-08-21)
         from ..services.app_settings import get_autoclose_rules
-        if not fee["is_free"] and get_autoclose_rules(db)["create_debt_night_close"]:
+        if not fee["is_free"] and get_autoclose_rules(
+                db, s.site_id)["create_debt_night_close"]:
             create_compensation(db, s, "night_close", user.username)
             created += 1
     db.add(AuditLog(username=user.username, action="NIGHT_CLOSE", entity="site",

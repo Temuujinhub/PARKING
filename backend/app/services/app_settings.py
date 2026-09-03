@@ -15,6 +15,7 @@ OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
 ENTRYPLATE_KEY = "entry_plate_rules"
 EXITRULES_KEY = "exit_rules"
+BARRIER_KEY = "barrier_rules"
 DRIVERTYPE_KEY = "driver_type_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
@@ -112,7 +113,37 @@ DEFAULTS: dict[str, dict] = {
         # үйлчлэхгүй — хог дугаарт нэхэмжлэл үүсгэхгүй.
         "no_session_fee": 2000,
         # Зогсоол бүрийн давхарга: {site_id: дүн}. Хоосон = глобал дүн.
+        # ХУУЧИН механизм — шинэ UI нь нийтлэг `_sites` давхаргад бичнэ, энэ нь
+        # нийцтэй байдлын үүднээс уншигдсаар байна (доор no_session_exit_fee).
         "site_overrides": {},
+        # ── 2026-09-03: өмнө нь КОДОД / .env-д хатуу байсан дүрмүүд ──────────
+        # Орж ирээд N СЕКУНДЫН ДОТОР гарах камерт уншуулбал хаалт НЭЭХГҮЙ.
+        # «Хуурамч гарц» схемийн эсрэг (орох-гарах уншуулаад дотроо үлдэх —
+        # session үнэгүй хаагдаж өдөржин үнэгүй зогсдог). 0 = унтраах.
+        # Гэрээт машинд үйлчлэхгүй (тэд ямар ч байсан үнэгүй).
+        "min_stay_seconds": 0,
+        # Гарах уншилттай ч ийм богино зогсолт нь «хуурамч гарц» гэж сэжиглэгдэж,
+        # машин ДАХИН гарцад ирэхэд хаагдсан бүртгэл нь сэргээгдэнэ
+        # (.env: suspicious_exit_minutes байсан).
+        "fake_exit_minutes": 2,
+        # Гарах уншилтаар авто сэргээх дээд хугацаа (кодод REOPEN_MAX_HOURS=48).
+        "reopen_max_hours": 48,
+        # Гарах хаалтан дээр данснаас автомат хасалт хийх эсэх.
+        "wallet_auto_deduct": True,
+    },
+    BARRIER_KEY: {
+        # Хаалт/уншилтын ЦАГИЙН цонхнууд — өмнө нь зөвхөн .env-д байсан тул
+        # зогсоол бүрийн онцлогт (эгнээний тоо, урсгалын хурд) тохируулах
+        # боломжгүй, өөрчлөхөд deploy шаарддаг байв (2026-09-03).
+        # Давхар уншилтыг нэг машин гэж үзэх цонх (сек).
+        "dedup_seconds": 30,
+        # Нэг эгнээнд энэ хугацаанд ирсэн уншилтууд = НЭГ машин (сек).
+        "entry_burst_seconds": 6,
+        # Амжилттай нээснээс хойш дахин команд илгээхгүй завсар (сек).
+        "reopen_cooldown_sec": 5,
+        # Давхар уншилт дээр ГАРАХ хаалтыг дахин нээх эсэх (эрхтэй машинд).
+        # Унтраавал: хаалт нээгдээгүй гацсан машин dedup цонх дуустал хүлээнэ.
+        "exit_dedup_reopen": True,
     },
     DRIVERTYPE_KEY: {
         # «Шөнө үнэгүй» (NIGHT) гэрээний төрлийн ГЛОБАЛ цагийн цонх (УБ цагаар,
@@ -135,6 +166,63 @@ DEFAULTS: dict[str, dict] = {
     },
 }
 
+# .env-ийн ОДООГИЙН утга нь эдгээр түлхүүрийн анхдагч болно — DB-д ГАРААР
+# тохируулаагүй л бол зогсоол өнөөдрийнхтэй ЯГ ИЖИЛ зан төлөвтэй үлдэнэ.
+# Уншилт бүрд ШИНЭЭР авна (import-д царцаахгүй): .env-ийн утга шинэчлэгдэхэд
+# эсвэл тестээс `settings.*` өөрчлөхөд шууд үйлчилнэ.
+ENV_FALLBACK: dict[tuple[str, str], str] = {
+    (BARRIER_KEY, "dedup_seconds"): "lpr_dedup_seconds",
+    (BARRIER_KEY, "entry_burst_seconds"): "entry_burst_seconds",
+    (BARRIER_KEY, "reopen_cooldown_sec"): "barrier_reopen_cooldown_sec",
+    (EXITRULES_KEY, "fake_exit_minutes"): "suspicious_exit_minutes",
+}
+
+
+def _base(key: str) -> dict:
+    """DEFAULTS дээр .env-ийн одоогийн утгыг давхарласан анхдагч багц."""
+    out = dict(DEFAULTS[key])
+    if not any(g == key for g, _ in ENV_FALLBACK):
+        return out
+    try:
+        from ..config import settings as _env
+    except Exception:  # noqa: BLE001 — config уншигдахгүй бол тогтмолууд хэвээр
+        return out
+    for (g, k), attr in ENV_FALLBACK.items():
+        if g != key:
+            continue
+        try:
+            out[k] = max(0, int(getattr(_env, attr)))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return out
+
+# ── ЗОГСООЛ БҮРИЙН ДАВХАРГА ────────────────────────────────────────────────
+# Бүлэг бүрийн DB мөрөнд `_sites` гэсэн НӨӨЦЛӨГДСӨН түлхүүр байна:
+#     {"_sites": {"<site_id>": {"stale_hours": 24, ...}}}
+# Энэ нь DEFAULTS-д БАЙХГҮЙ тул дүрэм хэрэглэгч код руу хэзээ ч задардаггүй —
+# зөвхөн `get_rules(db, key, site_id=...)` дуудахад тухайн зогсоолын утгууд
+# глобалыг дарж буцна. Ингэснээр «энэ тохиргоо зарим зогсоолд хэрэгжих
+# боломжгүй» гэсэн асуудал нэг механизмаар шийдэгдэнэ (2026-09-03).
+SITE_OVERLAY = "_sites"
+
+# Зогсоол бүрээр ДАРЖ болох түлхүүрүүд. Энд БАЙХГҮЙ түлхүүр зөвхөн глобал —
+# UI мөн үүгээр «глобал» гэж тэмдэглэнэ (ж: e-Barimt/НӨАТ нь ТТД-тэй уялдаатай
+# тул зогсоол бүрээр салгаж болохгүй).
+PER_SITE: dict[str, set[str]] = {
+    BLACKLIST_KEY: {"auto_enabled", "debt_count", "debt_amount",
+                    "block_entry", "block_exit_debt_count"},
+    AUTOCLOSE_KEY: {"enabled", "stale_hours", "awaiting_hours", "entry_only_free_hours",
+                    "invalid_plate_hours", "create_debt", "create_debt_unpaid_exit",
+                    "create_debt_reentry", "create_debt_shift_close",
+                    "create_debt_night_close"},
+    ENTRYPLATE_KEY: {"policy", "hold_seconds"},
+    EXITRULES_KEY: {"no_session_fee", "min_stay_seconds", "fake_exit_minutes",
+                    "reopen_max_hours", "wallet_auto_deduct"},
+    BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "reopen_cooldown_sec",
+                  "exit_dedup_reopen"},
+    DRIVERTYPE_KEY: {"night_from", "night_until"},
+}
+
 # Сонголттой (enum) утгын зөвшөөрөгдөх багц — (бүлэг, түлхүүр) бүрээр.
 # dict төрлийн түлхүүрт БҮХ утга нь энэ багцад багтах ёстой (site_overrides г.м).
 _POLICY_CHOICES = {"open", "hold", "strict"}
@@ -147,21 +235,112 @@ _cache: dict[str, tuple[float, dict]] = {}
 _CACHE_SEC = 30.0
 
 
-def get_rules(db, key: str) -> dict:
-    """Дүрмийн бүлэг (default дээр DB-ийн утгыг давхарлана)."""
+def _load(db, key: str) -> tuple[dict, dict]:
+    """(DB-д ЯВЦТАЙ бичигдсэн глобал утгууд, зогсоол бүрийн давхарга) — кэштэй.
+
+    Анхдагчийг ЭНД холихгүй: `_base()` нь .env-ээс амьдаар уншдаг тул кэшлэвэл
+    хуучирна. Давхарга нь түүхий (валидацилагдаагүй) байж болно."""
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < _CACHE_SEC:
-        return hit[1]
+        return hit[1], hit[2]
     from ..models import AppSetting
-    rules = dict(DEFAULTS[key])
+    stored, overlay = {}, {}
     try:
         row = db.get(AppSetting, key)
         if row and isinstance(row.value, dict):
-            rules.update({k: v for k, v in row.value.items() if k in DEFAULTS[key]})
+            stored = {k: v for k, v in row.value.items() if k in DEFAULTS[key]}
+            raw = row.value.get(SITE_OVERLAY)
+            if isinstance(raw, dict):
+                overlay = {str(sid): dict(v) for sid, v in raw.items() if isinstance(v, dict)}
     except Exception:  # noqa: BLE001 — тохиргоо уншиж чадахгүй бол default-аар үргэлжилнэ
         pass
-    _cache[key] = (time.monotonic(), rules)
-    return rules
+    _cache[key] = (time.monotonic(), stored, overlay)
+    return stored, overlay
+
+
+def _coerce(default, v):
+    """DB-д мөр хэлбэрээр хадгалагдсан утгыг DEFAULTS-ийн ТӨРӨЛД буулгана.
+    Хөрвүүлж чадахгүй бол None → дуудагч глобал утгыг хэвээр үлдээнэ."""
+    try:
+        if isinstance(default, bool):
+            return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "on", "yes")
+        if isinstance(default, str):
+            return str(v).strip()[:30] or None
+        if isinstance(default, dict):
+            return None                      # dict төрлийн түлхүүр давхаргад ордоггүй
+        return max(0, int(float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def get_rules(db, key: str, site_id: str | None = None) -> dict:
+    """Дүрмийн бүлэг: DEFAULTS → глобал (DB) → ЗОГСООЛЫН давхарга.
+
+    site_id өгвөл тухайн зогсоолын дарсан утгууд нэмэгдэнэ. `PER_SITE`-д
+    зөвшөөрөгдөөгүй эсвэл төрөл нь таарахгүй түлхүүр АВТОМАТААР алгасагдана —
+    буруу тохиргоо биллингийг унагаахгүй."""
+    stored, overlay = _load(db, key)
+    rules = {**_base(key), **stored}
+    site = overlay.get(site_id or "") if site_id else None
+    if not site:
+        return rules
+    allowed_keys = PER_SITE.get(key, set())
+    out = dict(rules)
+    for k, v in site.items():
+        if k not in allowed_keys or k not in DEFAULTS[key]:
+            continue
+        cv = _coerce(DEFAULTS[key][k], v)
+        if cv is None:
+            continue
+        allowed = CHOICES.get((key, k))
+        if allowed and cv not in allowed:
+            continue
+        out[k] = cv
+    return out
+
+
+def get_site_overrides(db, key: str) -> dict:
+    """Бүлгийн зогсоол бүрийн түүхий давхарга ({site_id: {түлхүүр: утга}})."""
+    return _load(db, key)[1]
+
+
+def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> dict:
+    """Нэг зогсоолын давхаргыг шинэчилнэ. Утга нь None/"" бол ТУХАЙН түлхүүрийг
+    устгаж глобал руу буцаана; бүх түлхүүр уствал зогсоолын мөр өөрөө арилна."""
+    from ..models import AppSetting
+    if key not in DEFAULTS:
+        raise ValueError(f"мэдэгдэхгүй бүлэг: {key}")
+    allowed_keys = PER_SITE.get(key, set())
+    row = db.get(AppSetting, key)
+    if row is None:
+        row = AppSetting(key=key, value={})
+        db.add(row)
+    stored = dict(row.value or {})
+    overlay = {str(k): dict(v) for k, v in (stored.get(SITE_OVERLAY) or {}).items()
+               if isinstance(v, dict)}
+    site = dict(overlay.get(site_id) or {})
+    for k, v in (values or {}).items():
+        if k not in allowed_keys:
+            continue                      # энэ түлхүүр зогсоол бүрээр тохируулагддаггүй
+        if v is None or (isinstance(v, str) and not v.strip()):
+            site.pop(k, None)             # глобал руу буцаана
+            continue
+        cv = _coerce(DEFAULTS[key][k], v)
+        if cv is None:
+            continue
+        allowed = CHOICES.get((key, k))
+        if allowed and cv not in allowed:
+            continue
+        site[k] = cv
+    if site:
+        overlay[site_id] = site
+    else:
+        overlay.pop(site_id, None)
+    stored[SITE_OVERLAY] = overlay
+    row.value = stored
+    row.updated_by = username
+    _cache.pop(key, None)
+    return site
 
 
 def set_rules(db, key: str, values: dict, username: str) -> dict:
@@ -201,28 +380,28 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
     row.value = merged
     row.updated_by = username
     _cache.pop(key, None)  # дараагийн уншилт шинэ утгыг авна
-    return {**DEFAULTS[key], **merged}
+    return {**_base(key), **{k: v for k, v in merged.items() if k in DEFAULTS[key]}}
 
 
 # ── Тохиромжтой нэрийн богиносголууд ────────────────────────────────────────
-def get_blacklist_rules(db) -> dict:
-    return get_rules(db, BLACKLIST_KEY)
+def get_blacklist_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, BLACKLIST_KEY, site_id)
 
 
 def set_blacklist_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, BLACKLIST_KEY, values, username)
 
 
-def get_autoclose_rules(db) -> dict:
-    return get_rules(db, AUTOCLOSE_KEY)
+def get_autoclose_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, AUTOCLOSE_KEY, site_id)
 
 
 def set_autoclose_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, AUTOCLOSE_KEY, values, username)
 
 
-def get_entry_plate_rules(db) -> dict:
-    return get_rules(db, ENTRYPLATE_KEY)
+def get_entry_plate_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, ENTRYPLATE_KEY, site_id)
 
 
 def set_entry_plate_rules(db, values: dict, username: str) -> dict:
@@ -230,14 +409,26 @@ def set_entry_plate_rules(db, values: dict, username: str) -> dict:
 
 
 def entry_plate_policy(db, site_id: str | None) -> tuple[str, int]:
-    """Тухайн зогсоолд үйлчлэх (policy, hold_seconds) — override нь глобалыг дарна."""
-    r = get_rules(db, ENTRYPLATE_KEY)
-    pol = (r.get("site_overrides") or {}).get(site_id or "") or r["policy"]
+    """Тухайн зогсоолд үйлчлэх (policy, hold_seconds).
+    Дараалал: ЗОГСООЛЫН давхарга (`_sites`) → хуучин `site_overrides` → глобал."""
+    r = get_rules(db, ENTRYPLATE_KEY, site_id)
+    pol = r["policy"]
+    if site_id and site_id not in (get_site_overrides(db, ENTRYPLATE_KEY) or {}):
+        pol = (r.get("site_overrides") or {}).get(site_id) or pol
     return (pol if pol in _POLICY_CHOICES else "hold"), max(1, int(r["hold_seconds"]))
 
 
-def get_exit_rules(db) -> dict:
-    return get_rules(db, EXITRULES_KEY)
+def get_exit_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, EXITRULES_KEY, site_id)
+
+
+def get_barrier_rules(db, site_id: str | None = None) -> dict:
+    """Хаалт/уншилтын цагийн цонхнууд (dedup/burst/cooldown) — зогсоолоор."""
+    return get_rules(db, BARRIER_KEY, site_id)
+
+
+def set_barrier_rules(db, values: dict, username: str) -> dict:
+    return set_rules(db, BARRIER_KEY, values, username)
 
 
 def set_exit_rules(db, values: dict, username: str) -> dict:
@@ -248,10 +439,15 @@ def no_session_exit_fee(db, site_id: str | None) -> int:
     """Тухайн зогсоолд үйлчлэх «орох уншилтгүй машины суурь хураамж» (₮).
     site_overrides нь глобал дүнг дарна; утгууд DB-д мөр (string) хэлбэрээр
     хадгалагдаж болох тул int руу хамгаалалттай хөрвүүлнэ. 0 = унтраалттай."""
-    r = get_rules(db, EXITRULES_KEY)
-    raw = (r.get("site_overrides") or {}).get(site_id or "")
-    if raw in (None, ""):
-        raw = r.get("no_session_fee", 0)
+    r = get_rules(db, EXITRULES_KEY, site_id)
+    raw = r.get("no_session_fee", 0)
+    # Хуучин `site_overrides` механизм — зөвхөн шинэ давхаргад энэ зогсоолын
+    # мөр БАЙХГҮЙ үед л үйлчилнэ (шинэ UI нь `_sites`-д бичдэг).
+    if site_id and "no_session_fee" not in (get_site_overrides(db, EXITRULES_KEY)
+                                            .get(site_id) or {}):
+        legacy = (r.get("site_overrides") or {}).get(site_id)
+        if legacy not in (None, ""):
+            raw = legacy
     try:
         return max(0, int(float(raw)))
     except (TypeError, ValueError):
@@ -261,18 +457,18 @@ def no_session_exit_fee(db, site_id: str | None) -> int:
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 
-def get_driver_type_rules(db) -> dict:
-    return get_rules(db, DRIVERTYPE_KEY)
+def get_driver_type_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, DRIVERTYPE_KEY, site_id)
 
 
 def set_driver_type_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, DRIVERTYPE_KEY, values, username)
 
 
-def night_window(db) -> tuple[str, str]:
+def night_window(db, site_id: str | None = None) -> tuple[str, str]:
     """NIGHT төрлийн хүчинтэй цонх — буруу/дутуу тохиргоонд default (21:00–08:00)
     руу унана: биллинг хэзээ ч «цонхгүй = бүх цагт үнэгүй» болж алдахгүй."""
-    r = get_rules(db, DRIVERTYPE_KEY)
+    r = get_rules(db, DRIVERTYPE_KEY, site_id)
     f = str(r.get("night_from") or "").strip()
     u = str(r.get("night_until") or "").strip()
     if _HHMM.match(f) and _HHMM.match(u) and f != u:

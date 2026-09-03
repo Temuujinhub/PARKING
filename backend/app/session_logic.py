@@ -275,7 +275,23 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
 
 
 # Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
+# Гарах уншилтаар авто сэргээх дээд хугацааны АНХДАГЧ. Зогсоол бүрээр
+# (Тохиргоо → Төлбөрийн дүрэм) дарж тохируулагдана — доорх `_exit_rules`.
 REOPEN_MAX_HOURS = 48
+
+
+def _exit_rules(db: Session, site_id: str | None) -> dict:
+    """Гарах хаалт/төлбөрийн дүрэм — тухайн зогсоолын давхаргатай."""
+    from .services.app_settings import get_exit_rules
+    return get_exit_rules(db, site_id)
+
+
+def _barrier_rules(db: Session, site_id: str | None) -> dict:
+    """Хаалт/уншилтын цагийн цонхнууд (dedup/burst/cooldown) — зогсоолоор.
+    Өмнө нь эдгээр нь зөвхөн .env-д байсан тул нэг зогсоолд тааруулсан утга
+    бусад бүх зогсоолыг дагуулж өөрчилдөг байв (2026-09-03)."""
+    from .services.app_settings import get_barrier_rules
+    return get_barrier_rules(db, site_id)
 
 
 def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSession | None:
@@ -302,13 +318,17 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
         return None                      # junk уншилт — сэргээх үндэслэлгүй
     if get_open_session(db, plate, site_id):
         return None                      # идэвхтэй бүртгэл бий — энэ функц хэрэггүй
-    since = datetime.utcnow() - timedelta(hours=REOPEN_MAX_HOURS)
+    since = datetime.utcnow() - timedelta(
+        hours=int(_exit_rules(db, site_id).get("reopen_max_hours") or REOPEN_MAX_HOURS))
     closed = (db.query(ParkingSession)
               .filter(ParkingSession.site_id == site_id,
                       ParkingSession.status.in_(["MANUAL_CLOSED", "CLOSED", "FREE"]),
                       ParkingSession.paid_at.is_(None),
                       ParkingSession.exit_time >= since)
               .all())
+
+    _rules = _exit_rules(db, site_id)
+    _fake_min = int(_rules["fake_exit_minutes"])
 
     def _short_fake_exit(s: ParkingSession) -> bool:
         """Гарах уншилт БАЙСАН ч зогсолт хэт богино — «хуурамч гарц» уу.
@@ -323,7 +343,7 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
         if not (s.entry_time and s.exit_time):
             return False
         mins = (s.exit_time - s.entry_time).total_seconds() / 60
-        return 0 <= mins <= settings.suspicious_exit_minutes
+        return 0 <= mins <= _fake_min
 
     # exit_confirmed=True (жинхэнэ гарах уншилттай) бол ердийн үед ХҮРЭХГҮЙ —
     # тэр машин үнэхээр гарсан, одоогийнх нь ШИНЭ зогсолт. Цорын ганц үл
@@ -427,7 +447,8 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
         if (getattr(drv, "contract_type", "") == "NIGHT"
                 and not (w_from and w_until) and db is not None):
             from .services.app_settings import night_window
-            w_from, w_until = night_window(db)
+            # Шөнийн цонх зогсоол бүрээр өөр байж болно (Тохиргоо → Төлбөрийн дүрэм)
+            w_from, w_until = night_window(db, s.site_id)
         if w_from and w_until:
             from .billing import free_window_minutes
             registered_free = False
@@ -581,7 +602,8 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     # хаалтны өмнө 30с дотор дахин уншигдвал хаалтыг ДАХИН нээхгүй (2026-09-01
     # хүсэлт). Хаалт нь огт нээгдээгүй (SUCCESS алга) гацсан машинд доорх
     # retry хэвээр үйлчилнэ — өмнөх «20с гацдаг» алдаа буцаж ирэхгүй.
-    window = max(float(settings.barrier_reopen_cooldown_sec), float(suppress_sec or 0))
+    window = max(float(_barrier_rules(db, device.site_id)["reopen_cooldown_sec"]),
+                 float(suppress_sec or 0))
     cooldown = datetime.utcnow() - timedelta(seconds=window)
     recent = (db.query(BarrierCommand)
               .filter(BarrierCommand.device_id == barrier.id,
@@ -615,14 +637,21 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     barrier = _find_barrier(db, device.site_id, device)
     if not barrier:
         return False
+    _br = _barrier_rules(db, device.site_id)
+    # Тохиргоо → Төлбөрийн дүрэм: энэ зогсоолд давхар уншилт дээр гарах хаалтыг
+    # дахин нээхийг ХОРИГЛОСОН бол энд зогсоно (анхдагчаар АСААЛТТАЙ — эс бол
+    # эхний команд амжилтгүй болсон машин dedup цонх дуустал гацна).
+    if not _br["exit_dedup_reopen"]:
+        _skip_command(db, barrier, None, "exit_retry", plate,
+                      "давхар уншилтын дахин нээлт тохиргоогоор унтраалттай")
+        return False
     now = datetime.utcnow()
     # Саяхан АМЖИЛТТАЙ нээсэн бол хаалт нээлттэй хэвээр - команд давтахгүй.
     # Энэ функц зөвхөн ДАВХАР УНШИЛТЫН (dedup) замаас дуудагддаг тул цонхыг
     # dedup-ийн бүтэн хугацаагаар (30с) авна: нэг машин хаалтны өмнө дахин
     # уншигдах бүрд хаалт ахин ахин нээгдэхгүй (2026-09-01 хүсэлт). Нээгдээгүй
     # (SUCCESS алга) гацсан машинд доорх retry хэвээр үйлчилнэ.
-    window = max(float(settings.barrier_reopen_cooldown_sec),
-                 float(settings.lpr_dedup_seconds))
+    window = max(float(_br["reopen_cooldown_sec"]), float(_br["dedup_seconds"]))
     cooldown = now - timedelta(seconds=window)
     recent_ok = (db.query(BarrierCommand)
                  .filter(BarrierCommand.device_id == barrier.id,
@@ -711,7 +740,8 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
         _skip_command(db, barrier, session_id, source, plate,
                       "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
         return True
-    cooldown = datetime.utcnow() - timedelta(seconds=settings.barrier_reopen_cooldown_sec)
+    _cool = int(_barrier_rules(db, device.site_id)["reopen_cooldown_sec"])
+    cooldown = datetime.utcnow() - timedelta(seconds=_cool)
     recent_ok = (db.query(BarrierCommand)
                  .filter(BarrierCommand.device_id == barrier.id,
                          BarrierCommand.command == "open",
@@ -720,7 +750,7 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
                  .first())
     if recent_ok:
         _skip_command(db, barrier, session_id, source, plate,
-                      f"{settings.barrier_reopen_cooldown_sec:.0f}с дотор аль хэдийн "
+                      f"{_cool:.0f}с дотор аль хэдийн "
                       "нээгдсэн — команд давтсангүй")
         return True
     cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
@@ -822,6 +852,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # «бүртгэлгүй гарах оролдлого» болдог байв (2026-08-21).
     from .services.app_settings import entry_plate_policy
     _pol, _hold_sec = entry_plate_policy(db, site_id)
+    # Цагийн цонхнууд — зогсоол бүрээр (Тохиргоо → Төлбөрийн дүрэм)
+    _br = _barrier_rules(db, site_id)
+    _dedup_sec, _burst_sec = int(_br["dedup_seconds"]), int(_br["entry_burst_seconds"])
     hold_active = _pol in ("hold", "strict") and not is_valid_plate(plate)
 
     # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Орох камер нэг
@@ -832,7 +865,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
             LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
-            LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
+            LprEvent.created_at >= now - timedelta(seconds=_dedup_sec),
         ).all()
     ]
     dup_of = [rp for rp in recent_plates if is_duplicate_read(plate, rp)]
@@ -854,7 +887,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # suppress_sec: 30с дотор аль хэдийн НЭЭГДСЭН бол дахин нээхгүй —
         # давтан уншилт бүрд хаалт ахин онгойхгүй; нээгдээгүй гацсанд retry хэвээр
         opened = (await ensure_entry_barrier(db, device, plate,
-                                             suppress_sec=settings.lpr_dedup_seconds)
+                                             suppress_sec=_dedup_sec)
                   if _can_open else False)
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened,
@@ -875,7 +908,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     burst_prev = (db.query(LprEvent)
                   .filter(LprEvent.device_id == device.id, LprEvent.lane_dir == "entry",
                           LprEvent.accepted.is_(True),
-                          LprEvent.created_at >= now - timedelta(seconds=settings.entry_burst_seconds))
+                          LprEvent.created_at >= now - timedelta(seconds=_burst_sec))
                   .order_by(LprEvent.created_at.desc()).first()) if burst_merge else None
     if burst_prev:
         if is_valid_plate(plate) and not get_open_session(db, plate, site_id):
@@ -935,7 +968,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # Өр үүсгэх эсэх нь Тохиргоо → Авто цэвэрлэгээ хуудаснаас удирдагдана
         # (өмнө нь кодод хатуу бичигдсэн байв — 2026-08-21).
         from .services.app_settings import get_autoclose_rules
-        if due > 0 and get_autoclose_rules(db)["create_debt_reentry"]:
+        if due > 0 and get_autoclose_rules(db, site_id)["create_debt_reentry"]:
             comp = create_compensation(db, existing, "unpaid_exit", "system")
             comp.amount = due
         # Энэ зам ямар ч AuditLog үлдээдэггүй байсан тул Түүх дээр «хэн хаасан»
@@ -987,7 +1020,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # (Хар жагсаалт → Дүрэм). Default нь анхааруулга — машиныг гадаа орхивол
     # өрөө хэзээ ч төлөхгүй, харин оруулаад гарахад нь оператор өрийг авна.
     from .services.app_settings import get_blacklist_rules
-    _bl_rules = get_blacklist_rules(db)
+    _bl_rules = get_blacklist_rules(db, site_id)
     black_blocks = bool(black) and _bl_rules["block_entry"]
 
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
@@ -1171,6 +1204,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     """
     site_id = device.site_id
     now = datetime.utcnow()
+    _br = _barrier_rules(db, site_id)
+    _xr = _exit_rules(db, site_id)
 
     # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Камер гарах дугаарыг
     # хэдэн секундын зайтай 2 дахь удаа арай ӨӨР уншихад (жишээ 2 дахь уншилт session-
@@ -1181,7 +1216,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             LprEvent.site_id == site_id, LprEvent.lane_dir == "exit",
             LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
-            LprEvent.created_at >= now - timedelta(seconds=settings.lpr_dedup_seconds),
+            LprEvent.created_at >= now - timedelta(seconds=int(_br["dedup_seconds"])),
         ).all()
     ]
     if any(is_duplicate_read(plate, rp) for rp in recent_plates):
@@ -1334,6 +1369,31 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                          camera_credentials(device))
         return {"action": "no_session", "plate": plate}
 
+    # ── ЭРТ ГАРАХ ХАМГААЛАЛТ (Тохиргоо → Төлбөрийн дүрэм) ──────────────────
+    # Орж ирээд min_stay_seconds-ээс ЭРТ гарах камерт уншуулбал хаалт НЭЭХГҮЙ.
+    # «Хуурамч гарц» схем: жолооч орох-гарах хоёуланд уншуулж бүртгэлээ үнэгүй
+    # хаалгаад дотроо үлдэж, оройдоо «бүртгэлгүй» болж гардаг (2026-08-14 KH
+    # зогсоолын бичлэгээр батлагдсан). 0 = унтраалттай — өмнөх зан төлөв.
+    # Гэрээт машинд үйлчлэхгүй: тэд ямар ч байсан үнэгүй тул схемийн ашиг алга.
+    _min_stay = int(_xr.get("min_stay_seconds") or 0)
+    if (_min_stay and session.entry_time
+            and (now - session.entry_time).total_seconds() < _min_stay
+            and not session.is_registered
+            and find_registered(db, plate, site_id) is None):
+        _elapsed = int((now - session.entry_time).total_seconds())
+        db.commit()
+        log.info("[exit] %s: орсноос хойш %sс (босго %sс) — хаалт нээсэнгүй",
+                 plate, _elapsed, _min_stay)
+        notify(site_id, "EXIT_TOO_SOON", {
+            "session_id": session.id, "plate": plate,
+            "elapsed_seconds": _elapsed, "min_stay_seconds": _min_stay,
+            "entry_time": session.entry_time.isoformat()})
+        schedule_display(device.ip_address,
+                         render_screen_text(settings.screen_nosession_text, plate=plate),
+                         camera_credentials(device))
+        return {"action": "too_soon", "session_id": session.id, "plate": plate,
+                "elapsed_seconds": _elapsed}
+
     session.exit_device_id = device.id
     session.confidence_exit = confidence
     # Гарах зургийг ард нь татаж хадгална (маргаан/нотолгоонд — ялангуяа төлбөргүй гарсан үед)
@@ -1347,7 +1407,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # ГЭРЭЭТ машинд үйлчлэхгүй (төлбөр авдаггүй тул ямагт гарна; session_fee_info
     # дээр is_registered шинэчлэгдсэн байгаа).
     from .services.app_settings import get_blacklist_rules
-    _exit_block_at = get_blacklist_rules(db)["block_exit_debt_count"]
+    _exit_block_at = get_blacklist_rules(db, site_id)["block_exit_debt_count"]
     if _exit_block_at and len(debts) >= _exit_block_at and not session.is_registered:
         session.status = "AWAITING_PAYMENT"
         session.duration_minutes = fee["duration_minutes"]
@@ -1395,7 +1455,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Үлдэгдэл ХҮРЭЛЦВЭЛ: хасаад шууд нээнэ — жолооч юу ч хийхгүй.
     # ХҮРЭЛЦЭХГҮЙ бол: байгааг нь хасаад үлдсэн дүнд ердийн QR урсгал.
     # Данс нь EV-ээс хамааралгүй бие даасан боломж — бүх жолоочид ажиллана.
-    if due > 0:
+    if due > 0 and _xr.get("wallet_auto_deduct", True):
         try:
             deducted, covered = await _wallet_auto_deduct(db, session, due)
         except Exception:  # noqa: BLE001 — данс унасан ч гарах урсгал зогсохгүй
