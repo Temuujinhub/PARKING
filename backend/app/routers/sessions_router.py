@@ -80,6 +80,34 @@ _MANUAL_PAID = "Оператор төлбөртэй гаргасан"
 _MANUAL_FREE = "Оператор ҮНЭГҮЙ гаргасан"
 
 
+def _close_map(db: Session, ids: list[str]) -> dict[str, dict]:
+    """session_id → {by, action, label, auto, at, reason, reason_code}.
+
+    `reason` — оператор ГАРААР гаргахдаа сонгосон шалтгаан (Тохиргоо → Нээх
+    шалтгааны жагсаалтаас, «Бусад» бол чөлөөт тайлбартай) эсвэл админ хасахдаа
+    бичсэн тэмдэглэл. Түүх хуудасны «Шалтгаан» багана (2026-09-03) — өмнө нь
+    шалтгаан зөвхөн session.note-д бусад тэмдэглэлтэй холилдож, тайланд
+    харагддаггүй байв."""
+    closed: dict[str, dict] = {}
+    if not ids:
+        return closed
+    # created_at өсөх дарааллаар — нэг session олон удаа хаагдсан бол СҮҮЛИЙНХ үлдэнэ
+    for eid, username, action, at, detail in (
+            db.query(AuditLog.entity_id, AuditLog.username, AuditLog.action,
+                     AuditLog.created_at, AuditLog.detail)
+            .filter(AuditLog.entity == "session", AuditLog.entity_id.in_(ids),
+                    AuditLog.action.in_(_CLOSE_ACTIONS))
+            .order_by(AuditLog.created_at).all()):
+        det = detail if isinstance(detail, dict) else {}
+        closed[eid] = {"by": username, "action": action,
+                       "label": _CLOSE_LABEL.get(action, action),
+                       "auto": username == "system",
+                       "at": at.isoformat() if at else None,
+                       "reason": (str(det.get("reason") or "").strip()[:300] or None),
+                       "reason_code": det.get("reason_code") or None}
+    return closed
+
+
 def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
     """Түүхэнд ХЭРХЭН хаагдсаныг хавсаргана — «Гарсан» төлөв хэт ерөнхий байсныг задлана.
 
@@ -108,17 +136,7 @@ def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
             "cashier": cashier,
         })
 
-    closed: dict[str, dict] = {}
-    # created_at өсөх дарааллаар — нэг session олон удаа хаагдсан бол СҮҮЛИЙНХ үлдэнэ
-    for eid, username, action, at in (
-            db.query(AuditLog.entity_id, AuditLog.username, AuditLog.action, AuditLog.created_at)
-            .filter(AuditLog.entity == "session", AuditLog.entity_id.in_(ids),
-                    AuditLog.action.in_(_CLOSE_ACTIONS))
-            .order_by(AuditLog.created_at).all()):
-        closed[eid] = {"by": username, "action": action,
-                       "label": _CLOSE_LABEL.get(action, action),
-                       "auto": username == "system",
-                       "at": at.isoformat() if at else None}
+    closed = _close_map(db, ids)
 
     for d in dicts:
         d["payments"] = pays.get(d["id"], [])
@@ -211,9 +229,22 @@ def sessions_excel(
     def _loc(dt):
         return (dt + TZ).strftime("%Y-%m-%d %H:%M") if dt else ""
 
+    closed = _close_map(db, [s.id for s in rows])
+
+    def _closed_label(s):
+        c = closed.get(s.id)
+        if not c:
+            return "", ""
+        label = c["label"]
+        if c["action"] == "MANUAL_EXIT":
+            label = _MANUAL_PAID if pays.get(s.id) else _MANUAL_FREE
+        who = "Систем" if c["auto"] else c["by"]
+        return f"{label} — {who}", (c.get("reason") or "")
+
     data = []
     for s in rows:
         plist = pays.get(s.id, [])
+        c_label, c_reason = _closed_label(s)
         data.append([
             s.plate_number,
             s.site.name if s.site else "",
@@ -224,15 +255,17 @@ def sessions_excel(
             ", ".join(pay_label.get(p.provider, p.provider) for p in plist),
             s.discount.name if s.discount else "",
             status_label.get(s.status, s.status),
+            c_label, c_reason,
             (s.note or "")[:200],
         ])
     total_row = ["Нийт", "", "", "", "", sum(r[5] for r in data),
-                 sum(r[6] for r in data), "", "", f"{len(data)} мөр", ""]
+                 sum(r[6] for r in data), "", "", f"{len(data)} мөр", "", "", ""]
     return _xlsx(
         "tuuh", "Түүх",
         ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа (мин)", "Дүн (₮)",
-         "Төлсөн (₮)", "Төлбөрийн хэрэгсэл", "Хөнгөлөлт", "Төлөв", "Тэмдэглэл"],
-        data, widths=[11, 18, 17, 17, 13, 12, 12, 20, 14, 16, 30],
+         "Төлсөн (₮)", "Төлбөрийн хэрэгсэл", "Хөнгөлөлт", "Төлөв", "Хаасан",
+         "Шалтгаан", "Тэмдэглэл"],
+        data, widths=[11, 18, 17, 17, 13, 12, 12, 20, 14, 16, 26, 28, 30],
         total_row=total_row)
 
 

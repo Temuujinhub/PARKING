@@ -49,6 +49,19 @@ function ClosedByCell({ s }) {
   )
 }
 
+// Шалтгаан — оператор ГАРААР гаргахдаа (эсвэл админ хасахдаа) сонгосон/бичсэн.
+// Систем хаасан мөрөнд шалтгаан байхгүй; тэнд «Хаасан» багана хангалттай.
+function ReasonCell({ s }) {
+  const c = s.closed_by
+  if (!c?.reason) return <span className="text-slate-600">-</span>
+  return (
+    <span className={`text-[11px] ${c.auto ? 'text-slate-400' : 'text-amber-200'}`}
+      title={`${c.label} — ${c.by}${c.reason_code ? ` (код: ${c.reason_code})` : ''}`}>
+      {c.reason}
+    </span>
+  )
+}
+
 const STATUSES = [
   ['', 'Бүгд'], ['OPEN', 'Зогсож буй'], ['AWAITING_PAYMENT', 'Төлбөр хүлээж буй'],
   ['PAID', 'Төлсөн'], ['CLOSED', 'Гарсан'], ['FREE', 'Үнэгүй'], ['MANUAL_CLOSED', 'Гарах уншилтгүй'],
@@ -133,7 +146,7 @@ export default function History() {
       </div>
 
       <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Төлбөр', 'Хөнгөлөлт',
-        'Төлөв', 'Хаасан', 'Зураг', ...(isAdmin ? [''] : [])]}
+        'Төлөв', 'Хаасан', 'Шалтгаан', 'Зураг', ...(isAdmin ? [''] : [])]}
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
           <tr key={s.id} className="hover:bg-surface-muted/30">
@@ -190,6 +203,7 @@ export default function History() {
             <td className="td text-xs">{s.discount_name || '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
             <td className="td"><ClosedByCell s={s} /></td>
+            <td className="td max-w-[14rem]"><ReasonCell s={s} /></td>
             <td className="td"><SnapshotButton session={s} /></td>
             {isAdmin && (
               <td className="td text-right">
