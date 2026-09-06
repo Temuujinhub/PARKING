@@ -1428,7 +1428,11 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
          .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start,
                  VatReceipt.created_at < end))
-    if provider:
+    if provider in ("?", "NULL", "NONE"):
+        # Самбар provider хоосон (хуучин, 2026-08-19-өөс өмнөх мөр) бүлгийг «?» гэж
+        # харуулдаг — түүгээр шүүхэд юу ч олдохгүй «Нөхөх баримт олдсонгүй» гардаг байв
+        q = q.filter(VatReceipt.provider.is_(None))
+    elif provider:
         q = q.filter(VatReceipt.provider == provider)
     if error:
         q = q.filter(VatReceipt.receipt_url == error)
@@ -1484,10 +1488,13 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
 
     from ..database import SessionLocal
     from .payments_router import _lock_payment, retry_ebarimt
+    import logging
+    log = logging.getLogger("parking.vat_bulk")
     db = SessionLocal()
     j = _bulk_job
     try:
         for pid in pay_ids:
+            res = None
             try:
                 payment = _lock_payment(db, pid)
                 if payment is None:
@@ -1496,17 +1503,32 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
                 try:
                     res = await retry_ebarimt(db, payment)
                 except Exception as e:  # noqa: BLE001 — нэг баримтын алдаа бөөнийг зогсоохгүй
+                    # ЖИНХЭНЭ алдааг хадгална + traceback логлоно. Өмнө нь flush-д унасан
+                    # session дээр commit дуудаад PendingRollbackError гарч анхны шалтгааныг
+                    # нууж байв (2026-09-06: «PendingRollbackError ×6» — юу болсон нь үл мэдэгдэх)
+                    log.exception("бөөн нөхөлт: төлбөр %s дээр алдаа", pid)
+                    db.rollback()
                     res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                db.commit()
+                if res.get("ok") or "error" in res:
+                    try:
+                        db.commit()
+                    except Exception as e:  # noqa: BLE001
+                        log.exception("бөөн нөхөлт: commit алдаа (төлбөр %s)", pid)
+                        db.rollback()
+                        if res.get("ok"):
+                            res = {"ok": False, "error": f"commit: {type(e).__name__}: {e}"}
             except Exception as e:  # noqa: BLE001 — DB алдаа ч job-ийг унагахгүй
+                log.exception("бөөн нөхөлт: төлбөр %s түгжих/уншихад алдаа", pid)
                 db.rollback()
                 res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             finally:
                 j["done"] += 1
+            if res is None:
+                continue
             if res.get("ok"):
                 j["ok"] += 1
             else:
-                err = (res.get("error") or "?")[:200]
+                err = (res.get("error") or "?")[:400]
                 j["failed"] += 1
                 j["errors"][err] = j["errors"].get(err, 0) + 1
                 # Квот/эрхийн алдаа = БҮХ дараагийнх нь ч унана — үргэлжлүүлэх нь утгагүй

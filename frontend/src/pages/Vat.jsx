@@ -266,7 +266,7 @@ export default function Vat() {
               {job.skipped ? ` · алгассан ${job.skipped}` : ''}
               {job.remaining ? ` · үлдсэн ${fmt(job.remaining)} (дахин дарна)` : ''}
               {job.stopped ? ` · ${job.stopped}` : ''}
-              {!job.running && job.top_errors?.[0] && <span className="text-amber-400"> · «{job.top_errors[0].error.slice(0, 90)}» ×{job.top_errors[0].count}</span>}
+              {!job.running && job.top_errors?.[0] && <span className="text-amber-400"> · «{job.top_errors[0].error.slice(0, 220)}» ×{job.top_errors[0].count}</span>}
             </div>
           )}
           <p className="text-xs text-slate-500">
