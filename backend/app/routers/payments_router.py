@@ -1366,9 +1366,16 @@ async def cancel_ebarimt_endpoint(payment_id: str, body: dict | None = None,
 
 
 @router.post("/{payment_id}/retry-ebarimt")
-async def retry_ebarimt_endpoint(payment_id: str, db: Session = Depends(get_db),
+async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
+                                 db: Session = Depends(get_db),
                                  user: User = Depends(require("vat", "reports"))):
-    """Бүтэлгүйтсэн НӨАТ баримтыг дахин үүсгэх (UI-ийн «Баримт дахин үүсгэх» товч)."""
+    """Бүтэлгүйтсэн НӨАТ баримтыг дахин үүсгэх (UI-ийн «Баримт дахин үүсгэх» товч).
+
+    body (сонголт, 2026-09-06): худалдан авагчийн дугаар БУРУУ байсан баримтыг засах —
+      {receiver_type: "CITIZEN"}  → иргэний (нэргүй) баримт болгож дахин үүсгэнэ
+      {customer_tin: "…"}         → зөв регистр/ТТД өгч байгууллагын баримт дахин үүсгэнэ
+    Жишээ: 6853959 гэсэн регистр ТЕГ-т байхгүй (getTinInfo found=false) тул QPay
+    «customerTin буруу» гэж унасаар, засах арга байгаагүй."""
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Төлбөр олдсонгүй")
@@ -1377,9 +1384,25 @@ async def retry_ebarimt_endpoint(payment_id: str, db: Session = Depends(get_db),
     payment = _lock_payment(db, payment_id)  # давхар товшилтоос давхар баримт гаргахгүй
     if payment is None:
         raise HTTPException(409, "Баримт үүсгэх ажиллагаа явагдаж байна — түр хүлээнэ үү")
+    body = body or {}
+    changed = {}
+    if body.get("customer_tin"):
+        reg, rtype = msgbill.classify_reg_no(body.get("customer_tin"))
+        if not reg:
+            raise HTTPException(400, "Худалдан авагчийн дугаар танигдсангүй — ААН регистр (7 орон), "
+                                     "ТТД (11–14 орон) эсвэл иргэний регистр (АА00112233)")
+        payment.customer_tin = reg
+        payment.ebarimt_receiver_type = "COMPANY" if rtype == "ORGANIZATION" else "CITIZEN"
+        changed = {"customer_tin": reg, "receiver_type": payment.ebarimt_receiver_type}
+    elif (body.get("receiver_type") or "").upper() == "CITIZEN":
+        changed = {"was_tin": payment.customer_tin, "receiver_type": "CITIZEN"}
+        payment.customer_tin = None
+        payment.ebarimt_receiver_type = "CITIZEN"
+    if changed:
+        db.flush()
     res = await retry_ebarimt(db, payment)
     db.add(AuditLog(username=user.username, action="EBARIMT_RETRY", entity="payment",
-                    entity_id=payment_id, detail=res))
+                    entity_id=payment_id, detail={**res, **({"changed": changed} if changed else {})}))
     db.commit()
     if not res.get("ok"):
         raise HTTPException(400, f"Баримт үүсгэж чадсангүй: {res.get('error')}")

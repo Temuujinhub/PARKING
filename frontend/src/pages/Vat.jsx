@@ -129,13 +129,30 @@ export default function Vat() {
 
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
   // QPay талд «И баримт» тохиргоо идэвхжсэний дараа хуучин баримтуудыг нөхөхөд.
-  const retry = async (r) => {
+  // opts: {receiver_type:'CITIZEN'} — иргэний баримт болгож; {customer_tin} — зөв дугаараар.
+  const retry = async (r, opts = null) => {
     setRetrying(r.id)
     try {
-      const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`, { method: 'POST' })
+      const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`,
+        { method: 'POST', ...(opts ? { body: opts } : {}) })
       toast(`Баримт үүслээ — ДДТД ${res.ebarimt_id}`)
-      reloadRows()
+      reloadRows(); reloadFails()
     } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
+  }
+  // Худалдан авагчийн дугаар буруу (QPay «customerTin», ТЕГ-т байхгүй регистр) —
+  // иргэний баримт болгох эсвэл зөв дугаар өгөх. 2026-09-06: 6853959 регистртэй
+  // төлбөрийн баримтыг засах ямар ч арга UI-д байгаагүй.
+  const badTin = (r) => r.status === 'FAILED' && /customerTin|ТТД|регистр|receiver/i.test(r.receipt_url || '')
+  const retryAsCitizen = (r) => {
+    if (!window.confirm(`${r.plate_number || ''} — худалдан авагчийн дугаар (${r.customer_tin || '?'}) буруу.\n`
+      + 'ИРГЭНИЙ (нэргүй) баримт болгож дахин үүсгэх үү? Байгууллага НӨАТ-аа буцаан авах боломжгүй болно.')) return
+    retry(r, { receiver_type: 'CITIZEN' })
+  }
+  const retryWithTin = (r) => {
+    const v = prompt(`${r.plate_number || ''} — зөв дугаар оруул (ААН регистр 7 орон / ТТД 11–14 орон / иргэний регистр АА00112233):`,
+      r.customer_tin || '')
+    if (v === null || !v.trim()) return
+    retry(r, { customer_tin: v.trim() })
   }
 
   // Баримт ЦУЦЛАХ (буцаалт) — мөнгө буцаахгүй, зөвхөн татварын баримт.
@@ -362,6 +379,16 @@ export default function Vat() {
                     {retrying === r.id ? '…' : 'Дахин үүсгэх'}
                   </button>
                 )}
+                {badTin(r) && (<>
+                  <button className="btn-secondary py-1 px-2 text-xs text-amber-300" disabled={retrying === r.id}
+                    onClick={() => retryWithTin(r)} title="Зөв регистр/ТТД оруулж байгууллагын баримтыг дахин үүсгэнэ">
+                    Дугаар засах
+                  </button>
+                  <button className="btn-secondary py-1 px-2 text-xs text-amber-300" disabled={retrying === r.id}
+                    onClick={() => retryAsCitizen(r)} title="Худалдан авагчийн дугаар буруу — иргэний (нэргүй) баримт болгож дахин үүсгэнэ">
+                    Иргэнээр
+                  </button>
+                </>)}
                 {(r.status === 'SENT' || r.status === 'CANCEL_PENDING') && r.ebarimt_id && (
                   <button className="btn-secondary py-1 px-2 text-xs text-red-400" disabled={cancelling === r.id}
                     onClick={() => cancel(r)}
