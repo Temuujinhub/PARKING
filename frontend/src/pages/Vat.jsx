@@ -47,14 +47,17 @@ export default function Vat() {
   const hasFilter = filterQS !== ''
 
   const { data: rows, loading, reload: reloadRows } = useFetch(
-    `/api/reports/vat-receipts?date_from=${from}&date_to=${to}${filterQS}`,
+    `/api/reports/vat-receipts?date_from=${from}&date_to=${to}&limit=1000${filterQS}`,
     { initial: [] })
   const { data: info, reload: reloadInfo } = useFetch('/api/reports/vat-info', { initial: null })
   // Бүтэлгүйтлийг ШАЛТГААНААР бүлэглэсэн нэгтгэл. Мөр тус бүрийн алдаа доорх
   // хүснэгтэд харагддаг ч 500+ ИЖИЛ алдаа хуудаслалттай жагсаалтад хэв маяг
   // болж харагддаггүй — прод дээр ийм хоёр тасалдал 24-48 цаг анзаарагдаагүй
   // (msgbill квот 85ш, QPay «ТТД бүртгэлгүй» 588ш). 2026-08-28.
-  const { data: fails, reload: reloadFails } = useFetch('/api/reports/vat-failures?days=7', { initial: [] })
+  // Самбар ба бөөн нөхөлт хуудасны ОГНООНЫ МУЖИЙГ дагана (өмнө нь 7 хоног хатуу байсан тул
+  // 8-р сарын бүтэлгүйтлүүд самбарт харагддаггүй, «Бүгдийг дахин үүсгэх» ч тэднийг авдаггүй байв)
+  const { data: fails, reload: reloadFails } = useFetch(
+    `/api/reports/vat-failures?date_from=${from}&date_to=${to}`, { initial: [] })
   const [bulking, setBulking] = useState(false)
   const [failsAt, setFailsAt] = useState(null)
   // Бөөн нөхөлт АРЫН АЖИЛ болсон (2026-09-06): 500 баримт хэдэн минут явдаг тул
@@ -100,7 +103,7 @@ export default function Vat() {
   // АВАХГҮЙ — зөвхөн ДДТД үүсгэнэ.
   // group өгвөл зөвхөн тэр (суваг + алдааны текст) бүлгийг нөхнө.
   const retryAll = async (group = null) => {
-    const base = { days: 7, limit: 500 }
+    const base = { date_from: from, date_to: to, limit: 500 }
     if (group) { base.provider = group.provider; base.error = group.error }
     try {
       const pre = await api('/api/reports/vat-retry-failed', {
@@ -142,7 +145,9 @@ export default function Vat() {
   // Худалдан авагчийн дугаар буруу (QPay «customerTin», ТЕГ-т байхгүй регистр) —
   // иргэний баримт болгох эсвэл зөв дугаар өгөх. 2026-09-06: 6853959 регистртэй
   // төлбөрийн баримтыг засах ямар ч арга UI-д байгаагүй.
-  const badTin = (r) => r.status === 'FAILED' && /customerTin|ТТД|регистр|receiver/i.test(r.receipt_url || '')
+  // Зөвхөн ХУДАЛДАН АВАГЧИЙН дугаарын алдаа — QPay-ийн мерчант талын «… ТТД бүртгэлгүй»
+  // (түрээслэгчийн жагсаалт) алдаанд энэ товчнууд ХАМААГҮЙ (2026-09-06: буруу гарч байв)
+  const badTin = (r) => r.status === 'FAILED' && /customerTin|customer_tin|худалдан авагч/i.test(r.receipt_url || '')
   const retryAsCitizen = (r) => {
     if (!window.confirm(`${r.plate_number || ''} — худалдан авагчийн дугаар (${r.customer_tin || '?'}) буруу.\n`
       + 'ИРГЭНИЙ (нэргүй) баримт болгож дахин үүсгэх үү? Байгууллага НӨАТ-аа буцаан авах боломжгүй болно.')) return
@@ -242,7 +247,7 @@ export default function Vat() {
         <div className="card space-y-2">
           <div className="flex items-center gap-2">
             <AlertTriangle size={15} className="text-amber-400" />
-            <h3 className="font-semibold text-slate-200">Бүтэлгүйтсэн баримт — шалтгаанаар (сүүлийн 7 хоног)</h3>
+            <h3 className="font-semibold text-slate-200">Бүтэлгүйтсэн баримт — шалтгаанаар ({from} … {to})</h3>
             <div className="ml-auto flex gap-1.5">
               <button className="btn-primary py-0.5 text-xs" disabled={bulking} onClick={() => retryAll()}
                 title="Бүх бүтэлгүйтсэн баримтын ДДТД-г дахин үүсгэнэ. Төлбөрийг ДАХИН АВАХГҮЙ. Шалтгааныг зассаны ДАРАА дарна уу.">
@@ -329,7 +334,7 @@ export default function Vat() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-slate-500">
-            {loading ? 'Хайж байна…' : `${rows.length} баримт${hasFilter ? ' (шүүлттэй)' : ''}`}
+            {loading ? 'Хайж байна…' : `${rows.length} баримт${hasFilter ? ' (шүүлттэй)' : ''}${rows.length >= 1000 ? ' — 1000-ын хязгаарт хүрсэн, хугацааг багасга' : ''}`}
           </span>
           {hasFilter && (
             <button className="btn-secondary py-0.5 px-2 text-xs"

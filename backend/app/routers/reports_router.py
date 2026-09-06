@@ -1342,8 +1342,8 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
 
 
 @router.get("/vat-failures")
-def vat_failures(days: int = 7, db: Session = Depends(get_db),
-                 user: User = Depends(require("vat", "reports"))):
+def vat_failures(days: int = 7, date_from: str | None = None, date_to: str | None = None,
+                 db: Session = Depends(get_db), user: User = Depends(require("vat", "reports"))):
     """Бүтэлгүйтсэн баримтуудыг АЛДААНЫ ШАЛТГААНААР бүлэглэж буцаана.
 
     Юуны учир (2026-08-28): алдааны текст `receipt_url`-д хадгалагддаг ба мөр
@@ -1355,9 +1355,15 @@ def vat_failures(days: int = 7, db: Session = Depends(get_db),
     Хоёулаа НЭГ шалтгаантай байсан тул бүлэглээд харвал шууд илэрнэ.
     """
     from sqlalchemy import case, func
-    days = max(1, min(int(days or 7), 90))
     now = datetime.utcnow()
-    start = now - timedelta(days=days)
+    # Хугацаа: UI-ийн огнооны муж (date_from/date_to — доорх жагсаалттай ИЖИЛ) эсвэл
+    # сүүлийн N хоног. 2026-09-06: самбар 7 хоног, жагсаалт сонгосон муж хардаг байсан тул
+    # 8/30-аас өмнөх бүтэлгүйтлүүд (8-р сарын бүх өр) самбарт огт харагддаггүй байв.
+    if date_from or date_to:
+        start, end = _range(date_from, date_to)
+    else:
+        days = max(1, min(int(days or 7), 90))
+        start, end = now - timedelta(days=days), now + timedelta(days=1)
     # active_24h — энэ шалтгаан СҮҮЛИЙН 24 ЦАГТ хэдэн удаа гарсан бэ. 0 бол шалтгаан
     # арилсан (жишээ нь QPay ТТД бүртгэл 09-03-нд засагдсан) ч ХУУЧИН унасан баримтууд
     # өөрөө нөхөгдөхгүй — «дахин үүсгэх» дарах л хэрэгтэй. 2026-09-06: 1,484 баримт
@@ -1369,7 +1375,8 @@ def vat_failures(days: int = 7, db: Session = Depends(get_db),
                   func.sum(case((VatReceipt.created_at >= now - timedelta(hours=24), 1),
                                 else_=0)).label("active_24h"))
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
+         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start,
+                 VatReceipt.created_at < end))
     q = _flt(q, ParkingSession.site_id, _scope(user))
     rows = (q.group_by(VatReceipt.provider, VatReceipt.receipt_url)
             .order_by(func.count().desc()).limit(20).all())
@@ -1389,7 +1396,7 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
     нэг нэгээр нь дарж нөхөх боломжгүй — 2026-08-27-нд ганц тасалдлаас 85,
     QPay-гээс 588 баримт хуримтлагдсан.
 
-    body: {days=7, provider?, error?, limit=100, dry=false}
+    body: {days=7 | date_from+date_to, provider?, error?, limit=100, dry=false}
       error     — зөвхөн ЭНЭ алдааны текстээр унасан бүлгийг (vat-failures-ийн мөр) нөхнө.
       dry=true  — ЮУ Ч ҮҮСГЭХГҮЙ, зөвхөн хэдэн баримт оролдохыг тоолно.
     Буцаах: total (энэ удаа оролдсон), candidates_total (бүгд), remaining (үлдсэн —
@@ -1412,11 +1419,15 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
     dry = bool(body.get("dry"))
     provider = (body.get("provider") or "").strip().upper() or None
     error = (body.get("error") or "").strip() or None
-    start = datetime.utcnow() - timedelta(days=days)
+    if body.get("date_from") or body.get("date_to"):
+        start, end = _range(body.get("date_from"), body.get("date_to"))
+    else:
+        start, end = datetime.utcnow() - timedelta(days=days), datetime.utcnow() + timedelta(days=1)
 
     q = (db.query(VatReceipt)
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
+         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start,
+                 VatReceipt.created_at < end))
     if provider:
         q = q.filter(VatReceipt.provider == provider)
     if error:
@@ -1432,6 +1443,7 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
             pay_ids.append(r.payment_id)
     if dry:
         return {"dry": True, "candidates": len(pay_ids), "rows": len(recs), "days": days,
+                "date_from": body.get("date_from"), "date_to": body.get("date_to"),
                 "provider": provider, "error": error, "candidates_total": candidates_total,
                 "limit": limit}
 
