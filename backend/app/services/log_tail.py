@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from ..config import settings
 from ..database import SessionLocal
 from ..models import Device, LprEvent, ParkingSite
+from ..timeutil import utc_epoch
 from ..session_logic import (handle_entry, handle_exit, handle_inner_pass,
                              normalize_plate)
 from .camera_records import (fetch_snap_events, from_camera_epoch,
@@ -53,7 +54,7 @@ _last_pull: dict[str, float] = {}
 
 
 def _key(plate: str, t: datetime) -> str:
-    return f"{plate}@{int(t.timestamp())}"
+    return f"{plate}@{int(utc_epoch(t))}"
 
 
 def may_open(gap_sec: float, interval_sec: float | None = None) -> bool:

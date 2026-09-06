@@ -15,6 +15,7 @@ from app.config import settings  # noqa: E402
 from app.services import clock_drift  # noqa: E402
 from app.services.clock_drift import (describe, device_drift,  # noqa: E402
                                       extract_real_utc, note_event)
+from app.timeutil import utc_epoch  # noqa: E402
 
 NOW = datetime(2026, 8, 31, 10, 0, 0)
 
@@ -24,7 +25,7 @@ def setup_function(_):
 
 
 def _ev(drift_sec: float) -> dict:
-    return {"Code": "TrafficJunction", "RealUTC": NOW.timestamp() + drift_sec}
+    return {"Code": "TrafficJunction", "RealUTC": utc_epoch(NOW) + drift_sec}
 
 
 def test_extract_only_real_utc():
@@ -72,6 +73,24 @@ def test_single_outlier_does_not_alarm():
     st = device_drift("d1")
     assert st and abs(st["drift_sec"]) < settings.clock_drift_warn_sec
     assert st["note"] is None
+
+
+def test_drift_independent_of_os_timezone(monkeypatch):
+    """2026-09-06 прод: сервер Asia/Ulaanbaatar болоход 38 камер бүгд
+    «7ц 59м түрүүлж» гэж улаан болов — naive.timestamp() OS бүсээр хазайдаг.
+    Камерын RealUTC = серверийн UTC бол ямар ч бүсэд зөрүү 0 байх ёстой."""
+    import time as _time
+    monkeypatch.setenv("TZ", "Asia/Ulaanbaatar")
+    _time.tzset()
+    try:
+        for _ in range(5):
+            note_event("d1", _ev(0), now=NOW)
+        st = device_drift("d1")
+        assert st and abs(st["drift_sec"]) < 1, st
+        assert st["note"] is None
+    finally:
+        monkeypatch.delenv("TZ")
+        _time.tzset()
 
 
 def test_describe_units():

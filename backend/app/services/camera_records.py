@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from ..config import settings
+from ..timeutil import utc_epoch
 from .barrier import DahuaRpc, DahuaRpcError
 
 
@@ -41,7 +42,9 @@ def to_camera_epoch(dt_utc: datetime) -> int:
     машин ҮНЭНДЭЭ УБ 18:59:47-д амьд event-ээр ирсэн — өөрөөр хэлбэл Time нь
     УБ локал цаг байв.
     """
-    return int(dt_utc.timestamp()) + _cam_offset_sec()
+    # utc_epoch: naive.timestamp() нь OS-ийн бүсээр хазайдаг — сервер +8ц болоход
+    # хайлтын муж 8ц ухарч log_tail юу ч олохгүй, camsync 8ц хоцордог байв (2026-09-06)
+    return int(utc_epoch(dt_utc)) + _cam_offset_sec()
 
 
 def from_camera_epoch(t) -> datetime:

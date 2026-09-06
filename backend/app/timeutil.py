@@ -10,6 +10,7 @@
     Жишээ алдаа: msgbill-ийн баримтын огнооны fallback `datetime.now()` байсан
     нь UTC сервер дээр УБ-аас 8 цаг хоцорсон огноо бичих латент алдаа байв.
 """
+import calendar
 from datetime import datetime, timedelta
 
 from .config import settings
@@ -27,3 +28,16 @@ def local_now() -> datetime:
 
 def local_str(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     return local_now().strftime(fmt)
+
+
+def utc_epoch(dt: datetime) -> float:
+    """Naive UTC datetime → Unix epoch (сек). tz-тэй бол шууд.
+
+    `dt.timestamp()`-ийг naive UTC дээр ХЭЗЭЭ Ч БҮҮ дууд: Python naive datetime-ийг
+    ЛОКАЛ цаг гэж үзэж OS-ийн бүсээр хөрвүүлдэг тул сервер Etc/UTC биш болмогц
+    (2026-09-06: прод 202.21.117.179 Asia/Ulaanbaatar болсон) epoch яг бүсийн
+    зөрүүгээр (8ц) хазайж — камерын цагийн зөрүү «7ц 59м түрүүлж» гэж 38 камерт
+    хуурамчаар дохиолж, camsync/log_tail-ийн хайлтын муж 8ц ухарч байв."""
+    if dt.tzinfo is not None:
+        return dt.timestamp()
+    return calendar.timegm(dt.timetuple()) + dt.microsecond / 1e6

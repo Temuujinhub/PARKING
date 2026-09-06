@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from ..auth import get_current_user, require_role
+from ..timeutil import utc_epoch
 from ..config import settings
 from ..database import get_db
 from ..models import Device, User
@@ -91,6 +92,25 @@ def _db_storage(db, snapshots: dict | None = None) -> dict:
             "snapshots": snapshots}
 
 _START = time.time()  # backend асаасан цаг (uptime тооцох)
+
+
+def _os_timezone() -> str:
+    """OS-ийн цагийн бүс: /etc/timezone → /etc/localtime symlink → TZ env → tzname.
+
+    Ubuntu дээр `timedatectl set-timezone` нь зөвхөн /etc/localtime symlink-ийг
+    солидог тул /etc/timezone байхгүй/хуучин байж болно (прод 2026-09-06: «?»)."""
+    try:
+        if os.path.exists("/etc/timezone"):
+            v = open("/etc/timezone").read().strip()
+            if v:
+                return v
+        if os.path.islink("/etc/localtime"):
+            target = os.readlink("/etc/localtime")
+            if "zoneinfo/" in target:
+                return target.split("zoneinfo/", 1)[1]
+        return os.environ.get("TZ") or "/".join(time.tzname)
+    except Exception:
+        return "?"
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 
@@ -412,7 +432,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         alive_map = {d.id: r for (d, _), r in zip(dev_targets, results)}
 
     def _dev_row(d):
-        age = int(now - d.last_seen.timestamp()) if d.last_seen else None
+        age = int(now - utc_epoch(d.last_seen)) if d.last_seen else None
         return {"id": d.id, "name": d.name, "site_id": d.site_id, "ip": d.ip_address,
                 "lane_dir": d.lane_dir, "reachable": alive_map.get(d.id),
                 "last_seen_age_sec": age}
@@ -432,8 +452,7 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         "utc": _utc.strftime("%Y-%m-%d %H:%M:%S"),
         "local": (_utc + _td(hours=settings.tz_offset_hours)).strftime("%Y-%m-%d %H:%M:%S"),
         "tz_offset_hours": settings.tz_offset_hours,
-        "os_tz": (open("/etc/timezone").read().strip()
-                  if os.path.exists("/etc/timezone") else "?"),
+        "os_tz": _os_timezone(),
         "os_naive_now": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
         # OS-ийн локал цаг UTC-аас зөрвөл `datetime.now()`-той код эвдэрнэ
         "os_utc_skew_sec": int(round((_dt.now() - _utc).total_seconds())),

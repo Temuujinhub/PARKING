@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 
 from ..config import settings
+from ..timeutil import utc_epoch
 
 log = logging.getLogger("parking.clock_drift")
 
@@ -55,7 +56,9 @@ def note_event(device_id: str, raw: dict, now: datetime | None = None) -> float 
     if cam_utc is None:
         return None
     now = now or datetime.utcnow()
-    drift = cam_utc - now.timestamp()   # >0 = камер түрүүлж
+    # utc_epoch — naive.timestamp() OS-ийн бүсээр хазайдаг (2026-09-06: прод +8ц
+    # болоход 38 камер бүгд «7ц 59м түрүүлж» гэж худал улаан болсон)
+    drift = cam_utc - utc_epoch(now)   # >0 = камер түрүүлж
     st = _state.get(device_id)
     if st is None or time.monotonic() - st["at"] > 6 * 3600:
         # Шинэ эсвэл 6+ цаг чимээгүй байсан камер — дундажийг шинээр эхэлнэ

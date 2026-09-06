@@ -26,6 +26,22 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-09-06 — 🕐 Серверийн цагийн бүс: 38 камер «7ц 59м түрүүлж» худал дохио
+
+Прод (202.21.117.179) серверийн OS цагийн бүс Etc/UTC → Asia/Ulaanbaatar болсон
+(`/api/health/system → clock.os_utc_skew_sec = 28800`). Аппын код бүхэлдээ naive
+UTC-тэй атал Python naive `datetime.timestamp()` нь OS-ийн бүсээр хөрвүүлдэг тул
+4 цэгт epoch яг 8 цагаар хазайв: камерын цагийн зөрүү (бүх камер +8ц улаан),
+камерын лог хайлтын муж `to_camera_epoch` (log_tail 8ц ухарч юу ч олохгүй,
+camsync 8ц хоцорч нөхнө), эрүүл мэндийн `last_seen_age_sec` (+8ц), log_tail dedup
+түлхүүр. Бодит зөрүү (8ц-ийг хассан): 10.0.113.x / 10.0.106.x **+2.5ц түрүүлж**,
+10.0.103.x / 10.0.109.13 **−7.5м хоцорч**, бусад 32 камер ±50с.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | **`timeutil.utc_epoch()`** — naive UTC → epoch-ийг `calendar.timegm`-ээр, OS бүсээс үл хамааран. clock_drift, camera_records.to_camera_epoch, health last_seen age, log_tail dedup 4 цэг бүгд үүгээр. Startup-д OS бүс UTC биш бол WARNING; health `os_tz` /etc/localtime symlink-ээс ч уншина. Тест: TZ=Asia/Ulaanbaatar дор зөрүү 0 | ⏳ | ⏳ | ⏳ |
+| ops | Серверийн бүсийг буцаах: `timedatectl set-timezone Etc/UTC && systemctl restart parking-backend` (прод, гараар — SSH гаднаас хаалттай) | — | — | ⏳ |
+
 ## 2026-09-03 — 📋 Түүх: «Шалтгаан» багана
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |

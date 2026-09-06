@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,6 +102,24 @@ def _bg_task(coro, name: str):
 
     task.add_done_callback(_done)
     return task
+
+
+@app.on_event("startup")
+async def warn_if_os_timezone_not_utc():
+    """Серверийн OS цагийн бүс UTC биш бол ЧАНГА анхааруулна.
+
+    Аппын код бүхэлдээ naive UTC-тэй (timeutil.py) тул OS-ийн бүс өөрчлөгдвөл
+    naive.timestamp()/datetime.now() хэрэглэсэн зам чимээгүй хазайна. 2026-09-06:
+    прод сервер Asia/Ulaanbaatar болсныг 3 хоног хэн ч мэдээгүй — 38 камер
+    «7ц 59м түрүүлж» гэж худал улаан, log_tail нөхөлт 8ц ухарсан."""
+    from datetime import datetime as _dt
+    skew = int(round((_dt.now() - _dt.utcnow()).total_seconds()))
+    if abs(skew) >= 60:
+        log.warning("СЕРВЕРИЙН OS ЦАГИЙН БҮС UTC БИШ (локал − UTC = %+d сек, TZ=%s). "
+                    "Апп UTC-д тооцоолдог тул `timedatectl set-timezone Etc/UTC && "
+                    "systemctl restart parking-backend` хий. Код utc_epoch()-оор "
+                    "хамгаалагдсан ч tools/cron скрипт хазайж болзошгүй.",
+                    skew, os.environ.get("TZ") or "/".join(time.tzname))
 
 
 @app.on_event("startup")
