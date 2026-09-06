@@ -1354,21 +1354,29 @@ def vat_failures(days: int = 7, db: Session = Depends(get_db),
       • QPay «түрээслэгчийн жагсаалтанд ТТД бүртгэлгүй» — 588 баримт
     Хоёулаа НЭГ шалтгаантай байсан тул бүлэглээд харвал шууд илэрнэ.
     """
-    from sqlalchemy import func
+    from sqlalchemy import case, func
     days = max(1, min(int(days or 7), 90))
-    start = datetime.utcnow() - timedelta(days=days)
+    now = datetime.utcnow()
+    start = now - timedelta(days=days)
+    # active_24h — энэ шалтгаан СҮҮЛИЙН 24 ЦАГТ хэдэн удаа гарсан бэ. 0 бол шалтгаан
+    # арилсан (жишээ нь QPay ТТД бүртгэл 09-03-нд засагдсан) ч ХУУЧИН унасан баримтууд
+    # өөрөө нөхөгдөхгүй — «дахин үүсгэх» дарах л хэрэгтэй. 2026-09-06: 1,484 баримт
+    # «зассан ажил» гэж бодогдоод 4 хоног нөхөгдөлгүй хэвтсэн.
     q = (db.query(VatReceipt.provider, VatReceipt.receipt_url,
                   func.count().label("n"), func.min(VatReceipt.created_at).label("first_at"),
                   func.max(VatReceipt.created_at).label("last_at"),
-                  func.sum(VatReceipt.amount).label("amount"))
+                  func.sum(VatReceipt.amount).label("amount"),
+                  func.sum(case((VatReceipt.created_at >= now - timedelta(hours=24), 1),
+                                else_=0)).label("active_24h"))
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
          .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
     q = _flt(q, ParkingSession.site_id, _scope(user))
     rows = (q.group_by(VatReceipt.provider, VatReceipt.receipt_url)
             .order_by(func.count().desc()).limit(20).all())
     return [{"provider": p or "?", "error": (e or "(алдаа бичигдээгүй)")[:400], "count": n,
-             "first_at": f.isoformat(), "last_at": l.isoformat(), "amount": float(a or 0)}
-            for p, e, n, f, l, a in rows]
+             "first_at": f.isoformat(), "last_at": l.isoformat(), "amount": float(a or 0),
+             "active_24h": int(a24 or 0)}
+            for p, e, n, f, l, a, a24 in rows]
 
 
 @router.post("/vat-retry-failed")
@@ -1381,8 +1389,11 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
     нэг нэгээр нь дарж нөхөх боломжгүй — 2026-08-27-нд ганц тасалдлаас 85,
     QPay-гээс 588 баримт хуримтлагдсан.
 
-    body: {days=7, provider?, limit=100, dry=false}
+    body: {days=7, provider?, error?, limit=100, dry=false}
+      error     — зөвхөн ЭНЭ алдааны текстээр унасан бүлгийг (vat-failures-ийн мөр) нөхнө.
       dry=true  — ЮУ Ч ҮҮСГЭХГҮЙ, зөвхөн хэдэн баримт оролдохыг тоолно.
+    Буцаах: total (энэ удаа оролдсон), candidates_total (бүгд), remaining (үлдсэн —
+      limit-ээс их байвал дахин дарна).
 
     Хамгаалалт:
       • `retry_ebarimt` өөрөө ДДТД-тэй баримтыг алгасдаг (давхардал үүсэхгүй)
@@ -1400,6 +1411,7 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
     limit = max(1, min(int(body.get("limit") or 100), 500))
     dry = bool(body.get("dry"))
     provider = (body.get("provider") or "").strip().upper() or None
+    error = (body.get("error") or "").strip() or None
     start = datetime.utcnow() - timedelta(days=days)
 
     q = (db.query(VatReceipt)
@@ -1407,7 +1419,10 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
          .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start))
     if provider:
         q = q.filter(VatReceipt.provider == provider)
+    if error:
+        q = q.filter(VatReceipt.receipt_url == error)
     q = _flt(q, ParkingSession.site_id, _scope(user))
+    candidates_total = q.count()
     recs = q.order_by(VatReceipt.created_at).limit(limit).all()
     # Нэг төлбөрт олон бүтэлгүй мөр байж болно — төлбөр бүрд НЭГ л оролдоно
     pay_ids, seen = [], set()
@@ -1417,10 +1432,12 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
             pay_ids.append(r.payment_id)
     if dry:
         return {"dry": True, "candidates": len(pay_ids), "rows": len(recs), "days": days,
-                "provider": provider}
+                "provider": provider, "error": error, "candidates_total": candidates_total,
+                "limit": limit}
 
     out = {"total": len(pay_ids), "ok": 0, "skipped": 0, "failed": 0,
-           "stopped": None, "errors": {}}
+           "stopped": None, "errors": {}, "candidates_total": candidates_total,
+           "remaining": max(0, candidates_total - len(recs))}
     for pid in pay_ids:
         payment = _lock_payment(db, pid)
         if payment is None:
@@ -1444,7 +1461,8 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
         await asyncio.sleep(0.3)      # ТЕГ/msgbill-ийг цохихгүй
     db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_BULK", entity="vat",
                     entity_id=provider or "ALL",
-                    detail={k: v for k, v in out.items() if k != "errors"}))
+                    detail={**{k: v for k, v in out.items() if k != "errors"},
+                            "error_filter": (error or "")[:120]}))
     db.commit()
     return out
 

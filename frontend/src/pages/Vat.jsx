@@ -56,28 +56,45 @@ export default function Vat() {
   // (msgbill квот 85ш, QPay «ТТД бүртгэлгүй» 588ш). 2026-08-28.
   const { data: fails, reload: reloadFails } = useFetch('/api/reports/vat-failures?days=7', { initial: [] })
   const [bulking, setBulking] = useState(false)
+  const [failsAt, setFailsAt] = useState(null)
+  // «Шинэчлэх» дарахад юу ч өөрчлөгдөхгүй мэт харагддаг байв — самбар ҮНЭНИЙГ л
+  // харуулдаг (баримт ҮҮСЭЭГҮЙ төлбөрүүд): шалтгааныг зассан ч хуучин баримтууд
+  // өөрөө нөхөгдөхгүй. Тиймээс шинэчилсэн цагийг харуулж, мөр бүрд шалтгаан
+  // одоо ч идэвхтэй эсэх + бүлгээр нь дахин үүсгэх товч нэмэв (2026-09-06).
+  const refreshFails = async () => {
+    await reloadFails()
+    setFailsAt(new Date())
+    toast('Бүтэлгүйтлийн жагсаалт шинэчлэгдлээ')
+  }
 
   // Бүтэлгүйтсэн баримтуудыг БӨӨНӨӨР нөхөх. Нэг гадны шалтгаанаар олон зуун
   // баримт зэрэг унадаг тул нэг нэгээр дарж нөхөх боломжгүй. Төлбөрийг ДАХИН
   // АВАХГҮЙ — зөвхөн ДДТД үүсгэнэ.
-  const retryAll = async () => {
+  // group өгвөл зөвхөн тэр (суваг + алдааны текст) бүлгийг нөхнө.
+  const retryAll = async (group = null) => {
     setBulking(true)
+    const base = { days: 7, limit: 500 }
+    if (group) { base.provider = group.provider; base.error = group.error }
     try {
       const pre = await api('/api/reports/vat-retry-failed', {
-        method: 'POST', body: { days: 7, limit: 500, dry: true } })
+        method: 'POST', body: { ...base, dry: true } })
       if (!pre.candidates) { toast('Нөхөх баримт олдсонгүй'); return }
-      if (!window.confirm(`${pre.candidates} төлбөрийн ДДТД-г дахин үүсгэх үү?\n\n`
+      const total = pre.candidates_total || pre.candidates
+      const more = total > pre.candidates
+        ? `\n\nНийт ${total} байгаагаас энэ удаа ${pre.candidates}-ыг оролдоно (нэг дарахад дээд тал нь ${pre.limit || 500}) — дуусмагц ДАХИН дарна уу.`
+        : ''
+      if (!window.confirm(`${pre.candidates} төлбөрийн ДДТД-г дахин үүсгэх үү?${more}\n\n`
         + 'Төлбөрийг ДАХИН АВАХГҮЙ — зөвхөн баримт үүснэ. ДДТД аль хэдийн үүссэн '
         + 'баримтыг алгасна. Квот дүүрвэл тэр дороо зогсоно.\n\n'
         + 'Гадны шалтгааныг (квот/ТТД бүртгэл) ЗАССАН эсэхээ эхлээд шалгаарай — '
         + 'эс бол бүгд дахин унана.')) return
-      const r = await api('/api/reports/vat-retry-failed', {
-        method: 'POST', body: { days: 7, limit: 500 } })
+      const r = await api('/api/reports/vat-retry-failed', { method: 'POST', body: base })
       const top = Object.entries(r.errors || {}).sort((a, b) => b[1] - a[1])[0]
       toast(`${r.ok} баримт үүсэв · ${r.failed} унав · ${r.skipped} алгасав`
+        + (r.remaining ? ` · ${r.remaining} үлдсэн — дахин дарна уу` : '')
         + (r.stopped ? ` — ${r.stopped}` : top ? ` · «${top[0].slice(0, 70)}»` : ''),
         r.ok ? 'success' : 'error')
-      reloadFails(); reloadRows(); reloadInfo()
+      await reloadFails(); setFailsAt(new Date()); reloadRows(); reloadInfo()
     } catch (e) { toast(e.message || 'Бөөнөөр нөхөхөд алдаа гарлаа', 'error') } finally { setBulking(false) }
   }
 
@@ -181,28 +198,49 @@ export default function Vat() {
             <AlertTriangle size={15} className="text-amber-400" />
             <h3 className="font-semibold text-slate-200">Бүтэлгүйтсэн баримт — шалтгаанаар (сүүлийн 7 хоног)</h3>
             <div className="ml-auto flex gap-1.5">
-              <button className="btn-primary py-0.5 text-xs" disabled={bulking} onClick={retryAll}
+              <button className="btn-primary py-0.5 text-xs" disabled={bulking} onClick={() => retryAll()}
                 title="Бүх бүтэлгүйтсэн баримтын ДДТД-г дахин үүсгэнэ. Төлбөрийг ДАХИН АВАХГҮЙ. Шалтгааныг зассаны ДАРАА дарна уу.">
                 {bulking ? 'Үүсгэж байна…' : 'Бүгдийг дахин үүсгэх'}
               </button>
-              <button className="btn-secondary py-0.5 text-xs" onClick={reloadFails}>Шинэчлэх</button>
+              <button className="btn-secondary py-0.5 text-xs" onClick={refreshFails}
+                title="Жагсаалтыг серверээс дахин татна. Баримт ҮҮСЭЭГҮЙ л бол мөр арилахгүй — арилгахын тулд «дахин үүсгэх» дарна.">
+                Шинэчлэх{failsAt ? ` · ${failsAt.toLocaleTimeString('mn-MN', { hour: '2-digit', minute: '2-digit' })}` : ''}
+              </button>
             </div>
           </div>
           <p className="text-xs text-slate-500">
-            Нэг шалтгаан олон зуун баримтыг зогсоож болно. Дүн нь ДДТД ҮҮСЭЭГҮЙ гүйлгээний нийлбэр —
-            шалтгааныг зассаны дараа доорх жагсаалтаас «Дахин үүсгэх»-ээр нөхнө.
+            Энд ДДТД ҮҮСЭЭГҮЙ хэвээр байгаа төлбөрүүд л харагдана. Шалтгааныг зассан ч хуучин баримтууд
+            өөрөө нөхөгдөхгүй — «Төлөв» багана <span className="text-emerald-400">зогссон</span> бол тухайн мөрийн
+            «Дахин үүсгэх»-ийг дарж нөх (нэг дарахад 500 хүртэл), <span className="text-rose-400">идэвхтэй</span> бол
+            эхлээд шалтгааныг нь зас — эс бол дахин унана.
           </p>
-          <Table headers={['Суваг', 'Тоо', 'Дүн', 'Эхэлсэн', 'Сүүлийн', 'Алдаа']} empty={false}>
-            {fails.map((f, i) => (
-              <tr key={i}>
-                <td className="td text-xs font-medium">{f.provider}</td>
-                <td className="td font-mono text-right">{fmt(f.count)}</td>
-                <td className="td font-mono text-right whitespace-nowrap">{fmt(f.amount)}₮</td>
-                <td className="td text-xs whitespace-nowrap">{fmtDate(f.first_at)}</td>
-                <td className="td text-xs whitespace-nowrap">{fmtDate(f.last_at)}</td>
-                <td className="td text-[11px] text-amber-400 break-words max-w-[28rem]">{f.error}</td>
-              </tr>
-            ))}
+          <Table headers={['Суваг', 'Тоо', 'Дүн', 'Эхэлсэн', 'Сүүлийн', 'Төлөв', 'Алдаа', '']} empty={false}>
+            {fails.map((f, i) => {
+              const hrs = Math.max(0, Math.round((Date.now() - new Date(f.last_at + (f.last_at.endsWith('Z') ? '' : 'Z'))) / 36e5))
+              const active = (f.active_24h || 0) > 0
+              return (
+                <tr key={i}>
+                  <td className="td text-xs font-medium">{f.provider}</td>
+                  <td className="td font-mono text-right">{fmt(f.count)}</td>
+                  <td className="td font-mono text-right whitespace-nowrap">{fmt(f.amount)}₮</td>
+                  <td className="td text-xs whitespace-nowrap">{fmtDate(f.first_at)}</td>
+                  <td className="td text-xs whitespace-nowrap">{fmtDate(f.last_at)}</td>
+                  <td className="td text-xs whitespace-nowrap">
+                    {active
+                      ? <span className="text-rose-400" title="Сүүлийн 24 цагт энэ алдаа дахин гарсан — шалтгаан арилаагүй">🔴 идэвхтэй · 24ц-д {fmt(f.active_24h)}</span>
+                      : <span className="text-emerald-400" title="Сүүлийн 24 цагт гараагүй — шалтгаан арилсан бололтой, дахин үүсгэж болно">🟢 зогссон · {hrs}ц өмнө</span>}
+                  </td>
+                  <td className="td text-[11px] text-amber-400 break-words max-w-[24rem]">{f.error}</td>
+                  <td className="td text-right whitespace-nowrap">
+                    <button className={`${active ? 'btn-secondary' : 'btn-primary'} py-0.5 text-xs`} disabled={bulking}
+                      onClick={() => retryAll(f)}
+                      title={active ? 'Шалтгаан одоо ч байна — эхлээд засаад дараа нь дар' : 'Зөвхөн энэ бүлгийн баримтуудыг дахин үүсгэнэ'}>
+                      Дахин үүсгэх
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
           </Table>
         </div>
       )}
