@@ -217,8 +217,8 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
         elif use_qpay_eb:
             receipt_raw = await qpay.create_ebarimt(
                 payment.provider_payment_id, receiver_type,
-                # COMPANY үед ААН регистр (ТТД)-ийг ebarimt_receiver болгон дамжуулна
-                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+                # COMPANY үед ТТД-г ebarimt_receiver болгон дамжуулна (регистр бол хөрвүүлнэ)
+                receiver=await _qpay_receiver(payment, receiver_type),
                 # Зогсоолын өөрийн QPay данс — баримт нь тухайн түрээслэгчийн ТТД-ээр үүснэ
                 acc=qpay.account_for(_site_of(payment)),
             )
@@ -1025,6 +1025,33 @@ def list_payments(
         for p in rows]}
 
 
+async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
+    """QPay ebarimt_v3-д дамжуулах худалдан авагч: COMPANY үед ЗААВАЛ ТТД (11–14 орон).
+
+    2026-09-06: POS дээр 7 оронтой ААН регистр (6853959) өгсөн төлбөрийн баримт
+    «receipt.customerTin … [0-9]{11,14}» гэж унаад дахин үүсгэхэд ч унасаар байв —
+    msgbill регистрийг өөрөө хөрвүүлдэг бол QPay хөрвүүлдэггүй. Тиймээс регистр
+    бол ТЕГ-ийн getTinInfo (tin_lookup, 24ц кэштэй)-оор ТТД болгоно. Хөрвүүлж
+    чадахгүй бол регистрээ л дамжуулна (QPay тодорхой алдаагаар унаж, дахин
+    оролдох боломжтой хэвээр — чимээгүйгээр иргэний баримт болгохгүй)."""
+    if receiver_type != "COMPANY":
+        return None
+    reg = (payment.customer_tin or "").strip()
+    if not re.fullmatch(r"[0-9]{7}", reg):
+        return reg or None
+    try:
+        from ..services import tin_lookup
+        res = await tin_lookup.lookup(reg)
+        tin = str(res.get("tin") or "").strip()
+        if re.fullmatch(r"[0-9]{11,14}", tin):
+            return tin
+        log.warning("QPay баримт: регистр %s → ТТД олдсонгүй (%s)", reg,
+                    res.get("error") or ("available" if res.get("available") else "суваггүй"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("QPay баримт: регистр %s → ТТД хайлт алдаа: %s", reg, e)
+    return reg
+
+
 async def retry_ebarimt(db: Session, payment: Payment) -> dict:
     """Бүтэлгүйтсэн e-Barimt баримтыг ДАХИН үүсгэнэ (төлбөрийг дахин авахгүй).
 
@@ -1056,7 +1083,7 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
         if is_qpay:
             raw = await qpay.create_ebarimt(
                 payment.provider_payment_id, receiver_type,
-                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
+                receiver=await _qpay_receiver(payment, receiver_type),
                 acc=qpay.account_for(_site_of(payment)))
         elif mb_acc:
             raw = {}

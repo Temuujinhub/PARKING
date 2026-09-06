@@ -1435,36 +1435,93 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
                 "provider": provider, "error": error, "candidates_total": candidates_total,
                 "limit": limit}
 
-    out = {"total": len(pay_ids), "ok": 0, "skipped": 0, "failed": 0,
+    # АРЫН АЖИЛ (2026-09-06): 500 баримт × ~0.5–1с = хэдэн минут → nginx-ийн 60с
+    # proxy_read_timeout-д 504 өгч, UI «алдаа» гэж харуулдаг байсан (сервер талдаа
+    # үргэлжилж дуусдаг байсан ч хэрэглэгч мэдэхгүй). Одоо шууд job буцааж,
+    # UI /vat-retry-failed/status-аар явцыг харна. Нэг зэрэг НЭГ л job.
+    if _bulk_job.get("running"):
+        raise HTTPException(409, "Бөөн нөхөлт аль хэдийн явагдаж байна — дуустал хүлээнэ үү")
+    job = {"running": True, "started_at": datetime.utcnow().isoformat(), "finished_at": None,
+           "total": len(pay_ids), "done": 0, "ok": 0, "skipped": 0, "failed": 0,
            "stopped": None, "errors": {}, "candidates_total": candidates_total,
-           "remaining": max(0, candidates_total - len(recs))}
-    for pid in pay_ids:
-        payment = _lock_payment(db, pid)
-        if payment is None:
-            out["skipped"] += 1
-            continue
+           "remaining": max(0, candidates_total - len(recs)),
+           "provider": provider, "error_filter": (error or "")[:120],
+           "username": user.username}
+    _bulk_job.clear()
+    _bulk_job.update(job)
+    asyncio.get_event_loop().create_task(_run_bulk_retry(pay_ids), name="vat_retry_bulk")
+    return {"started": True, "job": _job_public()}
+
+
+# Явагдаж буй/сүүлийн бөөн нөхөлтийн төлөв (процесс бүрд нэг — 1 worker)
+_bulk_job: dict = {}
+
+
+def _job_public() -> dict:
+    j = dict(_bulk_job)
+    errs = j.pop("errors", {}) or {}
+    top = sorted(errs.items(), key=lambda kv: -kv[1])[:3]
+    j["top_errors"] = [{"error": e, "count": n} for e, n in top]
+    j.pop("username", None)
+    return j
+
+
+async def _run_bulk_retry(pay_ids: list[str]) -> None:
+    """Бөөн нөхөлтийн бие — өөрийн DB session-тэй (хүсэлтийнх хаагдсан байдаг)."""
+    import asyncio
+
+    from ..database import SessionLocal
+    from .payments_router import _lock_payment, retry_ebarimt
+    db = SessionLocal()
+    j = _bulk_job
+    try:
+        for pid in pay_ids:
+            try:
+                payment = _lock_payment(db, pid)
+                if payment is None:
+                    j["skipped"] += 1
+                    continue
+                try:
+                    res = await retry_ebarimt(db, payment)
+                except Exception as e:  # noqa: BLE001 — нэг баримтын алдаа бөөнийг зогсоохгүй
+                    res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                db.commit()
+            except Exception as e:  # noqa: BLE001 — DB алдаа ч job-ийг унагахгүй
+                db.rollback()
+                res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            finally:
+                j["done"] += 1
+            if res.get("ok"):
+                j["ok"] += 1
+            else:
+                err = (res.get("error") or "?")[:200]
+                j["failed"] += 1
+                j["errors"][err] = j["errors"].get(err, 0) + 1
+                # Квот/эрхийн алдаа = БҮХ дараагийнх нь ч унана — үргэлжлүүлэх нь утгагүй
+                if "429" in err or "хязгаар" in err or "QUOTA" in err.upper():
+                    j["stopped"] = "Квот дүүрсэн тул зогслоо — шатлалаа ахиулаад дахин ажиллуулна уу"
+                    break
+            await asyncio.sleep(0.3)      # ТЕГ/msgbill-ийг цохихгүй
         try:
-            res = await retry_ebarimt(db, payment)
-        except Exception as e:  # noqa: BLE001 — нэг баримтын алдаа бөөнийг зогсоохгүй
-            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        db.commit()
-        if res.get("ok"):
-            out["ok"] += 1
-        else:
-            err = (res.get("error") or "?")[:200]
-            out["failed"] += 1
-            out["errors"][err] = out["errors"].get(err, 0) + 1
-            # Квот/эрхийн алдаа = БҮХ дараагийнх нь ч унана — үргэлжлүүлэх нь утгагүй
-            if "429" in err or "хязгаар" in err or "QUOTA" in err.upper():
-                out["stopped"] = "Квот дүүрсэн тул зогслоо — шатлалаа ахиулаад дахин ажиллуулна уу"
-                break
-        await asyncio.sleep(0.3)      # ТЕГ/msgbill-ийг цохихгүй
-    db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_BULK", entity="vat",
-                    entity_id=provider or "ALL",
-                    detail={**{k: v for k, v in out.items() if k != "errors"},
-                            "error_filter": (error or "")[:120]}))
-    db.commit()
-    return out
+            db.add(AuditLog(username=j.get("username") or "system", action="EBARIMT_RETRY_BULK",
+                            entity="vat", entity_id=j.get("provider") or "ALL",
+                            detail={k: v for k, v in j.items()
+                                    if k not in ("errors", "username", "running")}))
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+    finally:
+        j["running"] = False
+        j["finished_at"] = datetime.utcnow().isoformat()
+        db.close()
+
+
+@router.get("/vat-retry-failed/status")
+def vat_retry_failed_status(user: User = Depends(require("vat", "reports"))):
+    """Явагдаж буй (эсвэл сүүлийн) бөөн нөхөлтийн явц — UI 2с тутам асууна."""
+    if not _bulk_job:
+        return {"running": False, "idle": True}
+    return _job_public()
 
 
 def _vat_receipts_query(db, user, date_from, date_to, q=None, plate=None, ddtd=None,

@@ -57,6 +57,34 @@ export default function Vat() {
   const { data: fails, reload: reloadFails } = useFetch('/api/reports/vat-failures?days=7', { initial: [] })
   const [bulking, setBulking] = useState(false)
   const [failsAt, setFailsAt] = useState(null)
+  // Бөөн нөхөлт АРЫН АЖИЛ болсон (2026-09-06): 500 баримт хэдэн минут явдаг тул
+  // нэг HTTP хүсэлтээр хүлээхэд nginx 504 өгдөг байв. Одоо job эхлүүлээд 2с тутам
+  // явцыг асууна; хуудас дахин нээхэд ч явагдаж буй job харагдана.
+  const [job, setJob] = useState(null)
+  useEffect(() => {
+    let stop = false
+    const tick = async () => {
+      try {
+        const j = await api('/api/reports/vat-retry-failed/status')
+        if (stop) return
+        if (j.idle) { setJob(null); return }
+        setJob(j)
+        if (j.running) { setBulking(true); setTimeout(tick, 2000) }
+        else if (bulking) {
+          setBulking(false)
+          const top = (j.top_errors || [])[0]
+          toast(`${j.ok} баримт үүсэв · ${j.failed} унав · ${j.skipped} алгасав`
+            + (j.remaining ? ` · ${j.remaining} үлдсэн — дахин дарна уу` : '')
+            + (j.stopped ? ` — ${j.stopped}` : top ? ` · «${top.error.slice(0, 70)}»` : ''),
+            j.ok ? 'success' : 'error')
+          reloadFails().then(() => setFailsAt(new Date())); reloadRows(); reloadInfo()
+        }
+      } catch { /* статус татагдахгүй бол дараагийн дарахад л мэдэгдэнэ */ }
+    }
+    tick()
+    return () => { stop = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulking])
   // «Шинэчлэх» дарахад юу ч өөрчлөгдөхгүй мэт харагддаг байв — самбар ҮНЭНИЙГ л
   // харуулдаг (баримт ҮҮСЭЭГҮЙ төлбөрүүд): шалтгааныг зассан ч хуучин баримтууд
   // өөрөө нөхөгдөхгүй. Тиймээс шинэчилсэн цагийг харуулж, мөр бүрд шалтгаан
@@ -72,13 +100,13 @@ export default function Vat() {
   // АВАХГҮЙ — зөвхөн ДДТД үүсгэнэ.
   // group өгвөл зөвхөн тэр (суваг + алдааны текст) бүлгийг нөхнө.
   const retryAll = async (group = null) => {
-    setBulking(true)
     const base = { days: 7, limit: 500 }
     if (group) { base.provider = group.provider; base.error = group.error }
     try {
       const pre = await api('/api/reports/vat-retry-failed', {
         method: 'POST', body: { ...base, dry: true } })
       if (!pre.candidates) { toast('Нөхөх баримт олдсонгүй'); return }
+      setBulking(true)
       const total = pre.candidates_total || pre.candidates
       const more = total > pre.candidates
         ? `\n\nНийт ${total} байгаагаас энэ удаа ${pre.candidates}-ыг оролдоно (нэг дарахад дээд тал нь ${pre.limit || 500}) — дуусмагц ДАХИН дарна уу.`
@@ -87,15 +115,16 @@ export default function Vat() {
         + 'Төлбөрийг ДАХИН АВАХГҮЙ — зөвхөн баримт үүснэ. ДДТД аль хэдийн үүссэн '
         + 'баримтыг алгасна. Квот дүүрвэл тэр дороо зогсоно.\n\n'
         + 'Гадны шалтгааныг (квот/ТТД бүртгэл) ЗАССАН эсэхээ эхлээд шалгаарай — '
-        + 'эс бол бүгд дахин унана.')) return
+        + 'эс бол бүгд дахин унана.')) { setBulking(false); return }
       const r = await api('/api/reports/vat-retry-failed', { method: 'POST', body: base })
-      const top = Object.entries(r.errors || {}).sort((a, b) => b[1] - a[1])[0]
-      toast(`${r.ok} баримт үүсэв · ${r.failed} унав · ${r.skipped} алгасав`
-        + (r.remaining ? ` · ${r.remaining} үлдсэн — дахин дарна уу` : '')
-        + (r.stopped ? ` — ${r.stopped}` : top ? ` · «${top[0].slice(0, 70)}»` : ''),
-        r.ok ? 'success' : 'error')
-      await reloadFails(); setFailsAt(new Date()); reloadRows(); reloadInfo()
-    } catch (e) { toast(e.message || 'Бөөнөөр нөхөхөд алдаа гарлаа', 'error') } finally { setBulking(false) }
+      if (r.started) {
+        setJob(r.job)
+        toast(`${r.job.total} баримтын нөхөлт эхэллээ — явц доор харагдана`)
+        return   // bulking=true хэвээр → дээрх useEffect явцыг 2с тутам асууна
+      }
+      toast('Хариу ойлгомжгүй — жагсаалтыг шинэчилж шалгана уу', 'error')
+      setBulking(false)
+    } catch (e) { toast(e.message || 'Бөөнөөр нөхөхөд алдаа гарлаа', 'error'); setBulking(false) }
   }
 
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
@@ -208,6 +237,16 @@ export default function Vat() {
               </button>
             </div>
           </div>
+          {job && (
+            <div className={`text-xs rounded px-2 py-1 ${job.running ? 'bg-sky-900/40 text-sky-200' : 'bg-slate-800 text-slate-300'}`}>
+              {job.running ? '⏳ Нөхөлт явагдаж байна' : '✔ Сүүлийн нөхөлт дууссан'} · {job.done}/{job.total}
+              {' '}· үүссэн <b className="font-mono">{job.ok}</b> · унасан <b className="font-mono">{job.failed}</b>
+              {job.skipped ? ` · алгассан ${job.skipped}` : ''}
+              {job.remaining ? ` · үлдсэн ${fmt(job.remaining)} (дахин дарна)` : ''}
+              {job.stopped ? ` · ${job.stopped}` : ''}
+              {!job.running && job.top_errors?.[0] && <span className="text-amber-400"> · «{job.top_errors[0].error.slice(0, 90)}» ×{job.top_errors[0].count}</span>}
+            </div>
+          )}
           <p className="text-xs text-slate-500">
             Энд ДДТД ҮҮСЭЭГҮЙ хэвээр байгаа төлбөрүүд л харагдана. Шалтгааныг зассан ч хуучин баримтууд
             өөрөө нөхөгдөхгүй — «Төлөв» багана <span className="text-emerald-400">зогссон</span> бол тухайн мөрийн
