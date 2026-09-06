@@ -92,15 +92,31 @@ def _external_receipt(body: dict | None) -> dict | None:
             "msgbillId": (str(body.get("ebarimt_ref") or "")[:80] or None)}
 
 
+def _err_text(v, limit: int = 400) -> str:
+    """Алдааг ЗААВАЛ текст болгоно — QPay 400-ийн `message` нь dict байж болно
+    ({"ebarimt_receiver": {"type": "MAX_LENGTH", ...}}). 2026-09-06: тэр dict шууд
+    `receipt_url`-д бичигдэх гэж psycopg2 «can't adapt type 'dict'» унаад session
+    эвдэрч, бөөн нөхөлт PendingRollbackError гэж л харуулдаг байв."""
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        try:
+            import json as _json
+            v = _json.dumps(v, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            v = str(v)
+    return v[:limit]
+
+
 def _ebarimt_err(e: Exception) -> str:
     """e-Barimt/msgbill/QPay алдааг богино текст болгоно (VatReceipt.receipt_url-д)."""
     import httpx as _httpx
     if isinstance(e, _httpx.HTTPStatusError):
         try:
-            return (e.response.json().get("message") or e.response.text[:200])
+            return _err_text(e.response.json().get("message") or e.response.text)
         except Exception:  # noqa: BLE001
-            return e.response.text[:200]
-    return str(e)[:200]
+            return _err_text(e.response.text)
+    return _err_text(str(e))
 
 
 def _invoice_no(session: ParkingSession) -> str:
@@ -217,7 +233,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
         elif use_qpay_eb:
             receipt_raw = await qpay.create_ebarimt(
                 payment.provider_payment_id, receiver_type,
-                # COMPANY үед ТТД-г ebarimt_receiver болгон дамжуулна (регистр бол хөрвүүлнэ)
+                # COMPANY үед ААН-ы 7 оронтой регистрийг ebarimt_receiver болгон дамжуулна
                 receiver=await _qpay_receiver(payment, receiver_type),
                 # Зогсоолын өөрийн QPay данс — баримт нь тухайн түрээслэгчийн ТТД-ээр үүснэ
                 acc=qpay.account_for(_site_of(payment)),
@@ -234,7 +250,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                 payer_reg_no=payment.customer_tin,
             )
             if not receipt_raw.get("billId"):
-                ebarimt_error = (receipt_raw.get("error")
+                ebarimt_error = _err_text(receipt_raw.get("error")
                                  or f"msgbill төлөв {receipt_raw.get('state') or '?'} — ДДТД ирээгүй")
         else:
             receipt_raw = await ebarimt.create_receipt(
@@ -1026,30 +1042,19 @@ def list_payments(
 
 
 async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
-    """QPay ebarimt_v3-д дамжуулах худалдан авагч: COMPANY үед ЗААВАЛ ТТД (11–14 орон).
+    """QPay ebarimt_v3-д дамжуулах худалдан авагч (COMPANY үед л).
 
-    2026-09-06: POS дээр 7 оронтой ААН регистр (6853959) өгсөн төлбөрийн баримт
-    «receipt.customerTin … [0-9]{11,14}» гэж унаад дахин үүсгэхэд ч унасаар байв —
-    msgbill регистрийг өөрөө хөрвүүлдэг бол QPay хөрвүүлдэггүй. Тиймээс регистр
-    бол ТЕГ-ийн getTinInfo (tin_lookup, 24ц кэштэй)-оор ТТД болгоно. Хөрвүүлж
-    чадахгүй бол регистрээ л дамжуулна (QPay тодорхой алдаагаар унаж, дахин
-    оролдох боломжтой хэвээр — чимээгүйгээр иргэний баримт болгохгүй)."""
+    2026-09-06-нд прод дээр батлагдсан: QPay `ebarimt_receiver` нь **ААН-ы 7 оронтой
+    РЕГИСТР** — 7-оос урт бол `{"ebarimt_receiver": {"type": "MAX_LENGTH", "message":
+    "String max length (7)!"}}` гэж татгалздаг; ТТД-г QPay өөрөө ТЕГ-ээс олдог. Тиймээс
+    регистрийг ХЭВЭЭР нь дамжуулна (ТТД болгож хөрвүүлэхгүй — өмнөх хувилбар ингэж
+    хөрвүүлээд бүх байгууллагын баримтыг унагаж байв). Регистр ТЕГ-т байхгүй бол QPay
+    «receipt.customerTin … [0-9]{11,14}» гэж унана → Ибаримт дээр «Дугаар засах» /
+    «Иргэнээр». 11–14 оронтой ТТД хадгалагдсан бол QPay MAX_LENGTH гэж тодорхой унана."""
     if receiver_type != "COMPANY":
         return None
-    reg = (payment.customer_tin or "").strip()
-    if not re.fullmatch(r"[0-9]{7}", reg):
-        return reg or None
-    try:
-        from ..services import tin_lookup
-        res = await tin_lookup.lookup(reg)
-        tin = str(res.get("tin") or "").strip()
-        if re.fullmatch(r"[0-9]{11,14}", tin):
-            return tin
-        log.warning("QPay баримт: регистр %s → ТТД олдсонгүй (%s)", reg,
-                    res.get("error") or ("available" if res.get("available") else "суваггүй"))
-    except Exception as e:  # noqa: BLE001
-        log.warning("QPay баримт: регистр %s → ТТД хайлт алдаа: %s", reg, e)
-    return reg
+    reg = re.sub(r"[\s-]", "", (payment.customer_tin or "")).strip()
+    return reg or None
 
 
 async def retry_ebarimt(db: Session, payment: Payment) -> dict:
@@ -1116,7 +1121,7 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
                     rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
                     rec.provider = "MSGBILL"
                 if not raw.get("billId"):
-                    err = raw.get("error") or f"msgbill төлөв {raw.get('state') or '?'} — ДДТД ирээгүй"
+                    err = _err_text(raw.get("error") or f"msgbill төлөв {raw.get('state') or '?'} — ДДТД ирээгүй")
                     if rec:
                         rec.receipt_url = err
                     db.commit()
