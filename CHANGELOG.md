@@ -39,7 +39,7 @@ camsync 8ц хоцорч нөхнө), эрүүл мэндийн `last_seen_age_s
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| fix | **`timeutil.utc_epoch()`** — naive UTC → epoch-ийг `calendar.timegm`-ээр, OS бүсээс үл хамааран. clock_drift, camera_records.to_camera_epoch, health last_seen age, log_tail dedup 4 цэг бүгд үүгээр. Startup-д OS бүс UTC биш бол WARNING; health `os_tz` /etc/localtime symlink-ээс ч уншина. Тест: TZ=Asia/Ulaanbaatar дор зөрүү 0 | ⏳ | ⏳ | ⏳ |
+| fix | **`timeutil.utc_epoch()`** — naive UTC → epoch-ийг `calendar.timegm`-ээр, OS бүсээс үл хамааран. clock_drift, camera_records.to_camera_epoch, health last_seen age, log_tail dedup 4 цэг бүгд үүгээр. Startup-д OS бүс UTC биш бол WARNING; health `os_tz` /etc/localtime symlink-ээс ч уншина. Тест: TZ=Asia/Ulaanbaatar дор зөрүү 0 | 0784f7c | ✅ 09-06 | ✅ 09-06 |
 | ops | Серверийн бүсийг буцаах: `timedatectl set-timezone Etc/UTC && systemctl restart parking-backend` (прод, гараар — SSH гаднаас хаалттай) | — | — | ⏳ |
 
 ## 2026-09-03 — 📋 Түүх: «Шалтгаан» багана
