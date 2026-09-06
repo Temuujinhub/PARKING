@@ -40,6 +40,7 @@ camsync 8ц хоцорч нөхнө), эрүүл мэндийн `last_seen_age_s
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
 | fix | **`timeutil.utc_epoch()`** — naive UTC → epoch-ийг `calendar.timegm`-ээр, OS бүсээс үл хамааран. clock_drift, camera_records.to_camera_epoch, health last_seen age, log_tail dedup 4 цэг бүгд үүгээр. Startup-д OS бүс UTC биш бол WARNING; health `os_tz` /etc/localtime symlink-ээс ч уншина. Тест: TZ=Asia/Ulaanbaatar дор зөрүү 0 | 0784f7c | ✅ 09-06 | ✅ 09-06 |
+| tool | `camera_ntp_config.py` «бүс(NTP/Loc)» багана + `--timezone N` — Рашбулаг/10.0.113.x камер хананы цаг зөв атлаа RealUTC 2.5ц түрүүлж (бүс GMT+5:30 байх магадлалтай); 13=GMT+8 биш бол ⚠ | ⏳ | ⏳ | ⏳ |
 | ops | Серверийн бүсийг буцаах: `timedatectl set-timezone Etc/UTC && systemctl restart parking-backend` (прод, Тэмүүжин гараар) | — | — | ✅ 09-06 |
 
 ## 2026-09-03 — 📋 Түүх: «Шалтгаан» багана
