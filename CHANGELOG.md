@@ -46,7 +46,7 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| feat | **`GET /api/payments/pos/bootstrap?terminal_id=`** — нэвтэрсний дараа НЭГ дуудлагаар эрх + хандах зогсоолууд + зогсоол бүрийн `lanes[]` (хаалт+камер эгнээгээр хосолсон: lane_dir, lane_no, barrier_id, can_open, camera_id) + `barriers[]`/`cameras[]`; терминал бүртгэлтэй бол `terminal.site_id` анхдагч. Нууц талбар (device_key/IP/нууц үг) ирэхгүй. `GET /api/sessions/recent-exits` шинэ `lane_no` / `device_id` шүүлт (зөвхөн сонгосон эгнээний гарах камерын машин) + мөр бүрд `exit_lane_no/exit_lane_dir/exit_device_name`. Заавар PAX_POS_APP_GUIDE §2.1/§3.1/§4, Postman «Bootstrap» + `lane_no`. Тест: unit `test_pos_lanes` (4), live `test_pos_bootstrap.py` | ⏳ | ⏳ | ⏳ |
+| feat | **`GET /api/payments/pos/bootstrap?terminal_id=`** — нэвтэрсний дараа НЭГ дуудлагаар эрх + хандах зогсоолууд + зогсоол бүрийн `lanes[]` (хаалт+камер эгнээгээр хосолсон: lane_dir, lane_no, barrier_id, can_open, camera_id) + `barriers[]`/`cameras[]`; терминал бүртгэлтэй бол `terminal.site_id` анхдагч. Нууц талбар (device_key/IP/нууц үг) ирэхгүй. `GET /api/sessions/recent-exits` шинэ `lane_no` / `device_id` шүүлт (зөвхөн сонгосон эгнээний гарах камерын машин) + мөр бүрд `exit_lane_no/exit_lane_dir/exit_device_name`. Заавар PAX_POS_APP_GUIDE §2.1/§3.1/§4, Postman «Bootstrap» + `lane_no`. Тест: unit `test_pos_lanes` (4), live `test_pos_bootstrap.py` | c1fa352 | ✅ 09-07 | ✅ 09-07 |
 
 ## 2026-09-06 — 🕐 Серверийн цагийн бүс: 38 камер «7ц 59м түрүүлж» худал дохио
 
