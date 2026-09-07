@@ -453,33 +453,55 @@ def audit_sessions(site_id: str | None = None, camera: bool = False,
 
 @router.get("/recent-exits")
 def recent_exits(site_id: str, minutes: int | None = None,
+                 lane_no: int | None = None, device_id: str | None = None,
                  db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     """Касс/PAX: сүүлд гарах камерт уншигдсан, төлбөр хүлээж буй машинууд.
 
     Гарах уншилтаас хойш `exit_queue_show_min` (default 3) минутын дараа
     жагсаалтаас алга болно — төлөлгүй буцсан машин кассын дэлгэцийг бөглөхгүй
-    (түүх/хайлтад хэвээр үлдэнэ, дахин уншигдвал буцаж гарна)."""
+    (түүх/хайлтад хэвээр үлдэнэ, дахин уншигдвал буцаж гарна).
+
+    `lane_no` / `device_id` (2026-09-07): олон гарах эгнээтэй зогсоолд POS
+    ЗӨВХӨН өөрийн эгнээний (сонгосон хаалтын) камерт уншигдсан машиныг харна —
+    `device_id` = хаалт ЭСВЭЛ камерын id (хаалт өгвөл ижил эгнээний камераар
+    таарна). Мөр бүрд `exit_lane_no`, `exit_lane_dir`, `exit_device_name` ирнэ."""
     from ..config import settings as _cfg
     allowed = operator_sites(user)
     if allowed and site_id not in allowed:
         site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
     win = minutes if minutes is not None else getattr(_cfg, "exit_queue_show_min", 3)
     since = datetime.utcnow() - timedelta(minutes=win)
-    sessions = (
+    if device_id and lane_no is None:
+        dev = db.get(Device, device_id)
+        if dev and dev.site_id == site_id:
+            lane_no = dev.lane_no
+    q = (
         db.query(ParkingSession)
         .filter(ParkingSession.site_id == site_id,
                 ParkingSession.status == "AWAITING_PAYMENT",
                 # Гарах уншилтын цаг (exit_time); хуучин бичлэгт updated_at уналт
                 func.coalesce(ParkingSession.exit_time,
                               ParkingSession.updated_at) >= since)
-        .order_by(ParkingSession.updated_at.desc()).limit(20).all()
     )
+    if lane_no is not None:
+        q = (q.join(Device, Device.id == ParkingSession.exit_device_id)
+             .filter(Device.lane_no == lane_no))
+    sessions = q.order_by(ParkingSession.updated_at.desc()).limit(20).all()
     # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
     from ..models import Compensation
     debt_plates = {p for (p,) in db.query(Compensation.plate_number)
                    .filter(Compensation.status == "PENDING").all()}
-    return [_session_out(db, s, with_fee=True) | {"has_debt": s.plate_number in debt_plates}
-            for s in sessions]
+    dev_ids = {s.exit_device_id for s in sessions if s.exit_device_id}
+    devs = {d.id: d for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()} if dev_ids else {}
+    out = []
+    for s in sessions:
+        d = devs.get(s.exit_device_id)
+        out.append(_session_out(db, s, with_fee=True) | {
+            "has_debt": s.plate_number in debt_plates,
+            "exit_lane_no": d.lane_no if d else None,
+            "exit_lane_dir": d.lane_dir if d else None,
+            "exit_device_name": d.name if d else None})
+    return out
 
 
 @router.put("/{session_id}/note")

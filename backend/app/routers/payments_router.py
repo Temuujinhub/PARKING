@@ -932,6 +932,92 @@ def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
     }
 
 
+def pos_lanes(barriers: list[dict], cameras: list[dict]) -> list[dict]:
+    """Хаалт + камерыг ЭГНЭЭГЭЭР (lane_dir, lane_no) хослуулна — POS апп «аль
+    хаалтыг удирдах вэ» гэж сонгоход нэг мөр = нэг эгнээ. Камергүй хаалт,
+    хаалтгүй камер ч мөр болно (тохиргоо дутууг апп дээр харагдуулна)."""
+    lanes: dict[tuple[str, int], dict] = {}
+
+    def _lane(d: dict) -> dict:
+        key = (d.get("lane_dir") or "entry", int(d.get("lane_no") or 1))
+        if key not in lanes:
+            lanes[key] = {"lane_dir": key[0], "lane_no": key[1],
+                          "barrier_id": None, "barrier_name": None, "can_open": False,
+                          "camera_id": None, "camera_name": None}
+        return lanes[key]
+
+    for b in barriers:
+        ln = _lane(b)
+        ln.update(barrier_id=b["id"], barrier_name=b.get("name"), can_open=bool(b.get("can_open")))
+    for c in cameras:
+        ln = _lane(c)
+        ln.update(camera_id=c["id"], camera_name=c.get("name"))
+    order = {"entry": 0, "exit": 1, "both": 2}
+    return sorted(lanes.values(), key=lambda x: (order.get(x["lane_dir"], 9), x["lane_no"]))
+
+
+@router.get("/pos/bootstrap")
+def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
+                  user: User = Depends(require("cashier"))):
+    """POS апп нэвтэрсний дараа НЭГ дуудлагаар: эрх + хандах зогсоолууд + зогсоол
+    бүрийн эгнээ (хаалт/камер хос). Апп зогсоол → эгнээ (хаалт) сонгуулж хадгална.
+
+    2026-09-07: зарим зогсоол 2 орох + 2 гарах хаалттай болсон тул «орох/гарах»
+    гэсэн хоёр сонголт хүрэлцэхээ больсон. Өмнө нь зогсоол тохиргооны файлд
+    хатуу бичигддэг, хаалтын жагсаалт тусдаа endpoint-оос (`/api/barriers/devices`)
+    ирдэг байв — одоо энд бүгд нэг дор. Нууц талбар (device_key, IP, нууц үг)
+    ОГТ БУЦААХГҮЙ — `lean_barrier_rows`-той ижил зарчим.
+
+    Терминал бүртгэлтэй бол (`terminal_id`) харьяалагдах зогсоолыг `terminal`-д
+    өгнө — апп тэр зогсоолыг анхдагчаар сонгоно; хэрэглэгч олон зогсоолтой бол
+    сонгуулна."""
+    from ..auth import effective_permissions
+    from ..models import Device, ParkingSite
+    from .barriers_router import lean_barrier_rows
+    allowed = operator_sites(user)
+    sq = db.query(ParkingSite)
+    if allowed:
+        sq = sq.filter(ParkingSite.id.in_(allowed))
+    sites = sq.order_by(ParkingSite.created_at).all()
+    site_ids = [s.id for s in sites]
+    barriers_by_site: dict[str, list[dict]] = {}
+    for b in lean_barrier_rows(db, user):
+        barriers_by_site.setdefault(b["site_id"], []).append(b)
+    cams_by_site: dict[str, list[dict]] = {}
+    if site_ids:
+        cq = (db.query(Device)
+              .filter(Device.device_type == "camera", Device.status != "deleted",
+                      Device.site_id.in_(site_ids))
+              .order_by(Device.lane_dir, Device.lane_no, Device.created_at))
+        for d in cq.all():
+            cams_by_site.setdefault(d.site_id, []).append({
+                "id": d.id, "site_id": d.site_id, "name": d.name,
+                "lane_no": d.lane_no, "lane_dir": d.lane_dir,
+                "nested_inner": d.nested_inner, "status": d.status,
+                "last_seen": d.last_seen.isoformat() if d.last_seen else None})
+    terminal = _find_terminal(db, terminal_id or "")
+    if terminal:
+        terminal.last_seen = datetime.utcnow()
+        db.commit()
+    out_sites = []
+    for s in sites:
+        bars = barriers_by_site.get(s.id, [])
+        cams = cams_by_site.get(s.id, [])
+        out_sites.append({
+            "id": s.id, "name": s.name, "site_code": s.site_code, "address": s.address,
+            "lanes": pos_lanes(bars, cams),
+            "barriers": bars, "cameras": cams,
+        })
+    return {
+        "user": {"username": user.username, "full_name": user.full_name, "role": user.role},
+        "permissions": sorted(effective_permissions(user)),
+        "terminal": ({"terminal_id": terminal_id, "site_id": terminal.site_id,
+                      "site_name": terminal.site.name if terminal.site else None}
+                     if terminal else None),
+        "sites": out_sites,
+    }
+
+
 @router.post("/pos/confirm")
 async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):

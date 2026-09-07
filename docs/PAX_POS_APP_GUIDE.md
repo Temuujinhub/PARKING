@@ -44,6 +44,53 @@ POST /api/auth/login  (form-urlencoded)
 username=pos_site01&password=***
 ```
 
+### 2.1 Зогсоол + хаалт (эгнээ) сонголт — 2026-09-07-оос
+
+Зарим зогсоол **2 орох + 2 гарах** хаалттай (4 камер, 4 хаалт) болсон тул
+«орох / гарах» гэсэн хоёр сонголт хүрэлцэхгүй. Нэвтэрсний дараа НЭГ дуудлагаар
+эрх + хандах зогсоолууд + зогсоол бүрийн ЭГНЭЭНИЙ жагсаалт ирнэ:
+
+```
+GET /api/payments/pos/bootstrap?terminal_id=TDB-PAX-SITE01-01
+```
+
+```json
+{
+  "user": {"username": "pos_site01", "full_name": "…", "role": "OPERATOR"},
+  "permissions": ["cashier", "check", "free_exit"],
+  "terminal": {"terminal_id": "TDB-PAX-SITE01-01", "site_id": "…", "site_name": "Хангарьд"},
+  "sites": [{
+    "id": "…", "name": "Хангарьд", "site_code": "site01", "address": "…",
+    "lanes": [
+      {"lane_dir": "entry", "lane_no": 1, "barrier_id": "…", "barrier_name": "Орох хаалт 1", "can_open": true,  "camera_id": "…", "camera_name": "Орох камер 1"},
+      {"lane_dir": "entry", "lane_no": 2, "barrier_id": "…", "barrier_name": "Орох хаалт 2", "can_open": true,  "camera_id": "…", "camera_name": "Орох камер 2"},
+      {"lane_dir": "exit",  "lane_no": 1, "barrier_id": "…", "barrier_name": "Гарах хаалт 1", "can_open": true,  "camera_id": "…", "camera_name": "Гарах камер 1"},
+      {"lane_dir": "exit",  "lane_no": 2, "barrier_id": "…", "barrier_name": "Гарах хаалт 2", "can_open": true,  "camera_id": "…", "camera_name": "Гарах камер 2"}
+    ],
+    "barriers": [ {id, site_id, name, lane_no, lane_dir, auto_open, status, can_open, last_seen} ],
+    "cameras":  [ {id, site_id, name, lane_no, lane_dir, nested_inner, status, last_seen} ]
+  }]
+}
+```
+
+Апп дээрх урсгал:
+
+1. `sites` нэгээс олон бол **зогсоол сонгуулна** (`terminal.site_id` байвал анхдагчаар сонгоно).
+2. Тухайн зогсоолын `lanes`-аас **удирдах эгнээ (хаалт)** сонгуулна — `lane_dir=exit`
+   мөрүүдийг «Гарах хаалт 1 / 2» гэж, `entry`-г «Орох хаалт 1 / 2» гэж харуулна.
+   `barrier_id` = null бол тэр эгнээнд хаалт бүртгэгдээгүй (сонгуулахгүй).
+3. Сонголтыг локалд хадгална: `site_id`, `lane_no`, `barrier_id`. Тохиргооны
+   дэлгэцээс дахин солих боломжтой байх.
+4. Хаалт нээх: `POST /api/barriers/{barrier_id}/open` — сонгосон эгнээний хаалт.
+   `can_open=false` бол товчийг нуух (§3.6).
+5. Recent Exits: `GET /api/sessions/recent-exits?site_id=…&lane_no={lane_no}` —
+   зөвхөн сонгосон эгнээний камерт уншигдсан машинууд (§3.1). Эгнээ сонгоогүй/бүх
+   эгнээг харах бол `lane_no`-гүй дуудна.
+
+Хариунд `device_key`, IP, нууц үг ОГТ ирэхгүй (аюулгүй байдлын хатууруулалт хэвээр).
+Хуучин `GET /api/admin/sites` + `GET /api/barriers/devices?site_id=` хоёр хэвээр
+ажиллана — шинэ апп `bootstrap`-ыг л ашиглана.
+
 ## 3. Дэлгэцүүд ба урсгал
 
 ### 3.1 Recent Exits (үндсэн дэлгэц)
@@ -54,7 +101,14 @@ WebSocket-ээр real-time шинэчлэгдэнэ:
 ws://SERVER/ws/sites/{site_id}
 ```
 
-- Эхлэхдээ: `GET /api/sessions/recent-exits?site_id={site_id}` — одоогийн жагсаалт
+- Эхлэхдээ: `GET /api/sessions/recent-exits?site_id={site_id}&lane_no={lane_no}` — одоогийн
+  жагсаалт. `lane_no` (2026-09-07) = сонгосон эгнээ; өгвөл ЗӨВХӨН тэр эгнээний гарах
+  камерт уншигдсан машин ирнэ (2 гарах хаалттай зогсоолд нөгөө эгнээний машин
+  холилдохгүй). Эсвэл `device_id={barrier_id}` өгч болно (ижил эгнээний камераар таарна).
+  Мөр бүрд `exit_lane_no`, `exit_lane_dir`, `exit_device_name` нэмэлт талбар ирнэ —
+  `lane_no`-гүй (бүх эгнээ) горимд машин аль хаалтан дээр байгааг харуулна.
+- `EXIT_LPR_EVENT` ирэхэд: `device_id`/эгнээ нь сонгосон эгнээтэй таарахгүй бол алгасна
+  (эгнээ шүүлттэй горимд)
 - `EXIT_LPR_EVENT` ирэхэд жагсаалтын эхэнд нэмнэ
 - `EXIT_COMPLETED` / `PAYMENT_COMPLETED` ирэхэд жагсаалтаас хасна
 - Мөр бүрт: **дугаар (том, font-mono), орсон цаг, хугацаа, дүн**
@@ -288,9 +342,11 @@ Barrier device_id-г **`GET /api/barriers/devices?site_id=...`**-ээс авна
 ```json
 {
   "server_url": "https://test.easy-parking.mn",
-  "site_id": "{Тохиргоо→Зогсоол хуудаснаас UUID}",
   "terminal_id": "TDB-PAX-SITE01-01",
-  "operator_username": "pos_site01"
+  "operator_username": "pos_site01",
+  "site_id":    "{нэвтрэлтийн дараа bootstrap-аас СОНГОСОН — хатуу бичихгүй}",
+  "lane_no":    2,
+  "barrier_id": "{сонгосон эгнээний хаалт — bootstrap lanes[].barrier_id}"
 }
 ```
 
