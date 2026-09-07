@@ -9,7 +9,7 @@
   4. Касс/шалгах дэлгэцэд нөхөн төлбөртэй машин улаанаар тэмдэглэгдэнэ
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -85,18 +85,26 @@ def create_compensation(db: Session, session: ParkingSession, reason: str, usern
 
 @router.get("")
 def list_compensations(status: str | None = None, plate: str | None = None,
+                       site_id: str | None = None, min_days: int = 0,
                        limit: int = 200, db: Session = Depends(get_db),
                        user: User = Depends(require("compensations", "reports"))):
+    """site_id = зөвхөн тэр зогсоолын өр (Өр цэвэрлэх хуудас зогсоолоор ажилладаг),
+    min_days = үүссэнээс хойш N+ хоног болсон нь (хуучин авлага ялгах)."""
     allowed = operator_sites(user)  # оператор зөвхөн өөрийн зогсоолуудын өр
     q = db.query(Compensation)
     if allowed:
         q = q.filter(Compensation.site_id.in_(allowed))
+    if site_id:
+        enforce_site(user, site_id)
+        q = q.filter(Compensation.site_id == site_id)
     if status:
         q = q.filter(Compensation.status == status)
     if plate:
         q = q.filter(Compensation.plate_number.ilike(f"%{plate.upper().strip()}%"))
-    rows = q.order_by(Compensation.created_at.desc()).limit(min(limit, 1000)).all()
     now = datetime.utcnow()
+    if min_days and min_days > 0:
+        q = q.filter(Compensation.created_at <= now - timedelta(days=min_days))
+    rows = q.order_by(Compensation.created_at.desc()).limit(min(limit, 1000)).all()
 
     def _age(c):
         return (now - c.created_at).days
@@ -123,6 +131,9 @@ def list_compensations(status: str | None = None, plate: str | None = None,
     if allowed:
         pq = pq.filter(Compensation.site_id.in_(allowed))
         paidq = paidq.filter(Compensation.site_id.in_(allowed))
+    if site_id:
+        pq = pq.filter(Compensation.site_id == site_id)
+        paidq = paidq.filter(Compensation.site_id == site_id)
     pending = pq.all()
     aging = {"0-7": 0.0, "8-30": 0.0, "31-90": 0.0, "90+": 0.0}
     for c in pending:
@@ -241,11 +252,148 @@ def cancel_compensation(comp_id: str, body: dict, db: Session = Depends(get_db),
     allowed = operator_sites(user)
     if allowed and comp.site_id not in allowed:
         raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
-    comp.status = "CANCELLED"
+    reason = _clean_reason(body.get("reason"))
+    _mark_cancelled(comp, user.username, reason)
     db.add(AuditLog(username=user.username, action="COMPENSATION_CANCELLED", entity="compensation",
-                    entity_id=comp_id, detail={"reason": body.get("reason", ""), "plate": comp.plate_number}))
+                    entity_id=comp_id, detail=_writeoff_detail(comp, reason)))
     db.commit()
     return to_dict(comp)
+
+
+# ─── Өр цэвэрлэх (Санхүү) ────────────────────────────────────────────────────
+# Зогсоол (жишээ: 3-р эмнэлэг) дээр хуримтлагдсан өрийг санхүү UI-аас БӨӨНӨӨР
+# цэвэрлэнэ. Өр устдаггүй — status=CANCELLED + мөр дээрээ хэн/хэзээ/тайлбар,
+# мөн өр тус бүрд DEBT_WRITE_OFF аудит мөр (Лог + энэ хуудасны «Цэвэрлэлтийн
+# лог» таб). Цэвэрлэсэн өр QR нэхэмжлэл, Түүхийн «өр N₮», касс дээрх улаан
+# тэмдэглэгээнээс шууд алга болно (бүгд PENDING-ээр л хайдаг).
+
+WRITEOFF_ACTIONS = ("DEBT_WRITE_OFF", "COMPENSATION_CANCELLED")
+WRITEOFF_MAX_IDS = 1000
+
+
+def _clean_reason(raw) -> str:
+    reason = " ".join(str(raw or "").split())
+    if len(reason) < 3:
+        raise HTTPException(400, "Тайлбар заавал — дор хаяж 3 тэмдэгт (яагаад цэвэрлэж байгаа нь логонд үлдэнэ)")
+    return reason[:500]
+
+
+def _mark_cancelled(comp: Compensation, username: str, reason: str, at: datetime | None = None):
+    comp.status = "CANCELLED"
+    comp.cancelled_at = at or datetime.utcnow()
+    comp.cancelled_by = username
+    comp.cancel_reason = reason
+
+
+def _writeoff_detail(comp: Compensation, reason: str, batch_id: str | None = None) -> dict:
+    d = {"plate": comp.plate_number, "amount": float(comp.amount), "reason": reason,
+         "site_id": comp.site_id, "site_name": comp.site.name if comp.site else None,
+         "debt_reason": comp.reason, "debt_created_at": comp.created_at.isoformat()}
+    if batch_id:
+        d["batch_id"] = batch_id
+    return d
+
+
+@router.post("/write-off")
+def write_off_debts(body: dict, db: Session = Depends(get_db),
+                    user: User = Depends(require("discounts", "settings"))):
+    """Сонгосон өрийг бөөнөөр цэвэрлэх (Санхүү → Өр цэвэрлэх).
+    body: {ids: [comp_id…], reason: str (заавал), unblacklist: bool (default true)}.
+    unblacklist — цэвэрлэсний дараа PENDING өр үлдээгүй дугаарын АВТОМАТ хоригийг
+    идэвхгүй болгоно (гараар нэмсэн хар жагсаалтын бичлэгт хүрэхгүй).
+    Буцаах: цэвэрлэсэн/алгассан тоо, дүн, batch_id (аудитаар мөшгөнө)."""
+    from uuid import uuid4
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "Цэвэрлэх өр сонгоогүй байна")
+    if len(ids) > WRITEOFF_MAX_IDS:
+        raise HTTPException(400, f"Нэг удаад хамгийн ихдээ {WRITEOFF_MAX_IDS} өр")
+    reason = _clean_reason(body.get("reason"))
+    unblacklist = bool(body.get("unblacklist", True))
+    allowed = operator_sites(user)
+    comps = db.query(Compensation).filter(Compensation.id.in_([str(i) for i in ids])).all()
+    now = datetime.utcnow()
+    batch_id = uuid4().hex[:12]
+    done, skipped, total, plates = 0, [], 0.0, set()
+    for c in comps:
+        if c.status != "PENDING":
+            skipped.append({"id": c.id, "plate": c.plate_number, "why": "төлөгдөөгүй биш"})
+            continue
+        if allowed and c.site_id not in allowed:
+            skipped.append({"id": c.id, "plate": c.plate_number, "why": "өөр зогсоол"})
+            continue
+        _mark_cancelled(c, user.username, reason, now)
+        db.add(AuditLog(username=user.username, action="DEBT_WRITE_OFF", entity="compensation",
+                        entity_id=c.id, detail=_writeoff_detail(c, reason, batch_id)))
+        done += 1
+        total += float(c.amount)
+        plates.add(c.plate_number)
+    missing = len(ids) - len(comps)
+    db.flush()
+
+    # Автомат хориг: PENDING өр үлдээгүй дугаарынхыг л идэвхгүй болгоно
+    unblocked: list[str] = []
+    if unblacklist and plates:
+        still = {p for (p,) in db.query(Compensation.plate_number)
+                 .filter(Compensation.plate_number.in_(list(plates)),
+                         Compensation.status == "PENDING").distinct().all()}
+        clear = [p for p in plates if p not in still]
+        if clear:
+            entries = (db.query(BlacklistEntry)
+                       .filter(BlacklistEntry.plate_number.in_(clear),
+                               BlacklistEntry.is_active.is_(True),
+                               BlacklistEntry.reason.ilike("%автомат хориг%")).all())
+            for e in entries:
+                e.is_active = False
+                unblocked.append(e.plate_number)
+                db.add(AuditLog(username=user.username, action="BLACKLIST_AUTO_LIFT",
+                                entity="blacklist", entity_id=e.id,
+                                detail={"plate": e.plate_number, "batch_id": batch_id,
+                                        "reason": f"өр цэвэрлэгдсэн: {reason}"}))
+    db.add(AuditLog(username=user.username, action="DEBT_WRITE_OFF_BATCH", entity="compensation",
+                    entity_id=batch_id,
+                    detail={"reason": reason, "count": done, "total": total,
+                            "plates": sorted(plates), "skipped": len(skipped) + missing,
+                            "unblacklisted": sorted(set(unblocked))}))
+    db.commit()
+    log.info("өр цэвэрлэв: %s · %d өр · %.0f₮ · %d дугаар · batch=%s · «%s»",
+             user.username, done, total, len(plates), batch_id, reason)
+    return {"batch_id": batch_id, "count": done, "total": total, "plates": sorted(plates),
+            "skipped": skipped, "missing": missing, "unblacklisted": sorted(set(unblocked))}
+
+
+@router.get("/write-off-log")
+def write_off_log(plate: str | None = None, site_id: str | None = None,
+                  limit: int = 300, db: Session = Depends(get_db),
+                  user: User = Depends(require("discounts", "settings", "logs"))):
+    """Цэвэрлэлт/цуцлалтын лог — өр тус бүрийн мөр (хэн, хэзээ, дугаар, дүн, тайлбар).
+    Аудит логоос (DEBT_WRITE_OFF, COMPENSATION_CANCELLED) уншина; операторын
+    зогсоолын хүрээгээр (detail.site_id) шүүнэ."""
+    allowed = operator_sites(user)
+    if site_id:
+        enforce_site(user, site_id)
+    q = db.query(AuditLog).filter(AuditLog.action.in_(WRITEOFF_ACTIONS))
+    rows = q.order_by(AuditLog.created_at.desc()).limit(min(limit, 1000) * 3).all()
+    plate_q = (plate or "").upper().strip()
+    out = []
+    for a in rows:
+        d = a.detail or {}
+        if allowed and d.get("site_id") and d["site_id"] not in allowed:
+            continue
+        if site_id and d.get("site_id") != site_id:
+            continue
+        if plate_q and plate_q not in str(d.get("plate") or ""):
+            continue
+        out.append({"id": a.id, "at": a.created_at.isoformat(), "by": a.username,
+                    "kind": "write_off" if a.action == "DEBT_WRITE_OFF" else "cancel",
+                    "compensation_id": a.entity_id, "plate": d.get("plate"),
+                    "amount": d.get("amount"), "reason": d.get("reason") or "",
+                    "site_id": d.get("site_id"), "site_name": d.get("site_name"),
+                    "debt_reason": d.get("debt_reason"), "debt_created_at": d.get("debt_created_at"),
+                    "batch_id": d.get("batch_id")})
+        if len(out) >= min(limit, 1000):
+            break
+    return {"rows": out, "total": sum(float(r["amount"] or 0) for r in out)}
 
 
 @router.post("/night-close")

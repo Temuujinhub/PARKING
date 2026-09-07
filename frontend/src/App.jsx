@@ -8,6 +8,7 @@ import Cashier from './pages/Cashier'
 import Check from './pages/Check'
 import Compensations from './pages/Compensations'
 import Dashboard from './pages/Dashboard'
+import Debts from './pages/Debts'
 import Discounts from './pages/Discounts'
 import Drivers from './pages/Drivers'
 import Health from './pages/Health'
@@ -76,6 +77,7 @@ export default function App() {
             <Route path="tariffs" element={<Protected module="discounts"><Tariffs /></Protected>} />
             <Route path="settlement" element={<Protected module="reports"><Settlement /></Protected>} />
             <Route path="invoices" element={<Protected module="reports"><Invoices /></Protected>} />
+            <Route path="debts" element={<Protected module="discounts"><Debts /></Protected>} />
             <Route path="users" element={<Protected module="users"><Users /></Protected>} />
             <Route path="logs" element={<Protected module="logs"><Logs /></Protected>} />
             <Route path="health" element={<Protected module="health"><Health /></Protected>} />

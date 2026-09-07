@@ -264,6 +264,11 @@ MIGRATIONS = [
     # зогссон машин 12 цаг зогссон мэт харагдаж, camsync-ийн давхардлын
     # шалгалтыг төөрөгдүүлдэг байв.
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_confirmed BOOLEAN NOT NULL DEFAULT false",
+
+    # 2026-09-07 — Санхүү → Өр цэвэрлэх: цуцлалтын тайлбар мөр дээрээ.
+    "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP",
+    "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(60)",
+    "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancel_reason TEXT",
     # Хуучин өгөгдөлд БАТЛАГДСАН нотолгоо нь гарах камерын зураг: exit_snapshot
     # байгаа бол машин гарцын камерт ЖИНХЭНЭ уншигдсан. Санаатайгаар ХАТУУ
     # шалгуур авав — эргэлзээтэйг «таамаг» гэж үлдээх нь аюулгүй (шинэ давхардлын

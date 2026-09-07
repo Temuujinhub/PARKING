@@ -214,7 +214,14 @@ export default function Compensations() {
             </td>
             <td className="td">{c.site_name}</td>
             <td className="td font-mono font-semibold">{fmt(c.amount)}₮</td>
-            <td className="td text-xs">{REASONS[c.reason] || c.reason}</td>
+            <td className="td text-xs">
+              {REASONS[c.reason] || c.reason}
+              {c.status === 'CANCELLED' && c.cancel_reason && (
+                <div className="text-[11px] text-slate-500 mt-0.5" title={`${c.cancelled_by || ''} · ${fmtDate(c.cancelled_at)}`}>
+                  Цуцлалт: {c.cancel_reason} — {c.cancelled_by}
+                </div>
+              )}
+            </td>
             <td className={`td text-xs font-mono ${c.age_bucket === '90+' ? 'text-red-400' : c.age_bucket === '31-90' ? 'text-amber-400' : 'text-slate-400'}`}>
               {c.days_old}х
             </td>

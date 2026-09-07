@@ -502,6 +502,12 @@ class Compensation(Base):
     # өр тус бүрд ТУСДАА e-Barimt үүсгэнэ). PENDING статус л эрх мэдэлтэй — холбоос
     # нь зөвхөн бүртгэл тул шинэ invoice үүсгэхэд дарж холбогдоно.
     payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True, index=True)
+    # Цэвэрлэлт/цуцлалт (2026-09-07): санхүү UI-аас өр цэвэрлэхэд ХЭН, ХЭЗЭЭ, ЯМАР
+    # ТАЙЛБАРААР гэдэг нь мөр дээрээ үлдэнэ (аудит логоос гадна — жагсаалтад шууд
+    # харагдана). status=CANCELLED үед л утгатай.
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(String(60), nullable=True)
+    cancel_reason = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     site = relationship("ParkingSite", lazy="joined")
