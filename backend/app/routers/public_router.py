@@ -158,7 +158,8 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
     if not payment or payment.status != "PAID":
         raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
     from ..services.ebarimt import get_cached_qr
-    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).first()
+    from ..services.receipts import primary_receipt
+    receipt = primary_receipt(db, payment_id)   # олон мөрөөс АЛБАН ЁСНЫ баримт (2026-09-07)
     return {
         "plate_number": payment.session.plate_number if payment.session else None,
         "amount": float(payment.amount),

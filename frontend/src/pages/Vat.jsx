@@ -1,5 +1,5 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, Ban, FileSpreadsheet, QrCode, RefreshCw, Send, X } from 'lucide-react'
+import { AlertTriangle, Ban, FileSpreadsheet, History, QrCode, RefreshCw, Send, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useDownload } from '../hooks/useDownload'
@@ -25,6 +25,12 @@ export default function Vat() {
   const [from, setFrom] = useState(monthAgo)
   const [to, setTo] = useState(today)
   const [qrReceipt, setQrReceipt] = useState(null)
+  const [hist, setHist] = useState(null)        // {row, data|null, error}
+  const loadHistory = async (r) => {
+    setHist({ row: r, data: null })
+    try { setHist({ row: r, data: await api(`/api/payments/${r.payment_id}/ebarimt-history`) }) }
+    catch (e) { setHist({ row: r, error: e.message }) }
+  }
   const [retrying, setRetrying] = useState(null)
   const [cancelling, setCancelling] = useState(null)
   const [tab, setTab] = useState('receipts')
@@ -356,7 +362,14 @@ export default function Vat() {
           <tr key={r.id}>
             <td className="td font-mono font-bold">{r.plate_number || '—'}</td>
             <td className="td text-xs">{r.site_name || '—'}</td>
-            <td className="td font-mono text-[10px] max-w-[16rem] break-all">{r.ebarimt_id || '-'}</td>
+            <td className="td font-mono text-[10px] max-w-[16rem] break-all">
+              {r.ebarimt_id || '-'}
+              {r.ddtd_note && (
+                <div className="font-sans text-[10px] text-red-400 mt-0.5 flex items-start gap-1" title={r.ddtd_note}>
+                  <AlertTriangle size={11} className="shrink-0 mt-0.5" /> <span>{r.ddtd_note}</span>
+                </div>
+              )}
+            </td>
             <td className="td font-mono font-semibold">{r.lottery_code || '-'}</td>
             <td className="td font-mono">{fmt(r.amount)}₮</td>
             <td className="td font-mono">{fmt(r.vat_amount)}₮</td>
@@ -370,6 +383,10 @@ export default function Vat() {
             </td>
             <td className="td whitespace-nowrap">
               <div className="flex items-center gap-1">
+                <button className={`btn-secondary py-1 px-2 ${r.ddtd_note ? 'text-red-400' : ''}`} onClick={() => loadHistory(r)}
+                  aria-label="ДДТД түүх" title="Энэ төлбөрийн ДДТД-ийн бүх ул мөр: хэвлэгдэх дугаар, бүх мөр, retry/цуцлалт/webhook, msgbill дээрх одоогийн төлөв">
+                  <History size={14} />
+                </button>
                 {r.status === 'SENT' && (
                   <button className="btn-secondary py-1 px-2" onClick={() => setQrReceipt(r)}
                     aria-label="Баримтын QR харах" title="QR аюулгүй байдлын үүднээс 1 цаг л хадгалагдана">
@@ -407,6 +424,92 @@ export default function Vat() {
         ))}
       </Table>
       </>)}
+
+      <Modal open={!!hist} onClose={() => setHist(null)} title="ДДТД түүх — нэг төлбөрийн бүх дугаар" wide>
+        {hist && !hist.data && !hist.error && <div className="text-sm text-slate-400 py-6 text-center">Ачаалж байна… (msgbill-ээс амьд төлөв асууж байна)</div>}
+        {hist?.error && <div className="text-sm text-red-400">{hist.error}</div>}
+        {hist?.data && (() => {
+          const d = hist.data
+          const src = (s) => s.replace('vat_receipts.', 'DB мөр · ').replace('raw.create', 'сувгийн POST хариу').replace('raw.webhook.', 'webhook ').replace('audit.', 'лог · ').replace('msgbill.live', 'msgbill одоо')
+          return (
+            <div className="space-y-4 text-sm">
+              <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-400">
+                <span>Дугаар: <b className="font-mono text-slate-200">{d.payment.plate_number || '—'}</b></span>
+                <span>Зогсоол: <b className="text-slate-200">{d.payment.site_name || '—'}</b></span>
+                <span>Дүн: <b className="font-mono text-slate-200">{fmt(d.payment.amount)}₮</b></span>
+                <span>Суваг: <b className="text-slate-200">{d.payment.provider} / {d.payment.method}</b></span>
+                <span>Төлсөн: <b className="font-mono text-slate-200">{fmtDate(d.payment.paid_at)}</b></span>
+              </div>
+              <div className={`rounded-lg p-3 border ${d.distinct_count > 1 ? 'border-red-500/40 bg-red-500/10' : 'border-accent/30 bg-accent/5'}`}>
+                <div className="text-xs text-slate-400">Хэвлэгдэх / харагдах АЛБАН ЁСНЫ баримт</div>
+                <div className="font-mono text-sm break-all">{d.primary?.ebarimt_id || '—'}
+                  {d.primary?.lottery && <span className="ml-2 text-accent">сугалаа {d.primary.lottery}</span>}
+                  {d.primary && <span className="ml-2 text-xs text-slate-500">{d.primary.status} · {d.primary.provider}</span>}
+                </div>
+                <div className={`text-xs mt-1 ${d.distinct_count > 1 ? 'text-red-400 font-semibold' : 'text-slate-500'}`}>
+                  {d.distinct_count > 1 ? `⚠ Энэ төлбөрт ${d.distinct_count} ӨӨР ДДТД харагдсан` : 'Нэг л ДДТД — зөрчилгүй'}
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold mb-1">Харагдсан ДДТД бүр — хаанаас</div>
+                <Table headers={['ДДТД', 'Эх сурвалж', 'Хэзээ', 'Сугалаа / нэмэлт']} empty={!d.numbers.length}>
+                  {d.numbers.flatMap((n) => n.seen.map((s, i) => (
+                    <tr key={n.ebarimt_id + i}>
+                      <td className="td font-mono text-[10px] break-all">{i === 0 ? n.ebarimt_id : <span className="text-slate-600">〃</span>}</td>
+                      <td className="td text-xs">{src(s.source)}</td>
+                      <td className="td font-mono text-xs">{fmtDate(s.at)}</td>
+                      <td className="td text-xs text-slate-400">{[s.lottery, s.state, s.by, s.provider].filter(Boolean).join(' · ')}</td>
+                    </tr>
+                  )))}
+                </Table>
+              </div>
+              {d.live.length > 0 && (
+                <div>
+                  <div className="font-semibold mb-1">msgbill дээрх одоогийн төлөв (амьд GET)</div>
+                  {d.live.map((l) => (
+                    <div key={l.provider_ref} className="text-xs font-mono break-all bg-surface-muted/30 rounded p-2 mb-1">
+                      {l.provider_ref}: {l.error ? <span className="text-red-400">{l.error}</span> : <>{l.state} · receipt_no {l.receipt_no || '—'} · сугалаа {l.lottery || '—'}{l.error ? ` · ${l.error}` : ''}</>}
+                      {l.raw && <details className="mt-1"><summary className="cursor-pointer text-slate-500">түүхий хариу</summary><pre className="whitespace-pre-wrap text-[10px]">{JSON.stringify(l.raw, null, 1)}</pre></details>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div>
+                <div className="font-semibold mb-1">DB мөрүүд ({d.receipts.length})</div>
+                <Table headers={['Мөр', 'Төлөв', 'ДДТД', 'Сугалаа', 'Дүн', 'Суваг / ref', 'Үүссэн', 'Тэмдэглэл']} empty={!d.receipts.length}>
+                  {d.receipts.map((r) => (
+                    <tr key={r.id} className={d.primary?.receipt_id === r.id ? 'bg-accent/5' : ''}>
+                      <td className="td font-mono text-[10px]">{r.id.slice(0, 8)}{d.primary?.receipt_id === r.id ? ' ★' : ''}</td>
+                      <td className="td"><Badge value={r.status} /></td>
+                      <td className="td font-mono text-[10px] break-all">{r.ebarimt_id || '—'}</td>
+                      <td className="td font-mono text-xs">{r.lottery_code || '—'}</td>
+                      <td className="td font-mono text-xs">{fmt(r.amount)}₮</td>
+                      <td className="td text-[10px] font-mono">{r.provider || '?'}{r.provider_ref ? ` · ${r.provider_ref}` : ''}</td>
+                      <td className="td font-mono text-xs">{fmtDate(r.created_at)}</td>
+                      <td className="td text-[10px] text-slate-400 max-w-[14rem] break-words">{r.ddtd_note || r.receipt_url || ''}
+                        {r.raw && <details className="mt-1"><summary className="cursor-pointer text-slate-500">raw</summary><pre className="whitespace-pre-wrap text-[10px]">{JSON.stringify(r.raw, null, 1)}</pre></details>}
+                      </td>
+                    </tr>
+                  ))}
+                </Table>
+              </div>
+              <div>
+                <div className="font-semibold mb-1">Үйлдлийн лог ({d.audit.length})</div>
+                <Table headers={['Хэзээ', 'Хэн', 'Үйлдэл', 'Дэлгэрэнгүй']} empty={!d.audit.length} maxH="30vh">
+                  {d.audit.map((a, i) => (
+                    <tr key={i}>
+                      <td className="td font-mono text-xs whitespace-nowrap">{fmtDate(a.at)}</td>
+                      <td className="td text-xs">{a.by}</td>
+                      <td className="td text-xs font-mono">{a.action}</td>
+                      <td className="td text-[10px] font-mono break-all max-w-lg">{JSON.stringify(a.detail)}</td>
+                    </tr>
+                  ))}
+                </Table>
+              </div>
+            </div>
+          )
+        })()}
+      </Modal>
 
       <Modal open={!!qrReceipt} onClose={() => setQrReceipt(null)} title="e-Barimt баримтын QR">
         {qrReceipt && (

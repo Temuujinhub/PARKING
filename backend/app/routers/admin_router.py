@@ -714,12 +714,19 @@ async def qpay_ebarimt_diag(body: dict, db: Session = Depends(get_db),
             out["create_result"] = {"ok": bool(eb.get("billId")), "raw": eb.get("raw"),
                                     "elapsed_ms": int((_dt.utcnow() - t0).total_seconds() * 1000)}
             if eb.get("billId") and rec:
-                rec.ebarimt_id = eb["billId"]
-                rec.lottery_code = (None if receiver_type == "COMPANY" else eb.get("lottery"))
-                rec.status = "SENT"
-                rec.receipt_url = None
+                from ..services.receipts import assign_ebarimt_id
+                rec.lottery_code = None
+                ok = assign_ebarimt_id(db, rec, eb["billId"], source="qpay-diag",
+                                       lottery=(None if receiver_type == "COMPANY" else eb.get("lottery")),
+                                       username=user.username, raw=eb.get("raw"),
+                                       allow_replace=rec.status != "SENT")
+                if ok:
+                    rec.status = "SENT"
+                    rec.receipt_url = None
                 db.commit()
-                out["create_result"]["receipt_updated"] = True
+                out["create_result"]["receipt_updated"] = ok
+                if not ok:
+                    out["create_result"]["conflict"] = rec.ddtd_note
         except _httpx.HTTPStatusError as e:
             body_raw: object
             try:

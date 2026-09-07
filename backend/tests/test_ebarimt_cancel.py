@@ -131,7 +131,10 @@ async def run():
     async def _fake_mark(*a, **k): pass
     res = await pr.retry_ebarimt(db, pay())
     check("ok + шинэ ebarimt_id", res.get("ok") and res.get("ebarimt_id") and res["ebarimt_id"] != "OLD")
-    check("шинэ VatReceipt мөр нэмэгдсэн, хуучин CANCELLED хэвээр", len(db.added) == 1 and canc.status == "CANCELLED" and db.added[0].provider == "QPAY")
+    # 2026-09-07: ДДТД бичилт бүр AuditLog(EBARIMT_ID_SET) мөр нэмдэг болсон тул VatReceipt-ийг л тоолно
+    _vr = [o for o in db.added if o.__class__.__name__ == "VatReceipt"]
+    check("шинэ VatReceipt мөр нэмэгдсэн, хуучин CANCELLED хэвээр", len(_vr) == 1 and canc.status == "CANCELLED" and _vr[0].provider == "QPAY")
+    check("ДДТД бичилт аудитлагдсан (EBARIMT_ID_SET)", any(getattr(o, "action", None) == "EBARIMT_ID_SET" for o in db.added))
 
     print(f"\n{'='*40}\nҮР ДҮН: {PASS} passed, {FAIL} failed")
     return FAIL == 0

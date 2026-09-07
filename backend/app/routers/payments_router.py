@@ -19,6 +19,7 @@ from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Paym
 from ..ratelimit import throttle
 from ..serializers import to_dict
 from ..services import ebarimt, msgbill, qpay
+from ..services.receipts import assign_ebarimt_id, primary_receipt
 from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
 
 log = logging.getLogger("parking.payments")
@@ -288,6 +289,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
         status="SENT" if receipt_raw.get("billId") else "FAILED",
         receipt_url=ebarimt_error,
         provider=rcpt_provider, provider_ref=receipt_raw.get("msgbillId"),
+        raw={"create": receipt_raw.get("raw")} if receipt_raw.get("raw") else None,
     ))
 
     for comp in comps:
@@ -329,6 +331,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                 status="SENT" if comp_receipt.get("billId") else "FAILED",
                 receipt_url=comp_error,
                 provider=rcpt_provider, provider_ref=comp_receipt.get("msgbillId"),
+                raw={"create": comp_receipt.get("raw")} if comp_receipt.get("raw") else None,
             ))
         comp.status = "PAID"
         comp.paid_at = datetime.utcnow()
@@ -401,7 +404,9 @@ def _remember_app_version(terminal, version: str | None):
 def _print_payload(db: Session, payment: Payment) -> dict:
     """POS терминал/веб-д хэвлэх e-Barimt баримтын мэдээлэл (мөрүүд + QR + сугалаа)."""
     session = db.get(ParkingSession, payment.session_id)
-    receipt = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).first()
+    # Нэг төлбөрт олон мөр (өрийн баримт, цуцлагдаад дахин үүссэн) байхад
+    # `.first()` дурын нэгийг өгч ХЭВЛЭСЭН ≠ ХАДГАЛСАН болдог байв (2026-09-07)
+    receipt = primary_receipt(db, payment.id)
     site = session.site if session else None
     tz = timedelta(hours=8)     # Улаанбаатар — принтерт ОРОН НУТГИЙН цаг хэвлэнэ
     ent = (session.entry_time + tz) if session and session.entry_time else None
@@ -1243,20 +1248,24 @@ async def retry_ebarimt(db: Session, payment: Payment) -> dict:
 
     ebarimt.cache_qr(payment.id, raw.get("qrData"))
     if rec:
-        rec.ebarimt_id = raw.get("billId")
-        rec.lottery_code = None if receiver_type == "COMPANY" else raw.get("lottery")
-        rec.status = "SENT"
-        rec.receipt_url = None
         rec.provider = rcpt_provider
         rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
+        rec.lottery_code = None
+        assign_ebarimt_id(db, rec, raw.get("billId"), source="retry",
+                          lottery=None if receiver_type == "COMPANY" else raw.get("lottery"),
+                          raw=raw.get("raw"), allow_replace=True)
+        rec.status = "SENT"
+        rec.receipt_url = None
     else:
-        db.add(VatReceipt(
+        rec = VatReceipt(
+            id=str(uuid.uuid4()),   # аудит мөрөнд entity_id хэрэгтэй (flush-гүйгээр)
             payment_id=payment.id, session_id=payment.session_id,
-            ebarimt_id=raw.get("billId"),
             lottery_code=None if receiver_type == "COMPANY" else raw.get("lottery"),
             amount=payment.amount, vat_amount=payment.vat_amount,
             customer_tin=payment.customer_tin, status="SENT",
-            provider=rcpt_provider, provider_ref=raw.get("msgbillId")))
+            provider=rcpt_provider, provider_ref=raw.get("msgbillId"))
+        db.add(rec)
+        assign_ebarimt_id(db, rec, raw.get("billId"), source="retry", raw=raw.get("raw"))
     db.commit()
     return {"ok": True, "ebarimt_id": raw.get("billId"), "lottery": raw.get("lottery")}
 
@@ -1343,6 +1352,47 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
             "pending": pending, "error": err}
 
 
+def _apply_msgbill_event(db: Session, rec: VatReceipt, event: str, data: dict) -> str:
+    """msgbill webhook-ийн нэг мөрөнд үзүүлэх нөлөө (тест хийхэд тусгаарласан).
+
+    Буцаах: "set" (ДДТД шинээр бичигдэв) | "same" | "conflict" (ӨӨР дугаар ирсэн —
+    хадгалсныг ДАРААГҮЙ, ddtd_note + EBARIMT_ID_CONFLICT) | "stale" | "cancelled".
+
+    2026-09-07-оос өмнө `rec.ebarimt_id = data.receipt_no` гэж чимээгүй дардаг байв:
+    POST-ын хариугаар аль хэдийн ХЭВЛЭГДСЭН дугаар webhook-оор өөр болж, хэвлэсэн
+    баримт ≠ Ибаримт хуудас (9723УБТ: …1797 хэвлэгдсэн, …1796 хадгалагдсан)."""
+    if event == "receipt.created":
+        if rec.status == "CANCELLED":
+            return "stale"   # аль хэдийн цуцалсан — хуучирсан мэдэгдэл
+        incoming = data.get("receipt_no")
+        before = rec.ebarimt_id
+        ok = assign_ebarimt_id(db, rec, incoming, source="webhook.receipt.created",
+                               lottery=data.get("lottery"), username="msgbill-webhook", raw=data)
+        if rec.ebarimt_id:
+            rec.status, rec.receipt_url, rec.provider = "SENT", None, "MSGBILL"
+        if not ok and incoming and before and incoming != before:
+            return "conflict"
+        return "set" if ok and before != incoming else "same"
+    # receipt.cancelled
+    incoming = data.get("receipt_no")
+    if incoming and rec.ebarimt_id and incoming != rec.ebarimt_id:
+        # Цуцлагдсан нь ХАДГАЛСАН баримт биш — msgbill талд энэ төлбөрт ӨӨР баримт байна
+        rec.ddtd_note = (f"ДДТД зөрүү (webhook.receipt.cancelled): цуцлагдсан {incoming} ≠ "
+                         f"хадгалсан {rec.ebarimt_id}")[:300]
+        db.add(AuditLog(username="msgbill-webhook", action="EBARIMT_ID_CONFLICT", entity="vat_receipt",
+                        entity_id=rec.id, detail={"payment_id": rec.payment_id, "stored": rec.ebarimt_id,
+                                                  "incoming": incoming, "source": "webhook.receipt.cancelled",
+                                                  "provider_ref": rec.provider_ref}))
+    _cur = getattr(rec, "raw", None)
+    merged = dict(_cur) if isinstance(_cur, dict) else {}
+    merged["webhook.receipt.cancelled"] = data
+    rec.raw = merged
+    rec.status = "CANCELLED"
+    rec.receipt_url = "msgbill webhook: receipt.cancelled"
+    ebarimt.cache_qr(rec.payment_id, None)
+    return "cancelled"
+
+
 @router.post("/msgbill/webhook")
 async def msgbill_webhook(request: Request, db: Session = Depends(get_db)):
     """msgbill.mn webhook — `receipt.created` / `receipt.cancelled` / `payment.succeeded`.
@@ -1371,18 +1421,7 @@ async def msgbill_webhook(request: Request, db: Session = Depends(get_db)):
     if event in ("receipt.created", "receipt.cancelled") and rid:
         recs = db.query(VatReceipt).filter(VatReceipt.provider_ref == rid).all()
         for rec in recs:
-            if event == "receipt.created":
-                if rec.status == "CANCELLED":
-                    continue   # аль хэдийн цуцалсан — хуучирсан мэдэгдэл
-                rec.ebarimt_id = data.get("receipt_no") or rec.ebarimt_id
-                if not rec.customer_tin and data.get("lottery"):
-                    rec.lottery_code = data.get("lottery")
-                if rec.ebarimt_id:
-                    rec.status, rec.receipt_url, rec.provider = "SENT", None, "MSGBILL"
-            else:
-                rec.status = "CANCELLED"
-                rec.receipt_url = "msgbill webhook: receipt.cancelled"
-                ebarimt.cache_qr(rec.payment_id, None)
+            _apply_msgbill_event(db, rec, event, data)
         db.add(AuditLog(username="msgbill-webhook", action="MSGBILL_WEBHOOK", entity="vat_receipt",
                         entity_id=rid, detail={"event": event, "scope": scope,
                                                "matched": len(recs), "receipt_no": data.get("receipt_no")}))
@@ -1426,8 +1465,12 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
                          amount=payment.amount, vat_amount=payment.vat_amount,
                          customer_tin=payment.customer_tin)
         db.add(rec)
-    rec.ebarimt_id = ext["billId"]
-    rec.lottery_code = None if receiver_type == "COMPANY" else ext["lottery"]
+    if not rec.id:
+        rec.id = str(uuid.uuid4())
+    rec.lottery_code = None
+    assign_ebarimt_id(db, rec, ext["billId"], source=f"attach:{ext['provider']}",
+                      lottery=None if receiver_type == "COMPANY" else ext["lottery"],
+                      username=user.username, raw=dict(body), allow_replace=True)
     rec.status, rec.receipt_url = "SENT", None
     rec.provider, rec.provider_ref = ext["provider"], ext["msgbillId"]
     ebarimt.cache_qr(payment.id, ext["qrData"])
@@ -1436,6 +1479,84 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
     db.commit()
     return {"ok": True, "ebarimt_id": rec.ebarimt_id, "provider": rec.provider,
             "lottery": rec.lottery_code}
+
+
+@router.get("/{payment_id}/ebarimt-history")
+async def ebarimt_history(payment_id: str, live: bool = True, db: Session = Depends(get_db),
+                          user: User = Depends(require("vat", "reports"))):
+    """НЭГ төлбөрийн ДДТД-ийн БҮХ ул мөр — «нэг гүйлгээнд хэд өөр дугаар, хаанаас» (2026-09-07).
+
+    Буцаах: primary (хэвлэгдэх/харагдах албан ёсны баримт), receipts (бүх мөр, raw-тай),
+    numbers (харагдсан ДДТД бүр: хаанаас, хэзээ), audit (retry/цуцлалт/webhook/зөрчил
+    цагийн дараалалаар), live (msgbill дээрх одоогийн төлөв — provider_ref бүрд GET)."""
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(404, "Төлбөр олдсонгүй")
+    site = _site_of(payment)
+    enforce_site(user, site.id if site else None)
+    recs = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id)
+            .order_by(VatReceipt.created_at).all())
+    prim = primary_receipt(db, payment_id)
+    rec_ids = [r.id for r in recs]
+    refs = [r.provider_ref for r in recs if r.provider_ref]
+    from sqlalchemy import or_
+    conds = [(AuditLog.entity == "payment") & (AuditLog.entity_id == payment_id)]
+    if rec_ids:
+        conds.append((AuditLog.entity == "vat_receipt") & (AuditLog.entity_id.in_(rec_ids)))
+    if refs:
+        conds.append((AuditLog.action == "MSGBILL_WEBHOOK") & (AuditLog.entity_id.in_(refs)))
+    audit = (db.query(AuditLog).filter(or_(*conds))
+             .order_by(AuditLog.created_at).limit(200).all())
+    numbers: dict[str, list[dict]] = {}
+
+    def _seen(no, source, at, extra=None):
+        if not no:
+            return
+        numbers.setdefault(str(no), []).append({"source": source, "at": at, **(extra or {})})
+
+    for r in recs:
+        _seen(r.ebarimt_id, f"vat_receipts.{r.status}", r.created_at.isoformat(),
+              {"receipt_id": r.id, "lottery": r.lottery_code, "provider": r.provider})
+        raw = r.raw if isinstance(r.raw, dict) else {}
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                _seen(v.get("receipt_no") or v.get("id") if k.startswith("webhook") else v.get("receipt_no"),
+                      f"raw.{k}", r.created_at.isoformat(), {"receipt_id": r.id, "lottery": v.get("lottery")})
+    for a in audit:
+        d = a.detail or {}
+        for key in ("stored", "incoming", "from", "to", "receipt_no", "ebarimt_id"):
+            _seen(d.get(key), f"audit.{a.action}.{key}", a.created_at.isoformat(), {"by": a.username})
+    live_rows = []
+    if live and refs:
+        acc = msgbill.api_key_for(site)
+        for r in recs:
+            if r.provider == "MSGBILL" and r.provider_ref:
+                try:
+                    if not acc.enabled:
+                        raise msgbill.MsgbillError("msgbill түлхүүр тохируулаагүй", code="NOT_CONFIGURED")
+                    g = await msgbill.get_receipt(acc, r.provider_ref)
+                    live_rows.append({"receipt_id": r.id, "provider_ref": r.provider_ref,
+                                      "state": g.get("state"), "receipt_no": g.get("billId") or (g.get("raw") or {}).get("receipt_no"),
+                                      "lottery": g.get("lottery"), "error": g.get("error"), "raw": g.get("raw")})
+                    _seen((g.get("raw") or {}).get("receipt_no"), "msgbill.live", datetime.utcnow().isoformat(),
+                          {"receipt_id": r.id, "state": g.get("state")})
+                except Exception as e:  # noqa: BLE001
+                    live_rows.append({"receipt_id": r.id, "provider_ref": r.provider_ref,
+                                      "error": _ebarimt_err(e)})
+    return {
+        "payment": {"id": payment.id, "amount": float(payment.amount), "provider": payment.provider,
+                    "method": payment.payment_method, "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+                    "plate_number": payment.session.plate_number if payment.session else None,
+                    "site_name": site.name if site else None, "terminal_id": payment.terminal_id},
+        "primary": {"receipt_id": prim.id, "ebarimt_id": prim.ebarimt_id, "lottery": prim.lottery_code,
+                    "status": prim.status, "provider": prim.provider} if prim else None,
+        "receipts": [to_dict(r) for r in recs],
+        "numbers": [{"ebarimt_id": k, "seen": v} for k, v in numbers.items()],
+        "distinct_count": len(numbers),
+        "audit": [{"at": a.created_at.isoformat(), "by": a.username, "action": a.action,
+                   "entity": a.entity, "entity_id": a.entity_id, "detail": a.detail} for a in audit],
+        "live": live_rows,
+    }
 
 
 @router.post("/{payment_id}/cancel-ebarimt")

@@ -410,6 +410,13 @@ class VatReceipt(Base):
     provider = Column(String(20), nullable=True)
     # Сувгийн өөрийн ID (msgbill rcp_… г.м) — PENDING/FAILED-ийг дараа GET-ээр нөхөхөд
     provider_ref = Column(String(80), nullable=True)
+    # 2026-09-07: сувгийн ТҮҮХИЙ хариу (msgbill/QPay/PosAPI объект, webhook биет) —
+    # «ebarimt.mn-д ямар дугаараар бүртгэгдсэн бэ» гэдгийг мөшгөх нотолгоо.
+    # {"create": {...}, "webhook.receipt.created": {...}, "get": {...}}
+    raw = Column(JSON, nullable=True)
+    # ДДТД-ийн зөрчлийн тэмдэглэл (services/receipts.assign_ebarimt_id) — Ибаримт
+    # хуудсанд улаанаар харагдана; NULL = зөрчилгүй.
+    ddtd_note = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (

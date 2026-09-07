@@ -269,6 +269,9 @@ MIGRATIONS = [
     "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP",
     "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(60)",
     "ALTER TABLE compensations ADD COLUMN IF NOT EXISTS cancel_reason TEXT",
+    # 2026-09-07 — ДДТД нэг эх үнэн: сувгийн түүхий хариу + зөрчлийн тэмдэглэл.
+    "ALTER TABLE vat_receipts ADD COLUMN IF NOT EXISTS raw JSON",
+    "ALTER TABLE vat_receipts ADD COLUMN IF NOT EXISTS ddtd_note TEXT",
     # Хуучин өгөгдөлд БАТЛАГДСАН нотолгоо нь гарах камерын зураг: exit_snapshot
     # байгаа бол машин гарцын камерт ЖИНХЭНЭ уншигдсан. Санаатайгаар ХАТУУ
     # шалгуур авав — эргэлзээтэйг «таамаг» гэж үлдээх нь аюулгүй (шинэ давхардлын
