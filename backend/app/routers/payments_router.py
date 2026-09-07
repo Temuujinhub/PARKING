@@ -970,9 +970,10 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
 
     Терминал бүртгэлтэй бол (`terminal_id`) харьяалагдах зогсоолыг `terminal`-д
     өгнө — апп тэр зогсоолыг анхдагчаар сонгоно; хэрэглэгч олон зогсоолтой бол
-    сонгуулна."""
+    сонгуулна. `open_reasons` — төлбөргүй гаргах шалтгааны жагсаалт (2026-09-07)."""
     from ..auth import effective_permissions
     from ..models import Device, ParkingSite
+    from ..services.app_settings import get_open_reasons
     from .barriers_router import lean_barrier_rows
     allowed = operator_sites(user)
     sq = db.query(ParkingSite)
@@ -1015,6 +1016,11 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
                       "site_name": terminal.site.name if terminal.site else None}
                      if terminal else None),
         "sites": out_sites,
+        # Төлбөргүй гаргах / хаалт нээх ШАЛТГААНЫ жагсаалт (Тохиргоо → Нээх шалтгаан).
+        # POS «Төлбөргүй гаргах» дээр эндээс сонгуулж manual-exit-д reason_code
+        # илгээнэ; «other» бол reason (тайлбар) заавал. Тусдаа дуудлага:
+        # GET /api/admin/open-reasons?active_only=true (cashier эрхээр ажиллана).
+        "open_reasons": get_open_reasons(db, active_only=True),
     }
 
 

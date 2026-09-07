@@ -978,6 +978,13 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
         raise HTTPException(400, f"«{code}» шалтгаан жагсаалтад алга — "
                                  f"Тохиргоо → Нээх шалтгаанаас сонгоно уу")
     note = str(body.get("reason") or "").strip()[:200]
+    # Шалтгаангүй гаргалт тайланд «—» болж утгагүй бүлэг үүсгэдэг; вэб касс энэ
+    # шалгалтыг UI дээрээ хийдэг байсан ч POS/гадны клиентэд серверт л найдна
+    # (2026-09-07). «Бусад» бол тайлбар заавал.
+    if not code and not note:
+        raise HTTPException(400, "Шалтгаан заавал — reason_code (жагсаалтаас) эсвэл reason (тайлбар)")
+    if code == "other" and len(note) < 3:
+        raise HTTPException(400, "«Бусад» шалтгаанд тайлбар заавал (3+ тэмдэгт)")
     reason_text = f"{reasons[code]}{f' — {note}' if note else ''}" if code else note
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын машиныг гаргана
     now = datetime.utcnow()

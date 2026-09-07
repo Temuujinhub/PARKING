@@ -154,7 +154,7 @@
         }
        ]
       },
-      "description": "2026-09-07: нэвтэрсний дараа НЭГ дуудлагаар эрх + хандах зогсоолууд + зогсоол бүрийн ЭГНЭЭ (хаалт+камер хос). 2 орох + 2 гарах хаалттай зогсоолд апп зогсоол → эгнээ сонгуулж site_id, lane_no, barrier_id хадгална.\n\nsites[].lanes[]: {lane_dir, lane_no, barrier_id, barrier_name, can_open, camera_id, camera_name}. Нууц талбар (device_key/IP/нууц үг) ирэхгүй."
+      "description": "2026-09-07: нэвтэрсний дараа НЭГ дуудлагаар эрх + хандах зогсоолууд + зогсоол бүрийн ЭГНЭЭ (хаалт+камер хос). 2 орох + 2 гарах хаалттай зогсоолд апп зогсоол → эгнээ сонгуулж site_id, lane_no, barrier_id хадгална.\n\nsites[].lanes[]: {lane_dir, lane_no, barrier_id, barrier_name, can_open, camera_id, camera_name}. Нууц талбар (device_key/IP/нууц үг) ирэхгүй.\n\n`open_reasons[]` {code,label} — Төлбөргүй гаргах шалтгааны жагсаалт (§3.7, reason_code-д)."
      },
      "event": [
       {
@@ -169,7 +169,8 @@
          "  const ex = site.lanes.find(l => l.lane_dir === 'exit' && l.barrier_id);",
          "  if (ex) { pm.collectionVariables.set('device_id', ex.barrier_id); pm.collectionVariables.set('lane_no', ex.lane_no);",
          "    console.log('Зогсоол:', site.name, '| гарах эгнээ', ex.lane_no, ex.barrier_name, '| can_open:', ex.can_open); }",
-         "  console.log('Эгнээнүүд:', site.lanes.map(l => l.lane_dir + l.lane_no + (l.barrier_id ? '' : '(хаалтгүй)')).join(', ')); }"
+         "  console.log('Эгнээнүүд:', site.lanes.map(l => l.lane_dir + l.lane_no + (l.barrier_id ? '' : '(хаалтгүй)')).join(', ')); }",
+         "if (r.open_reasons && r.open_reasons.length) { pm.collectionVariables.set('reason_code', r.open_reasons[0].code); console.log('Шалтгаанууд:', r.open_reasons.map(x => x.code + '=' + x.label).join(', ')); }"
         ]
        }
       }
@@ -858,7 +859,7 @@
    "description": "`shift/current` ба `shift/close` хоёулаа `print_data.lines` буцаана — ээлжийн Z-тайлан (сувгийн задаргаа, нийт дүн, тушаасан бэлэн, ЗӨРҮҮ). POS дээр шууд хэвлэнэ."
   },
   {
-   "name": "6. Хаалт",
+   "name": "6. Хаалт / төлбөргүй гаргах",
    "item": [
     {
      "name": "Хаалт гараар нээх (device_id-г 2-р хавтаснаас)",
@@ -892,6 +893,47 @@
        ]
       }
      }
+    },
+    {
+     "name": "Төлбөргүй гаргах — шалтгаантай (manual-exit)",
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"reason_code\": \"{{reason_code}}\",\n  \"reason\": \"POS-оос туршилт\",\n  \"open_barrier\": true,\n  \"device_id\": \"{{device_id}}\",\n  \"create_compensation\": false\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/sessions/{{session_id}}/manual-exit",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "sessions",
+        "{{session_id}}",
+        "manual-exit"
+       ]
+      },
+      "description": "Вэб кассын «Төлбөргүй гаргах»-тай ижил. reason_code = Bootstrap-ын open_reasons[].code (заавал; other бол reason 3+ тэмдэгт заавал). device_id = сонгосон эгнээний хаалт (§2.1). create_compensation=true бол төлөгдөөгүй дүнгээр өр үүснэ. Эрх: free_exit (байхгүй бол 403 — товчийг нуух)."
+     },
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "type": "text/javascript",
+        "exec": [
+         "pm.test('гарсан', () => pm.expect(pm.response.json().status).to.be.oneOf(['MANUAL_CLOSED','CLOSED']));",
+         "console.log('note:', pm.response.json().note);"
+        ]
+       }
+      }
+     ]
     }
    ]
   },

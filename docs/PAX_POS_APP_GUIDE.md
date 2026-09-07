@@ -59,6 +59,7 @@ GET /api/payments/pos/bootstrap?terminal_id=TDB-PAX-SITE01-01
   "user": {"username": "pos_site01", "full_name": "…", "role": "OPERATOR"},
   "permissions": ["cashier", "check", "free_exit"],
   "terminal": {"terminal_id": "TDB-PAX-SITE01-01", "site_id": "…", "site_name": "Хангарьд"},
+  "open_reasons": [{"code": "vip", "label": "VIP / гэрээт зочин"}, "…  (§3.7)"],
   "sites": [{
     "id": "…", "name": "Хангарьд", "site_code": "site01", "address": "…",
     "lanes": [
@@ -336,6 +337,50 @@ Barrier device_id-г **`GET /api/barriers/devices?site_id=...`**-ээс авна
 > эрхээр хаагдсан — OPERATOR эрхтэй POS хэрэглэгч **403 «Танд энэ үйлдлийг хийх
 > эрх байхгүй»** авдаг болсон. Шинэ endpoint нь `cashier`/`free_exit`/`barriers`
 > эрхийн аль нэгээр ажиллах бөгөөд ямар ч нууц талбар агуулахгүй.
+
+### 3.7 Төлбөргүй гаргах — шалтгаантай (2026-09-07-оос POS-д)
+
+Вэб кассын «Төлбөргүй гаргах» цонхтой ИЖИЛ: оператор шалтгааныг ЖАГСААЛТААС
+сонгож, шаардлагатай бол тайлбар бичээд машиныг төлбөргүй гаргана. Шалтгаан бүр
+тайланд тоологдоно (хэн, ямар шалтгаанаар хэдэн удаа үнэгүй гаргасан).
+Эрх: `free_exit` (§2-ын хүснэгт) — байхгүй бол товчийг нуух.
+
+Шалтгааны жагсаалт `bootstrap` хариунд `open_reasons` талбараар ирнэ (эсвэл
+`GET /api/admin/open-reasons?active_only=true`). Жагсаалтыг админ Тохиргоо → Нээх
+шалтгаанаас өөрчилдөг тул апп дотор хатуу бичихгүй, нэвтрэх бүрд шинэчилнэ:
+
+```json
+"open_reasons": [
+  {"code": "vip",          "label": "VIP / гэрээт зочин"},
+  {"code": "staff",        "label": "Ажилтны машин"},
+  {"code": "wrong_plate",  "label": "Дугаар буруу уншсан"},
+  {"code": "no_session",   "label": "Бүртгэл олдоогүй"},
+  {"code": "system_error", "label": "Системийн алдаа"},
+  {"code": "device_fault", "label": "Хаалт/камер эвдэрсэн"},
+  {"code": "emergency",    "label": "Онцгой байдал (түргэн, гал)"},
+  {"code": "test",         "label": "Туршилт"},
+  {"code": "other",        "label": "Бусад"}
+]
+```
+
+Дэлгэц: дугаар + бодогдсон төлбөр (`fee.total_fee`) → **Шалтгаан** (dropdown,
+заавал) → **Тайлбар** (текст; `code=other` бол ЗААВАЛ 3+ тэмдэгт, бусдад заавал
+биш) → төлбөртэй бол «Нөхөн төлбөрийн нэхэмжлэл үүсгэх» checkbox → **Гаргах**.
+
+```
+POST /api/sessions/{session_id}/manual-exit
+{
+  "reason_code": "wrong_plate",        // open_reasons[].code — заавал (эсвэл reason)
+  "reason": "Уншсан 1721УБТ → 1727УБТ", // тайлбар; other үед заавал
+  "open_barrier": true,
+  "device_id": "{сонгосон эгнээний barrier_id}",   // §2.1; өгөхгүй бол зогсоолын эхний гарах хаалт
+  "create_compensation": false         // true = төлөгдөөгүй дүнгээр өр (нэхэмжлэл) үүснэ
+}
+```
+
+Хариу: session (`status: MANUAL_CLOSED`, `note`-д шалтгаан + тайлбар). Алдаа:
+`400` шалтгаан жагсаалтад алга / шалтгаангүй / «Бусад»-д тайлбаргүй; `403` free_exit эрхгүй.
+Аудит: `MANUAL_EXIT` (reason_code, reason, plate, device_id) — Лог хуудсанд харагдана.
 
 ## 4. Тохиргооны файл (апп дотор)
 

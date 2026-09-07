@@ -83,6 +83,9 @@ def main():
         r2 = pr.pos_bootstrap(terminal_id=None, db=db, user=op_fe)
         check("free_exit → can_open=true", all(l["can_open"] for l in r2["sites"][0]["lanes"]))
         check("terminal_id өгөхгүй → terminal=null", r2["terminal"] is None)
+        check("open_reasons жагсаалт (code+label) ирнэ",
+              r["open_reasons"] and all(x.get("code") and x.get("label") for x in r["open_reasons"])
+              and any(x["code"] == "other" for x in r["open_reasons"]), str(r.get("open_reasons"))[:120])
 
         print("\nrecent-exits эгнээгээр:")
         rows = sr.recent_exits(site_id=site.id, minutes=30, db=db, user=op)
@@ -95,8 +98,36 @@ def main():
         check("device_id=хаалт exit2 → ижил эгнээний камерын машин", [x["id"] for x in rows if x["id"] in (s1.id, s2.id)] == [s2.id])
         rows = sr.recent_exits(site_id=site.id, minutes=30, device_id=cam_exit1.id, db=db, user=op)
         check("device_id=камер exit1 → 1-р эгнээ", [x["id"] for x in rows if x["id"] in (s1.id, s2.id)] == [s1.id])
+        print("\nmanual-exit шалтгааны шалгалт (POS):")
+        import asyncio
+        from fastapi import HTTPException
+        def _me(body, u=op_fe):
+            try:
+                return asyncio.run(sr.manual_exit(s1.id, body, db=db, user=u))
+            except HTTPException as e:
+                db.rollback(); return e
+        e = _me({"open_barrier": False})
+        check("шалтгаангүй → 400", isinstance(e, HTTPException) and e.status_code == 400, str(getattr(e, 'detail', e)))
+        e = _me({"open_barrier": False, "reason_code": "other", "reason": "ok"})
+        check("other + богино тайлбар → 400", isinstance(e, HTTPException) and e.status_code == 400)
+        e = _me({"open_barrier": False, "reason_code": "no_such_code"})
+        check("жагсаалтад байхгүй код → 400", isinstance(e, HTTPException) and e.status_code == 400)
+        from app.auth import has_permission
+        route = next(r for r in sr.router.routes if r.path.endswith("/manual-exit"))
+        mods = sum((getattr(d.call, "required_modules", ()) for d in route.dependant.dependencies), ())
+        check("manual-exit route free_exit эрх шаарддаг", "free_exit" in mods, str(mods))
+        check("free_exit-гүй POS оператор эрхгүй (403)", not any(has_permission(op, m) for m in mods))
+        check("free_exit-тэй POS оператор эрхтэй", any(has_permission(op_fe, m) for m in mods))
+        db.expire_all()
+        check("400-уудын дараа session хэвээр AWAITING", db.get(ParkingSession, s1.id).status == "AWAITING_PAYMENT")
+        r3 = _me({"open_barrier": False, "reason_code": "wrong_plate", "reason": "1721 → 1727"})
+        check("зөв код → MANUAL_CLOSED", isinstance(r3, dict) and r3["status"] == "MANUAL_CLOSED", str(r3)[:100])
+        check("note-д шалтгаан + тайлбар", isinstance(r3, dict) and "Дугаар буруу уншсан — 1721 → 1727" in (r3.get("note") or ""), str(r3.get("note") if isinstance(r3, dict) else r3))
+
     finally:
         db.rollback()
+        from app.models import AuditLog
+        db.query(AuditLog).filter(AuditLog.entity_id.in_([s1.id, s2.id])).delete(synchronize_session=False)
         db.query(ParkingSession).filter(ParkingSession.id.in_([s1.id, s2.id])).delete(synchronize_session=False)
         db.query(Device).filter(Device.id.in_([d.id for d in devs])).delete(synchronize_session=False)
         db.query(ParkingSite).filter(ParkingSite.id.in_([site.id, other.id])).delete(synchronize_session=False)
