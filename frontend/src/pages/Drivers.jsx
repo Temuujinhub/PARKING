@@ -24,6 +24,22 @@ const CONTRACT_TYPES = {
   NIGHT: 'Шөнө үнэгүй (глобал цонхоор)',
 }
 
+// Хамрах хүрээ — ДАВХАР (nested) зогсоолтой талбайд л утгатай. «Зөвхөн дотоод»
+// бүртгэл гадна талбайд ЭНГИЙН жолооч (төлбөртэй), зөвхөн доторх орох хаалтыг
+// нээлгэнэ. Зогсоолын «Дотоод зогсоол хаалттай» унтраалга асаалттай үед л шалгагдана.
+const ACCESS_SCOPES = {
+  site: 'Гадна талбай (зогсоолын гэрээт эрх)',
+  inner: 'Зөвхөн ДОТООД зогсоолд нэвтрэх (гадна төлбөртэй)',
+  both: 'Гадна гэрээт + дотоод зогсоолд нэвтрэх',
+}
+const scopeBadge = (d) => d.access_scope === 'inner'
+  ? <span className="ml-1 text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded whitespace-nowrap"
+      title="Зөвхөн доторх (давхар) зогсоолын орох хаалтаар нэвтэрнэ; гадна талбайд төлбөр энгийнээр бодогдоно">дотоод</span>
+  : d.access_scope === 'both'
+    ? <span className="ml-1 text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded whitespace-nowrap"
+        title="Гадна талбайд гэрээт + доторх зогсоолд нэвтрэх эрхтэй">гадна+дотоод</span>
+    : null
+
 // Excel импортын цонх — эхлээд УРЬДЧИЛАН ХАРНА (dry-run), дараа нь баталгаажуулж оруулна.
 // Ингэснээр буруу файл шууд DB рүү орохгүй.
 function ImportModal({ open, onClose, sites, onDone }) {
@@ -31,11 +47,15 @@ function ImportModal({ open, onClose, sites, onDone }) {
   const [file, setFile] = useState(null)
   const [siteId, setSiteId] = useState('')
   const [contractType, setContractType] = useState('CONTRACT')
+  const [scope, setScope] = useState('site')
   const [replace, setReplace] = useState(false)
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
+  // Сонгосон зогсоол давхар (дотоод камертай) бол хамрах хүрээ сонгуулна
+  const nestedPick = siteId ? !!sites.find((s) => s.id === siteId)?.has_inner_lanes
+    : sites.some((s) => s.has_inner_lanes)
 
-  useEffect(() => { setFile(null); setPreview(null); setReplace(false); setContractType('CONTRACT') }, [open])
+  useEffect(() => { setFile(null); setPreview(null); setReplace(false); setContractType('CONTRACT'); setScope('site') }, [open])
 
   const send = async (dryRun) => {
     if (!file) { toast('Excel файлаа сонгоно уу', 'error'); return }
@@ -45,6 +65,7 @@ function ImportModal({ open, onClose, sites, onDone }) {
       fd.append('file', file)
       fd.append('site_id', siteId)
       fd.append('contract_type', contractType)
+      fd.append('access_scope', nestedPick ? scope : 'site')
       fd.append('replace', replace ? 'true' : 'false')
       fd.append('dry_run', dryRun ? 'true' : 'false')
       const data = await api('/api/admin/drivers/import', { method: 'POST', formData: fd })
@@ -93,6 +114,18 @@ function ImportModal({ open, onClose, sites, onDone }) {
             {Object.entries(CONTRACT_TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
         </Field>
+        {nestedPick && (
+          <Field label="Хамрах хүрээ (давхар зогсоол)">
+            <select className="input" value={scope} onChange={(e) => setScope(e.target.value)}>
+              {Object.entries(ACCESS_SCOPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+            <div className="text-[11px] text-slate-500 mt-1">
+              «Зөвхөн дотоод» — файлын машинууд доторх зогсоолын орох хаалтаар нэвтэрнэ,
+              гадна талбайд төлбөр энгийнээр бодогдоно. Зогсоолын тохиргоонд «Дотоод
+              зогсоол хаалттай» асаалттай байх ёстой.
+            </div>
+          </Field>
+        )}
         <label className="flex items-start gap-2 text-xs cursor-pointer">
           <input type="checkbox" className="mt-0.5 cursor-pointer" checked={replace}
             onChange={(e) => setReplace(e.target.checked)} />
@@ -149,7 +182,11 @@ export default function Drivers() {
   const [company, setCompany] = useState('')
   const [siteFilter, setSiteFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
+  const [scopeFilter, setScopeFilter] = useState('')
   const [companies, setCompanies] = useState([])
+  // Давхар (дотоод камертай) зогсоол байгаа эсэх — хамрах хүрээний UI-г л нөхцөлт харуулна
+  const hasNested = sites.some((s) => s.has_inner_lanes)
+  const nestedFor = (siteId) => siteId ? !!sites.find((s) => s.id === siteId)?.has_inner_lanes : hasNested
   const [editing, setEditing] = useState(null)
   const [importing, setImporting] = useState(false)
   // «Шөнө үнэгүй» төрлийн глобал цонх (Тохиргооны эрхтэй хүн 🌙-оор өөрчилнө)
@@ -187,11 +224,12 @@ export default function Drivers() {
     if (company) p.set('company', company)
     if (siteFilter) p.set('site_id', siteFilter)
     if (typeFilter) p.set('contract_type', typeFilter)
+    if (scopeFilter) p.set('access_scope', scopeFilter)
     api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
   useEffect(() => { load(); loadNight(); loadDups(); api('/api/admin/sites').then(setSites) }, [])
-  useEffect(() => { load() }, [company, siteFilter, typeFilter])
+  useEffect(() => { load() }, [company, siteFilter, typeFilter, scopeFilter])
 
   const remove = async (d) => {
     if (!window.confirm(`${d.plate_number} (${d.full_name || d.company || '-'}) бүртгэлийг БҮРМӨСӨН устгах уу?`)) return
@@ -204,7 +242,7 @@ export default function Drivers() {
 
   const blank = {
     plate_number: '', full_name: '', phone: '', contract_type: 'MONTHLY',
-    site_id: '', monthly_fee: 0, company: '', note: '',
+    site_id: '', monthly_fee: 0, company: '', note: '', access_scope: 'site',
     valid_from: new Date().toISOString().slice(0, 10),
     valid_to: new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10),
   }
@@ -284,6 +322,16 @@ export default function Drivers() {
             <option key={v} value={v}>{l.split(' (')[0]}</option>
           ))}
         </select>
+        {hasNested && (
+          <select className="input w-auto min-w-40" value={scopeFilter} aria-label="Хамрах хүрээгээр шүүх"
+            onChange={(e) => setScopeFilter(e.target.value)}>
+            <option value="">Бүх хүрээ</option>
+            <option value="inner_any">Дотоод зогсоолд нэвтрэх эрхтэй</option>
+            <option value="inner">Зөвхөн дотоод</option>
+            <option value="both">Гадна + дотоод</option>
+            <option value="site">Зөвхөн гадна</option>
+          </select>
+        )}
         <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>
           <option value="">Бүх байгууллага ({companies.reduce((a, c) => a + c.count, 0)})</option>
           {companies.map((c) => (
@@ -365,7 +413,7 @@ export default function Drivers() {
                 </div>
               )}
             </td>
-            <td className="td">{d.site_name}</td>
+            <td className="td">{d.site_name}{scopeBadge(d)}</td>
             <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
             <td className="td"><Badge value={d.is_active ? 'active' : 'FAILED'} /></td>
             <td className="td text-right whitespace-nowrap">
@@ -422,6 +470,20 @@ export default function Drivers() {
                   {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </Field>
+              {/* Давхар зогсоолтой талбайд: дотоод зогсоолын жагсаалтад оруулах эсэх.
+                  Хуучин бүртгэл бүгд «гадна талбай» (site). */}
+              {(nestedFor(editing.site_id) || (editing.access_scope && editing.access_scope !== 'site')) && (
+                <Field label="Хамрах хүрээ (давхар зогсоол)">
+                  <select className="input" value={editing.access_scope || 'site'}
+                    onChange={(e) => setEditing({ ...editing, access_scope: e.target.value })}>
+                    {Object.entries(ACCESS_SCOPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    «Зөвхөн дотоод» — доторх зогсоолын орох хаалт нээгдэнэ, гадна талбайн
+                    төлбөр энгийнээр бодогдоно (гэрээт биш).
+                  </div>
+                </Field>
+              )}
               <Field label="Сарын төлбөр (₮)">
                 <input className="input" type="number" min="0" max="100000000" step="1000" value={editing.monthly_fee}
                   onChange={(e) => setEditing({ ...editing, monthly_fee: e.target.value })} />

@@ -71,6 +71,8 @@
  ├── ДАХИН ОРОЛТ: өмнөх бүртгэл AWAITING_PAYMENT + exit_device_id-тай юу
  │     └── тийм → хуучныг хааж (create_debt_reentry бол өр үүсгэж) шинийг нээнэ
  ├── ХААЛТТАЙ ЗОГСООЛ (`registered_only`) + гэрээт биш → НЭЭХГҮЙ
+ │     (гэрээт = `find_registered`: жолоочийн `access_scope` site/both; «inner» бүртгэл
+ │      гадна талбайд ГЭРЭЭТ БИШ — зөвхөн доторх орох хаалт `find_inner_registered`)
  ├── ХАР ЖАГСААЛТ + `block_entry` → НЭЭХГҮЙ
  ├── ФОРМАТ БУРУУ дугаар + policy
  │     ├── open   → нээнэ
@@ -178,6 +180,7 @@
 |---|---|
 | `no_charge` | Төлбөр огт авахгүй зогсоол |
 | `registered_only` | Зөвхөн гэрээт машин |
+| `inner_registered_only` | Давхар зогсоолын ДОТООД (`nested_inner` камер) орох хаалт зөвхөн `access_scope` inner/both бүртгэлд нээгдэнэ; доторх гарах ямагт нээгдэнэ, гадна хаалтад нөлөөгүй |
 | `auto_close_hours` | `stale_hours`-ыг дарна (0 = унтраах) |
 | `entry_only_free_hours` | Ижил нэртэй дүрмийг дарна |
 | `transit_max_hours` | Nested зогсоолын тоолуур зогсох дээд хугацаа |

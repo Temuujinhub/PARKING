@@ -251,6 +251,10 @@ export default function Dashboard() {
                 <Icon size={15} className={meta.color} aria-hidden />
                 <span className="font-mono font-semibold">{ev.data?.plate || ''}</span>
                 <span className={meta.color}>{meta.label}</span>
+                {/* Давхар зогсоолын ДОТООД хаалт татгалзсан бол гадна хаалттай андуурахгүй */}
+                {ev.data?.lane === 'inner_entry' && (
+                  <span className="text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded">дотоод хаалт</span>
+                )}
                 {ev.data?.total_fee !== undefined && <span className="font-mono">{fmt(ev.data.total_fee)}₮</span>}
                 <span className="ml-auto text-xs text-slate-500 font-mono">{fmtDate(ev.ts).split(' ')[1] || ''}</span>
               </div>

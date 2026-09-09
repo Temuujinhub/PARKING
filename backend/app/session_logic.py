@@ -134,13 +134,14 @@ def extract_vehicle_info(raw: dict) -> tuple[str | None, str | None]:
     return (cn or None), (tn or None)
 
 
-def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:
-    """Гэрээт машин мөн эсэх. site_id NULL («бүх зогсоол») бүртгэл нь зөвхөн
-    ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН зогсоолуудад үйлчилнэ — түрээслэгч ДАМНАН үнэгүй
-    нэвтрэхийг хориглоно (NULL/NULL тохирол нь tenant-гүй хуучин суулгацад
-    хуучин зан төлөвөө хадгална)."""
+# «Дотоод» хамрах хүрээ — доторх (nested_inner) орох хаалтаар нэвтрэх эрхтэй бүртгэл
+INNER_SCOPES = ("inner", "both")
+
+
+def _registered_base(db: Session, plate: str):
+    """Одоо хүчинтэй, идэвхтэй бүртгэлүүд (хамрах хүрээгээр шүүгээгүй)."""
     now = datetime.utcnow()
-    q = (
+    return (
         db.query(RegisteredDriver)
         .filter(
             RegisteredDriver.plate_number == plate,
@@ -149,21 +150,61 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
             RegisteredDriver.valid_to >= now,
         )
     )
-    site_tenant = (db.query(ParkingSite.tenant_id)
-                   .filter(ParkingSite.id == site_id).scalar()) if site_id else None
-    all_sites_cond = (RegisteredDriver.site_id.is_(None)) & (
+
+
+def _all_sites_cond(site_tenant):
+    """«Бүх зогсоол» (site_id NULL) бүртгэл нь зөвхөн ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН
+    зогсоолуудад үйлчилнэ — түрээслэгч ДАМНАН үнэгүй нэвтрэхийг хориглоно
+    (NULL/NULL тохирол нь tenant-гүй хуучин суулгацад хуучин зан төлөвөө хадгална)."""
+    return (RegisteredDriver.site_id.is_(None)) & (
         (RegisteredDriver.tenant_id == site_tenant) if site_tenant
         else RegisteredDriver.tenant_id.is_(None))
-    # Тусгай хэрэгцээт (ХБИ г.м) жагсаалт ч түрээслэгчийн хил ДОТРОО л үйлчилнэ:
-    # site_id NULL + тухайн түрээслэгчийн tenant_id = түрээслэгчийн бүх зогсоол.
-    # Түрээслэгч дамнасан систем-даяарх whitelist байхгүй (2026-08-09 шийдвэр).
+
+
+def _registered_order(q):
     # ТОДОРХОЙ дараалал: зогсоолд тусгайлан бүртгэсэн нь «бүх зогсоол»-ынхоос
     # түрүүлнэ, дараа нь хамгийн урт хүчинтэй. Өмнө нь `.first()` дараалалгүй
     # байсан тул давхардсан бүртгэлээс (ж: нэг нь NIGHT, нөгөө нь CONTRACT)
     # аль нь таарах нь санамсаргүй байв (2026-09-03).
-    return (q.filter((RegisteredDriver.site_id == site_id) | all_sites_cond)
-            .order_by(RegisteredDriver.site_id.is_(None), RegisteredDriver.valid_to.desc())
-            .first())
+    return q.order_by(RegisteredDriver.site_id.is_(None), RegisteredDriver.valid_to.desc())
+
+
+def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:
+    """Гэрээт машин мөн эсэх — ЗОГСООЛЫН (гадна талбайн) эрх: төлбөр үнэгүй/нөхцөлт,
+    хаалттай зогсоолд орох, гарах хаалт г.м бүх «гэрээт» шийдвэр үүн дээр тулгуурлана.
+
+    Хамрах хүрээ:
+      • `access_scope="inner"` (зөвхөн доторх зогсоолын эрх) бүртгэл ЭНД ТООЛОГДОХГҮЙ —
+        тэр машин гадна талбайд энгийн жолооч шиг төлбөр төлнө. Түүний эрхийг
+        `find_inner_registered` шалгана.
+      • Тусдаа site-тай (parent/child) давхар зогсоолд: ХҮҮХЭД зогсоол дээр дуудагдвал
+        ЭЦЭГ зогсоолд «дотоод» (inner/both) хүрээгээр бүртгэсэн машин ч гэрээт гэж
+        тоологдоно — ингэснээр «Рашбулаг ЭТТ»-д дотоод жагсаалтаа нэг л газар
+        хөтөлж, аль ч загварт (нэг site / хоёр site) ижил үйлчилнэ.
+    Тусгай хэрэгцээт (ХБИ г.м) жагсаалт ч түрээслэгчийн хил ДОТРОО л үйлчилнэ:
+    site_id NULL + тухайн түрээслэгчийн tenant_id = түрээслэгчийн бүх зогсоол.
+    Түрээслэгч дамнасан систем-даяарх whitelist байхгүй (2026-08-09 шийдвэр)."""
+    site = db.get(ParkingSite, site_id) if site_id else None
+    site_tenant = site.tenant_id if site else None
+    outer = ((RegisteredDriver.site_id == site_id) | _all_sites_cond(site_tenant)) \
+        & (RegisteredDriver.access_scope != "inner")
+    cond = outer
+    if site is not None and site.parent_site_id:
+        cond = outer | ((RegisteredDriver.site_id == site.parent_site_id)
+                        & RegisteredDriver.access_scope.in_(INNER_SCOPES))
+    return _registered_order(_registered_base(db, plate).filter(cond)).first()
+
+
+def find_inner_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver | None:
+    """ДОТООД (давхар зогсоолын) орох хаалтаар нэвтрэх эрхтэй бүртгэл — зөвхөн
+    `access_scope` inner/both. Зогсоолын `inner_registered_only` асаалттай үед
+    `handle_inner_pass` үүгээр шийднэ; «site» хүрээтэй энгийн гэрээт машин доторх
+    хаалттай зогсоолд ОРОХГҮЙ (дотоод жагсаалт нь тусдаа, илэрхий жагсаалт)."""
+    site = db.get(ParkingSite, site_id) if site_id else None
+    site_tenant = site.tenant_id if site else None
+    cond = ((RegisteredDriver.site_id == site_id) | _all_sites_cond(site_tenant)) \
+        & RegisteredDriver.access_scope.in_(INNER_SCOPES)
+    return _registered_order(_registered_base(db, plate).filter(cond)).first()
 
 
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:
@@ -1127,6 +1168,21 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
                  plate, session.plate_number)
     entering = device.lane_dir != "exit"
 
+    # ХААЛТТАЙ дотоод зогсоол (site.inner_registered_only): доторх ОРОХ хаалт зөвхөн
+    # «дотоод» хүрээтэй (access_scope inner/both) бүртгэлтэй машинд нээгдэнэ.
+    # Гадна талбайн энгийн гэрээт («site» хүрээ) машин ч энд нэвтрэхгүй — дотоод
+    # жагсаалт нь илэрхий, тусдаа жагсаалт. ГАРАХ чиглэлийг ХЭЗЭЭ Ч хориглохгүй
+    # (машиныг дотор гацаахгүй). Татгалзсан үед тоолуурыг ЗОГСООХГҮЙ — машин
+    # дотогш ороогүй, гадна талбайд байгаа тул төлбөр нь хэвийн гүйнэ.
+    denied = False
+    if entering and site is not None and bool(getattr(site, "inner_registered_only", False)):
+        inner_reg = find_inner_registered(db, plate, device.site_id)
+        if inner_reg is None and fuzzy and session is not None:
+            # Бохир дугаарыг дотоод камер өөр уншсан бол гадна камерын уншилтаар
+            # (session-ий дугаар) дахин шалгана — гарах хаалттай ижил уян хатан
+            inner_reg = find_inner_registered(db, session.plate_number, device.site_id)
+        denied = inner_reg is None
+
     if session is None and is_valid_plate(plate):
         # САЯХАН ГАРСАН машиныг нөхөж болохгүй: шороон зогсоолд эгнээ байхгүй тул
         # гарч яваа машиныг дотоод ОРОХ камер дахин уншдаг (2026-08-11 Рашбулаг,
@@ -1156,7 +1212,10 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
             log.info("[nested] %s: гадна орох уншилт алдагдсан — session нөхөж үүсгэв (%s)",
                      plate, session.id[:8])
 
-    if entering:
+    if denied:
+        changed = False
+        action = "inner_denied"
+    elif entering:
         changed = pause_session(session, now)
         action = "inner_entry"
     else:
@@ -1164,9 +1223,32 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
         action = "inner_exit"
 
     db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
-                    lane_dir=device.lane_dir, confidence=confidence, accepted=True,
+                    lane_dir=device.lane_dir, confidence=confidence, accepted=not denied,
+                    reject_reason="дотоод зогсоол хаалттай — дотоод бүртгэлгүй" if denied else None,
                     raw=strip_images(raw)))
     db.commit()
+
+    if denied:
+        # Хаалт нээхгүй, операторт мэдэгдэж, LED дээр шалтгааныг харуулна —
+        # гадна талын хаалттай зогсоолтой (registered_only) ижил зан төлөв.
+        log.info("[nested] %s: дотоод зогсоол ХААЛТТАЙ — дотоод бүртгэлгүй тул орох "
+                 "хаалт нээгээгүй (%s)", plate, device.name)
+        notify(device.site_id, "UNREGISTERED_DENIED",
+               {"plate": plate, "lane": "inner_entry", "device": device.name})
+        _local_hm = (now + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+        schedule_display(device.ip_address,
+                         render_screen_text("{plate}\nBurtgelgui mashin", plate=plate,
+                                            time_str=_local_hm),
+                         camera_credentials(device))
+        notify(device.site_id, "INNER_PASS", {
+            "session_id": session.id if session else None, "plate": plate,
+            "lane_dir": device.lane_dir, "denied": True,
+            "paused": bool(session and session.paused_since),
+            "paused_minutes": int(session.paused_minutes or 0) if session else 0,
+            "barrier_opened": False,
+        })
+        return {"action": action, "session_id": session.id if session else None,
+                "counter_changed": False, "barrier_opened": False, "denied": True}
 
     if session is None:
         log.info("[nested] %s: дотоод %s хаалт — зогсоолд идэвхтэй бүртгэл алга, "
@@ -1191,12 +1273,13 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
 
     notify(device.site_id, "INNER_PASS", {
         "session_id": session.id if session else None, "plate": plate,
-        "lane_dir": device.lane_dir, "paused": bool(session and session.paused_since),
+        "lane_dir": device.lane_dir, "denied": False,
+        "paused": bool(session and session.paused_since),
         "paused_minutes": int(session.paused_minutes or 0) if session else 0,
         "barrier_opened": barrier_opened,
     })
     return {"action": action, "session_id": session.id if session else None,
-            "counter_changed": changed, "barrier_opened": barrier_opened}
+            "counter_changed": changed, "barrier_opened": barrier_opened, "denied": False}
 
 
 async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict,

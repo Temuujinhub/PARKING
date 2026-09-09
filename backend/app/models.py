@@ -102,6 +102,12 @@ class ParkingSite(Base):
     # Хаалттай зогсоол: true үед зөвхөн бүртгэлтэй (гэрээт) машинд орох хаалт
     # нээгдэнэ — бүртгэлгүй машинд нээгдэхгүй (ажилчдын зогсоол г.м).
     registered_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # ДОТООД (давхар) зогсоол хаалттай: `nested_inner` камертай доторх ОРОХ хаалт
+    # зөвхөн `access_scope` inner/both бүртгэлтэй машинд нээгдэнэ. Гадна талбайн
+    # орох/гарах хаалтад нөлөөлөхгүй; доторх ГАРАХ хаалт ямагт нээгдэнэ (машиныг
+    # дотор гацаахгүй). Рашбулаг ЭТТ 2026-09-09: дотоод зогсоолд зөвхөн
+    # тодорхой (ажилчдын) машин нэвтэрнэ.
+    inner_registered_only = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     # ─── Nested (дамжин) зогсоол ───────────────────────────────────────────
     # Энэ зогсоол ӨӨР зогсоолын ДОТОР байрлана: гадна зогсоолоор дамжиж л
     # ороход хүрдэг (жишээ: Рашбулаг ЭТТ-ийн гадна талбай дотор ажилчдын
@@ -249,6 +255,14 @@ class RegisteredDriver(Base):
     # бүх цагт бүрэн үнэгүй. free_from/free_until цонхтой хамт хэрэглэж болно
     # (хоёулаа хугацаанаас хасагдана).
     free_first_minutes = Column(Integer, nullable=True)
+    # Хамрах хүрээ — давхар (nested) зогсоолтой талбайд:
+    #   "site"  = зогсоолын гэрээт эрх (гадна талбайд үнэгүй/нөхцөлтэй) — хуучин зан;
+    #   "inner" = ЗӨВХӨН доторх зогсоолын орох хаалтаар нэвтрэх эрх. Гадна талбайн
+    #             төлбөр энгийнээр бодогдоно (find_registered энэ бүртгэлийг ҮЗЭХГҮЙ);
+    #   "both"  = хоёулаа (гадна гэрээт + дотоод нэвтрэх).
+    # Зогсоолын `inner_registered_only` асаалттай үед л шалгагдана; унтраалттай
+    # бол доторх хаалт хуучнаараа бүх машинд нээгдэнэ (2026-09-09 Рашбулаг ЭТТ).
+    access_scope = Column(String(10), nullable=False, default="site", server_default=text("'site'"))
     valid_from = Column(DateTime, nullable=False, default=datetime.utcnow)
     valid_to = Column(DateTime, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)

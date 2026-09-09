@@ -31,6 +31,8 @@ class SiteCreate(_In):
     auto_close_hours: int | None = Field(default=None, ge=0, le=720)
     entry_only_free_hours: int | None = Field(default=None, ge=0, le=720)
     registered_only: bool | None = None
+    # Доторх (nested_inner камертай) орох хаалт зөвхөн «дотоод» хүрээтэй бүртгэлд
+    inner_registered_only: bool | None = None
     # Nested (дамжин) зогсоол — энэ зогсоол аль зогсоолын ДОТОР байна
     parent_site_id: str | None = None
     transit_max_hours: int | None = Field(default=None, ge=0, le=720)
@@ -113,6 +115,8 @@ class DriverCreate(_In):
     free_until: str | None = None
     # Гэрээний нөхцөл: эхний N минут үнэгүй (60/120), илүүг тарифаар. NULL/0 = бүрэн үнэгүй
     free_first_minutes: int | None = Field(default=None, ge=0, le=1440)
+    # Хамрах хүрээ: site (гадна гэрээт, default) | inner (зөвхөн дотоод зогсоол) | both
+    access_scope: str | None = None
     valid_from: str | None = None   # ISO datetime — хуучин fromisoformat логик хэвээр
     valid_to: str                   # заавал (өмнө нь дутуу бол 500 өгдөг байсан)
 
@@ -130,6 +134,7 @@ class DriverUpdate(_In):
     free_from: str | None = None
     free_until: str | None = None
     free_first_minutes: int | None = Field(default=None, ge=0, le=1440)
+    access_scope: str | None = None
     valid_from: str | None = None
     valid_to: str | None = None
 

@@ -33,6 +33,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
     editing.entry_only_free_hours != null && editing.entry_only_free_hours !== '',
     editing.barrier_close_sweep_min != null && editing.barrier_close_sweep_min !== '' && +editing.barrier_close_sweep_min > 0,
     !!editing.registered_only,
+    !!editing.inner_registered_only,
     !!editing.no_charge,
   ].filter(Boolean).length : 0
 
@@ -181,6 +182,27 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
               «Бүртгэлтэй машин» жагсаалтад байгаа машинд л орох хаалт нээгдэнэ,
               бусдад «Бүртгэлгүй машин» гэж дэлгэцэнд гарна.
             </div>
+            {/* НЭГ зогсоол доторх давхар зогсоол («дотоод» камертай): доторх ОРОХ
+                хаалт зөвхөн «дотоод» хүрээтэй (Бүртгэлтэй машин → Хамрах хүрээ)
+                машинд нээгдэнэ. Гадна хаалтад нөлөөлөхгүй, доторх ГАРАХ ямагт нээгдэнэ.
+                Зөвхөн дотоод камертай зогсоолд харагдана (Рашбулаг ЭТТ, 2026-09-09). */}
+            {(editing.has_inner_lanes || editing.inner_registered_only) && (
+              <>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input type="checkbox" className="w-4 h-4 accent-accent"
+                    checked={!!editing.inner_registered_only}
+                    onChange={(e) => setEditing({ ...editing, inner_registered_only: e.target.checked })} />
+                  <span className="text-sm">Дотоод зогсоол хаалттай — зөвхөн «дотоод» бүртгэлтэй машин нэвтэрнэ</span>
+                </label>
+                <div className="text-[11px] text-slate-500 -mt-2">
+                  Доторх (давхар зогсоолын) ОРОХ хаалт зөвхөн «Бүртгэлтэй машин» хуудсанд
+                  хамрах хүрээ нь «Зөвхөн дотоод» эсвэл «Гадна + дотоод» гэж бүртгэсэн машинд
+                  нээгдэнэ; бусдад «Бүртгэлгүй машин» гэж гарна. Гадна талбайн хаалтад
+                  нөлөөлөхгүй, доторх ГАРАХ хаалт ямагт нээгдэнэ.
+                  {!editing.has_inner_lanes && ' ⚠ Энэ зогсоолд дотоод камер алга — унтраалга үйлчлэхгүй.'}
+                </div>
+              </>
+            )}
             {/* Дотоод/ажилчдын зогсоол — цаг тооцохгүй. Дамжин зогсоолд ихэвчлэн
                 хамт асаана: доторх зогсоол өөрөө төлбөр авахгүй. */}
             <label className="flex items-center gap-2 cursor-pointer select-none">

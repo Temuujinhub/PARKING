@@ -175,6 +175,13 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         db.query(ParkingSite.parent_site_id, func.count())
         .filter(ParkingSite.parent_site_id.isnot(None))
         .group_by(ParkingSite.parent_site_id).all())
+    # НЭГ site доторх давхар зогсоол (`nested_inner` камертай) — UI энэ тугаар
+    # «дотоод зогсоол хаалттай» унтраалга, бүртгэлийн «дотоод» хүрээг харуулна
+    inner_lane_counts = dict(
+        db.query(Device.site_id, func.count())
+        .filter(Device.device_type == "camera", Device.nested_inner.is_(True),
+                Device.status != "deleted")
+        .group_by(Device.site_id).all())
     smap = {s.id: s.name for s in db.query(ParkingSite).all()}
     tmap = {t.id: t for t in db.query(Tenant).all()}
     # Ижил нэртэй зогсоол — БҮХ зогсоолоор (шүүлтээс үл хамааран). Кодыг нь давхардуулах
@@ -200,6 +207,7 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
         out.append(to_dict(s, extra={
             "parent_site_name": smap.get(s.parent_site_id),
             "child_site_count": int(child_counts.get(s.id, 0)),
+            "has_inner_lanes": bool(inner_lane_counts.get(s.id, 0)),
             # Доторх (давхар) зогсоолд ОДОО байгаа машины тоо
             "inside_nested": inside,
             # Тэдгээр нь «эзэлсэн»-ээс хасагдсан эсэх (тусдаа site-тай загварт л хасагдана)
@@ -375,7 +383,8 @@ def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
                            "tariff_template_id", "auto_close_hours", "entry_only_free_hours",
-                           "registered_only", "parent_site_id", "transit_max_hours",
+                           "registered_only", "inner_registered_only",
+                           "parent_site_id", "transit_max_hours",
                            "no_charge", "qr_url",
                            "qpay_username", "qpay_password", "qpay_invoice_code",
                            "qpay_branch_code", "qpay_district_code",
@@ -429,7 +438,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     if "parent_site_id" in body:
         _assert_parent_ok(db, body["parent_site_id"], self_id=site_id)
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
-              "auto_close_hours", "entry_only_free_hours", "registered_only", "is_active",
+              "auto_close_hours", "entry_only_free_hours", "registered_only",
+              "inner_registered_only", "is_active",
               "parent_site_id", "transit_max_hours", "barrier_close_sweep_min",
               "no_charge", "qr_url",
               "qpay_username", "qpay_password", "qpay_invoice_code",
@@ -1672,6 +1682,7 @@ def update_discount(discount_id: str, payload: schemas.DiscountUpdate, db: Sessi
 @router.get("/drivers")
 def list_drivers(q: str | None = None, company: str | None = None,
                  site_id: str | None = None, contract_type: str | None = None,
+                 access_scope: str | None = None,
                  db: Session = Depends(get_db),
                  user: User = Depends(require("drivers"))):
     query = db.query(RegisteredDriver).order_by(RegisteredDriver.company,
@@ -1679,6 +1690,12 @@ def list_drivers(q: str | None = None, company: str | None = None,
     if contract_type:
         # Төрлөөр шүүх — «Тусгай хэрэгцээт» (SPECIAL) г.м. тусдаа жагсаалт харах
         query = query.filter(RegisteredDriver.contract_type == contract_type)
+    if access_scope:
+        # Хамрах хүрээгээр: «дотоод» = доторх зогсоолд нэвтрэх эрхтэй (inner+both)
+        if access_scope == "inner_any":
+            query = query.filter(RegisteredDriver.access_scope.in_(("inner", "both")))
+        else:
+            query = query.filter(RegisteredDriver.access_scope == access_scope)
     if q:
         # Дугаар, эзэмшигч, байгууллагын аль нэгээр нь хайна (олон зуун мөртэй
         # жагсаалтад зөвхөн дугаараар хайх нь хангалтгүй)
@@ -1820,6 +1837,9 @@ def _parse_dt(value: str, field: str, end_of_day: bool = False) -> datetime:
 
 
 CONTRACT_TYPES = ("MONTHLY", "CONTRACT", "VIP", "STAFF", "SPECIAL", "TRANSIT", "NIGHT")
+# Хамрах хүрээ (давхар зогсоол): site = гадна гэрээт (default) · inner = зөвхөн
+# доторх зогсоолд нэвтрэх (гадна төлбөртэй) · both = хоёулаа
+ACCESS_SCOPES = ("site", "inner", "both")
 
 
 def _driver_validate(body: dict, existing: RegisteredDriver | None = None) -> None:
@@ -1827,6 +1847,9 @@ def _driver_validate(body: dict, existing: RegisteredDriver | None = None) -> No
     ct = body.get("contract_type", existing.contract_type if existing else "MONTHLY")
     if ct not in CONTRACT_TYPES:
         raise HTTPException(400, f"contract_type буруу: {ct!r} — {', '.join(CONTRACT_TYPES)}")
+    sc = body.get("access_scope")
+    if sc is not None and sc not in ACCESS_SCOPES:
+        raise HTTPException(400, f"access_scope буруу: {sc!r} — {', '.join(ACCESS_SCOPES)}")
     f = body.get("free_from", existing.free_from if existing else None) or None
     u = body.get("free_until", existing.free_until if existing else None) or None
     if bool(f) != bool(u):
@@ -1918,6 +1941,7 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
         free_from=_hhmm_or_400(body.get("free_from"), "free_from"),
         free_until=_hhmm_or_400(body.get("free_until"), "free_until"),
         free_first_minutes=body.get("free_first_minutes") or None,
+        access_scope=body.get("access_scope") or "site",
         valid_from=vf, valid_to=vt,
     )
     db.add(d)
@@ -1963,6 +1987,8 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
               "is_active", "company", "note"):
         if k in body:
             setattr(d, k, body[k])
+    if body.get("access_scope"):
+        d.access_scope = body["access_scope"]
     for k in ("free_from", "free_until"):
         if k in body:
             setattr(d, k, _hhmm_or_400(body[k], k))
@@ -2041,6 +2067,7 @@ def import_template(user: User = Depends(require("drivers"))):
 @router.post("/drivers/import")
 async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
                          contract_type: str = Form("CONTRACT"),
+                         access_scope: str = Form("site"),
                          valid_days: int = Form(365),
                          replace: bool = Form(False),
                          dry_run: bool = Form(False),
@@ -2065,6 +2092,8 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
 
     if contract_type not in CONTRACT_TYPES:
         raise HTTPException(400, f"contract_type буруу: {contract_type!r}")
+    if access_scope not in ACCESS_SCOPES:
+        raise HTTPException(400, f"access_scope буруу: {access_scope!r}")
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Зөвхөн .xlsx файл дэмжинэ")
     data = await file.read()
@@ -2092,6 +2121,7 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
         return {"dry_run": True, **preview}
 
     res = import_rows(db, rows, site_id or None, contract_type=contract_type,
+                      access_scope=access_scope,
                       valid_days=valid_days, deactivate_missing=replace,
                       # «Бүх зогсоол» импортод бүртгэлийг импортлогчийн түрээслэгчид
                       # холбоно — эс бол tenant_id NULL болж хэнд ч харагдахгүй

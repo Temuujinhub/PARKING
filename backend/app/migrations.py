@@ -298,6 +298,12 @@ MIGRATIONS = [
     # Дүн царцсан session (орох уншилтгүй машины суурь хураамж г.м) — total_fee-г
     # тарифаас дахин бодохгүй.
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS fee_locked BOOLEAN NOT NULL DEFAULT false",
+
+    # 2026-09-09 — Давхар зогсоолын ДОТООД хаалт хаалттай (Рашбулаг ЭТТ): доторх
+    # орох хаалт зөвхөн «дотоод» хүрээтэй (inner/both) бүртгэлтэй машинд нээгдэнэ.
+    # Хуучин бүртгэл бүгд 'site' (гадна гэрээт) хэвээр — зан төлөв өөрчлөгдөхгүй.
+    "ALTER TABLE registered_drivers ADD COLUMN IF NOT EXISTS access_scope VARCHAR(10) NOT NULL DEFAULT 'site'",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS inner_registered_only BOOLEAN NOT NULL DEFAULT false",
 ]
 
 

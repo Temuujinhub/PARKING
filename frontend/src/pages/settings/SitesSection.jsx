@@ -112,6 +112,12 @@ export default function SitesSection({ onGotoIntegrations }) {
                   дотроо {s.child_site_count} зогсоол
                 </span>
               )}
+              {s.inner_registered_only && (
+                <span className="ml-1.5 text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded cursor-help whitespace-nowrap"
+                  title="Доторх (давхар) зогсоолын орох хаалт зөвхөн «дотоод» хүрээтэй бүртгэлтэй машинд нээгдэнэ">
+                  дотоод хаалттай
+                </span>
+              )}
               {s.no_charge && !s.parent_site_name && (
                 <span className="ml-1.5 text-[10px] text-slate-400 bg-slate-500/10 px-1.5 py-0.5 rounded whitespace-nowrap">
                   төлбөргүй
