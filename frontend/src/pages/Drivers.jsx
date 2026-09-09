@@ -1,5 +1,5 @@
 // Бүртгэлтэй машин — гэрээт/сарын эрхтэй машинууд
-import { AlertTriangle, Plus, Search, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Download, Plus, Search, Trash2, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useAuth } from '../auth'
@@ -39,6 +39,19 @@ const scopeBadge = (d) => d.access_scope === 'inner'
     ? <span className="ml-1 text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded whitespace-nowrap"
         title="Гадна талбайд гэрээт + доторх зогсоолд нэвтрэх эрхтэй">гадна+дотоод</span>
     : null
+
+// Импортын ЗАГВАР .xlsx татах — заавар хуудас + тогтсон гарчигтай жишээ. Хэрэглэгчид
+// өөр өөр баганатай файл ирүүлж зөрдөг байсан тул толгой дээр тод товч, импортын
+// цонхонд ч давтана.
+async function downloadTemplate(toast) {
+  try {
+    const blob = await api('/api/admin/drivers/import-template', { blob: true })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = 'burtgeltei_mashin_zagvar.xlsx'; a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) { toast(e.message, 'error') }
+}
 
 // Excel импортын цонх — эхлээд УРЬДЧИЛАН ХАРНА (dry-run), дараа нь баталгаажуулж оруулна.
 // Ингэснээр буруу файл шууд DB рүү орохгүй.
@@ -80,23 +93,18 @@ function ImportModal({ open, onClose, sites, onDone }) {
   return (
     <Modal open={open} onClose={onClose} title="Гэрээт машины жагсаалт — Excel импорт">
       <div className="space-y-3 text-sm">
-        <div className="text-xs text-slate-400">
-          Excel-ийн <b className="text-slate-200">бүх хуудсыг</b> уншина — хуудас бүрийг
-          нэг байгууллага гэж үзнэ. Хуудсанд «Улсын дугаар» гэсэн гарчигтай багана
-          байх шаардлагатай. Ижил дугаар давхардвал шинэчилнэ (давхар бүртгэл үүсэхгүй).
+        <div className="rounded-lg border border-accent/40 bg-accent/5 p-3 space-y-2">
+          <div className="text-xs text-slate-300">
+            Файлыг <b className="text-slate-100">яг загварын форматаар</b> бөглөнө: хуудас
+            бүр = нэг байгууллага (хуудасны нэр = байгууллагын нэр), 1-р мөрийн гарчиг{' '}
+            <span className="font-mono text-slate-100">Улсын дугаар · Эзэмшигч · Утас · Албан тушаал</span>.
+            Баганын нэр өөр бол уншигдахгүй. Ижил дугаар давхардвал шинэчилнэ.
+          </div>
+          <button type="button" className="btn-secondary py-1.5 text-xs"
+            onClick={() => downloadTemplate(toast)}>
+            <Download size={14} /> Excel загвар татах (.xlsx)
+          </button>
         </div>
-        <button type="button" className="text-accent text-xs underline"
-          onClick={async () => {
-            try {
-              const blob = await api('/api/admin/drivers/import-template', { blob: true })
-              const url = URL.createObjectURL(blob)
-              const a = document.createElement('a')
-              a.href = url; a.download = 'drivers_import_template.xlsx'; a.click()
-              URL.revokeObjectURL(url)
-            } catch (e) { toast(e.message, 'error') }
-          }}>
-          ⬇ Загвар файл татах (.xlsx)
-        </button>
         <Field label="Excel файл (.xlsx)" required>
           <input type="file" accept=".xlsx,.xlsm" className="input"
             onChange={(e) => { setFile(e.target.files?.[0] || null); setPreview(null) }} />
@@ -280,6 +288,10 @@ export default function Drivers() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Бүртгэлтэй машин</h1>
         <div className="flex gap-2">
+          <button className="btn-secondary" title="Импортын жишээ формат — хуудас бүр нэг байгууллага, тогтсон гарчигтай"
+            onClick={() => downloadTemplate(toast)}>
+            <Download size={16} /> Excel загвар татах
+          </button>
           <button className="btn-secondary" onClick={() => setImporting(true)}>
             <Upload size={16} /> Excel-ээс импортлох
           </button>

@@ -2036,32 +2036,19 @@ def delete_driver(driver_id: str, db: Session = Depends(get_db),
 
 @router.get("/drivers/import-template")
 def import_template(user: User = Depends(require("drivers"))):
-    """Excel импортын загвар файл — гарчиг нь parse_workbook-ийн хайдаг нэрстэй ижил.
-    Хуудас бүр = нэг байгууллага гэдгийг 2 жишээ хуудсаар үзүүлнэ."""
+    """Excel импортын ЗАГВАР файл — заавар хуудас + тогтсон гарчигтай жишээ хуудсууд
+    (services/driver_import.build_template). Хэрэглэгчид багана зөрүүлж ирүүлдэг
+    байсан тул яг энэ форматаар бөглөхийг зөвлөнө."""
     import io
 
     from fastapi.responses import StreamingResponse
-    from openpyxl import Workbook
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Байгууллага 1"
-    ws.append(["Улсын дугаар", "Эзэмшигч", "Албан тушаал"])
-    ws.append(["1234УБА", "Бат-Эрдэнэ", "жишээ мөр — өөрийн жагсаалтаар солино"])
-    ws.append(["ДК1234", "", "дипломат дугаар мөн болно"])
-    ws2 = wb.create_sheet("Байгууллага 2")
-    ws2.append(["Улсын дугаар", "Эзэмшигч", "Албан тушаал"])
-    ws2.append(["5678УНА", "Сарнай", "хуудас бүр тусдаа байгууллага болно"])
-    for w in (ws, ws2):
-        w.column_dimensions["A"].width = 16
-        w.column_dimensions["B"].width = 22
-        w.column_dimensions["C"].width = 40
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
+    from ..services.driver_import import build_template
+
     return StreamingResponse(
-        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="drivers_import_template.xlsx"'})
+        io.BytesIO(build_template()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="burtgeltei_mashin_zagvar.xlsx"'})
 
 
 @router.post("/drivers/import")

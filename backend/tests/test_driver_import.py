@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import openpyxl  # noqa: E402
 
-from app.services.driver_import import normalize_plate, parse_workbook  # noqa: E402
+from app.services.driver_import import (  # noqa: E402
+    TEMPLATE_HEADERS, build_template, normalize_phone, normalize_plate, parse_workbook,
+)
 
 PASS = FAIL = 0
 
@@ -96,6 +98,31 @@ data = build({"Хоосон": [["зүгээр текст", ""], ["мөр", ""]]}
 rows, warns = parse_workbook(data)
 check("дугаар олдоогүй", len(rows) == 0)
 check("шалтгааныг анхааруулсан", any("олдсонгүй" in w for w in warns))
+
+print("\nЗагвар файл (build_template) өөрчлөлтгүй уншигдана:")
+rows, warns = parse_workbook(build_template())
+companies = {r["company"] for r in rows}
+check("4 жишээ дугаар уншсан", len(rows) == 4)
+check("байгууллага = хуудасны нэр (гарчиг «Улсын дугаар» биш)",
+      companies == {"Байгууллага 1", "Байгууллага 2"})
+check("«ЗААВАР» хуудас анхааруулгагүй алгасагдсан", not warns)
+check("утас уншигдсан", any(r["plate"] == "1234УБА" and r["phone"] == "99112233" for r in rows))
+check("«Утас» багана улсын дугаар гэж андуурагдаагүй", all(r["plate"] != "99112233" for r in rows))
+check("эзэмшигч/албан тушаал уншигдсан",
+      any(r["full_name"] == "Сарнай" and r["note"] == "Захирал" for r in rows))
+check("дипломат дугаар", "ДК1234" in {r["plate"] for r in rows})
+
+print("\nБаганын дараалал солигдсон загвар:")
+data = build({"Хан банк": [
+    [TEMPLATE_HEADERS[3], TEMPLATE_HEADERS[2], TEMPLATE_HEADERS[0], TEMPLATE_HEADERS[1]],
+    ["Жолооч", "+976 8800-1122", "77 88 УБН", "Болд"],
+]})
+rows, warns = parse_workbook(data)
+check("дараалал өөр ч уншсан", len(rows) == 1 and rows[0]["plate"] == "7788УБН")
+check("утас +976/зураастай → 8 орон", rows[0]["phone"] == "88001122")
+check("байгууллага = хуудасны нэр", rows[0]["company"] == "Хан банк")
+check("normalize_phone: Excel тоо 99112233.0", normalize_phone(99112233.0) == "99112233")
+check("normalize_phone: буруу урт → хоосон", normalize_phone("1234") == "")
 
 print("\nБодит Моннисын файл (байвал):")
 real = "/root/PARKING/docs/Monnis_property/МБ гадна автомашины зогсоолын бүртгэл -last.xlsx"
