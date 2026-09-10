@@ -108,6 +108,94 @@ def _daily_rows(db, start, end, site_id):
     return out, totals
 
 
+# Санхүүгийн загварын «Төлбөрийн хэлбэр» багана бүрд аль provider унах вэ.
+# Жагсаалтад ОРООГҮЙ бүх provider (WALLET, SITE_WALLET, EP_WALLET, TOKI,
+# EASYWALLET, түншийн шинэ түлхүүр…) «wallet» руу унана — ингэснээр шинэ түнш
+# нэмэгдэхэд мөнгө тайлангаас чимээгүй унахгүй.
+_PAY_GROUP = {"CASH": "cash", "POS": "card", "QPAY": "qr", "TRANSFER": "transfer"}
+_PAY_KEYS = ("cash", "card", "qr", "wallet", "transfer")
+
+
+def _daily_site_rows(db, start, end, site_id):
+    """Өдөр × ЗОГСООЛ задаргаа — санхүүгийн нэгтгэлийн Excel-ийн эх өгөгдөл.
+
+    `_daily_rows` нь бүх зогсоолыг нийлүүлж өдөрт нэг мөр гаргадаг; санхүү нь
+    зогсоол тус бүрийн мөрийг өдрөөр нь шаарддаг (гадаад системийн загвартай
+    тулгаж нэгтгэдэг) тул тусдаа. Өдөр/зогсоол бүрд query биш — бүх хугацааг
+    ЛОКАЛ өдөр + site_id-аар бүлэглэсэн 3 query.
+
+    «Нийт алдсан» = тухайн өдөр ОРСОН машинд бодогдсон төлбөрөөс тэр
+    машинуудаас хураагдаагүй хэсэг (үнэгүй гаралт, хөнгөлөлт, өр). Тиймээс
+    «Зогсоолын төлбөр» ба «Нийт төлсөн» хоёр өөр суурьтай (орсон цаг vs мөнгө
+    орсон цаг) бөгөөд F − G нь H-тэй яг таарахгүй байж болно.
+    """
+    days = _day_list(start, end)
+    if not days:
+        return []
+    lo, hi = days[0], days[-1] + timedelta(days=1)
+    sites = _flt(db.query(ParkingSite), ParkingSite.id, site_id).all()
+    sites.sort(key=lambda s: (s.site_code or "", s.name or ""))
+
+    sess_day = func.date(ParkingSession.entry_time + TZ)
+    sq = (db.query(sess_day, ParkingSession.site_id, func.count(),
+                   func.count(ParkingSession.exit_time),
+                   func.coalesce(func.sum(ParkingSession.duration_minutes), 0),
+                   func.coalesce(func.sum(ParkingSession.total_fee), 0))
+          .filter(ParkingSession.entry_time >= lo, ParkingSession.entry_time < hi))
+    sess = {(str(d), sid): (int(n), int(x), int(m or 0), float(fee or 0))
+            for d, sid, n, x, m, fee
+            in _flt(sq, ParkingSession.site_id, site_id)
+            .group_by(sess_day, ParkingSession.site_id).all()}
+
+    # Мөнгө ОРСОН өдрөөр (paid_at) — кассын өдрийн орлоготой таарна
+    pay_day = func.date(Payment.paid_at + TZ)
+    pq = (db.query(pay_day, ParkingSession.site_id, Payment.provider,
+                   func.coalesce(func.sum(Payment.amount), 0))
+          .join(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi))
+    pays = {}
+    for d, sid, provider, amt in (_flt(pq, ParkingSession.site_id, site_id)
+                                  .group_by(pay_day, ParkingSession.site_id,
+                                            Payment.provider).all()):
+        g = pays.setdefault((str(d), sid), dict.fromkeys(_PAY_KEYS, 0.0))
+        g[_PAY_GROUP.get(provider, "wallet")] += float(amt or 0)
+
+    # Тухайн өдөр ОРСОН машинаас хураасан дүн (ижил бүлэг) — «алдсан»-д хэрэгтэй
+    cq = (db.query(sess_day, ParkingSession.site_id,
+                   func.coalesce(func.sum(Payment.amount), 0))
+          .select_from(ParkingSession)
+          .join(Payment, Payment.session_id == ParkingSession.id)
+          .filter(Payment.status == "PAID",
+                  ParkingSession.entry_time >= lo, ParkingSession.entry_time < hi))
+    collected = {(str(d), sid): float(a or 0)
+                 for d, sid, a in _flt(cq, ParkingSession.site_id, site_id)
+                 .group_by(sess_day, ParkingSession.site_id).all()}
+
+    out = []
+    for day in days:
+        ds = (day + TZ).strftime("%Y-%m-%d")
+        for s in sites:
+            entered, exited, minutes, accrued = sess.get((ds, s.id), (0, 0, 0, 0.0))
+            g = pays.get((ds, s.id)) or dict.fromkeys(_PAY_KEYS, 0.0)
+            paid = sum(g.values())
+            # Тухайн өдөр огт хөдөлгөөнгүй зогсоолын мөрийг гаргахгүй — 20 зогсоол
+            # × 30 хоног = 600 мөрийн ихэнх нь хоосон болж, санхүүгийн файлыг
+            # уншихад төвөгтэй болно. Хөдөлгөөн (орсон/гарсан/төлбөр) байвал үлдэнэ.
+            if not (entered or exited or accrued or paid):
+                continue
+            out.append({
+                "date": ds,
+                "site": f"{s.site_code} - {s.name}" if s.site_code else s.name,
+                "entered": entered, "exited": exited, "minutes": minutes,
+                "accrued": accrued,
+                "lost": max(0.0, accrued - collected.get((ds, s.id), 0.0)),
+                "paid": paid,
+                "cash": g["cash"], "card": g["card"], "qr": g["qr"],
+                "wallet": g["wallet"], "transfer": g["transfer"],
+            })
+    return out
+
+
 @router.get("/dashboard")
 def dashboard_stats(rev_days: int = 7,
                     db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
@@ -946,10 +1034,14 @@ def settlement_excel(site_id: str, date_from: str | None = None, date_to: str | 
 def daily_excel(date_from: str | None = None, date_to: str | None = None,
                 site_id: str | None = None,
                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Өдөр өдрөөр задарсан тайлангийн Excel."""
+    """Өдөр × зогсоолоор задарсан тайлангийн Excel (санхүүгийн нэгтгэлийн загвар).
+
+    Дэлгэц дээрх «Өдрөөр» хүснэгт нь өдөрт нэг мөр хэвээр (`/daily`); экспорт нь
+    санхүүгийн програмд импортлодог гадаад загварын баганы дараалалтай таарахын
+    тулд зогсоол тус бүрээр задарна — 2026-09-10."""
     start, end = _range(date_from, date_to)
-    out, tot = _daily_rows(db, start, end, _scope(user, site_id))
-    return _excel.daily_excel(out, tot)
+    rows = _daily_site_rows(db, start, end, _scope(user, site_id))
+    return _excel.daily_site_excel(rows)
 
 
 @router.get("/by-shift/excel")

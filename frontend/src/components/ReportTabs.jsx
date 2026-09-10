@@ -228,7 +228,9 @@ export function DailyTab({ from, to, siteId }) {
   if (!data) return null
   return (
     <>
-      <div className="text-xs text-slate-400">Өдөр дээр дарж тухайн өдрийн бүх гүйлгээг цаг:минутаар харна.</div>
+      <div className="text-xs text-slate-400">Өдөр дээр дарж тухайн өдрийн бүх гүйлгээг цаг:минутаар харна.
+        <span className="text-slate-500"> · Excel татахад санхүүгийн загвараар (өдөр × зогсоолоор) гарна.</span>
+      </div>
       <Table headers={['Огноо', 'Орсон', 'Гарсан', 'Бэлэн (₮)', 'QPay (₮)', 'Карт (₮)', 'Дансаар (₮)', 'Нийт орлого (₮)']} empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.date} onClick={() => setDay(r.date)} className="cursor-pointer hover:bg-surface-muted/40">

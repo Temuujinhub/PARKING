@@ -115,16 +115,48 @@ def settlement_excel(rows):
                  xrows, widths=(12, 11, 11, 11, 11, 11, 12, 13, 13, 13, 12, 12, 20, 11, 14))
 
 
-def daily_excel(out, tot):
-    """Өдөр өдрөөр задарсан тайлангийн Excel (out/tot = _daily_rows-ийн гаралт)."""
-    rows = [[r["date"], r["entered"], r["exited"], r["cash_amount"], r["qpay_amount"],
-             r["pos_amount"], r["transfer_amount"], r["paid_amount"]] for r in out]
-    total_row = ["НИЙТ", tot["entered"], tot["exited"], tot["cash_amount"], tot["qpay_amount"],
-                 tot["pos_amount"], tot["transfer_amount"], tot["paid_amount"]]
-    return _xlsx("daily", "Өдрийн тайлан",
-                 ["Огноо", "Орсон", "Гарсан", "Бэлэн (₮)", "QPay (₮)", "Карт (₮)",
-                  "Дансаар (₮)", "Нийт орлого (₮)"],
-                 rows, widths=(14, 10, 10, 14, 14, 14, 14, 16), total_row=total_row)
+def daily_site_excel(rows):
+    """Өдөр × Зогсоол санхүүгийн загварын Excel (rows = _daily_site_rows-ийн гаралт).
+
+    Баганы дараалал нь санхүүгийн програмд импортлодог ГАДААД загвартай яг адил
+    (A–N) — тэр файлуудтай шууд нийлүүлж (append) болдог байх нь энэ экспортын
+    гол зорилго. Тиймээс:
+      • Толгой нь 2 мөр: I1:N1 нийлүүлсэн «Төлбөрийн хэлбэр», гарчгууд 2-р мөрд.
+      • «By STATIC QR» / «By INSPECTOR QR» бидний системд байхгүй тул үргэлж 0 —
+        баганы БАЙРЛАЛ таарахын тулд үлдээв.
+      • «Дансаар» (TRANSFER) загварт байхгүй ч бодит орлого тул 15 дахь (O)
+        баганад, загварын 14 баганын АРД нэмэгдэв — A–N хөдлөхгүй, мөнгө ч
+        тайлангаас унахгүй.
+      • НИЙТ мөр АГУУЛААГҮЙ — олон сарын файлыг доор нь залгахад дунд нь орсон
+        нийлбэр мөр чимээгүй алдаа үүсгэдэг.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Өдрийн тайлан"
+    ws.append([])  # 1-р мөр — зөвхөн «Төлбөрийн хэлбэр» бүлгийн гарчиг
+    ws.append(["Огноо", "Зогсоол", "Машины тоо /орсон", "Машины тоо /гарсан",
+               "Ашигласан хугацаа /мин", "Зогсоолын төлбөр", "Нийт алдсан", "Нийт төлсөн",
+               "By CASH", "By CARD", "By QR", "By WALLET", "By STATIC QR", "By INSPECTOR QR",
+               "By TRANSFER (Дансаар)"])
+    ws.merge_cells("I1:N1")
+    ws["I1"] = "Төлбөрийн хэлбэр"
+    ws["I1"].font = Font(bold=True)
+    ws["I1"].alignment = Alignment(horizontal="center")
+    for c in ws[2]:
+        c.font = Font(bold=True)
+        c.alignment = Alignment(vertical="center", wrap_text=True)
+    for r in rows:
+        ws.append([r["date"], r["site"], r["entered"], r["exited"], r["minutes"],
+                   r["accrued"], r["lost"], r["paid"],
+                   r["cash"], r["card"], r["qr"], r["wallet"], 0, 0, r["transfer"]])
+    ws.freeze_panes = "C3"
+    for i, w in enumerate((12, 34, 17, 17, 20, 17, 14, 14,
+                           12, 12, 12, 12, 14, 16, 20), 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    return _excel_response(wb, "odriin_tailan")
 
 
 def by_shift_excel(rows):
