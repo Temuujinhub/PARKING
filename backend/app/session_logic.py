@@ -259,7 +259,7 @@ def plates_ocr_similar(a: str, b: str) -> bool:
     return sum(1 for x, y in zip(a, b) if x != y) == 1
 
 
-def plates_burst_similar(prev: str, new: str) -> bool:
+def plates_burst_similar(prev: str, new: str, max_diff: int = 2) -> bool:
     """Орох камерын burst цонхонд (6с) дараалан ирсэн хоёр уншилт НЭГ МАШИН уу.
 
     2026-09-13 Маршил: хурим/арга хэмжээний үеэр орох хаалт онгорхой байж
@@ -277,7 +277,7 @@ def plates_burst_similar(prev: str, new: str) -> bool:
     if plates_ocr_similar(prev, new):
         return True
     a, b = _ocr_canon(prev), _ocr_canon(new)
-    return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) <= 2
+    return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) <= max_diff
 
 
 def is_duplicate_read(plate: str, recent: str) -> bool:
@@ -365,6 +365,43 @@ def _barrier_rules(db: Session, site_id: str | None) -> dict:
     return get_barrier_rules(db, site_id)
 
 
+def paid_wait_fallback(db: Session, plate: str, site_id: str, now: datetime,
+                       minutes: int) -> ParkingSession | None:
+    """«Төлсөн-хүлээж буй» машин — гарах камер уншаагүй/буруу уншсан үед.
+
+    Утаснаасаа урьдчилж төлсөн машин гарцад ирэхэд камер дугаарыг нь junk/OCR
+    зөрүүтэй уншвал сешн олдохгүй → «бүртгэлгүй» → гацна. 14 хоногт «төлсөн ч
+    нээгдээгүй» 216-ийн 184 нь ийм (Кэй Эйч 40/122, NIC 25/83).
+
+    Дүрэм: энэ зогсоолд сүүлийн `minutes`-д төлсөн, гарцад хараахан
+    уншигдаагүй (exit_device_id хоосон) PAID сешн ЯГ НЭГ байх; уншсан дугаар
+    нь junk ЭСВЭЛ тэр сешний дугаартай ≤2 тэмдэгтийн зөрүүтэй байх. Огт өөр
+    зөв дугаар = орох уншилт нь алдагдсан ӨӨР машин байж болно → хүрэхгүй
+    (эс бол төлсөн машины сешнийг өөр машинд «зарчихна»). Зөвхөн аль хэдийн
+    ТӨЛСӨН машин гарна тул мөнгөний эрсдэлгүй."""
+    if minutes <= 0:
+        return None
+    cands = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site_id, ParkingSession.status == "PAID",
+                     ParkingSession.exit_device_id.is_(None),
+                     ParkingSession.paid_at.isnot(None),
+                     ParkingSession.paid_at >= now - timedelta(minutes=minutes))
+             .all())
+    if len(cands) != 1:
+        return None
+    s = cands[0]
+    if is_valid_plate(plate) and not plates_burst_similar(s.plate_number, plate):
+        return None
+    s.note = (f"{s.note + ' | ' if s.note else ''}гарах камер «{plate}» уншсан — төлсөн-хүлээж "
+              f"буй {s.plate_number} гэж үзэж нээв (fallback)")[:1000]
+    db.add(AuditLog(username="system", action="PAID_WAIT_FALLBACK", entity="session",
+                    entity_id=s.id,
+                    detail={"plate": s.plate_number, "read_plate": plate,
+                            "paid_at": s.paid_at.isoformat() if s.paid_at else None}))
+    log.info("[exit] төлсөн-хүлээж буй fallback: «%s» → %s (session %s)", plate, s.plate_number, s.id)
+    return s
+
+
 def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSession | None:
     """Гарах камерт уншигдсан ч ИДЭВХТЭЙ бүртгэл алга — САЯХАН АЛБАДАН хаагдсаныг
     сэргээнэ («Бүртгэлгүй гарах оролдлого»-ын 23%-ийн шалтгаан).
@@ -422,8 +459,10 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     # exit_device_id: гарах камерт уншигдаад төлөлгүй үлдээд хаагдсан (unpaid_exit)
     # сешн — машин үнэхээр гарсан, exit_confirmed False байсан ч (дээрх
     # close_session_forced-ийн засвараас өмнөх өгөгдөл) сэргээхгүй.
+    _skip_read = bool(_rules.get("reopen_skip_exit_read", True))
     closed = [s for s in closed
-              if (not s.exit_confirmed and not s.exit_device_id) or _short_fake_exit(s)]
+              if (not s.exit_confirmed and not (_skip_read and s.exit_device_id))
+              or _short_fake_exit(s)]
     cands = [s for s in closed if s.plate_number == plate]
     if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
         cands = [s for s in closed if plates_ocr_similar(plate, s.plate_number)]
@@ -1039,7 +1078,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Burst цонхонд ирсэн ЗӨВ дугаар өмнөх уншилттай огт төстэй биш бол энэ нь
     # хаалт онгорхой байхад ард нь орж ирсэн ӨӨР машин — нэгтгэхгүй, хэвийн
     # замаар шинэ сешн нээнэ (Маршил 2026-09-13, plates_burst_similar-ийн тайлбар).
-    if burst_prev and is_valid_plate(plate) and not plates_burst_similar(burst_prev.plate_number, plate):
+    if (burst_prev and is_valid_plate(plate)
+            and not plates_burst_similar(burst_prev.plate_number, plate,
+                                         int(_br.get("entry_burst_max_diff", 2)))):
         log.info("[entry] burst цонхонд өөр машин: %s → %s — нэгтгэхгүй, шинэ сешн",
                  burst_prev.plate_number, plate)
         burst_prev = None
@@ -1437,6 +1478,14 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         close_paid_as_inferred_exit(db, session, "exit")
         db.flush()
         session, fuzzy = None, False
+    if session is None:
+        # Утаснаасаа төлөөд гарцад хүлээж буй машиныг камер буруу/junk уншсан
+        # байж болно — ЯГ НЭГ нэр дэвшигч байвал түүнийг гаргана (Тохиргоо →
+        # Төлбөрийн дүрэм → paid_wait_fallback_minutes, 0 = унтраах).
+        session = paid_wait_fallback(db, plate, site_id, now,
+                                     int(_xr.get("paid_wait_fallback_minutes") or 0))
+        if session is not None:
+            plate = session.plate_number   # цаашдын урсгал (LED, аудит) сешний дугаараар
     if session is None:
         # Идэвхтэй бүртгэл алга — саяхан АЛБАДАН хаагдсаныг сэргээж үзнэ.
         # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт
