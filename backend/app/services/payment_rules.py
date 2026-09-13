@@ -149,6 +149,14 @@ CATALOG: list[dict] = [
      "desc": "Гарах камерт уншигдсан хэрнээ N цаг хөдөлгөөнгүй бол дагаж "
              "гарсан гэж үзнэ. Төлбөр нь сүүлд харагдсан үеийн дүнгээр царцана.",
      "applies": "AWAITING_PAYMENT бүртгэл", "not_applied": "—"},
+    {"group": A.AUTOCLOSE_KEY, "key": "paid_exit_hours", "unit": "hour",
+     "name": "Төлсөн ч гарах уншилт ирээгүй — таамаг гарц (цаг)",
+     "desc": "Төлбөрөө төлсөн машин deadline-аас хойш N цаг гарах камерт "
+             "уншигдаагүй бол «deadline дээр гарсан» гэж үзэж ТӨЛСӨН ДҮНГЭЭР хаана. "
+             "Дараа нь камерт дахин уншигдахад орсноос хойшхи бүх цагийг (50–75 "
+             "мянга) нэхэхгүй, шинэ зогсолт нээнэ. 0 = унтраах (хуучин зан).",
+     "applies": "PAID бүртгэл · exit_deadline хэтэрсэн · гарах уншилтгүй",
+     "not_applied": "Deadline-аас N цагийн дотор гарах уншилт ирвэл зөрүүг нэхнэ"},
     {"group": A.AUTOCLOSE_KEY, "key": "entry_only_free_hours", "unit": "hour",
      "name": "Зөвхөн орох уншилттай — үнэгүй хаах хугацаа",
      "desc": "Гарах камерт огт уншигдаагүй бүртгэл — гарах уншилт алдагдсан "
@@ -239,6 +247,7 @@ MAX: dict[tuple[str, str], int] = {
     (A.BLACKLIST_KEY, "debt_amount"): 100_000_000,
     (A.AUTOCLOSE_KEY, "invalid_plate_hours"): 720,
     (A.AUTOCLOSE_KEY, "awaiting_hours"): 720,
+    (A.AUTOCLOSE_KEY, "paid_exit_hours"): 720,
     (A.AUTOCLOSE_KEY, "entry_only_free_hours"): 720,
     (A.AUTOCLOSE_KEY, "stale_hours"): 720,
 }

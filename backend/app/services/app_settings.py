@@ -52,6 +52,14 @@ DEFAULTS: dict[str, dict] = {
         # 2+ мөр болох, автомат хар жагсаалт). Жинхэнэ авлага = unpaid_exit.
         "create_debt": False,       # хаахдаа төлөгдөөгүй дүнгээр өр үүсгэх эсэх
         "awaiting_hours": 2,        # гарах хаалтад уншигдсан ч төлөөгүй N цаг
+        # ТӨЛСӨН ч гарах уншилт ирээгүй: deadline-аас хойш N цаг өнгөрвөл «машин
+        # deadline дээр гарсан» гэж үзэж ТӨЛСӨН ДҮНГЭЭР хаана (2026-09-13, Кэй Эйч
+        # 4924УНУ/3311УЕУ/7179УНО: 2 хоногийн дараа камерт дахин уншигдахад
+        # орсноос хойшхи бүх цагаар 50–75 мянга нэхсэн). Дараагийн уншилтад
+        # (орох/гарах) ч энэ босгоор шалгана — 72ц авто цэвэрлэгээг хүлээхгүй.
+        # Продын 8–9 сарын дата: grace-ээс хойш 0–2ц гарсан 11 машин бүгд зөрүүгээ
+        # төлсөн (бодит), 2ц+ хоцорсон 10-аас 9 нь хий дүн → босго 2ц. 0 = унтраах.
+        "paid_exit_hours": 2,
         "entry_only_free_hours": 72,  # зөвхөн орох уншилттай (гарц уншаагүй) → үнэгүй
         "invalid_plate_hours": 2,   # формат буруу (junk) дугаар → үнэгүй хаана
         # ── ӨР ҮҮСГЭХ БУСАД ЗАМУУД (2026-08-21) ────────────────────────────
@@ -211,7 +219,8 @@ SITE_OVERLAY = "_sites"
 PER_SITE: dict[str, set[str]] = {
     BLACKLIST_KEY: {"auto_enabled", "debt_count", "debt_amount",
                     "block_entry", "block_exit_debt_count"},
-    AUTOCLOSE_KEY: {"enabled", "stale_hours", "awaiting_hours", "entry_only_free_hours",
+    AUTOCLOSE_KEY: {"enabled", "stale_hours", "awaiting_hours", "paid_exit_hours",
+                    "entry_only_free_hours",
                     "invalid_plate_hours", "create_debt", "create_debt_unpaid_exit",
                     "create_debt_reentry", "create_debt_shift_close",
                     "create_debt_night_close"},

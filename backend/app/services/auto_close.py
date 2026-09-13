@@ -19,7 +19,9 @@ from datetime import datetime, timedelta
 from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, ParkingSession, ParkingSite
-from ..session_logic import close_session_forced, is_valid_plate
+from ..session_logic import (
+    close_paid_as_inferred_exit, close_session_forced, is_valid_plate, paid_exit_expired,
+)
 
 log = logging.getLogger("parking.auto_close")
 
@@ -117,6 +119,30 @@ def run_once() -> int:
                     except Exception as e:  # noqa: BLE001
                         db.rollback()
                         log.error(f"{s.plate_number} үнэгүй хааж чадсангүй: {e}")
+
+            # ТӨЛСӨН ч гарах уншилт ирээгүй (2026-09-13): deadline + paid_exit_hours
+            # өнгөрвөл «deadline дээр гарсан» гэж төлсөн дүнгээр хаана — 12/72 цагийн
+            # ерөнхий цэвэрлэгээг хүлээх хооронд машин камерт дахин уншигдвал
+            # орсноос хойшхи бүх цагийг нэхдэг байсныг (Кэй Эйч 50–75 мянга) хаана.
+            # session_logic-ийн орох/гарах уншилт дээрх шалгалттай ижил дүрэм.
+            pe_hours = int(rules.get("paid_exit_hours") or 0)
+            if pe_hours > 0:
+                paid_stuck = (db.query(ParkingSession)
+                              .filter(ParkingSession.site_id == site.id,
+                                      ParkingSession.status == "PAID",
+                                      ParkingSession.paid_at.isnot(None),
+                                      ParkingSession.paid_at < now - timedelta(hours=pe_hours))
+                              .limit(200).all())
+                for s in paid_stuck:
+                    if not paid_exit_expired(db, s, now, site.id):
+                        continue
+                    try:
+                        close_paid_as_inferred_exit(db, s, f"auto_close {pe_hours}ц")
+                        db.commit()
+                        closed += 1
+                    except Exception as e:  # noqa: BLE001
+                        db.rollback()
+                        log.error(f"paid-exit close алдаа ({s.plate_number}): {e}")
 
             if not hours or hours <= 0:
                 continue

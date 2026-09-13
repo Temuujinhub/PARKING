@@ -19,6 +19,7 @@ const BOUNDS = {
   samples: { min: 1, max: 10 },
   invalid_plate_hours: { min: 0, max: 720 },
   awaiting_hours: { min: 0, max: 720 },
+  paid_exit_hours: { min: 0, max: 720 },
   entry_only_free_hours: { min: 0, max: 720 },
   stale_hours: { min: 0, max: 720 },
 }
@@ -354,6 +355,7 @@ function AutoCloseRunCard({ toast, onGotoRules }) {
         <div className="text-xs text-slate-500">
           Ерөнхий: {rules.enabled ? <span className="text-accent">асаалттай</span> : <span className="text-amber-400">унтраалттай</span>}
           {' '}· junk {rules.invalid_plate_hours}ц · төлөөгүй {rules.awaiting_hours}ц ·
+          төлсөн ч гарц уншаагүй {rules.paid_exit_hours ?? 0}ц ·
           зөвхөн орох {rules.entry_only_free_hours}ц · ерөнхий {rules.stale_hours}ц
         </div>
       )}

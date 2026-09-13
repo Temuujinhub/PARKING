@@ -528,6 +528,52 @@ def amount_due(db: Session, s: ParkingSession, fee: dict) -> float:
     return max(0.0, round(fee["total_fee"] - paid_total(db, s), 2))
 
 
+def paid_exit_expired(db: Session, s: ParkingSession, now: datetime,
+                      site_id: str | None = None) -> bool:
+    """ТӨЛСӨН мөртөө гарах уншилт ирээгүй, exit_deadline-аас хойш `paid_exit_hours`
+    цаг өнгөрсөн сешн үү. 0 = дүрэм унтраалттай → ямагт False."""
+    if s.status != "PAID" or not s.paid_at:
+        return False
+    from .services.app_settings import get_autoclose_rules
+    hours = int(get_autoclose_rules(db, site_id or s.site_id).get("paid_exit_hours") or 0)
+    if hours <= 0:
+        return False
+    deadline = s.exit_deadline or s.paid_at
+    return now > deadline + timedelta(hours=hours)
+
+
+def close_paid_as_inferred_exit(db: Session, s: ParkingSession, trigger: str) -> None:
+    """Төлсөн ч гарах уншилт алдагдсан сешнийг «deadline дээр гарсан» гэж хаана.
+
+    Дүн = ТӨЛСӨН ҮЕИЙН дүн (баримт үүссэн яг тэр дүн). Орсноос хойшхи бүх цагаар
+    ДАХИН БОДОХГҮЙ — Кэй Эйч 2026-09-08: 1,000₮ төлсөн машин 2 хоногийн дараа
+    орох камерт уншигдахад хуучин сешн дээр наалдаж, гарахад нь 2,326 мин =
+    50,000₮ (үлдэгдэл 49,000) нэхэж, 52,000-ийн QR хүртэл үүссэн. Тэр дүн
+    төлөгдсөн бол хуурамч орлого + хуурамч НӨАТ-тэй баримт ТЕГ рүү явах байв.
+
+    exit_confirmed=False (гарах уншилт байхгүй — таамаг гарц), status=CLOSED
+    (төлбөр барагдсан). Өр үүсгэхгүй, commit хийхгүй — caller хийнэ."""
+    from .services.nested import close_open_pause
+    at = s.exit_deadline or s.paid_at
+    fee = session_fee_info(db, s, at=s.paid_at)
+    close_open_pause(db, s, at)
+    s.exit_time = at
+    s.exit_confirmed = False
+    s.duration_minutes = fee["duration_minutes"]
+    s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+    s.status = "CLOSED"
+    s.note = (f"{s.note + ' | ' if s.note else ''}төлсөн ч гарах уншилт алдагдсан — "
+              f"deadline ({(at + timedelta(hours=settings.tz_offset_hours)):%m-%d %H:%M}) дээр "
+              f"гарсан гэж үзэж төлсөн дүнгээр хаав ({trigger})")[:1000]
+    db.add(AuditLog(username="system", action="PAID_EXIT_INFERRED", entity="session",
+                    entity_id=s.id,
+                    detail={"plate": s.plate_number, "trigger": trigger,
+                            "paid_at": s.paid_at.isoformat() if s.paid_at else None,
+                            "exit_deadline": at.isoformat(), "total_fee": fee["total_fee"]}))
+    log.info("[paid-exit] %s: төлсөн ч гарах уншилтгүй — deadline дээр хаав (%s, %.0f₮)",
+             s.plate_number, trigger, fee["total_fee"])
+
+
 def close_session_forced(db: Session, s: ParkingSession, reason: str, username: str,
                          create_comp: bool = True) -> float:
     """Админ/авто цэвэрлэгээ: гацсан session-ийг хааж, төлөгдөөгүй дүнгээр өр үүсгэнэ.
@@ -997,6 +1043,17 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     registered = find_registered(db, plate, site_id)
 
     existing = get_open_session(db, plate, site_id)
+    if existing and paid_exit_expired(db, existing, now, site_id):
+        # ТӨЛСӨН машин deadline-аас хойш олон цаг «дотор» гэж тоологдож байгаад
+        # ОРОХ камерт дахин уншигдав — энэ нь өөрөө гарсны нотолгоо (машин
+        # гаднаас орж ирж байна). Хуучин сешнийг deadline дээр төлсөн дүнгээр
+        # хааж, ШИНЭ зогсолт нээнэ. Өмнө нь «давхар орох event — session хэвээр»
+        # гэж үзээд шинэ зогсолт бүртгэдэггүй, дараа гарахад нь орсноос хойшхи
+        # бүх цагийг нэхдэг байв (Кэй Эйч 2026-09-10: 3311УЕУ-гийн 81 минутын
+        # 1,000₮ алдагдаж, оронд нь 50,000-ийн хуурамч QR үүссэн).
+        close_paid_as_inferred_exit(db, existing, "reentry")
+        db.flush()
+        existing = None
     if existing and existing.exit_device_id and existing.status == "AWAITING_PAYMENT":
         # Машин өмнө нь гарах камерт уншигдаад ТӨЛБӨРГҮЙ гарсан байж — одоо дахин орж ирэв.
         # Хуучин session дээр наалдвал шинэ зогсолт огт бүртгэгдэхгүй (7/12, 7/20-ны гацаа).
@@ -1330,6 +1387,16 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
+    if session is not None and paid_exit_expired(db, session, now, site_id):
+        # ТӨЛСӨН сешн deadline-аас хойш олон цаг гарах уншилтгүй хэвтээд одоо
+        # гарцад уншигдав. Орох уншилт ч алдагдсан (эс бол дээрх орох зам шинэ
+        # сешн нээсэн байх) тул энэ бол ОРОХ УНШИЛТГҮЙ ШИНЭ зогсолт: хуучныг
+        # төлсөн дүнгээр хааж, доорх «бүртгэл олдсонгүй» урсгалаар (гэрээт →
+        # үнэгүй, бусад → суурь хураамж) явуулна. Өмнө нь deadline хэтэрсэн гэж
+        # орсноос хойшхи 2–3 хоногийн дүн (50–75 мянга) нэхдэг байв.
+        close_paid_as_inferred_exit(db, session, "exit")
+        db.flush()
+        session, fuzzy = None, False
     if session is None:
         # Идэвхтэй бүртгэл алга — саяхан АЛБАДАН хаагдсаныг сэргээж үзнэ.
         # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт

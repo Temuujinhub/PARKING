@@ -85,19 +85,32 @@ def _iso_local(iso: str | None) -> str:
 
 def transactions_excel(rows):
     """Дэлгэрэнгүй бичилтийн Excel (rows = _txn_rows-ийн гаралт)."""
-    headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Төлсөн", "Хугацаа(мин)", "Машины төрөл",
-               "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)", "НӨАТ(₮)", "Нийт(₮)", "Төлсөн(₮)",
+    # «Бодогдсон дүн/НӨАТ» = системийн тооцоолсон (session) дүн; «Баримтын дүн/
+    # НӨАТ» = ТЕГ рүү явсан баримтын дүн. Хоёр нь зөрөх тохиолдол: гарах уншилт
+    # алдагдаж сешн дахин бодогдсон (2026-09-08 Кэй Эйч: бодогдсон 50,000 vs
+    # баримт 1,000). Санхүү борлуулалтын бүртгэлтэй тулгахдаа баримтын баганыг
+    # ашиглана. «Гарц» = камерын уншилттай (баримттай) / таамаг (авто, гараар).
+    EXIT_MN = {"confirmed": "Баримттай", "inferred": "Таамаг", None: ""}
+    headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Гарц", "Төлсөн", "Хугацаа(мин)",
+               "Машины төрөл", "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)",
+               "Бодогдсон НӨАТ(₮)", "Бодогдсон дүн(₮)", "Төлсөн(₮)",
+               "Баримтын дүн(₮)", "Баримтын НӨАТ(₮)",
                "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
     xrows = [[r["plate_number"], r["site_name"],
               _iso_local(r["entry_time"]), _iso_local(r["exit_time"]),
+              EXIT_MN.get(r.get("exit_kind"), ""),
               _iso_local(r.get("paid_at")), r["duration_minutes"],
               r["car_type"], r["discount_name"] or "", r["base_fee"], r["discount_amount"],
-              r["vat_amount"], r["total_fee"], r["paid_amount"], r["provider"] or "",
+              r["vat_amount"], r["total_fee"], r["paid_amount"],
+              "" if r.get("receipt_amount") is None else r["receipt_amount"],
+              "" if r.get("receipt_vat") is None else r["receipt_vat"],
+              r["provider"] or "",
               r["invoice_no"] or "",
               r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
               r["customer_tin"] or ""] for r in rows]
     return _xlsx("bichilt", "Бичилт", headers, xrows,
-                 widths=(11, 14, 17, 17, 17, 11, 12, 12, 11, 11, 9, 11, 11, 16, 26, 15, 14, 20, 12, 12))
+                 widths=(11, 14, 17, 17, 10, 17, 11, 12, 12, 11, 11, 12, 13, 11, 13, 13,
+                         16, 26, 15, 14, 20, 12, 12))
 
 
 def settlement_excel(rows):

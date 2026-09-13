@@ -597,6 +597,15 @@ def _txn_rows(db, sessions):
             # QPay портал/банкны хуулгатай тулгах гүйлгээний утга (машины дугаартай)
             "invoice_no": primary.sender_invoice_no if primary else None,
             "ebarimt_id": rec.ebarimt_id if rec else None,
+            # БАРИМТЫН дүн/НӨАТ — session-ий бодогдсон дүнгээс ТУСДАА. Гарах уншилт
+            # алдагдсан сешний total_fee 50,000 болж дахин бодогдсон ч баримт нь
+            # төлсөн 1,000₮-өөр үүссэн байдаг (Кэй Эйч 2026-09-08); санхүү ТЕГ-тэй
+            # тулгахдаа ЭНЭ баганыг ашиглана.
+            "receipt_amount": float(rec.amount or 0) if rec else None,
+            "receipt_vat": float(rec.vat_amount or 0) if rec else None,
+            # Гарц: камерын уншилттай (баримттай) уу, таамаг (авто/гараар хаасан) уу
+            "exit_kind": (None if not s.exit_time
+                          else "confirmed" if s.exit_confirmed else "inferred"),
             "lottery_code": rec.lottery_code if rec else None,
             "customer_tin": rec.customer_tin if rec else (primary.customer_tin if primary else None),
             "paid_at": primary.paid_at.isoformat() if primary and primary.paid_at else None,
