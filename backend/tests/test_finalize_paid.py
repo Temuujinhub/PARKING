@@ -45,7 +45,15 @@ class FakePayment:
 
 
 class FakeSession:
+    id = "SESS1"
     plate_number = "1234УБА"
+    site = None          # _site_of(payment) → түрээслэгчийн ТТД/QPay данс (глобал fallback)
+    site_id = None
+    status = "AWAITING_PAYMENT"
+    exit_time = None
+    exit_device_id = None
+    paid_at = None
+    total_fee = 5000
     entry_time = __import__("datetime").datetime(2026, 7, 9, 11, 44)
     duration_minutes = 175
 

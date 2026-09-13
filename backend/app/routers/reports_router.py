@@ -566,6 +566,16 @@ def _txn_rows(db, sessions):
             pays_by_sess.setdefault(p.session_id, []).append(p)
     rec_by_sess = {r.session_id: r for r in
                    db.query(VatReceipt).filter(VatReceipt.session_id.in_(ids)).all()} if ids else {}
+    # Төлбөрт НИЙЛҮҮЛЖ төлөгдсөн ӨМНӨХ ӨР (Compensation.payment_id) — борлуулалтыг
+    # «одоогийн зогсолт» / «өрийн төлөлт» гэж салгаж харуулна (2026-09-13 санхүүгийн
+    # тулгалт: 9-р сард 154 төлбөр 1.74 сая₮-ийн 1.15 сая нь өр байсан ч тайланд
+    # ялгарахгүй байв). Баримт нь бүтэн дүнгээр нэг л үүсдэг (QPay ebarimt_v3).
+    pay_ids = [p.id for ps in pays_by_sess.values() for p in ps if p.status == "PAID"]
+    debt_by_pay: dict = {}
+    if pay_ids:
+        for c in db.query(Compensation).filter(Compensation.payment_id.in_(pay_ids),
+                                               Compensation.status == "PAID").all():
+            debt_by_pay[c.payment_id] = debt_by_pay.get(c.payment_id, 0.0) + float(c.amount)
     cashier_ids = {p.cashier_id for ps in pays_by_sess.values() for p in ps if p.cashier_id}
     cashiers = {u.id: u.full_name or u.username for u in
                 db.query(User).filter(User.id.in_(cashier_ids)).all()} if cashier_ids else {}
@@ -575,6 +585,7 @@ def _txn_rows(db, sessions):
         paid = [p for p in pays if p.status == "PAID"]
         primary = (paid[0] if paid else (pays[0] if pays else None))
         paid_amount = sum(float(p.amount) for p in paid)
+        debt_paid = sum(debt_by_pay.get(p.id, 0.0) for p in paid)
         rec = rec_by_sess.get(s.id)
         out.append({
             "session_id": s.id,
@@ -590,6 +601,9 @@ def _txn_rows(db, sessions):
             "vat_amount": float(s.vat_amount or 0),
             "total_fee": float(s.total_fee or 0),
             "paid_amount": paid_amount,
+            # Төлсөн дүнгийн задаргаа: өмнөх өрийн төлөлт / энэ зогсолтын төлбөр
+            "debt_paid": debt_paid,
+            "session_paid": max(0.0, paid_amount - debt_paid),
             "provider": PROVIDER_MN.get(primary.provider, primary.provider) if primary else None,
             "payment_method": primary.payment_method if primary else None,
             "status": STATUS_MN2.get(s.status, s.status),

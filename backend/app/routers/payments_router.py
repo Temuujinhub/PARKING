@@ -170,6 +170,32 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
 
     if payment.status == "PAID":
         return  # idempotent — давхар webhook хамгаалалт
+    # УРАЛДААН (2026-09-13 аудит): QPay webhook ба кассын «шалгах» (check) ЗЭРЭГ
+    # ирэхэд хоёулаа PENDING гэж хараад хоёулаа баримт үүсгэж, нэг ДДТД DB-д 2
+    # мөр болдог байв (9-р сард 3 төлбөр, 0.03–0.24с зайтай). Мөрийг NOWAIT-аар
+    # түгжинэ: нөгөө нь түгжээг авч чадахгүй → «finalize явж байна» гэж буцна.
+    # NOWAIT чухал: энгийн FOR UPDATE нь event loop-ыг блоклож, түгжээ барьсан
+    # coroutine (e-Barimt HTTP хүлээж буй) хэзээ ч дуусахгүй гацаана.
+    # ЗӨВХӨН БАГАНААР түгжинэ: Payment-ийн joined relationship-уудтай `FOR UPDATE`
+    # Postgres-т «nullable side of outer join» гэж унадаг — тэр алдааг доорх
+    # except барьж finalize-ыг бүхэлд нь алгасах байсан (2026-09-13 тестээр илэрсэн).
+    try:
+        row = (db.query(Payment.id, Payment.status).filter(Payment.id == payment.id)
+               .with_for_update(nowait=True).first())
+    except AttributeError:
+        row = None  # тестийн FakeDB — түгжээгүй
+    except Exception as e:  # noqa: BLE001
+        msg = str(e).splitlines()[0]
+        if "could not obtain lock" in msg or "LockNotAvailable" in msg:
+            log.warning("finalize: payment=%s мөр түгжигдсэн (давхар finalize) — алгаслаа",
+                        payment.id)
+            db.rollback()
+            return
+        log.error("finalize: түгжээний алдаа (үргэлжлүүлнэ): %s", msg[:160])
+        db.rollback()
+        row = None
+    if row is not None and row[1] == "PAID":
+        return
     payment.status = "PAID"
     payment.paid_at = datetime.utcnow()
     if raw:

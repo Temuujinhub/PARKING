@@ -94,6 +94,7 @@ def transactions_excel(rows):
     headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Гарц", "Төлсөн", "Хугацаа(мин)",
                "Машины төрөл", "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)",
                "Бодогдсон НӨАТ(₮)", "Бодогдсон дүн(₮)", "Төлсөн(₮)",
+               "Үүнээс энэ зогсолт(₮)", "Үүнээс өмнөх өр(₮)",
                "Баримтын дүн(₮)", "Баримтын НӨАТ(₮)",
                "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
     xrows = [[r["plate_number"], r["site_name"],
@@ -102,6 +103,7 @@ def transactions_excel(rows):
               _iso_local(r.get("paid_at")), r["duration_minutes"],
               r["car_type"], r["discount_name"] or "", r["base_fee"], r["discount_amount"],
               r["vat_amount"], r["total_fee"], r["paid_amount"],
+              r.get("session_paid", r["paid_amount"]), r.get("debt_paid", 0),
               "" if r.get("receipt_amount") is None else r["receipt_amount"],
               "" if r.get("receipt_vat") is None else r["receipt_vat"],
               r["provider"] or "",
@@ -109,7 +111,7 @@ def transactions_excel(rows):
               r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
               r["customer_tin"] or ""] for r in rows]
     return _xlsx("bichilt", "Бичилт", headers, xrows,
-                 widths=(11, 14, 17, 17, 10, 17, 11, 12, 12, 11, 11, 12, 13, 11, 13, 13,
+                 widths=(11, 14, 17, 17, 10, 17, 11, 12, 12, 11, 11, 12, 13, 11, 14, 14, 13, 13,
                          16, 26, 15, 14, 20, 12, 12))
 
 
