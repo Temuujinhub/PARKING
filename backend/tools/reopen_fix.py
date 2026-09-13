@@ -77,7 +77,7 @@ def find_candidates(db, since: datetime, site_like: str | None):
 
 
 def fix_one(db, s: ParkingSession, reopen: AuditLog, close: AuditLog, dry: bool,
-            restore_debts: bool) -> dict:
+            restore_debts: bool, restore_max: float = 10_000) -> dict:
     # Анхны гарах уншилт: AUTO_CLOSE-оос өмнөх сүүлийн гарах LprEvent (энэ дугаар, энэ зогсоол)
     ev = (db.query(LprEvent)
           .filter(LprEvent.site_id == s.site_id, LprEvent.lane_dir == "exit",
@@ -99,10 +99,17 @@ def fix_one(db, s: ParkingSession, reopen: AuditLog, close: AuditLog, dry: bool,
     new_debts = (db.query(Compensation)
                  .filter(Compensation.session_id == s.id, Compensation.status == "PENDING",
                          Compensation.created_at >= reopen.created_at).all())
-    old_debts = (db.query(Compensation)
-                 .filter(Compensation.session_id == s.id, Compensation.status == "CANCELLED",
-                         Compensation.cancelled_by.is_(None),
-                         Compensation.created_at < reopen.created_at).all())
+    old_debts_all = (db.query(Compensation)
+                     .filter(Compensation.session_id == s.id, Compensation.status == "CANCELLED",
+                             Compensation.cancelled_by.is_(None),
+                             Compensation.created_at < reopen.created_at).all())
+    # Анхны өрөөс зөвхөн ЖИЖИГ (≤ restore_max, анхдагч 10,000₮ — 30–60 мин зогсоод
+    # төлөлгүй гарсан бодит авлага)-ийг л буцаана. Том (25,000–99,000₮, өдрийн
+    # дээд хязгаараар бодогдсон, ихэвчлэн Моннис зэрэг түрээслэгчийн зогсоолын
+    # системийн артефакт — 2026-08-12 аудит: өрийн 99.7% ийм) өрийг цуцалсан
+    # хэвээр үлдээж жагсаалтад тусад нь харуулна — санхүү гараар шийднэ.
+    old_debts = [c for c in old_debts_all if float(c.amount) <= restore_max]
+    big_debts = [c for c in old_debts_all if float(c.amount) > restore_max]
     pend_pay = (db.query(Payment).filter(Payment.session_id == s.id,
                                          Payment.status == "PENDING").all())
     info = {"plate": s.plate_number, "site": s.site.name if s.site else "?",
@@ -112,28 +119,36 @@ def fix_one(db, s: ParkingSession, reopen: AuditLog, close: AuditLog, dry: bool,
             "fee_new": fee["total_fee"],
             "cancel_new_debts": [float(c.amount) for c in new_debts],
             "restore_old_debts": [float(c.amount) for c in old_debts] if restore_debts else [],
+            "skip_big_debts": [float(c.amount) for c in big_debts],
+            # Оператор аль хэдийн 0₮ болгосон (үнэгүй гаргасан) сешнд дүн/өр дахин
+            # тавихгүй — зөвхөн сэргээлтийн дараах хуурамч өрийг цуцална.
+            "resolved_zero": s.status in ("FREE", "MANUAL_CLOSED", "CLOSED") and float(s.total_fee or 0) == 0,
             "cancel_invoices": [float(p.amount) for p in pend_pay]}
+    if info["resolved_zero"]:
+        info["fee_new"] = 0.0
+        info["restore_old_debts"] = []
     if dry:
         return info
-    from app.services.nested import close_open_pause
-    close_open_pause(db, s, at)
-    s.exit_time = at
-    s.exit_confirmed = True
-    s.exit_device_id = ev.device_id if ev else s.exit_device_id
-    s.duration_minutes = fee["duration_minutes"]
-    s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
-    s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
-    s.exit_deadline = None
-    s.note = (f"{s.note + ' | ' if s.note else ''}{TOOL}: буруу авто сэргээлтийг буцаав — "
-              f"анхны гарц {_ub(at)} ({info['exit_src']}), дүн {fee['total_fee']:.0f}₮ "
-              f"(сэргээлтийн дүн {info['fee_was']:.0f}₮)")[:1000]
     now = datetime.utcnow()
+    if not info["resolved_zero"]:
+        from app.services.nested import close_open_pause
+        close_open_pause(db, s, at)
+        s.exit_time = at
+        s.exit_confirmed = True
+        s.exit_device_id = ev.device_id if ev else s.exit_device_id
+        s.duration_minutes = fee["duration_minutes"]
+        s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+        s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+        s.exit_deadline = None
+        s.note = (f"{s.note + ' | ' if s.note else ''}{TOOL}: буруу авто сэргээлтийг буцаав — "
+                  f"анхны гарц {_ub(at)} ({info['exit_src']}), дүн {fee['total_fee']:.0f}₮ "
+                  f"(сэргээлтийн дүн {info['fee_was']:.0f}₮)")[:1000]
     for c in new_debts:
         c.status = "CANCELLED"
         c.cancelled_at = now
         c.cancelled_by = TOOL
         c.cancel_reason = "Системийн алдаа — буруу авто сэргээлтийн хий дүнгээр үүссэн өр"
-    if restore_debts:
+    if restore_debts and not info["resolved_zero"]:
         for c in old_debts:
             c.status = "PENDING"
     for p in pend_pay:
@@ -150,6 +165,8 @@ def main():
     ap.add_argument("--site", default=None, help="зогсоолын нэрийн хэсэг")
     ap.add_argument("--no-restore-debts", action="store_true",
                     help="сэргээлтээр цуцлагдсан анхны өрийг PENDING болгож БУЦААХГҮЙ")
+    ap.add_argument("--restore-debts-max", type=float, default=10_000,
+                    help="энэ дүнгээс ИХ анхны өрийг буцаахгүй, цуцалсан хэвээр (анхдагч 10000)")
     ap.add_argument("--apply", action="store_true", help="бодитоор бичих (анхдагч: зөвхөн харуулна)")
     a = ap.parse_args()
     since = datetime.fromisoformat(a.since) - TZ
@@ -159,7 +176,8 @@ def main():
         print(f"{'ЗАСНА' if a.apply else 'DRY-RUN'} — {a.since}-аас хойшхи буруу сэргээлт: {len(cands)} сешн")
         t_was = t_new = t_cancel = t_restore = 0.0
         for s, r, c in cands:
-            info = fix_one(db, s, r, c, dry=not a.apply, restore_debts=not a.no_restore_debts)
+            info = fix_one(db, s, r, c, dry=not a.apply, restore_debts=not a.no_restore_debts,
+                           restore_max=a.restore_debts_max)
             t_was += info["fee_was"]; t_new += info["fee_new"]
             t_cancel += sum(info["cancel_new_debts"]); t_restore += sum(info["restore_old_debts"])
             extra = ""
@@ -169,6 +187,10 @@ def main():
                 extra += f"  ↺ анхны өр {', '.join(f'{x:.0f}' for x in info['restore_old_debts'])}"
             if info["cancel_invoices"]:
                 extra += f"  ✂ нэхэмжлэл {', '.join(f'{x:.0f}' for x in info['cancel_invoices'])}"
+            if info["skip_big_debts"]:
+                extra += f"  ⚠ том анхны өр {', '.join(f'{x:.0f}' for x in info['skip_big_debts'])} — цуцалсан хэвээр, гараар шийднэ"
+            if info["resolved_zero"]:
+                extra += "  ⏭ дүн 0 (оператор шийдсэн) — сешн/өрд хүрэхгүй"
             print(f"  {info['plate']:<9} {info['site'][:14]:<14} орсон {info['entry']} · сэргээсэн "
                   f"{info['reopened']} · гарц → {info['exit_new']} ({info['exit_src']}) · дүн "
                   f"{info['fee_was']:>7.0f} → {info['fee_new']:>6.0f}₮ [{info['status_was']}]{extra}")
