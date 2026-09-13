@@ -44,9 +44,9 @@ QPay-ийн нэхэмжлэлийн мөрөөр (зогсолт + өр тус 
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| fix | **Давхар баримтын уралдаан**: `_finalize_paid` эхэнд payment мөрийг `FOR UPDATE NOWAIT`-аар (зөвхөн id/status баганаар — joined relationship-тай FOR UPDATE Postgres-т унадаг) түгжинэ; түгжээ авч чадахгүй = нөгөө finalize явж байна → алгасна. NOWAIT чухал: энгийн FOR UPDATE event loop-ыг блоклоно | ⏳ | ⏳ | ⏳ |
-| feat | **Бичилтийн Excel/JSON: «Үүнээс энэ зогсолт(₮)» / «Үүнээс өмнөх өр(₮)»** (`session_paid`, `debt_paid` — Compensation.payment_id-ээр) — нийлсэн төлбөрийн борлуулалтын салгалт санхүүд ил | ⏳ | ⏳ | ⏳ |
-| test | `test_finalize_paid.py` FakeSession загвар кодтой нийцүүлэв (site/exit_time…); сүүлийн `_print_payload` сугалааны шалгалт хуучин mock-той — үлдээв | ⏳ | ⏳ | ⏳ |
+| fix | **Давхар баримтын уралдаан**: `_finalize_paid` эхэнд payment мөрийг `FOR UPDATE NOWAIT`-аар (зөвхөн id/status баганаар — joined relationship-тай FOR UPDATE Postgres-т унадаг) түгжинэ; түгжээ авч чадахгүй = нөгөө finalize явж байна → алгасна. NOWAIT чухал: энгийн FOR UPDATE event loop-ыг блоклоно | dd7ea78 | ✅ 09-13 | ✅ 09-13 |
+| feat | **Бичилтийн Excel/JSON: «Үүнээс энэ зогсолт(₮)» / «Үүнээс өмнөх өр(₮)»** (`session_paid`, `debt_paid` — Compensation.payment_id-ээр) — нийлсэн төлбөрийн борлуулалтын салгалт санхүүд ил | dd7ea78 | ✅ 09-13 | ✅ 09-13 |
+| test | `test_finalize_paid.py` FakeSession загвар кодтой нийцүүлэв (site/exit_time…); сүүлийн `_print_payload` сугалааны шалгалт хуучин mock-той — үлдээв | dd7ea78 | ✅ 09-13 | ✅ 09-13 |
 
 **Шийдвэр шаардлагатай (кодлоогүй):** өөр түрээслэгчийн өрийг QR-д нийлүүлэх эсэх
 (`_pending_debts` дугаараар бүх зогсоолоос татдаг). Санал: зөвхөн ижил түрээслэгчийн
