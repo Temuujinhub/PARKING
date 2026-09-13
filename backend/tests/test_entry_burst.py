@@ -21,7 +21,7 @@ settings.snapshot_enabled = False
 settings.screen_enabled = False
 
 from app.database import SessionLocal  # noqa: E402
-from app.models import AuditLog, Device, LprEvent, ParkingSession, ParkingSite  # noqa: E402
+from app.models import AuditLog, BarrierCommand, Device, LprEvent, ParkingSession, ParkingSite  # noqa: E402
 from app.session_logic import handle_entry  # noqa: E402
 
 PASS = FAIL = 0
@@ -54,6 +54,10 @@ def cleanup(plates):
            .filter(ParkingSession.plate_number.in_(plates)).all()]
     db.query(LprEvent).filter(LprEvent.plate_number.in_(plates)).delete(synchronize_session=False)
     if ids:
+        # Хаалтны команд (session FK) — сешнээс өмнө устгана
+        from app.models import BarrierCommand
+        db.query(BarrierCommand).filter(BarrierCommand.session_id.in_(ids)).delete(
+            synchronize_session=False)
         db.query(AuditLog).filter(AuditLog.entity_id.in_(ids)).delete(synchronize_session=False)
         db.query(ParkingSession).filter(ParkingSession.id.in_(ids)).delete(synchronize_session=False)
     db.commit()
@@ -136,12 +140,15 @@ async def run_multilane():
     check("2 тусдаа session, дугаарууд хэвээр",
           len(live) == 2 and {s.plate_number for s in live} == set(plates4))
     cleanup(plates4)
+    db.query(BarrierCommand).filter(BarrierCommand.device_id == cam2.id).delete(synchronize_session=False)
     db.query(Device).filter(Device.id == cam2.id).delete()
     db.commit()
 
 
 asyncio.run(run())
 asyncio.run(run_multilane())
+from app.models import BarrierCommand  # noqa: E402
+db.query(BarrierCommand).filter(BarrierCommand.device_id == cam.id).delete(synchronize_session=False)
 db.query(Device).filter(Device.id == cam.id).delete()
 db.commit()
 db.close()

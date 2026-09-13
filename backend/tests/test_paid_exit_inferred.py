@@ -203,10 +203,11 @@ finally:
             synchronize_session=False)
         db.query(Payment).filter(Payment.session_id.in_(sess_ids)).delete(synchronize_session=False)
         db.query(AuditLog).filter(AuditLog.entity_id.in_(sess_ids)).delete(synchronize_session=False)
-    if dev_ids:
-        db.query(BarrierCommand).filter(BarrierCommand.device_id.in_(dev_ids)).delete(
+    site_devs = [d.id for d in db.query(Device.id).filter(Device.site_id == site.id).all()]
+    if site_devs:
+        db.query(BarrierCommand).filter(BarrierCommand.device_id.in_(site_devs)).delete(
             synchronize_session=False)
-        db.query(LprEvent).filter(LprEvent.device_id.in_(dev_ids)).delete(synchronize_session=False)
+        db.query(LprEvent).filter(LprEvent.device_id.in_(site_devs)).delete(synchronize_session=False)
     db.query(LprEvent).filter(LprEvent.plate_number.in_(PLATES)).delete(synchronize_session=False)
     # Сешн (entry_device_id FK) → дараа нь төхөөрөмж
     db.query(ParkingSession).filter(ParkingSession.plate_number.in_(PLATES)).delete(

@@ -259,6 +259,27 @@ def plates_ocr_similar(a: str, b: str) -> bool:
     return sum(1 for x, y in zip(a, b) if x != y) == 1
 
 
+def plates_burst_similar(prev: str, new: str) -> bool:
+    """Орох камерын burst цонхонд (6с) дараалан ирсэн хоёр уншилт НЭГ МАШИН уу.
+
+    2026-09-13 Маршил: хурим/арга хэмжээний үеэр орох хаалт онгорхой байж
+    машин 3–5 секунд тутам орсон → burst нэгтгэл дараагийн машины дугаарыг
+    өмнөх машины сешн дээр ДАРЖ бичиж (1588УБВ→9361УКА→1353УЕС→…), 14 хоногт
+    428 «autocorrect»-ийн 387 нь огт өөр машин байв. Сешнгүй үлдсэн машин
+    гарцад «бүртгэлгүй» болж, хуучин сешн рүү авто сэргээгдэн 50,000₮ нэхэгдсэн.
+
+    Дүрэм (8–9 сарын 8,000+ нэгтгэлийн хэмжилт): junk→зөв (hold-ийн зорилго)
+    эсвэл ижил урттай, жигдэлсний дараа ≤2 тэмдэгтийн зөрүү = нэг машин (15
+    кейс бүгд OCR хувилбар: 1310ХЭН→7370ХЭН, 5876УОУ→5875УКУ); ≥3 зөрүү = өөр
+    машин (652 кейс). Тайрагдсан уншилт `plates_ocr_similar`-аар хамгаалагдана."""
+    if not is_valid_plate(prev):
+        return True                      # junk → зөв: hold policy-ийн залруулга
+    if plates_ocr_similar(prev, new):
+        return True
+    a, b = _ocr_canon(prev), _ocr_canon(new)
+    return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) <= 2
+
+
 def is_duplicate_read(plate: str, recent: str) -> bool:
     """Нэг машиныг ХОЁР ДАХЬ УДАА уншсан эсэх (зөвхөн dedup-д, session тохооход БИШ).
 
@@ -324,7 +345,10 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
 # Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
 # Гарах уншилтаар авто сэргээх дээд хугацааны АНХДАГЧ. Зогсоол бүрээр
 # (Тохиргоо → Төлбөрийн дүрэм) дарж тохируулагдана — доорх `_exit_rules`.
-REOPEN_MAX_HOURS = 48
+# 48 → 12 (2026-09-13): 48ц-ийн цонх 2 хоногийн өмнөх зогсолтыг сэргээж 50,000₮
+# нэхдэг байв. Бодит хэрэгцээ: stale_hours (12ц) авто хаалтын дараахан гарах
+# машин — хаагдсанаас хойш хэдхэн цаг. Тохиргоо → Төлбөрийн дүрэм-ээс өөрчилнө.
+REOPEN_MAX_HOURS = 12
 
 
 def _exit_rules(db: Session, site_id: str | None) -> dict:
@@ -395,7 +419,11 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     # exit_confirmed=True (жинхэнэ гарах уншилттай) бол ердийн үед ХҮРЭХГҮЙ —
     # тэр машин үнэхээр гарсан, одоогийнх нь ШИНЭ зогсолт. Цорын ганц үл
     # хамаарах нь дээрх «хуурамч гарц».
-    closed = [s for s in closed if not s.exit_confirmed or _short_fake_exit(s)]
+    # exit_device_id: гарах камерт уншигдаад төлөлгүй үлдээд хаагдсан (unpaid_exit)
+    # сешн — машин үнэхээр гарсан, exit_confirmed False байсан ч (дээрх
+    # close_session_forced-ийн засвараас өмнөх өгөгдөл) сэргээхгүй.
+    closed = [s for s in closed
+              if (not s.exit_confirmed and not s.exit_device_id) or _short_fake_exit(s)]
     cands = [s for s in closed if s.plate_number == plate]
     if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
         cands = [s for s in closed if plates_ocr_similar(plate, s.plate_number)]
@@ -585,7 +613,12 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     now = datetime.utcnow()
     # Гарах цаг нь БАРИМТТАЙ юу (гарах камерт уншигдсан) эсвэл ТААМАГ уу.
     # Зөвхөн AWAITING_PAYMENT нь гарах уншилттай — бусад нь «одоо» гэсэн таамаг.
-    confirmed = s.status == "AWAITING_PAYMENT" and bool(s.exit_time)
+    # AWAITING_PAYMENT сешний exit_time нь төлбөр хүлээх үед хоосон байдаг тул
+    # өмнө нь `bool(s.exit_time)` ямагт False → авто хаагдсан 1,946 сешн
+    # «гарах уншилтгүй» гэж тэмдэглэгдэж, 48ц-ийн дотор машин дахин гарцад
+    # уншигдахад auto_reopen_for_exit сэргээж 2 хоногийн дүн (50,000₮) нэхдэг
+    # байв (Маршил 2026-09-13, 53 сешн). exit_device_id = гарах камерт уншигдсан.
+    confirmed = s.status == "AWAITING_PAYMENT" and bool(s.exit_time or s.exit_device_id)
     if s.status == "PAID" and s.paid_at:
         # Төлчихсөн машин — grace дотор гарсан гэж үзэж төлбөрийг ТӨЛСӨН/deadline
         # үедээ царцаана. Эс бол одоог хүртэлх хугацаагаар хэт нэхэж, худал өр үүснэ.
@@ -1003,6 +1036,13 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                           LprEvent.accepted.is_(True),
                           LprEvent.created_at >= now - timedelta(seconds=_burst_sec))
                   .order_by(LprEvent.created_at.desc()).first()) if burst_merge else None
+    # Burst цонхонд ирсэн ЗӨВ дугаар өмнөх уншилттай огт төстэй биш бол энэ нь
+    # хаалт онгорхой байхад ард нь орж ирсэн ӨӨР машин — нэгтгэхгүй, хэвийн
+    # замаар шинэ сешн нээнэ (Маршил 2026-09-13, plates_burst_similar-ийн тайлбар).
+    if burst_prev and is_valid_plate(plate) and not plates_burst_similar(burst_prev.plate_number, plate):
+        log.info("[entry] burst цонхонд өөр машин: %s → %s — нэгтгэхгүй, шинэ сешн",
+                 burst_prev.plate_number, plate)
+        burst_prev = None
     if burst_prev:
         if is_valid_plate(plate) and not get_open_session(db, plate, site_id):
             prev_session = get_open_session(db, burst_prev.plate_number, site_id)
