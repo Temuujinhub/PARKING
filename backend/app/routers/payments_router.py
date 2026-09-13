@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..auth import enforce_site, operator_sites, require, scoped_site
 from ..config import settings
 from ..database import get_db
-from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Payment,
+from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, ParkingSite, Payment,
                       User, VatReceipt)
 from ..ratelimit import throttle
 from ..serializers import to_dict
@@ -491,11 +491,28 @@ def _print_payload(db: Session, payment: Payment) -> dict:
     }
 
 
-def _pending_debts(db: Session, plate: str) -> list[Compensation]:
-    """Дугаарын төлөгдөөгүй нөхөн төлбөрүүд (бүх зогсоолын — өр дугаарыг дагадаг)."""
-    return (db.query(Compensation)
-            .filter(Compensation.plate_number == plate,
-                    Compensation.status == "PENDING").all())
+def _tenant_site_ids(db: Session, site) -> list[str] | None:
+    """Энэ зогсоолтой ИЖИЛ ТҮРЭЭСЛЭГЧИЙН зогсоолуудын id. site=None → None (хязгааргүй)."""
+    if site is None:
+        return None
+    tid = getattr(site, "tenant_id", None)
+    q = db.query(ParkingSite.id)
+    q = q.filter(ParkingSite.tenant_id == tid) if tid else q.filter(ParkingSite.tenant_id.is_(None))
+    return [r[0] for r in q.all()]
+
+
+def _pending_debts(db: Session, plate: str, site=None) -> list[Compensation]:
+    """Дугаарын төлөгдөөгүй нөхөн төлбөрүүд — өр дугаарыг дагадаг, ГЭХДЭЭ зөвхөн
+    ИЖИЛ ТҮРЭЭСЛЭГЧИЙН зогсоолуудынх (2026-09-13 тулгалт: EasyParking-ийн зогсоолд
+    Моннисын өр 38,000₮, Моннист EasyParking-ийн 19,500₮ нийлүүлж хураагдаж, баримт
+    нь ТӨЛЖ БУЙ зогсоолын QPay данс/ТТД-ээр гарч НӨАТ, орлого буруу компанид очиж
+    байв). Түрээслэгчгүй зогсоол = зөвхөн түрээслэгчгүй зогсоолуудын өр."""
+    q = db.query(Compensation).filter(Compensation.plate_number == plate,
+                                      Compensation.status == "PENDING")
+    ids = _tenant_site_ids(db, site)
+    if ids is not None:
+        q = q.filter(Compensation.site_id.in_(ids))
+    return q.all()
 
 
 def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
@@ -518,7 +535,8 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
     session.duration_minutes = fee["duration_minutes"]
 
     # Өмнөх өрийг нийлүүлж нэхэмжлэх: дүн + өр тус бүрийн НӨАТ (үнэд багтсан)
-    comps: list[Compensation] = _pending_debts(db, session.plate_number) if include_debts else []
+    comps: list[Compensation] = (_pending_debts(db, session.plate_number, session.site)
+                                 if include_debts else [])
     debt_total = sum(float(c.amount) for c in comps)
     debt_vat = sum(round(float(c.amount) * settings.vat_rate / (1 + settings.vat_rate))
                    for c in comps)
@@ -609,7 +627,8 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     if existing and existing.provider_invoice_id:
         current_due = amount_due(db, session, session_fee_info(db, session))
         if include_debts:
-            current_due += sum(float(c.amount) for c in _pending_debts(db, session.plate_number))
+            current_due += sum(float(c.amount)
+                               for c in _pending_debts(db, session.plate_number, session.site))
         if abs(float(existing.amount) - current_due) <= 1:
             # qr_image-ыг заавал буцаана: өмнө нь энэ (ДАВТАН хүсэлтийн) зам
             # түүнийг огт өгдөггүй байсан тул хуудсаа сэргээсэн жолоочид QR-ийн

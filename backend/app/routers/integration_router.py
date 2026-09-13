@@ -28,6 +28,80 @@ from ..ratelimit import throttle
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/v1", tags=["integration"])
+log = __import__("logging").getLogger("parking.integration")
+
+
+def receipt_info(db: Session, payment: Payment) -> dict | None:
+    """Төлбөрийн e-Barimt мэдээлэл — түнш (Easy Wallet) аппдаа жолоочид харуулна.
+    ДДТД, сугалаа, дүн/НӨАТ, төлөв, QR (түр санах ойд байвал). Баримт үүсээгүй/
+    амжилтгүй бол status FAILED + шалтгаан — түнш дараа GET-ээр дахин асууж болно."""
+    from ..models import VatReceipt
+    from ..services import ebarimt as _eb
+    r = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id)
+         .order_by(VatReceipt.created_at.desc()).first())
+    if r is None:
+        return None
+    return {"ddtd": r.ebarimt_id, "lottery": r.lottery_code,
+            "amount": float(r.amount or 0), "vat_amount": float(r.vat_amount or 0),
+            "status": r.status, "provider": r.provider,
+            "error": (r.receipt_url or "")[:200] if r.status != "SENT" else None,
+            "qr_data": _eb.get_cached_qr(payment.id),
+            "created_at": r.created_at.isoformat() if r.created_at else None}
+
+
+def _payment_event(db: Session, payment: Payment, event: str) -> dict:
+    sess = db.get(ParkingSession, payment.session_id) if payment.session_id else None
+    site = db.get(ParkingSite, sess.site_id) if sess else None
+    return {"event": event, "payment_id": payment.id, "status": payment.status,
+            "transaction_id": payment.provider_payment_id,
+            "amount": float(payment.amount), "vat_amount": float(payment.vat_amount or 0),
+            "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+            "plate": sess.plate_number if sess else None,
+            "site_code": site.site_code if site else None,
+            "site_name": site.name if site else None,
+            "ebarimt": receipt_info(db, payment)}
+
+
+async def push_partner_webhook(url: str, payload: dict, partner: str,
+                               timeout: float = 6.0) -> dict:
+    """Түншийн сервер рүү POST. Буцаана: {ok, status_code, body, error} — аудит/туршилтад.
+    Алдаа хэзээ ч дуудагчийг унагаахгүй (төлбөр/хаалт аль хэдийн хийгдсэн)."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(url, json=payload,
+                             headers={"Content-Type": "application/json",
+                                      "X-Parking-Partner": partner,
+                                      "X-Parking-Event": payload.get("event", "")})
+        ok = 200 <= r.status_code < 300
+        return {"ok": ok, "status_code": r.status_code, "body": (r.text or "")[:300], "error": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "status_code": None, "body": None, "error": str(e)[:200]}
+
+
+async def _notify_partner(db_factory, key_id: str | None, url: str, payload: dict, partner: str):
+    """Fire-and-forget: webhook илгээж үр дүнг аудитад бичнэ (өөрийн DB сешнээр)."""
+    res = await push_partner_webhook(url, payload, partner)
+    db = db_factory()
+    try:
+        db.add(AuditLog(username=f"partner:{partner}", action="PARTNER_WEBHOOK",
+                        entity="payment", entity_id=payload.get("payment_id"),
+                        detail={"url": url, "ok": res["ok"], "status": res["status_code"],
+                                "error": res["error"], "event": payload.get("event")}))
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+    finally:
+        db.close()
+    if not res["ok"]:
+        log.warning("түншийн webhook амжилтгүй [%s] %s: %s", partner, url,
+                    res["error"] or res["status_code"])
+
+
+def _webhook_url_for(db: Session, partner: str) -> str | None:
+    k = (db.query(PartnerKey).filter(PartnerKey.name == partner, PartnerKey.is_active.is_(True))
+         .order_by(PartnerKey.created_at.desc()).first())
+    return (k.webhook_url or "").strip() or None if k else None
 
 OPEN_STATUSES = ("OPEN", "AWAITING_PAYMENT", "PAID")
 
@@ -285,8 +359,18 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
                     entity_id=payment.id, detail={"transaction_id": payment.provider_payment_id,
                                                   "amount": float(payment.amount)}))
     db.commit()
+    # Түншийн webhook (Тохиргоо → Холболт → Гадаад API): төлбөр + e-Barimt-ийг
+    # түншийн сервер рүү шууд илгээнэ — Easy Wallet апп жолоочид ДДТД/сугалаа
+    # харуулна. Хариуг хүлээхгүй (fire-and-forget), үр дүн аудитад.
+    hook = _webhook_url_for(db, partner)
+    if hook:
+        import asyncio
+        from ..database import SessionLocal
+        asyncio.ensure_future(_notify_partner(SessionLocal, None, hook,
+                                              _payment_event(db, payment, "payment.paid"), partner))
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
-            payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat()}
+            payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
+            "ebarimt": receipt_info(db, payment)}
 
 
 @router.get("/payments/{payment_id}")
@@ -297,4 +381,6 @@ def payment_status(payment_id: str, db: Session = Depends(get_db),
         raise HTTPException(404, "Payment олдсонгүй")
     return {"payment_id": payment.id, "status": payment.status,
             "amount": float(payment.amount),
-            "paid_at": payment.paid_at.isoformat() if payment.paid_at else None}
+            "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+            # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан
+            "ebarimt": receipt_info(db, payment)}

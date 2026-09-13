@@ -638,6 +638,9 @@ class PartnerKey(Base):
     key_prefix = Column(String(12), nullable=False)                # эхний тэмдэгтүүд (танихад)
     scopes = Column(String(60), nullable=False, default="read,pay")
     site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)
+    # Түншийн сервер рүү төлбөр/баримтын мэдэгдэл (POST) илгээх URL — Easy Wallet
+    # апп жолоочид ДДТД/сугалаа харуулахад (2026-09-13). Хоосон = илгээхгүй.
+    webhook_url = Column(String(300), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)

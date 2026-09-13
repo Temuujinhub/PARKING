@@ -46,6 +46,10 @@ _METHOD_MAP = {
     "CASH": "CASH",
     "CARD": "CARD",
     "QR": "CARD",
+    # Түншийн хэтэвч (Easy Wallet, tokI …) — цахим төлбөр, msgbill-д CARD кодоор.
+    # Өмнө нь WALLET методыг Тохиргоо → Холболт → e-Barimt API-д сонгох боломжгүй
+    # тул easywallet-ийн бүх төлбөр «баримтын суваг байхгүй» FAILED болдог байв.
+    "WALLET": "CARD",
 }
 
 

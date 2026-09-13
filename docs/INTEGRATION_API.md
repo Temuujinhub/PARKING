@@ -90,7 +90,45 @@ Body: `{"transaction_id": "TX123", "amount": 2000}`
 
 ### 5. GET /api/v1/payments/{payment_id} — төлөв шалгах
 
-`{"payment_id": "...", "status": "PENDING|PAID|CANCELLED", "amount": 2000, "paid_at": ...}`
+`{"payment_id": "...", "status": "PENDING|PAID|CANCELLED", "amount": 2000, "paid_at": ..., "ebarimt": {...}|null}`
+
+### 6. e-Barimt (НӨАТ-ын баримт) — 2026-09-13
+
+Төлбөр PAID болмогц систем баримтыг өөрөө үүсгэнэ (QPay/msgbill). Түнш баримтыг
+хоёр замаар авна:
+
+**а) Хариунд** — `confirm` ба `GET /payments/{id}` хоёулаа `ebarimt` талбартай:
+
+```json
+"ebarimt": {
+  "ddtd": "030101065006000097410004910014863",   // ДДТД (33 орон)
+  "lottery": "SO 63177600",                       // сугалааны дугаар (ААН-д null)
+  "amount": 2000, "vat_amount": 182,
+  "status": "SENT",                               // SENT | FAILED | PENDING
+  "provider": "QPAY",                             // QPAY | MSGBILL | POSAPI
+  "error": null,                                  // FAILED үед шалтгаан
+  "qr_data": "…",                                 // ebarimt QR (үүссэн даруйд түр байна)
+  "created_at": "2026-09-13T10:20:00"
+}
+```
+
+Баримт үүсэх нь хэдэн зуун мс — `confirm`-ийн хариунд ихэвчлэн бэлэн; `null` эсвэл
+`PENDING` бол 2–3 секундын дараа `GET /payments/{id}`-ээр дахин асууна.
+
+**б) Webhook (POST)** — Тохиргоо → Холболт → Гадаад API → түлхүүрийн «Webhook» талбарт
+түншийн URL оруулбал төлбөр PAID болмогц систем тэр URL руу дараах JSON-ыг POST хийнэ
+(толгой: `Content-Type: application/json`, `X-Parking-Partner: <нэр>`,
+`X-Parking-Event: payment.paid`):
+
+```json
+{"event": "payment.paid", "payment_id": "…", "status": "PAID", "transaction_id": "TX123",
+ "amount": 2000, "vat_amount": 182, "paid_at": "…", "plate": "1234УБА",
+ "site_code": "NIC", "site_name": "NIC", "ebarimt": { …дээрхтэй ижил… }}
+```
+
+Түншийн сервер 2xx буцаах ёстой; хариуг хүлээхгүй (хугацаа 6с), давтан илгээхгүй —
+алдвал `GET /payments/{id}`-ээр нөхнө. «Турших» товч `payment.paid.test` event-ийг
+(`"test": true`) сүүлийн бодит төлбөрийн өгөгдлөөр илгээж HTTP код/хариуг харуулна.
 
 ## Жишээ урсгал (curl)
 

@@ -1009,6 +1009,7 @@ def list_partner_keys(db: Session = Depends(get_db),
             "site_code": site.site_code if site else None,
             "site_name": site.name if site else None,
             "is_active": k.is_active,
+            "webhook_url": k.webhook_url,
             "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
             "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
             "created_by": k.created_by,
@@ -1044,6 +1045,56 @@ def create_partner_key(body: dict, db: Session = Depends(get_db),
     db.commit()
     return {"id": k.id, "name": name, "key": raw, "key_prefix": k.key_prefix,
             "scopes": scopes, "site_id": site_id}
+
+
+@router.post("/partner-keys/{key_id}/webhook")
+def set_partner_webhook(key_id: str, body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Түншийн webhook URL (төлбөр + e-Barimt мэдэгдэл POST хийх). body: {url} — хоосон = унтраах."""
+    from ..models import PartnerKey
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    url = (body.get("url") or "").strip()
+    if url and not url.lower().startswith(("https://", "http://")):
+        raise HTTPException(400, "URL http(s)://-ээр эхлэх ёстой")
+    k.webhook_url = url[:300] or None
+    _audit(db, user, "PARTNER_WEBHOOK_SET", "partner_key", k.id, {"name": k.name, "url": k.webhook_url})
+    db.commit()
+    return {"ok": True, "webhook_url": k.webhook_url}
+
+
+@router.post("/partner-keys/{key_id}/webhook/test")
+async def test_partner_webhook(key_id: str, body: dict | None = None, db: Session = Depends(get_db),
+                               user: User = Depends(require_role("SUPER_ADMIN"))):
+    """Webhook-ийг ТУРШИНА: сүүлийн бодит төлбөрийн (эсвэл жишээ) payload-ыг илгээж
+    түншийн сервер хүлээж авч байгаа эсэхийг (HTTP код, хариу) буцаана."""
+    from ..models import PartnerKey, Payment
+    from .integration_router import _payment_event, push_partner_webhook
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    url = ((body or {}).get("url") or k.webhook_url or "").strip()
+    if not url:
+        raise HTTPException(400, "Webhook URL тохируулаагүй")
+    pay = (db.query(Payment).filter(Payment.provider == k.name, Payment.status == "PAID")
+           .order_by(Payment.paid_at.desc()).first())
+    if pay is not None:
+        payload = _payment_event(db, pay, "payment.paid.test")
+    else:
+        payload = {"event": "payment.paid.test", "payment_id": "00000000-0000-0000-0000-000000000000",
+                   "status": "PAID", "transaction_id": "TEST", "amount": 1000, "vat_amount": 91,
+                   "paid_at": datetime.utcnow().isoformat(), "plate": "0000ТЕС", "site_code": "TEST",
+                   "site_name": "Туршилт",
+                   "ebarimt": {"ddtd": "000000000000000000000000000000000", "lottery": "TE 00000000",
+                               "amount": 1000, "vat_amount": 91, "status": "SENT", "provider": "QPAY",
+                               "error": None, "qr_data": None, "created_at": datetime.utcnow().isoformat()}}
+    payload["test"] = True
+    res = await push_partner_webhook(url, payload, k.name)
+    _audit(db, user, "PARTNER_WEBHOOK_TEST", "partner_key", k.id,
+           {"url": url, "ok": res["ok"], "status": res["status_code"], "error": res["error"]})
+    db.commit()
+    return {**res, "url": url, "sample_payment_id": pay.id if pay else None}
 
 
 @router.post("/partner-keys/{key_id}/revoke")

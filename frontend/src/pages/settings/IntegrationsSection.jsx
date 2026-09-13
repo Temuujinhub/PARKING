@@ -528,7 +528,8 @@ function MsgbillKeyModal({ state, onClose, onDone }) {
 
 // Глобал түлхүүр/хамрах арга — DB-д (app_settings), .env-г дарна. Прод серверт
 // SSH-гүй тул .env засахын оронд эндээс тохируулна.
-const METHOD_OPTS = [['TRANSFER', 'Дансаар (online operator)'], ['CASH', 'Бэлэн'], ['CARD', 'Карт (POS)']]
+const METHOD_OPTS = [['TRANSFER', 'Дансаар (online operator)'], ['CASH', 'Бэлэн'], ['CARD', 'Карт (POS)'],
+  ['WALLET', 'Хэтэвч (Easy Wallet, tokI — түншийн API)']]
 function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
   const toast = useToast()
   const [key, setKey] = useState('')
@@ -633,7 +634,7 @@ function MsgbillPanel({ mb, isSuper, onChanged }) {
                  : `✗ ${r.error || r.state}`, r.ok ? undefined : 'error')
     } catch (e) { toast(e.message, 'error') } finally { setTesting(false) }
   }
-  const methods = (mb.methods || []).map((m) => ({ TRANSFER: 'Дансаар', CASH: 'Бэлэн', CARD: 'Карт', QR: 'QR' }[m] || m))
+  const methods = (mb.methods || []).map((m) => ({ TRANSFER: 'Дансаар', CASH: 'Бэлэн', CARD: 'Карт', QR: 'QR', WALLET: 'Хэтэвч' }[m] || m))
   return (
     <div className="card space-y-2 text-xs">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -741,8 +742,9 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"session_id": "SESSION_ID", "amount": 3000}' \\\n  ${base}/api/v1/payments`],
   ['Төлөгдсөнийг батлах → хаалт нээгдэж, e-Barimt үүснэ',
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"transaction_id": "ТАНЫ_ГҮЙЛГЭЭНИЙ_ДУГААР"}' \\\n  ${base}/api/v1/payments/PAYMENT_ID/confirm`],
-  ['Төлбөрийн төлөв шалгах',
-    `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/payments/PAYMENT_ID"`],
+  ['Төлбөрийн төлөв + e-Barimt (ДДТД, сугалаа, QR) шалгах',
+    `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/payments/PAYMENT_ID"
+# → {"status":"PAID", ..., "ebarimt": {"ddtd": "0301…", "lottery": "SO 1234…", "amount": 2000, "vat_amount": 182, "status": "SENT", "qr_data": "…"}}`],
 ]
 
 // Түлхүүр үүсгэх модал — үүссэн түлхүүр НЭГ УДАА л ил гарна
@@ -825,6 +827,23 @@ function PartnerApiPanel() {
   const copy = (text) => navigator.clipboard.writeText(text)
     .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
 
+  // Түншийн webhook: төлбөр + e-Barimt (ДДТД, сугалаа, QR)-ийг түншийн сервер рүү POST
+  const [hookEdit, setHookEdit] = useState({})   // {key_id: url}
+  const [hookRes, setHookRes] = useState({})     // {key_id: {ok,status_code,error,body}}
+  const saveHook = async (k) => {
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/webhook`, { method: 'POST', body: { url: hookEdit[k.id] ?? k.webhook_url ?? '' } })
+      toast('Webhook хадгалагдлаа'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const testHook = async (k) => {
+    try {
+      const r = await api(`/api/admin/partner-keys/${k.id}/webhook/test`, { method: 'POST', body: { url: hookEdit[k.id] ?? k.webhook_url ?? '' } })
+      setHookRes({ ...hookRes, [k.id]: r })
+      toast(r.ok ? `Түншийн сервер хүлээж авлаа (HTTP ${r.status_code})` : `Амжилтгүй: ${r.error || 'HTTP ' + r.status_code}`, r.ok ? 'success' : 'error')
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const revoke = async (k) => {
     if (!confirm(`«${k.name}» түлхүүрийг хаах уу? Тэр дороо хүчингүй болно, буцаахгүй.`)) return
     try {
@@ -843,7 +862,7 @@ function PartnerApiPanel() {
               <Plus size={14} /> Түлхүүр үүсгэх
             </button>
           </div>
-          <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Сүүлд ашигласан', 'Төлөв', '']}
+          <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Webhook (төлбөр + баримт)', 'Сүүлд ашигласан', 'Төлөв', '']}
             empty={!data || (data.keys.length === 0 && data.env_partners.length === 0)}>
             {(data?.keys || []).map((k) => (
               <tr key={k.id} className={k.is_active ? '' : 'opacity-50'}>
@@ -853,6 +872,24 @@ function PartnerApiPanel() {
                 <td className="td text-xs">{k.site_code
                   ? <span>{k.site_name} <span className="font-mono text-slate-500">({k.site_code})</span></span>
                   : 'Бүх зогсоол'}</td>
+                <td className="td text-xs">
+                  {k.is_active ? (
+                    <div className="space-y-1 min-w-[260px]">
+                      <input className="input py-1 text-xs font-mono w-full" placeholder="https://…/parking/webhook"
+                        value={hookEdit[k.id] ?? k.webhook_url ?? ''}
+                        onChange={(e) => setHookEdit({ ...hookEdit, [k.id]: e.target.value })} />
+                      <div className="flex gap-1.5 items-center">
+                        <button className="btn-secondary py-0.5 text-[11px]" onClick={() => saveHook(k)}>Хадгалах</button>
+                        <button className="btn-secondary py-0.5 text-[11px]" onClick={() => testHook(k)}>Турших</button>
+                        {hookRes[k.id] && (
+                          <span className={`text-[11px] ${hookRes[k.id].ok ? 'text-accent' : 'text-red-400'}`}>
+                            {hookRes[k.id].ok ? `✓ HTTP ${hookRes[k.id].status_code}` : `✗ ${hookRes[k.id].error || 'HTTP ' + hookRes[k.id].status_code}`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : <span className="text-slate-500">—</span>}
+                </td>
                 <td className="td text-xs">{k.last_used_at
                   ? new Date(k.last_used_at + 'Z').toLocaleString()
                   : <span className="text-slate-500">ашиглаагүй</span>}</td>
@@ -873,6 +910,7 @@ function PartnerApiPanel() {
                 <td className="td font-mono text-xs text-slate-500">—</td>
                 <td className="td text-xs">Лавлах + Төлбөр</td>
                 <td className="td text-xs">Бүх зогсоол</td>
+                <td className="td text-xs text-slate-500">—</td>
                 <td className="td text-xs text-slate-500">—</td>
                 <td className="td"><span className="text-accent text-xs">Идэвхтэй</span>
                   <span className="ml-1.5 text-[10px] text-slate-500 cursor-help"
