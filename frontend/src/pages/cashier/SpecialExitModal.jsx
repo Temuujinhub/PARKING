@@ -17,7 +17,7 @@ export const SPECIAL_KINDS = {
   no_session: { label: 'Бүртгэлгүй', hint: 'Орох уншилтгүй (бүртгэлгүй) машин — суурь хураамжгүй гаргана', needsSnapshot: true },
 }
 
-export default function SpecialExitModal({ kind, session, fee, busy, canFreeExit, onClose, onConfirm }) {
+export default function SpecialExitModal({ kind, session, fee, busy, onClose, onConfirm }) {
   const [snap, setSnap] = useState(null)      // {camera, taken_at, path}
   const [snapErr, setSnapErr] = useState('')
   const [taking, setTaking] = useState(false)
@@ -47,8 +47,10 @@ export default function SpecialExitModal({ kind, session, fee, busy, canFreeExit
 
   if (!kind || !session || !spec) return null
   const unpaid = !fee?.is_free && Number(fee?.total_fee || 0) > 0 && !session.paid_at
-  // Зураг заавал шаардлагатай төрөлд зураггүй бол ЗӨВХӨН free_exit эрхтэй хүн гаргана
-  const ready = !!snap || !spec.needsSnapshot || canFreeExit
+  // Зураг ЗААВАЛ БИШ (2026-09-14): камер зураг өгөхгүй үед ч оператор гаргана —
+  // зураггүй гаргалт аудитад тусдаа тэмдэглэгдэнэ. Зураг авч байх хооронд л хүлээнэ.
+  const ready = true
+  const noSnap = !snap && spec.needsSnapshot
 
   return (
     <Modal open={!!kind} title={`${spec.label} — гаргах`} onClose={onClose} wide>
@@ -88,8 +90,8 @@ export default function SpecialExitModal({ kind, session, fee, busy, canFreeExit
                 <button type="button" className="btn-secondary py-1 px-2 text-xs" onClick={takeSnapshot} disabled={taking}>
                   Дахин оролдох
                 </button>
-                {!canFreeExit && spec.needsSnapshot && (
-                  <span className="text-slate-400">Зураггүйгээр гаргах боломжгүй — камер ажиллахгүй бол админд хандана уу</span>
+                {spec.needsSnapshot && (
+                  <span className="text-slate-400">Зураггүй ч гаргаж болно — аудитад «зураггүй» гэж тэмдэглэгдэнэ</span>
                 )}
               </div>
             )}
@@ -105,7 +107,7 @@ export default function SpecialExitModal({ kind, session, fee, busy, canFreeExit
         <div className="flex gap-2">
           <button className="btn-primary" disabled={!ready || busy || taking}
             onClick={() => onConfirm({ kind, note: note.trim() })}>
-            {busy ? 'Гаргаж байна…' : (kind === 'paid_no_open' ? 'Хаалт нээх' : 'Баталгаажуулж гаргах')}
+            {busy ? 'Гаргаж байна…' : (kind === 'paid_no_open' ? 'Хаалт нээх' : (noSnap ? 'Зураггүй гаргах' : 'Баталгаажуулж гаргах'))}
           </button>
           <button className="btn-secondary" onClick={onClose}>Болих</button>
         </div>

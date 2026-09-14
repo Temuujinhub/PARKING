@@ -1600,7 +1600,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 "total_fee": float(_flat), "amount_due": float(_flat),
                 "has_debt": bool(debts), "debt_amount": debt_amount,
                 "no_entry": True})
-            _txt = _fee_screen_text(plate, 0, _flat, debt_shown)
+            _txt = _fee_screen_text(plate, 0, _flat, debt_shown, db=db, site_id=site_id)
             schedule_display(device.ip_address, _txt,
                              _txt if settings.screen_voice else None,
                              camera_credentials(device))
@@ -1670,7 +1670,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "amount_due": due_now,
             "has_debt": True, "debt_amount": debt_amount, "blocked": True})
         # Дэлгэцэнд өнөөдрийн төлбөр ба өмнөх өрийг ТУСДАА мөрөөр харуулна
-        _txt = _fee_screen_text(plate, fee["duration_minutes"], due_now, debt_shown)
+        _txt = _fee_screen_text(plate, fee["duration_minutes"], due_now, debt_shown,
+                                db=db, site_id=site_id)
         schedule_display(device.ip_address, _txt,
                          _txt if settings.screen_voice else None,
                          camera_credentials(device))
@@ -1731,7 +1732,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     })
     # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй).
     # Өртэй машинд ӨМНӨХ ӨР тусдаа мөрөөр (өнөөдрийн зогсолтын дүнтэй нийлүүлэхгүй).
-    fee_text = _fee_screen_text(plate, fee["duration_minutes"], due, debt_shown)
+    fee_text = _fee_screen_text(plate, fee["duration_minutes"], due, debt_shown,
+                                db=db, site_id=site_id)
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
                          camera_credentials(device))
@@ -1740,11 +1742,20 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "debt_amount": debt_amount}
 
 
-def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0) -> str:
+def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0,
+                     db: Session | None = None, site_id: str | None = None) -> str:
     """Гарах LED — төлбөр хүлээж буй машины текст. Зогсолтын дүн ({amount}) ба
-    өмнөх өр ({debt}) ТУСДАА мөрөнд: screen_fee_text + (өртэй бол) screen_debt_text.
-    Өмнө нь хоёрыг нийлүүлж нэг дүнгээр харуулдаг байсан тул жолооч өнөөдрийн
-    зогсолтоо хэд гэдгийг ялгаж хардаггүй байв (2026-09-14)."""
+    өмнөх өр ({debt}) ТУСДАА мөрөнд. Зогсоолд «Төлбөр хүлээх дэлгэц» мөрүүд
+    (Тохиргоо → LED дэлгэц, screen_config.fee) тохируулсан бол түүгээр; үгүй бол
+    .env screen_fee_text + (өртэй бол) screen_debt_text. Өмнө нь хоёрыг нийлүүлж
+    нэг дүнгээр харуулдаг байсан тул жолооч өнөөдрийн зогсолтоо ялгаж хардаггүй
+    байв (2026-09-14)."""
+    lines = _site_screen_lines(db, site_id, "fee") if db is not None and site_id else None
+    if lines:
+        _local_hm = (datetime.utcnow() + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+        return _screen_text_from_lines(lines, plate=plate, time_str=_local_hm,
+                                       duration_minutes=duration_minutes, amount=amount,
+                                       debt=debt)
     text = render_screen_text(settings.screen_fee_text, amount=amount, plate=plate,
                               duration_minutes=duration_minutes, debt=debt)
     if debt and float(debt) > 0 and settings.screen_debt_text:
@@ -1766,7 +1777,7 @@ def _site_screen_lines(db: Session, site_id: str, lane: str) -> list | None:
 
 def _screen_text_from_lines(lines: list, *, plate: str = "", time_str: str = "",
                             duration_minutes=None, amount=None,
-                            payment: str = "", reason: str = "") -> str:
+                            payment: str = "", reason: str = "", debt=None) -> str:
     """Тохируулсан мөрүүдээс LED-ийн эцсийн текстийг угсарна. Хоосон утгатай
     мөр (ж: төлбөртэй гарахад {reason}) өөрөө хасагдана — LED-д цоорхой үлдэхгүй."""
     out = []
@@ -1784,6 +1795,10 @@ def _screen_text_from_lines(lines: list, *, plate: str = "", time_str: str = "",
             v = payment
         elif t == "reason":
             v = reason
+        elif t == "debt":
+            # Өмнөх өр — 0 бол мөр гарахгүй; угтвар тохиргооноос (default «Ur»)
+            pre = str(ln.get("text") or "Ur").strip()
+            v = "" if not debt or float(debt) <= 0 else f"{pre} {int(round(float(debt)))}T".strip()
         elif t == "text":
             v = str(ln.get("text", ""))
         else:

@@ -105,8 +105,6 @@ def main():
               d.get("exit_device_name") == "Гарах камер 2" and d.get("exit_lane_no") == 2)
 
         print("\nХБИ — зураггүй бол 409, зурагтай бол гаргана:")
-        e = call(sr.special_exit, s_hbi.id, {"kind": "hbi"}, db=db, user=op)
-        check("зураггүй оператор → 409", isinstance(e, HTTPException) and e.status_code == 409, str(getattr(e, "detail", e)))
         e = call(sr.special_exit, s_hbi.id, {"kind": "nope"}, db=db, user=op)
         check("буруу kind → 400", isinstance(e, HTTPException) and e.status_code == 400)
         r = call(sr.special_exit_snapshot, s_hbi.id, {}, db=db, user=op)
@@ -134,12 +132,16 @@ def main():
         e = call(sr.special_exit, s_hbi.id, {"kind": "hbi"}, db=db, user=op)
         check("хаагдсан session дахин → 400", isinstance(e, HTTPException) and e.status_code == 400)
 
-        print("\nАдмин (free_exit) зураггүй ч гаргана:")
-        r = call(sr.special_exit, s_unpaid.id, {"kind": "emergency"}, db=db, user=admin)
-        check("emergency зураггүй админ → MANUAL_CLOSED", isinstance(r, dict) and r["status"] == "MANUAL_CLOSED", str(r)[:120])
+        print("\nОператор зураггүй ч гаргана (камер зураг өгөхгүй үед):")
+        r = call(sr.special_exit, s_unpaid.id, {"kind": "emergency"}, db=db, user=op)
+        check("emergency зураггүй ОПЕРАТОР → MANUAL_CLOSED", isinstance(r, dict) and r["status"] == "MANUAL_CLOSED", str(r)[:120])
         db.expire_all()
         s = db.get(ParkingSession, s_unpaid.id)
         check("exit_device_id зогсоолын гарах камер болов", s.exit_device_id == cam_out.id)
+        a = (db.query(AuditLog).filter(AuditLog.entity_id == s.id, AuditLog.action == "SPECIAL_EXIT").first())
+        check("аудитад snapshot_fresh=false (зураггүй гаргалт ялгагдана)",
+              a is not None and a.detail.get("snapshot_fresh") is False and not a.detail.get("snapshot"), str(a.detail if a else None))
+        _ = admin
 
         print("\nТөлөөд нээгдээгүй:")
         e = call(sr.special_exit, s_hbi.id, {"kind": "paid_no_open"}, db=db, user=op)
@@ -161,6 +163,24 @@ def main():
         t = _fee_screen_text("1234УБА", 65, 3000, 25000)
         check("өртэй: 4 дэх мөр «Ur 25000T», дүн НИЙЛҮҮЛЭГДЭЭГҮЙ",
               t.split("\n") == ["1234УБА", "1ц 05м", "3000T", "Ur 25000T"], repr(t))
+
+        print("\nLED — зогсоолын «Төлбөр хүлээх дэлгэц» мөрүүд (screen_config.fee):")
+        site.screen_config = {"fee": [{"type": "plate"}, {"type": "amount"}, {"type": "debt", "text": "Ur"},
+                                      {"type": "text", "text": "Tulnu uu"}]}
+        db.commit()
+        t = _fee_screen_text("1234УБА", 65, 3000, 0, db=db, site_id=site.id)
+        check("өргүй: өрийн мөр хасагдана", t.split("\n") == ["1234УБА", "3000T", "Tulnu uu"], repr(t))
+        t = _fee_screen_text("1234УБА", 65, 3000, 25000, db=db, site_id=site.id)
+        check("өртэй: тохируулсан угтвартай өрийн мөр", t.split("\n") == ["1234УБА", "3000T", "Ur 25000T", "Tulnu uu"], repr(t))
+        from app.routers.admin_router import _check_screen_config
+        c = _check_screen_config({"fee": [{"type": "debt", "text": "Өр"}, {"type": "amount"}], "exit": [{"type": "debt"}]})
+        check("_check_screen_config fee/debt зөвшөөрнө", c and c["fee"][0] == {"type": "debt", "text": "Өр"} and c["exit"] == [{"type": "debt"}], str(c))
+        e = None
+        try:
+            _check_screen_config({"fee": [{"type": "payment"}]})
+        except HTTPException as ex:
+            e = ex
+        check("fee-д payment төрөл байхгүй → 400", e is not None and e.status_code == 400)
 
         print("\nPOS bootstrap:")
         r = pr.pos_bootstrap(terminal_id=None, db=db, user=pos)

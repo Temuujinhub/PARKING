@@ -22,13 +22,26 @@ const EXIT_TYPES = [
   ['amount', 'Төлбөрийн дүн'],
   ['payment', 'Төлбөрийн төрөл (QPay/Карт/Бэлэн)'],
   ['reason', 'Үнэгүй гарсан шалтгаан'],
+  ['debt', 'Өмнөх өр (өртэй бол)'],
+  ['text', 'Текст (гараас)'],
+]
+// Төлбөр ХҮЛЭЭХ дэлгэц — гарах камерт уншигдаад төлөөгүй байх үед (2026-09-14):
+// одоогийн зогсолтын дүн ба өмнөх өр ТУСДАА мөрөөр. Тохируулаагүй бол системийн
+// үндсэн: дугаар / хугацаа / дүн / (өртэй бол) «Ur {өр}T».
+const FEE_TYPES = [
+  ['none', '— Хоосон —'],
+  ['time', 'Цаг (одоо)'],
+  ['plate', 'Машины дугаар'],
+  ['duration', 'Зогссон хугацаа'],
+  ['amount', 'Одоогийн зогсолтын дүн'],
+  ['debt', 'Өмнөх өр (өртэй бол)'],
   ['text', 'Текст (гараас)'],
 ]
 
 // Урьдчилан харах жишээ утгууд
 const SAMPLE = {
   time: '14:05', plate: '1234 УБА', duration: '2ts 05min', amount: '3000T',
-  payment: 'QPay', reason: 'Гэрээт',
+  payment: 'QPay', reason: 'Гэрээт', debt: '25000T',
 }
 
 const emptyLines = () => Array.from({ length: 4 }, () => ({ type: 'none', text: '' }))
@@ -59,12 +72,18 @@ function LanePanel({ title, hint, types, lines, setLines }) {
             <input value={l.text || ''} maxLength={40} placeholder="LED дээр гарах текст"
               onChange={(e) => setLine(i, { text: e.target.value })} className="input flex-1" />
           )}
+          {l.type === 'debt' && (
+            <input value={l.text || ''} maxLength={12} placeholder="Угтвар (default: Ur)"
+              title="Өрийн мөрийн угтвар — LED кирилл дэмжвэл «Өр», үгүй бол «Ur»"
+              onChange={(e) => setLine(i, { text: e.target.value })} className="input w-40" />
+          )}
         </div>
       ))}
       {/* Урьдчилан харах — LED шиг хар дэвсгэр дээр */}
       <div className="bg-black rounded-lg p-3 font-mono text-green-400 text-sm min-h-[5.5rem] space-y-0.5">
         {lines.filter((l) => l.type !== 'none' && (l.type !== 'text' || (l.text || '').trim()))
-          .map((l, i) => <div key={i}>{l.type === 'text' ? l.text : SAMPLE[l.type]}</div>)}
+          .map((l, i) => <div key={i}>{l.type === 'text' ? l.text
+            : l.type === 'debt' ? `${(l.text || '').trim() || 'Ur'} ${SAMPLE.debt}` : SAMPLE[l.type]}</div>)}
         {lines.every((l) => l.type === 'none' || (l.type === 'text' && !(l.text || '').trim())) && (
           <div className="text-slate-600">(тохиргоогүй — системийн үндсэн текст гарна)</div>
         )}
@@ -79,6 +98,7 @@ export default function ScreenSection() {
   const [siteId, setSiteId] = useState('')
   const [entry, setEntry] = useState(emptyLines())
   const [exit, setExit] = useState(emptyLines())
+  const [fee, setFee] = useState(emptyLines())
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -94,15 +114,16 @@ export default function ScreenSection() {
     const cfg = s?.screen_config || {}
     setEntry(pad4(cfg.entry))
     setExit(pad4(cfg.exit))
+    setFee(pad4(cfg.fee))
   }, [siteId, sites])
 
   const save = async () => {
     setBusy(true)
     try {
       const clean = (lines) => lines.map((l) =>
-        l.type === 'text' ? { type: 'text', text: (l.text || '').trim() } : { type: l.type })
+        (l.type === 'text' || l.type === 'debt') ? { type: l.type, text: (l.text || '').trim() } : { type: l.type })
       await api(`/api/admin/sites/${siteId}`, {
-        method: 'PUT', body: { screen_config: { entry: clean(entry), exit: clean(exit) } },
+        method: 'PUT', body: { screen_config: { entry: clean(entry), exit: clean(exit), fee: clean(fee) } },
       })
       toast('LED дэлгэцийн тохиргоо хадгалагдлаа')
       api('/api/admin/sites').then(setSites) // preview-д шинэ утгыг тусгана
@@ -115,7 +136,7 @@ export default function ScreenSection() {
     try {
       await api(`/api/admin/sites/${siteId}`, { method: 'PUT', body: { screen_config: null } })
       toast('Үндсэн тохиргоонд буцлаа')
-      setEntry(emptyLines()); setExit(emptyLines())
+      setEntry(emptyLines()); setExit(emptyLines()); setFee(emptyLines())
       api('/api/admin/sites').then(setSites)
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
@@ -136,6 +157,9 @@ export default function ScreenSection() {
       <div className="flex gap-4 flex-wrap">
         <LanePanel title="Орох дэлгэц" types={ENTRY_TYPES}
           hint="Машин орж ирэхэд харуулах мөрүүд" lines={entry} setLines={setEntry} />
+        <LanePanel title="Төлбөр хүлээх дэлгэц" types={FEE_TYPES}
+          hint="Гарах камерт уншигдаад ТӨЛӨӨГҮЙ байх үед: одоогийн зогсолтын дүн ба өмнөх өр тусдаа мөрөөр (тохируулаагүй бол: дугаар / хугацаа / дүн / Ur өр)"
+          lines={fee} setLines={setFee} />
         <LanePanel title="Гарах дэлгэц" types={EXIT_TYPES}
           hint="Төлбөр төлөгдөж/үнэгүй нөхцөлөөр гарахад харуулах мөрүүд" lines={exit} setLines={setExit} />
       </div>

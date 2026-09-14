@@ -324,7 +324,7 @@ export default function Cashier() {
 
       {/* Онцгой гаргалт — гарах камераас зураг авч баталгаажуулах */}
       <SpecialExitModal kind={specialKind} session={selected} fee={fee} busy={busy}
-        canFreeExit={canFreeExit} onClose={() => setSpecialKind(null)} onConfirm={doSpecialExit} />
+        onClose={() => setSpecialKind(null)} onConfirm={doSpecialExit} />
 
       {/* QPay QR modal */}
       <QpayModal qpayInfo={qpayInfo} onClose={() => setQpayInfo(null)} />

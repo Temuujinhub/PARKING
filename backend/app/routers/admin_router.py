@@ -36,7 +36,11 @@ def _qpay_err(e: Exception) -> str:
 # LED мөрийн зөвшөөрөгдсөн төрлүүд. payment/reason нь зөвхөн ГАРАХ дэлгэцэд
 # утгатай (төлбөрийн төрөл / үнэгүй гарсан шалтгаан).
 _SCREEN_TYPES = {"none", "time", "plate", "duration", "amount", "text"}
-_SCREEN_EXIT_TYPES = _SCREEN_TYPES | {"payment", "reason"}
+# debt — ӨМНӨХ өр (төлөгдөөгүй нөхөн төлбөр) тусдаа мөр; 0 бол мөр хасагдана (2026-09-14)
+_SCREEN_EXIT_TYPES = _SCREEN_TYPES | {"payment", "reason", "debt"}
+# fee — ТӨЛБӨР ХҮЛЭЭХ дэлгэц (гарах камерт уншигдаад төлөөгүй байх үе): дугаар/
+# хугацаа/одоогийн дүн/өмнөх өр. Тохируулаагүй бол .env screen_fee_text + screen_debt_text.
+_SCREEN_FEE_TYPES = _SCREEN_TYPES | {"debt"}
 
 
 def _qr_data_uri(data: str | None) -> str:
@@ -63,19 +67,24 @@ def _check_screen_config(cfg):
     if not isinstance(cfg, dict):
         raise HTTPException(400, "screen_config буруу бүтэцтэй")
     out = {}
-    for lane in ("entry", "exit"):
+    for lane in ("entry", "exit", "fee"):
         lines = cfg.get(lane)
         if lines is None:
             continue
         if not isinstance(lines, list) or len(lines) > 4:
             raise HTTPException(400, f"screen_config.{lane}: дээд тал нь 4 мөр байна")
-        allowed = _SCREEN_EXIT_TYPES if lane == "exit" else _SCREEN_TYPES
+        allowed = {"entry": _SCREEN_TYPES, "exit": _SCREEN_EXIT_TYPES, "fee": _SCREEN_FEE_TYPES}[lane]
         clean = []
         for ln in lines:
             t = (ln or {}).get("type", "none") if isinstance(ln, dict) else "none"
             if t not in allowed:
                 raise HTTPException(400, f"screen_config.{lane}: '{t}' төрөл байхгүй")
             item = {"type": t}
+            if t == "debt":
+                # Өрийн мөрийн угтвар (LED фонт кирилл дэмжихгүй бол «Ur», дэмжвэл «Өр»)
+                pre = str((ln or {}).get("text", "")).strip()[:12]
+                if pre:
+                    item["text"] = pre
             if t == "text":
                 txt = str((ln or {}).get("text", "")).strip()[:40]
                 if not txt:

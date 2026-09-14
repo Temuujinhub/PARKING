@@ -1,6 +1,8 @@
 """Session удирдлага: жагсаалт, хайлт, шалгах, түүх, гараар хаах."""
 from datetime import datetime, timedelta, timezone
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ from ..services.barrier import open_barrier
 from ..ws import manager
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+log = logging.getLogger("parking.sessions")
 
 
 def _device_names(db: Session) -> dict[str, dict]:
@@ -1158,8 +1161,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     """Онцгой гаргалтын 2-р алхам. body: {kind, device_id?, note?}
       kind = paid_no_open | hbi | emergency | no_session (SPECIAL_EXIT_KINDS)
     • hbi/emergency/no_session: сүүлийн 10 минутад авсан баталгаажуулах зураг
-      (special-exit/snapshot) ЗААВАЛ — free_exit эрхтэй хэрэглэгчид л зураггүй
-      зөвшөөрнө. Session нөхөн төлбөргүй MANUAL_CLOSED болж хаалт нээгдэнэ.
+      (special-exit/snapshot) хүсэмжлэгдэнэ; камер зураг өгөхгүй бол зураггүй ч
+      гаргана (аудитад snapshot_fresh=false). Нөхөн төлбөргүй MANUAL_CLOSED + хаалт.
     • paid_no_open: төлбөр бүрэн төлөгдсөн (үлдэгдэлгүй) байх ёстой — хаалтыг
       дахин нээнэ; PAID session-ийг ердийн төлбөрийн урсгалтай адил хаана."""
     from ..auth import has_permission
@@ -1184,9 +1187,12 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
                .order_by(AuditLog.created_at.desc()).first())
         snap_at = row[0] if row else None
     snap_fresh = bool(snap_at and (now - snap_at) <= timedelta(minutes=SPECIAL_EXIT_SNAPSHOT_MAX_MIN))
-    if spec["needs_snapshot"] and not snap_fresh and not has_permission(user, "free_exit"):
-        raise HTTPException(409, "Эхлээд гарах камераас зураг авч баталгаажуулна уу "
-                                 f"(сүүлийн {SPECIAL_EXIT_SNAPSHOT_MAX_MIN} минутад)")
+    # Зураг ЗААВАЛ БИШ (Тэмүүжин 2026-09-14: камер зураг өгөхгүй үед ч оператор
+    # гаргадаг байх ёстой) — UI зургийг ямагт авахыг оролддог, аудитад
+    # snapshot_fresh=false гэж үлдэнэ (зураггүй гаргалтыг тайланд ялгана).
+    if spec["needs_snapshot"] and not snap_fresh:
+        log.warning("[special-exit] %s %s: баталгаажуулах ЗУРАГГҮЙ гаргав (%s, free_exit=%s)",
+                    kind, s.plate_number, user.username, has_permission(user, "free_exit"))
 
     device = db.get(Device, body.get("device_id")) if body.get("device_id") else None
     if device and device.site_id != s.site_id:
