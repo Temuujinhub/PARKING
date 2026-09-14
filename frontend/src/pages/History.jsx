@@ -173,8 +173,15 @@ export default function History() {
               )}
             </td>
             <td className="td">{s.site_name}</td>
-            <td className="td font-mono text-xs">{fmtDate(s.entry_time)}</td>
-            <td className="td font-mono text-xs">{fmtDate(s.exit_time)}</td>
+            {/* Орсон/гарсан цагийн доор АЛЬ камерт уншигдсан нь (2+2 эгнээтэй зогсоол) */}
+            <td className="td font-mono text-xs">
+              {fmtDate(s.entry_time)}
+              {s.entry_device_name && <div className="text-[10px] font-sans text-slate-500">{s.entry_device_name}</div>}
+            </td>
+            <td className="td font-mono text-xs">
+              {fmtDate(s.exit_time)}
+              {s.exit_device_name && <div className="text-[10px] font-sans text-sky-300/80">{s.exit_device_name}</div>}
+            </td>
             <td className="td font-mono">
               {fmtDur(s.duration_minutes)}
               {/* Доторх (nested) зогсоолд өнгөрүүлсэн хугацаа төлбөрөөс хасагдсан —

@@ -19,9 +19,29 @@ from ..ws import manager
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+def _device_names(db: Session) -> dict[str, dict]:
+    """device_id → {name, lane_no, lane_dir}. Төхөөрөмжийн хүснэгт жижиг (зогсоол
+    бүрд 2-8 мөр) тул нэг хүсэлтэд НЭГ удаа бүхэлд нь уншаад db.info-д кэшлэнэ —
+    жагсаалтын мөр бүрд query хийхгүй (History 500 мөр)."""
+    cache = db.info.get("_device_names")
+    if cache is None:
+        cache = {d.id: {"name": d.name, "lane_no": d.lane_no, "lane_dir": d.lane_dir}
+                 for d in db.query(Device.id, Device.name, Device.lane_no, Device.lane_dir).all()}
+        db.info["_device_names"] = cache
+    return cache
+
+
 def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict:
     extra = {"site_name": s.site.name if s.site else None,
              "discount_name": s.discount.name if s.discount else None}
+    # АЛЬ камерт уншуулж орж ирсэн / гарсан — 2+2 эгнээтэй зогсоолд оператор
+    # машин аль хаалтан дээр байгааг мэдэхгүй байсан (2026-09-14 гомдол).
+    names = _device_names(db)
+    ent, ext = names.get(s.entry_device_id), names.get(s.exit_device_id)
+    extra["entry_device_name"] = ent["name"] if ent else None
+    extra["entry_lane_no"] = ent["lane_no"] if ent else None
+    extra["exit_device_name"] = ext["name"] if ext else None
+    extra["exit_lane_no"] = ext["lane_no"] if ext else None
     # PAID (төлсөн ч ГАРААГҮЙ) session-д мөн төлбөрийг бодно: grace дууссаны
     # дараа зогссоор байгаа машины нэмэлт төлбөр Касс/Шалгах дээр огт
     # харагддаггүй байв — гарах камерт дахин уншигдтал «0₮» гэж зогсдог
@@ -56,8 +76,8 @@ def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
 
 # Session-ийг ХААСАН үйлдлүүд — Түүх дээр «хэн/юугаар хаасан» гэдгийг гаргана.
 # Гараар хаасныг операторын нэрээр, автоматыг «систем» гэж ялгаж харуулна.
-_CLOSE_ACTIONS = ("ADMIN_REMOVE", "MANUAL_EXIT", "AUTO_CLOSE", "AUTO_FREE_CLOSE",
-                  "AUTO_JUNK_CLOSE", "CAMERA_SYNC", "CAMERA_SYNC_EXIT",
+_CLOSE_ACTIONS = ("ADMIN_REMOVE", "MANUAL_EXIT", "SPECIAL_EXIT", "AUTO_CLOSE",
+                  "AUTO_FREE_CLOSE", "AUTO_JUNK_CLOSE", "CAMERA_SYNC", "CAMERA_SYNC_EXIT",
                   "SHIFT_CLOSE_CAR", "NIGHT_CLOSE_CAR", "REENTRY_CLOSE")
 # Шалтгаан бүрд НЭГ товч шошиг. Урьд нь 5 нь л шошготой байсан тул нөхөлт,
 # ээлж/шөнийн хаалт, дахин орж ирэлтээр хаагдсан бүртгэлүүд Түүх дээр «Хаасан»
@@ -65,6 +85,7 @@ _CLOSE_ACTIONS = ("ADMIN_REMOVE", "MANUAL_EXIT", "AUTO_CLOSE", "AUTO_FREE_CLOSE"
 _CLOSE_LABEL = {
     "ADMIN_REMOVE": "Админ хассан",
     "MANUAL_EXIT": "Оператор гаргасан",       # доор төлбөртэй/үнэгүй гэж хуваагдана
+    "SPECIAL_EXIT": "Онцгой гаргалт (зурагтай)",  # ХБИ/түргэн/бүртгэлгүй — камерын зурагтай
     "AUTO_CLOSE": "Авто: хугацаа хэтэрсэн",
     "AUTO_FREE_CLOSE": "Авто: орох уншилттай",
     "AUTO_JUNK_CLOSE": "Авто: буруу дугаар",
@@ -245,10 +266,13 @@ def sessions_excel(
     for s in rows:
         plist = pays.get(s.id, [])
         c_label, c_reason = _closed_label(s)
+        _dn = _device_names(db)
         data.append([
             s.plate_number,
             s.site.name if s.site else "",
             _loc(s.entry_time), _loc(s.exit_time),
+            (_dn.get(s.entry_device_id) or {}).get("name") or "",
+            (_dn.get(s.exit_device_id) or {}).get("name") or "",
             int(s.duration_minutes or 0),
             float(s.total_fee or 0),
             float(sum(float(p.amount) for p in plist)),
@@ -258,14 +282,15 @@ def sessions_excel(
             c_label, c_reason,
             (s.note or "")[:200],
         ])
-    total_row = ["Нийт", "", "", "", "", sum(r[5] for r in data),
-                 sum(r[6] for r in data), "", "", f"{len(data)} мөр", "", "", ""]
+    total_row = ["Нийт", "", "", "", "", "", "", sum(r[7] for r in data),
+                 sum(r[8] for r in data), "", "", f"{len(data)} мөр", "", "", ""]
     return _xlsx(
         "tuuh", "Түүх",
-        ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Хугацаа (мин)", "Дүн (₮)",
+        ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Орох камер", "Гарах камер",
+         "Хугацаа (мин)", "Дүн (₮)",
          "Төлсөн (₮)", "Төлбөрийн хэрэгсэл", "Хөнгөлөлт", "Төлөв", "Хаасан",
          "Шалтгаан", "Тэмдэглэл"],
-        data, widths=[11, 18, 17, 17, 13, 12, 12, 20, 14, 16, 26, 28, 30],
+        data, widths=[11, 18, 17, 17, 16, 16, 13, 12, 12, 20, 14, 16, 26, 28, 30],
         total_row=total_row)
 
 
@@ -277,9 +302,14 @@ def check_plate(plate: str, site_id: str | None = None,
     if len(plate) < 2:
         return []
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
+    # Сүүлийн 30 минутад ТӨЛЖ хаагдсан бүртгэлийг ч олно (2026-09-14): QR-аар
+    # төлөөд хаалт нээгдээгүй машин CLOSED болчихсон тул касс олж чадахгүй,
+    # «Төлөөд нээгдээгүй» товч ашиглагдахгүй байв. Бусад хаагдсан бүртгэл орохгүй.
+    recent_paid = (ParkingSession.status == "CLOSED") & ParkingSession.paid_at.isnot(None) & (
+        ParkingSession.exit_time >= datetime.utcnow() - timedelta(minutes=30))
     q = db.query(ParkingSession).filter(
         ParkingSession.plate_number.ilike(f"{plate}%"),
-        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
+        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]) | recent_paid,
     )
     if site_id:
         q = q.filter(ParkingSession.site_id == site_id)
@@ -501,7 +531,9 @@ def recent_exits(site_id: str, minutes: int | None = None,
             "exit_lane_no": d.lane_no if d else None,
             "exit_lane_dir": d.lane_dir if d else None,
             "exit_device_name": d.name if d else None})
-    return out
+    # `debt` {amount, count} — касс дээр өнөөдрийн зогсолт ба өмнөх өрийг ТУСАД НЬ
+    # харуулна (өмнө нь зөвхөн has_debt туг ирдэг байсан тул дүн харагддаггүй байв)
+    return _attach_debt(db, out)
 
 
 @router.put("/{session_id}/note")
@@ -824,13 +856,14 @@ def get_snapshot(session_id: str, kind: str, db: Session = Depends(get_db),
     from fastapi.responses import FileResponse
 
     from ..config import settings as cfg
-    if kind not in ("entry", "exit"):
-        raise HTTPException(404, "kind нь entry эсвэл exit байна")
+    if kind not in ("entry", "exit", "verify"):
+        raise HTTPException(404, "kind нь entry, exit эсвэл verify байна")
     s = db.get(ParkingSession, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолууд
-    rel = s.entry_snapshot if kind == "entry" else s.exit_snapshot
+    rel = {"entry": s.entry_snapshot, "exit": s.exit_snapshot,
+           "verify": getattr(s, "verify_snapshot", None)}[kind]
     if not rel:
         raise HTTPException(404, "Зураг хадгалагдаагүй байна")
     path = os.path.join(cfg.snapshot_dir, rel)
@@ -1028,6 +1061,225 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
         "barrier_opened": barrier_opened, "manual": True,
     })
     return _session_out(db, s)
+
+
+# ─── Онцгой гаргалт (2026-09-14) ─────────────────────────────────────────────
+# Оператор/POS-д free_exit эрх ОЛГОХГҮЙ гэсэн шийдвэртэй (танилаа үнэгүй гаргах
+# эрсдэл). Гэвч ХБИ, түргэн/цагдаа, орох уншилтгүй (бүртгэлгүй) машин, төлөөд
+# хаалт нээгдээгүй машиныг ЗОГСООЛ ДЭЭР шийдэх ёстой. Тиймээс ЯЛГААТАЙ, явцуу
+# урсгал: (1) гарах хаалтны дугаар уншигч камераас ОДООГИЙН зургийг гараар авч
+# session-д хадгална (баталгаажуулах нотолгоо) → (2) зөвхөн доорх 4 шалтгаанаар,
+# нөхөн төлбөргүй гаргана. Аудит SPECIAL_EXIT (зурагтай), Түүхэнд «Онцгой
+# гаргалт (зурагтай)» гэж тусдаа харагдана.
+SPECIAL_EXIT_KINDS = {
+    # Төлбөр төлөгдсөн ч хаалт нээгдээгүй — зураг ЗААВАЛ БИШ (мөнгө орсон)
+    "paid_no_open": {"label": "Төлөөд нээгдээгүй", "reason_code": None, "needs_snapshot": False},
+    "hbi":          {"label": "ХБИ (хөгжлийн бэрхшээлтэй иргэн)", "reason_code": "hbi",
+                     "needs_snapshot": True},
+    "emergency":    {"label": "Онцгой (түргэн, цагдаа, гал)", "reason_code": "emergency",
+                     "needs_snapshot": True},
+    "no_session":   {"label": "Бүртгэлгүй (орох уншилтгүй)", "reason_code": "no_session",
+                     "needs_snapshot": True},
+}
+# Баталгаажуулах зураг хэдэн минутын дотор авсан байх ёстой вэ — хуучин зургаар
+# өөр машин гаргахаас сэргийлнэ (машин хаалтан дээр ирээд л дарна)
+SPECIAL_EXIT_SNAPSHOT_MAX_MIN = 10
+
+
+def _exit_camera_for(db: Session, s: ParkingSession, device_id: str | None) -> Device | None:
+    """Онцгой гаргалтын зураг авах ГАРАХ камер: (1) сонгосон төхөөрөмж (камер бол
+    өөрөө, хаалт бол ижил эгнээний камер), (2) session-ийг уншсан гарах камер,
+    (3) зогсоолын идэвхтэй, IP-тэй гарах камер."""
+    from ..services.device_auto import barrier_matches_camera
+    cams = (db.query(Device)
+            .filter(Device.site_id == s.site_id, Device.device_type == "camera",
+                    Device.status == "active",
+                    Device.ip_address.isnot(None), Device.ip_address != "")
+            .order_by(Device.lane_no, Device.created_at).all())
+    if device_id:
+        d = db.get(Device, device_id)
+        if d and d.site_id == s.site_id:
+            if d.device_type == "camera" and d.ip_address:
+                return d
+            if d.device_type == "barrier":
+                near = next((c for c in cams if barrier_matches_camera(c, d)), None)
+                if near:
+                    return near
+    if s.exit_device_id:
+        d = db.get(Device, s.exit_device_id)
+        if d and d.ip_address:
+            return d
+    exit_cams = [c for c in cams if c.lane_dir in ("exit", "both") and not c.nested_inner]
+    return exit_cams[0] if exit_cams else None
+
+
+@router.post("/{session_id}/special-exit/snapshot")
+async def special_exit_snapshot(session_id: str, body: dict | None = None,
+                                db: Session = Depends(get_db),
+                                user: User = Depends(require("cashier"))):
+    """Онцгой гаргалтын 1-р алхам: гарах камераас ОДООГИЙН кадрыг гараар авч
+    session.verify_snapshot-д хадгална. body: {device_id?: хаалт/камер}.
+    Хариу: {ok, camera, taken_at, path}. Камер зураг өгөхгүй бол 502 —
+    оператор дахин оролдоно (free_exit эрхтэй админ зураггүй ч гаргаж болно)."""
+    import os
+    from ..services.snapshot import _fetch_from_camera, _save, discard_saved
+    body = body or {}
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)
+    cam = _exit_camera_for(db, s, body.get("device_id"))
+    if not cam:
+        raise HTTPException(400, "Энэ зогсоолд IP-тэй гарах камер бүртгэлгүй байна")
+    data = await _fetch_from_camera(cam.ip_address, camera_credentials(cam))
+    if not data:
+        raise HTTPException(502, f"«{cam.name}» камераас зураг авч чадсангүй — "
+                                 f"дахин оролдоно уу (камер завгүй/гацсан байж болно)")
+    rel = _save(data, s.plate_number, "verify")
+    if not rel:
+        raise HTTPException(500, "Зургийг хадгалж чадсангүй")
+    old = s.verify_snapshot
+    s.verify_snapshot = rel
+    db.add(AuditLog(username=user.username, action="SPECIAL_EXIT_SNAPSHOT", entity="session",
+                    entity_id=session_id,
+                    detail={"plate": s.plate_number, "site_id": s.site_id,
+                            "camera": cam.name, "device_id": cam.id, "path": rel,
+                            "size": len(data)}))
+    db.commit()
+    if old and old != rel:
+        discard_saved(old)
+    return {"ok": True, "camera": cam.name, "device_id": cam.id, "path": rel,
+            "taken_at": datetime.utcnow().isoformat(), "size": len(data)}
+
+
+@router.post("/{session_id}/special-exit")
+async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db),
+                       user: User = Depends(require("cashier"))):
+    """Онцгой гаргалтын 2-р алхам. body: {kind, device_id?, note?}
+      kind = paid_no_open | hbi | emergency | no_session (SPECIAL_EXIT_KINDS)
+    • hbi/emergency/no_session: сүүлийн 10 минутад авсан баталгаажуулах зураг
+      (special-exit/snapshot) ЗААВАЛ — free_exit эрхтэй хэрэглэгчид л зураггүй
+      зөвшөөрнө. Session нөхөн төлбөргүй MANUAL_CLOSED болж хаалт нээгдэнэ.
+    • paid_no_open: төлбөр бүрэн төлөгдсөн (үлдэгдэлгүй) байх ёстой — хаалтыг
+      дахин нээнэ; PAID session-ийг ердийн төлбөрийн урсгалтай адил хаана."""
+    from ..auth import has_permission
+    from ..session_logic import _close_and_open, _find_barrier
+    kind = str(body.get("kind") or "").strip()
+    spec = SPECIAL_EXIT_KINDS.get(kind)
+    if not spec:
+        raise HTTPException(400, f"kind буруу — {', '.join(SPECIAL_EXIT_KINDS)}")
+    s = db.get(ParkingSession, session_id)
+    if not s:
+        raise HTTPException(404, "Session олдсонгүй")
+    enforce_site(user, s.site_id)
+    note = str(body.get("note") or "").strip()[:200]
+    now = datetime.utcnow()
+
+    # Баталгаажуулах зураг — сүүлийн N минутад ЭНЭ session-д авсан байх ёстой
+    snap_at = None
+    if s.verify_snapshot:
+        row = (db.query(AuditLog.created_at)
+               .filter(AuditLog.entity == "session", AuditLog.entity_id == s.id,
+                       AuditLog.action == "SPECIAL_EXIT_SNAPSHOT")
+               .order_by(AuditLog.created_at.desc()).first())
+        snap_at = row[0] if row else None
+    snap_fresh = bool(snap_at and (now - snap_at) <= timedelta(minutes=SPECIAL_EXIT_SNAPSHOT_MAX_MIN))
+    if spec["needs_snapshot"] and not snap_fresh and not has_permission(user, "free_exit"):
+        raise HTTPException(409, "Эхлээд гарах камераас зураг авч баталгаажуулна уу "
+                                 f"(сүүлийн {SPECIAL_EXIT_SNAPSHOT_MAX_MIN} минутад)")
+
+    device = db.get(Device, body.get("device_id")) if body.get("device_id") else None
+    if device and device.site_id != s.site_id:
+        device = None
+    cam = _exit_camera_for(db, s, body.get("device_id"))
+
+    if kind == "paid_no_open":
+        if not s.paid_at:
+            raise HTTPException(400, "Энэ машины төлбөр төлөгдөөгүй байна")
+        if s.status in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+            fee = session_fee_info(db, s, at=now)
+            due = amount_due(db, s, fee)
+            if due > 0:
+                raise HTTPException(400, f"Төлснөөс хойш нэмэлт {int(due)}₮ үлдсэн — "
+                                         "эхлээд төлүүлнэ үү")
+            if not cam:
+                raise HTTPException(400, "Гарах камер/хаалт олдсонгүй")
+            s.exit_device_id = s.exit_device_id or cam.id
+            exit_dev = db.get(Device, s.exit_device_id) or cam
+            s.status = "PAID"
+            db.add(AuditLog(username=user.username, action="SPECIAL_EXIT", entity="session",
+                            entity_id=session_id,
+                            detail={"kind": kind, "label": spec["label"], "reason": note,
+                                    "plate": s.plate_number, "site_id": s.site_id,
+                                    "snapshot": s.verify_snapshot, "device_id": exit_dev.id}))
+            res = await _close_and_open(db, exit_dev, s, now, fee, source="manual")
+            return _session_out(db, s) | {"barrier_opened": bool(res.get("barrier_opened")),
+                                          "special": kind}
+        # Аль хэдийн хаагдсан (төлбөрийн дараа хаалт нээгдээгүй ч session хаагдсан):
+        # 30 минутын дотор бол зөвхөн хаалтыг дахин нээнэ
+        if not s.exit_time or (now - s.exit_time) > timedelta(minutes=30):
+            raise HTTPException(400, "Энэ бүртгэл 30 минутаас өмнө хаагдсан — "
+                                     "хаалтыг Хаалтны удирдлагаас нээнэ үү")
+        barrier = device if device and device.device_type == "barrier" else None
+        if not barrier and cam:
+            barrier = _find_barrier(db, s.site_id, cam)
+        if not barrier:
+            raise HTTPException(400, "Гарах хаалт олдсонгүй")
+        cmd = await open_barrier(db, barrier, s.id, "manual", issued_by=user.username,
+                                 plate=s.plate_number)
+        db.add(AuditLog(username=user.username, action="SPECIAL_EXIT", entity="session",
+                        entity_id=session_id,
+                        detail={"kind": kind, "label": spec["label"], "reason": note,
+                                "plate": s.plate_number, "site_id": s.site_id,
+                                "snapshot": s.verify_snapshot, "device_id": barrier.id,
+                                "reopen_only": True}))
+        db.commit()
+        return _session_out(db, s) | {"barrier_opened": cmd.status == "SUCCESS",
+                                      "special": kind}
+
+    # ── ХБИ / онцгой / бүртгэлгүй: нөхөн төлбөргүй гаргана ──
+    if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+        raise HTTPException(400, "Энэ бүртгэл аль хэдийн хаагдсан байна")
+    from ..services.app_settings import get_open_reasons
+    labels = {r["code"]: r["label"] for r in get_open_reasons(db)}
+    reason_code = spec["reason_code"]
+    reason_text = f"{labels.get(reason_code, spec['label'])}{f' — {note}' if note else ''}"
+    fee = session_fee_info(db, s, at=now)
+    s.exit_time = now
+    s.exit_confirmed = True
+    s.duration_minutes = fee["duration_minutes"]
+    if s.total_fee is None:
+        s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+    s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+    if cam and not s.exit_device_id:
+        s.exit_device_id = cam.id
+    s.note = f"{s.note + ' | ' if s.note else ''}Онцгой гаргалт: {reason_text}"[:1000]
+
+    barrier = device if device and device.device_type == "barrier" else None
+    if not barrier and cam:
+        barrier = _find_barrier(db, s.site_id, cam)
+    if not barrier:
+        barrier = (db.query(Device).filter(Device.site_id == s.site_id,
+                                           Device.device_type == "barrier",
+                                           Device.lane_dir == "exit").first())
+    db.add(AuditLog(username=user.username, action="SPECIAL_EXIT", entity="session",
+                    entity_id=session_id,
+                    detail={"kind": kind, "label": spec["label"], "reason_code": reason_code,
+                            "reason": reason_text, "plate": s.plate_number,
+                            "site_id": s.site_id, "snapshot": s.verify_snapshot,
+                            "snapshot_fresh": snap_fresh, "device_id": barrier.id if barrier else None,
+                            "unpaid_fee": float(fee["total_fee"]) if not s.paid_at else 0.0}))
+    db.commit()
+    barrier_opened = False
+    if barrier:
+        cmd = await open_barrier(db, barrier, s.id, "manual", issued_by=user.username,
+                                 plate=s.plate_number)
+        barrier_opened = cmd.status == "SUCCESS"
+    await manager.broadcast(s.site_id, "EXIT_COMPLETED", {
+        "session_id": s.id, "plate": s.plate_number, "status": s.status,
+        "barrier_opened": barrier_opened, "manual": True, "special": kind,
+    })
+    return _session_out(db, s) | {"barrier_opened": barrier_opened, "special": kind}
 
 
 @router.post("/{session_id}/reopen")

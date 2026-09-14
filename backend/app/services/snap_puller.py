@@ -45,11 +45,24 @@ _last_pic: dict[str, float] = {}
 
 
 def puller_delivers(ip: str, max_age_sec: float = 1800.0) -> bool:
-    """Тухайн камер сүүлийн max_age_sec (30 мин)-д WS-ээр зураг өгсөн эсэх."""
-    if not settings.snap_pull or not ip:
+    """Тухайн камер сүүлийн max_age_sec (30 мин)-д WS/comet-оор зураг өгсөн эсэх.
+    Хоёр суваг хоёулаа _last_pic-д бичдэг тул аль нэг нь асаалттай бол л утгатай
+    (өмнө нь зөвхөн snap_pull-аар хаагддаг байсан тул comet зураг өгч байхад ч
+    snapshot.py «өгдөггүй» гэж үзэн snapshot.cgi руу шууд ордог байв)."""
+    if not (settings.snap_pull or settings.snap_comet) or not ip:
         return False
     ts = _last_pic.get(ip)
     return ts is not None and (time.monotonic() - ts) <= max_age_sec
+
+
+def comet_attached(ip: str) -> bool:
+    """Энэ камерын comet суваг ОДОО холбоотой (attach амжилттай, тасраагүй) юу.
+    Зураг өгсөн түүхээс үл хамааран — шөнийн чимээгүй байдлын дараах эхний
+    машинд ч snapshot.py хүлээх эсэхээ үүгээр шийднэ."""
+    if not settings.snap_comet or not ip:
+        return False
+    st = _comet_state.get(ip)
+    return bool(st and st.get("attached"))
 
 _PLATE_JSON_RE = re.compile(r'"PlateNumber"\s*:\s*"([^"]+)"')
 
@@ -131,6 +144,12 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                          ParkingSession.entry_time >= datetime.utcnow() - timedelta(hours=48))
                  .order_by(ParkingSession.entry_time.desc()).first())
             if s:
+                # Өмнө нь өөр суваг (snapshot.cgi-ийн амьд кадр, эсвэл ижил
+                # burst-ийн өмнөх зураг) холбочихсон байвал ЭНЭ event зураг илүү
+                # (машин яг хаалганы өмнө) — дарж бичээд хуучин файлыг арилгана.
+                # Өмнө нь дарж бичдэг ч файлыг нь орхидог байсан тул retention
+                # хүртэл орфон зурагнууд хуримтлагддаг байв.
+                old_rel = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
                 if lane_dir == "exit":
                     s.exit_snapshot = rel
                 else:
@@ -138,6 +157,9 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                 sess_id, site_id = s.id, s.site_id
                 db.commit()
                 note_source(src)
+                if old_rel and old_rel != rel:
+                    from .snapshot import discard_saved
+                    await asyncio.to_thread(discard_saved, old_rel)
                 log.info(f"{plate_n} {lane_dir}: OK ({src}, {len(data)}b) → {rel}")
                 # UI-д «зураг бэлэн» мэдэгдэл — касс дээр нээлттэй харагдаж буй
                 # машины зураг refresh-гүйгээр гарч ирнэ

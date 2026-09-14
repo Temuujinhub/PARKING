@@ -1024,6 +1024,7 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
     from ..auth import effective_permissions
     from ..models import Device, ParkingSite
     from ..services.app_settings import get_open_reasons
+    from .sessions_router import SPECIAL_EXIT_KINDS
     from .barriers_router import lean_barrier_rows
     allowed = operator_sites(user)
     sq = db.query(ParkingSite)
@@ -1071,6 +1072,12 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
         # илгээнэ; «other» бол reason (тайлбар) заавал. Тусдаа дуудлага:
         # GET /api/admin/open-reasons?active_only=true (cashier эрхээр ажиллана).
         "open_reasons": get_open_reasons(db, active_only=True),
+        # Онцгой гаргалт (2026-09-14, free_exit эрхгүй POS/операторт): эхлээд
+        # POST /api/sessions/{id}/special-exit/snapshot (гарах камерын зураг),
+        # дараа нь POST /api/sessions/{id}/special-exit {kind} — kind жагсаалт:
+        "special_exit_kinds": [{"kind": k, "label": v["label"],
+                                "needs_snapshot": v["needs_snapshot"]}
+                               for k, v in SPECIAL_EXIT_KINDS.items()],
     }
 
 

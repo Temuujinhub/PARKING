@@ -1084,7 +1084,8 @@ def format_duration(minutes: float | int | None) -> str:
 
 def render_screen_text(template: str, amount: float | int | None = None,
                        plate: str = "", duration_minutes: float | int | None = None,
-                       time_str: str = "", payment: str = "", reason: str = "") -> str:
+                       time_str: str = "", payment: str = "", reason: str = "",
+                       debt: float | int | None = None) -> str:
     """Template-ийн {amount}/{plate}/{duration}/{time}/{payment}/{reason}-ийг
     орлуулна. Дүн бүхэл тоогоор, {duration} нь зогссон хугацаа («2ts 05min»),
     {time} нь локал цаг («14:05», дуудагч бэлдэж өгнө), {payment} нь төлбөрийн
@@ -1092,10 +1093,21 @@ def render_screen_text(template: str, amount: float | int | None = None,
     Мөр таслал: .env-д «|» эсвэл literal «\\n» бичвэл LED-ийн жинхэнэ мөр таслал (\\n)
     болгоно — дугаар/хугацаа/төлбөрийг тусдаа мөрүүдэд харуулах боломжтой."""
     amt = "" if amount is None else f"{int(round(float(amount)))}"
+    # {debt} — ӨМНӨХ өр (нөхөн төлбөр). 0/None бол хоосон → тэр мөр хасагдана,
+    # ингэснээр өргүй машинд «Ur T» гэсэн хоосон мөр гарахгүй.
+    dbt = "" if not debt or float(debt) <= 0 else f"{int(round(float(debt)))}"
     text = (template.replace("{amount}", amt).replace("{plate}", plate or "")
+            .replace("{debt}", dbt)
             .replace("{duration}", format_duration(duration_minutes))
             .replace("{time}", time_str or "")
             .replace("{payment}", payment or "").replace("{reason}", reason or ""))
     text = text.replace("\\n", "\n").replace("|", "\n")  # .env мөр таслалыг хөрвүүлнэ
     # Хоосон мөрийг хаяна: {duration} өгөгдөөгүй үед дундаа цоорхой мөр үлдэхгүй
-    return "\n".join(line.strip() for line in text.split("\n") if line.strip())
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    # {debt} хоосон бол зөвхөн «T»/«Ur T» гэх мэт тоогүй үлдэгдэл мөрийг хаяна
+    if not dbt and "{debt}" in template:
+        dline = [ln.strip() for ln in template.replace("\\n", "\n").replace("|", "\n").split("\n")
+                 if "{debt}" in ln]
+        empties = {ln.replace("{debt}", "").strip() for ln in dline}
+        lines = [ln for ln in lines if ln not in empties]
+    return "\n".join(lines)

@@ -306,6 +306,9 @@ MIGRATIONS = [
     "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS inner_registered_only BOOLEAN NOT NULL DEFAULT false",
     # 2026-09-13: түншийн webhook (Easy Wallet-д баримт/төлбөрийн мэдэгдэл)
     "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS webhook_url VARCHAR(300)",
+
+    # 2026-09-14 — онцгой гаргалтын баталгаажуулах зураг (гарах камерын гар snapshot)
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS verify_snapshot VARCHAR(255)",
 ]
 
 

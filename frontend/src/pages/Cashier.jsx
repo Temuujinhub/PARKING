@@ -13,6 +13,7 @@ import ManualEntryModal, { minutesAgo } from './cashier/ManualEntryModal'
 import PaymentPanel from './cashier/PaymentPanel'
 import QpayModal from './cashier/QpayModal'
 import ShiftCloseModal from './cashier/ShiftCloseModal'
+import SpecialExitModal from './cashier/SpecialExitModal'
 import TodayExitsTable from './cashier/TodayExitsTable'
 
 export default function Cashier() {
@@ -144,6 +145,19 @@ export default function Cashier() {
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
 
+  // Онцгой гаргалт (2026-09-14): ХБИ / түргэн-цагдаа / бүртгэлгүй / төлөөд нээгдээгүй.
+  // free_exit эрх шаардахгүй — харин гарах камераас зураг авч баталгаажуулна.
+  const [specialKind, setSpecialKind] = useState(null)
+  const doSpecialExit = async (body) => {
+    setBusy(true)
+    try {
+      const r = await api(`/api/sessions/${selected.id}/special-exit`, { method: 'POST', body })
+      toast(r.barrier_opened ? 'Хаалт нээгдлээ' : 'Бүртгэл хаагдлаа (хаалтны команд амжилтгүй — Хаалтны удирдлагыг шалгана уу)',
+        r.barrier_opened ? 'success' : 'error')
+      setSpecialKind(null); setSelected(null); loadExits(siteId)
+    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+  }
+
   const addTestCar = async () => {
     if (!siteId) return
     try {
@@ -196,6 +210,15 @@ export default function Cashier() {
   // «Бэлнээр» — ЗӨВХӨН оффисоос ажилладаг ONLINE_OPERATOR дээр нуугдана
   // (тэдэнд бэлэн мөнгөний касс байхгүй). Бусад бүх эрхэд харагдана.
   const showCash = user?.role !== 'ONLINE_OPERATOR'
+  // QPay QR товч — жолооч хаалтан дээрх QR-ыг өөрөө уншуулдаг тул зогсоолын/
+  // онлайн операторт хэрэггүй; POS болон админд үлдээнэ (2026-09-14).
+  const isOperator = user?.role === 'OPERATOR' || user?.role === 'ONLINE_OPERATOR'
+  const showQpay = !isOperator
+  // Онцгой гаргалтын товчнууд роль бүрд: оператор — төлөөд нээгдээгүй / ХБИ / түргэн;
+  // POS — дээр нь «Бүртгэлгүй» (орох уншилтгүй машин); админ бүгдийг харна.
+  const specialKinds = isOperator
+    ? ['paid_no_open', 'hbi', 'emergency']
+    : ['paid_no_open', 'hbi', 'emergency', 'no_session']
   const site = sites.find((s) => s.id === siteId)
 
   const saveNote = async () => {
@@ -280,7 +303,8 @@ export default function Cashier() {
         {/* Төлбөрийн дэлгэрэнгүй */}
         <PaymentPanel
           selected={selected} setSelected={setSelected} fee={fee} canAct={canAct} canFreeExit={canFreeExit} busy={busy}
-          canTransfer={canTransfer} showCash={showCash} site={site}
+          canTransfer={canTransfer} showCash={showCash} showQpay={showQpay}
+          specialKinds={specialKinds} onSpecialExit={setSpecialKind} site={site}
           discounts={discounts} searchPlate={searchPlate} searchResults={searchResults}
           onSearchChange={onSearchChange} onSearch={search}
           onPickResult={(s) => { setSelected(s); setSearchResults(null); setSearchPlate('') }}
@@ -297,6 +321,10 @@ export default function Cashier() {
       {/* Төлбөргүй гаргах — шалтгаан сонгох */}
       <FreeExitModal open={freeExit} session={selected} fee={fee} busy={busy}
         onClose={() => setFreeExit(false)} onConfirm={doFreeExit} />
+
+      {/* Онцгой гаргалт — гарах камераас зураг авч баталгаажуулах */}
+      <SpecialExitModal kind={specialKind} session={selected} fee={fee} busy={busy}
+        canFreeExit={canFreeExit} onClose={() => setSpecialKind(null)} onConfirm={doSpecialExit} />
 
       {/* QPay QR modal */}
       <QpayModal qpayInfo={qpayInfo} onClose={() => setQpayInfo(null)} />

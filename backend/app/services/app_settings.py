@@ -529,7 +529,8 @@ OPEN_REASON_DEFAULTS = [
     {"code": "no_session", "label": "Бүртгэл олдоогүй", "is_active": True},
     {"code": "system_error", "label": "Системийн алдаа", "is_active": True},
     {"code": "device_fault", "label": "Хаалт/камер эвдэрсэн", "is_active": True},
-    {"code": "emergency", "label": "Онцгой байдал (түргэн, гал)", "is_active": True},
+    {"code": "emergency", "label": "Онцгой (түргэн, цагдаа, гал)", "is_active": True},
+    {"code": "hbi", "label": "ХБИ (хөгжлийн бэрхшээлтэй иргэн)", "is_active": True},
     {"code": "test", "label": "Туршилт", "is_active": True},
     {"code": "other", "label": "Бусад", "is_active": True},
 ]

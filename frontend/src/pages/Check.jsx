@@ -346,7 +346,11 @@ export default function Check() {
               <FlagBadges audit={s.audit} />
             </td>
             <td className="td">{s.site_name}</td>
-            <td className="td font-mono text-xs">{fmtDate(s.entry_time)}</td>
+            <td className="td font-mono text-xs">
+              {fmtDate(s.entry_time)}
+              {/* Аль орох камерт уншигдсан (олон эгнээтэй зогсоол) */}
+              {s.entry_device_name && <div className="text-[10px] font-sans text-slate-500">{s.entry_device_name}</div>}
+            </td>
             <td className="td font-mono">{fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}</td>
             <td className="td font-mono font-semibold">
               {s.fee?.is_free ? <span className="text-cyan-400">Үнэгүй</span> : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}

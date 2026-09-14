@@ -1532,6 +1532,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     if debts:
         notify(site_id, "DEBT_ALERT", {
             "plate": plate, "debt_count": len(debts), "debt_amount": debt_amount})
+    # LED-д харуулах өр = ЯГ нэхэмжлэгдэх өр (ижил түрээслэгчийн зогсоолуудынх —
+    # payments_router._pending_debts-тэй нэг дүрэм). Хориг/сануулга (дээрх debts)
+    # бүх зогсоолын өрөөр хэвээр.
+    from .routers.payments_router import _pending_debts as _tenant_debts
+    debt_shown = float(sum(c.amount for c in _tenant_debts(db, plate, db.get(ParkingSite, site_id))))
 
     if not session:
         # ГЭРЭЭТ машин: session олдоогүй ч (орох уншилт алдагдсан, жагсаалтад
@@ -1595,9 +1600,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 "total_fee": float(_flat), "amount_due": float(_flat),
                 "has_debt": bool(debts), "debt_amount": debt_amount,
                 "no_entry": True})
-            _txt = render_screen_text(settings.screen_fee_text,
-                                      amount=_flat + debt_amount, plate=plate,
-                                      duration_minutes=0)
+            _txt = _fee_screen_text(plate, 0, _flat, debt_shown)
             schedule_display(device.ip_address, _txt,
                              _txt if settings.screen_voice else None,
                              camera_credentials(device))
@@ -1666,10 +1669,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
             "amount_due": due_now,
             "has_debt": True, "debt_amount": debt_amount, "blocked": True})
-        # Дэлгэцэнд өнөөдрийн төлбөр + өмнөх өрийн нийлбэрийг харуулна
-        _txt = render_screen_text(settings.screen_fee_text,
-                                  amount=due_now + debt_amount, plate=plate,
-                                  duration_minutes=fee["duration_minutes"])
+        # Дэлгэцэнд өнөөдрийн төлбөр ба өмнөх өрийг ТУСДАА мөрөөр харуулна
+        _txt = _fee_screen_text(plate, fee["duration_minutes"], due_now, debt_shown)
         schedule_display(device.ip_address, _txt,
                          _txt if settings.screen_voice else None,
                          camera_credentials(device))
@@ -1729,16 +1730,29 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         "has_debt": bool(debts), "debt_amount": debt_amount,
     })
     # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй).
-    # Өртэй машинд ӨМНӨХ ӨРИЙГ НИЙЛҮҮЛЖ нэхэмжилнэ (жолооч нийт дүнгээ шууд харна).
-    fee_text = render_screen_text(settings.screen_fee_text,
-                                  amount=due + debt_amount, plate=plate,
-                                  duration_minutes=fee["duration_minutes"])
+    # Өртэй машинд ӨМНӨХ ӨР тусдаа мөрөөр (өнөөдрийн зогсолтын дүнтэй нийлүүлэхгүй).
+    fee_text = _fee_screen_text(plate, fee["duration_minutes"], due, debt_shown)
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
                          camera_credentials(device))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
             "debt_amount": debt_amount}
+
+
+def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0) -> str:
+    """Гарах LED — төлбөр хүлээж буй машины текст. Зогсолтын дүн ({amount}) ба
+    өмнөх өр ({debt}) ТУСДАА мөрөнд: screen_fee_text + (өртэй бол) screen_debt_text.
+    Өмнө нь хоёрыг нийлүүлж нэг дүнгээр харуулдаг байсан тул жолооч өнөөдрийн
+    зогсолтоо хэд гэдгийг ялгаж хардаггүй байв (2026-09-14)."""
+    text = render_screen_text(settings.screen_fee_text, amount=amount, plate=plate,
+                              duration_minutes=duration_minutes, debt=debt)
+    if debt and float(debt) > 0 and settings.screen_debt_text:
+        dline = render_screen_text(settings.screen_debt_text, debt=debt, plate=plate,
+                                   amount=amount, duration_minutes=duration_minutes)
+        if dline:
+            text = f"{text}\n{dline}" if text else dline
+    return text
 
 
 def _site_screen_lines(db: Session, site_id: str, lane: str) -> list | None:

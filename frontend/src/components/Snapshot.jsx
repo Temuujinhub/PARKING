@@ -80,7 +80,7 @@ export function SnapshotImg({ sessionId, kind, label, eventTime }) {
 // "Камераас татах"-аар нөхөж болно.
 export function SnapshotButton({ session }) {
   const [open, setOpen] = useState(false)
-  const has = session.entry_snapshot || session.exit_snapshot
+  const has = session.entry_snapshot || session.exit_snapshot || session.verify_snapshot
   return (
     <>
       <button className={`btn-secondary py-1 px-2 text-xs ${has ? '' : 'opacity-40'}`}
@@ -92,9 +92,18 @@ export function SnapshotButton({ session }) {
       <Modal open={open} onClose={() => setOpen(false)}
         title={`${session.plate_number} — Камерын зураг`} wide>
         {open && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <SnapshotImg sessionId={session.id} kind="entry" label="Орох" eventTime={session.entry_time} />
-            <SnapshotImg sessionId={session.id} kind="exit" label="Гарах" eventTime={session.exit_time || session.updated_at} />
+          <div className={`grid grid-cols-1 gap-4 ${session.verify_snapshot ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
+            <SnapshotImg sessionId={session.id} kind="entry"
+              label={`Орох${session.entry_device_name ? ` · ${session.entry_device_name}` : ''}`}
+              eventTime={session.entry_time} />
+            <SnapshotImg sessionId={session.id} kind="exit"
+              label={`Гарах${session.exit_device_name ? ` · ${session.exit_device_name}` : ''}`}
+              eventTime={session.exit_time || session.updated_at} />
+            {/* Онцгой гаргалтын баталгаажуулах зураг — оператор гаргахын өмнө гарах
+                камераас гараар авсан (ХБИ/түргэн/бүртгэлгүй нотолгоо) */}
+            {session.verify_snapshot && (
+              <SnapshotImg sessionId={session.id} kind="verify" label="Баталгаажуулалт (гар зураг)" />
+            )}
           </div>
         )}
       </Modal>

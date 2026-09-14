@@ -1,16 +1,30 @@
 // Төлбөрийн дэлгэрэнгүй — дугаар хайх, сонгосон машины тооцоо, төлбөр авах
-import { Banknote, DoorOpen, Landmark, QrCode, Search } from 'lucide-react'
+import { Accessibility, Banknote, DoorOpen, Landmark, QrCode, Search, Siren, UserX } from 'lucide-react'
 import { api, fmt, fmtDate, fmtDur } from '../../api'
 import { SnapshotImg } from '../../components/Snapshot'
 import { Badge, Field, useToast } from '../../components/ui'
 
 export default function PaymentPanel({
   selected, setSelected, fee, canAct, canFreeExit, busy, discounts,
-  canTransfer, showCash, site,
+  canTransfer, showCash, showQpay, specialKinds, site,
   searchPlate, searchResults, onSearchChange, onSearch, onPickResult,
-  onPay, onApplyDiscount, onManualExit, onSaveNote, siteId, loadExits,
+  onPay, onApplyDiscount, onManualExit, onSpecialExit, onSaveNote, siteId, loadExits,
 }) {
   const toast = useToast()
+  // Онцгой гаргалтын товчнууд (2026-09-14): QPay-ийн оронд операторт, POS-д нэмэлтээр.
+  // Дарахад гарах камераас зураг авч баталгаажуулдаг (SpecialExitModal).
+  const SPECIAL_BTN = {
+    paid_no_open: { label: 'Төлөөд нээгдээгүй', Icon: DoorOpen, cls: 'border-emerald-500/40 text-emerald-300' },
+    hbi: { label: 'ХБИ', Icon: Accessibility, cls: 'border-sky-500/40 text-sky-300' },
+    emergency: { label: 'Түргэн / Цагдаа', Icon: Siren, cls: 'border-red-500/40 text-red-300' },
+    no_session: { label: 'Бүртгэлгүй', Icon: UserX, cls: 'border-amber-500/40 text-amber-300' },
+  }
+  const COLS = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3', 4: 'grid-cols-2' }
+  // Саяхан ТӨЛЖ хаагдсан (CLOSED) бүртгэл хайлтаар олдож болно — түүнд зөвхөн
+  // «Төлөөд нээгдээгүй» л утгатай; төлбөрийн товчнууд нээлттэй бүртгэлд л гарна
+  const payable = !selected || ['OPEN', 'AWAITING_PAYMENT', 'PAID'].includes(selected.status)
+  const kindsFor = (kinds) => (payable ? kinds : kinds.filter((k) => k === 'paid_no_open'))
+  const payCols = COLS[[canTransfer, showCash, showQpay].filter(Boolean).length] || 'grid-cols-1'
   return (
     <div className="card">
       <h2 className="font-semibold mb-3">Төлбөр авах</h2>
@@ -59,13 +73,41 @@ export default function PaymentPanel({
             <Badge value={selected.status} />
           </div>
           <div className="grid grid-cols-2 gap-2 text-sm bg-surface-muted/30 rounded-lg p-3">
-            <span className="text-slate-400">Орсон цаг</span><span className="font-mono text-right">{fmtDate(selected.entry_time)}</span>
+            <span className="text-slate-400">Орсон цаг</span>
+            <span className="font-mono text-right">
+              {fmtDate(selected.entry_time)}
+              {/* Аль камерт уншуулж орсон/гарсан — 2+2 эгнээтэй зогсоолд машин
+                  аль хаалтан дээр байгааг оператор шууд харна (2026-09-14) */}
+              {selected.entry_device_name && (
+                <span className="block text-[10px] font-sans text-slate-500">{selected.entry_device_name}</span>
+              )}
+            </span>
+            {selected.exit_device_name && (
+              <>
+                <span className="text-slate-400">Гарах хаалт</span>
+                <span className="text-right text-xs text-sky-300">{selected.exit_device_name}
+                  {selected.exit_lane_no ? <span className="text-slate-500"> · эгнээ {selected.exit_lane_no}</span> : null}
+                </span>
+              </>
+            )}
             <span className="text-slate-400">Хугацаа</span><span className="font-mono text-right">{fmtDur(fee?.duration_minutes)}</span>
             <span className="text-slate-400">Үндсэн дүн</span><span className="font-mono text-right">{fmt(fee?.base_fee)}₮</span>
             <span className="text-slate-400">Хөнгөлөлт</span><span className="font-mono text-right text-cyan-400">-{fmt(fee?.discount_amount)}₮</span>
             <span className="text-slate-400">НӨАТ (10%)</span><span className="font-mono text-right">{fmt(fee?.vat_amount)}₮</span>
-            <span className="text-slate-300 font-semibold">Нийт дүн</span>
+            <span className="text-slate-300 font-semibold">Одоогийн зогсолт</span>
             <span className="font-mono text-right text-xl font-bold text-accent">{fmt(fee?.total_fee)}₮</span>
+            {/* ӨМНӨХ ӨР (төлөгдөөгүй нөхөн төлбөр) — одоогийн зогсолтын дүнгээс ТУСАД НЬ.
+                QR/касс төлөхөд нийлүүлж нэхэмжлэгдэнэ; өмнө нь дүн нь огт харагддаггүй байв */}
+            {selected.debt?.amount > 0 && (
+              <>
+                <span className="text-red-300">Өмнөх өр{selected.debt.count > 1 ? ` (${selected.debt.count})` : ''}</span>
+                <span className="font-mono text-right text-red-300 font-semibold">+{fmt(selected.debt.amount)}₮</span>
+                <span className="text-slate-300 font-semibold">Нийт төлөх</span>
+                <span className="font-mono text-right text-lg font-bold text-amber-300">
+                  {fmt((Number(selected.amount_due ?? fee?.total_fee) || 0) + Number(selected.debt.amount))}₮
+                </span>
+              </>
+            )}
             {/* Төлснөөс хойш зогссоор байгаа машин: өмнө төлсөн дүнг хасаад
                 зөвхөн ҮЛДЭГДЛИЙГ нэхэмжилнэ (grace хэтэрсэн тохиолдол) */}
             {selected.paid_total > 0 && (
@@ -79,9 +121,11 @@ export default function PaymentPanel({
           </div>
           {/* Камерын зураг — машин таарч байгааг нүдээр баталгаажуулна */}
           <div className="grid grid-cols-2 gap-2">
-            <SnapshotImg sessionId={selected.id} kind="entry" label="Орох зураг"
+            <SnapshotImg sessionId={selected.id} kind="entry"
+              label={`Орох зураг${selected.entry_device_name ? ` · ${selected.entry_device_name}` : ''}`}
               eventTime={selected.entry_time} />
-            <SnapshotImg sessionId={selected.id} kind="exit" label="Гарах зураг"
+            <SnapshotImg sessionId={selected.id} kind="exit"
+              label={`Гарах зураг${selected.exit_device_name ? ` · ${selected.exit_device_name}` : ''}`}
               eventTime={selected.exit_time || selected.updated_at} />
           </div>
           <Field label="Хөнгөлөлт хэрэглэх">
@@ -109,8 +153,13 @@ export default function PaymentPanel({
                 : <span className="text-amber-400">данс тохируулаагүй — Тохиргоо → Зогсоол → Засах</span>}
             </div>
           )}
-          {canAct && (
-            <div className={`grid gap-2 ${canTransfer && showCash ? 'grid-cols-3' : 'grid-cols-2'}`}>
+          {selected.status === 'CLOSED' && selected.paid_at && (
+            <div className="text-xs text-emerald-300 bg-emerald-500/10 rounded-lg px-3 py-2">
+              Төлбөр төлөгдөж хаагдсан бүртгэл — хаалт нээгдээгүй бол «Төлөөд нээгдээгүй» дарна уу
+            </div>
+          )}
+          {canAct && payable && (
+            <div className={`grid gap-2 ${payCols}`}>
               {/* Online operator: Бэлнээрийн ОРОНД Дансаар (шилжүүлэг) товч */}
               {canTransfer && (
                 <button onClick={() => onPay('TRANSFER')} disabled={busy || fee?.is_free} className="btn-primary justify-center">
@@ -123,9 +172,33 @@ export default function PaymentPanel({
                   <Banknote size={16} /> Бэлнээр
                 </button>
               )}
-              <button onClick={() => onPay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
-                <QrCode size={16} /> QPay
-              </button>
+              {/* QPay QR — жолооч хаалтан дээрх QR-ыг өөрөө уншуулдаг тул операторт
+                  хэрэггүй (2026-09-14: OPERATOR/ONLINE_OPERATOR-т нуусан, POS/админд үлдээв) */}
+              {showQpay && (
+                <button onClick={() => onPay('QPAY')} disabled={busy || fee?.is_free} className="btn-secondary justify-center">
+                  <QrCode size={16} /> QPay
+                </button>
+              )}
+            </div>
+          )}
+          {/* Онцгой гаргалт — free_exit эрхгүй оператор/POS-ийн явцуу урсгал:
+              дарахад гарах камераас зураг авч баталгаажуулаад л гаргана */}
+          {canAct && kindsFor(specialKinds || []).length > 0 && (
+            <div className={`grid gap-2 ${COLS[Math.min(kindsFor(specialKinds).length, 4)] || 'grid-cols-2'}`}>
+              {kindsFor(specialKinds).map((k) => {
+                const b = SPECIAL_BTN[k]
+                if (!b) return null
+                const Icon = b.Icon
+                const paidOnly = k === 'paid_no_open'
+                return (
+                  <button key={k} onClick={() => onSpecialExit(k)}
+                    disabled={busy || (paidOnly && !selected.paid_at)}
+                    title={paidOnly && !selected.paid_at ? 'Төлбөр төлөгдсөн машинд л' : 'Гарах камераас зураг авч баталгаажуулна'}
+                    className={`btn-secondary justify-center text-xs ${b.cls}`}>
+                    <Icon size={14} /> {b.label}
+                  </button>
+                )
+              })}
             </div>
           )}
           {fee?.is_free && (
@@ -133,7 +206,7 @@ export default function PaymentPanel({
               Төлбөргүй: {fee.reason || 'Үнэгүй хугацаанд байна'}
             </div>
           )}
-          {canAct && canFreeExit && (
+          {canAct && canFreeExit && payable && (
             <button onClick={onManualExit} className="btn-secondary w-full justify-center text-xs">
               <DoorOpen size={14} /> Гараар гаргах (төлбөргүй)
             </button>

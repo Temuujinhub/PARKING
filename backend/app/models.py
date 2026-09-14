@@ -347,6 +347,10 @@ class ParkingSession(Base):
     paid_from_wallet = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     entry_snapshot = Column(String(255), nullable=True)  # орох камерын зураг (snapshot_dir доторх зам)
     exit_snapshot = Column(String(255), nullable=True)   # гарах камерын зураг
+    # Оператор/POS «онцгой гаргалт» (ХБИ, түргэн/цагдаа, бүртгэлгүй, төлөөд
+    # нээгдээгүй) хийхийн ӨМНӨ гарах камераас гараар авсан баталгаажуулах зураг —
+    # free_exit эрхгүй операторын гаргалтын нотолгоо (2026-09-14).
+    verify_snapshot = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

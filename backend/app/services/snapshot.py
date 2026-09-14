@@ -316,6 +316,51 @@ async def _wait_event_snapshot(session_id: str, lane_dir: str) -> bool:
     return False
 
 
+def image_channel_alive(ip: str) -> bool:
+    """Энэ камераас event зураг ӨӨРӨӨ ирэх боломжтой юу — ямар нэг зургийн
+    суваг (CGI стрим / comet / WS) АМЬД байна уу.
+
+    2026-09-14: зогсоолуудаас «event бүрд давхар Manual Snapshot үүсгэж байна»
+    гэсэн гомдол. Шалтгаан: snapshot.cgi-г хойшлуулах эсэхийг «сүүлийн 30 мин /
+    1 цагт зураг ӨГСӨН үү» гэж хэмждэг байсан тул шөнийн чимээгүй байдлын дараах
+    ЭХНИЙ машин, backend дахин ассаны дараах эхний машин бүрд суваг холбоотой
+    атлаа snapshot.cgi ШУУД дуудагдаж, дараа нь comet-ийн жинхэнэ зураг давхар
+    ирдэг байв. Одоо сувгийн ХОЛБОЛТ (attach) амьд бол зураг өгсөн түүхгүй ч
+    хүлээнэ; суваггүй камерт зан төлөв хэвээр (шууд snapshot.cgi — тэнд өөр
+    зам байхгүй, хойшлуулбал машин өнгөрчихнө)."""
+    if not ip:
+        return False
+    if stream_delivers(ip):
+        return True
+    from .snap_puller import comet_attached, puller_delivers
+    return comet_attached(ip) or puller_delivers(ip)
+
+
+async def _wait_camera_image(session_id: str, camera_ip: str, lane_dir: str,
+                             t0: float) -> tuple[bytes, str] | None | bool:
+    """Камерын ӨӨРИЙН event зургийг НЭГ цонхонд (snapshot_wait_event_sec) хүлээнэ:
+    стримийн санамж (offer_stream_image) ба session-д аль хэдийн холбогдсон
+    эсэх (comet/WS _attach_to_session) хоёуланг нь ээлжлэн шалгана.
+      • (bytes, src) — стримээс зураг ирлээ, дуудагч хадгална
+      • True         — өөр суваг session-д аль хэдийн холбочихсон, хийх зүйлгүй
+      • None         — цонх дуустал юу ч ирсэнгүй → snapshot.cgi fallback"""
+    import time as _time
+    deadline = _time.monotonic() + max(settings.snapshot_wait_event_sec,
+                                       settings.snapshot_stream_wait_sec)
+    tick = 0
+    while True:
+        item = _stream_images.get(camera_ip)
+        if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
+            _stream_images.pop(camera_ip, None)
+            return item[1], item[2]
+        tick += 1
+        if tick % 4 == 0 and await _snapshot_written(session_id, lane_dir):
+            return True
+        if _time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(0.25)
+
+
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                              lane_dir: str, raw: dict,
                              creds: tuple[str, str] | None = None):
@@ -323,29 +368,52 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
     t0 = _time.monotonic()
     data = _payload_picture(raw)
     source = "payload"
+    # Логоос НӨХСӨН (log_tail) event: машин аль хэдийн өнгөрсөн тул амьд кадр
+    # (snapshot.cgi) нь тэр машин биш — хуурамч нотолгоо + камер дээр илүүц
+    # Manual Snapshot. Payload-д зураг байхгүй бол зураггүй үлдээнэ.
+    if data is None and isinstance(raw, dict) and raw.get("log_tail"):
+        return
+    # Энэ session-д (энэ чиглэлд) зураг АЛЬ ХЭДИЙН байвал юу ч хийхгүй — гарах
+    # хаалтан дээр төлбөр хүлээж зогссон машин dedup цонхны дараа ДАХИН уншигдах
+    # бүрд snapshot.cgi дуудагдаж, дараа нь «аль хэдийн бий» гээд хаядаг байв
+    # (камер дээр Manual Snapshot бичлэг л үлддэг байсан).
+    if data is None and await _snapshot_written(session_id, lane_dir):
+        return
     if data is None and camera_ip:
-        # 1) CGI event стримээр камер өөрөө илгээсэн ЖИНХЭНЭ event кадр. Энэ нь
-        #    хамгийн зөв зураг: машин яг хаалганы өмнө байх агшны кадр бөгөөд
-        #    камер дээр ямар ч нэмэлт бичлэг үүсгэхгүй.
-        got = await _take_stream_image(camera_ip, t0)
-        if got is not None:
-            data, source = got
-    if data is None and camera_ip:
-        # 2) Энэ камер event зургаа WS-ээр өгдөг нь батлагдсан бол түүнийг хүлээнэ.
-        from .snap_puller import puller_delivers
-        if settings.snapshot_wait_event_sec > 0 and puller_delivers(camera_ip):
-            if await _wait_event_snapshot(session_id, lane_dir):
-                log.info(f"{plate} {lane_dir}: WS event зураг ирлээ — snapshot.cgi алгасав")
+        if image_channel_alive(camera_ip):
+            # 1) Камер ӨӨРӨӨ зургаа илгээх суваг амьд — түүнийг НЭГ цонхонд
+            #    хүлээнэ (CGI стрим/comet санамж + comet/WS-ийн session холболт).
+            #    Энэ нь хамгийн зөв зураг: машин яг хаалганы өмнө байх агшны
+            #    кадр бөгөөд камер дээр ямар ч нэмэлт бичлэг үүсгэхгүй.
+            got = await _wait_camera_image(session_id, camera_ip, lane_dir, t0)
+            if got is True:
+                log.info(f"{plate} {lane_dir}: event зураг сувгаар ирлээ — snapshot.cgi алгасав")
                 return
-            log.info(f"{plate} {lane_dir}: WS зураг {settings.snapshot_wait_event_sec:.0f}с-д "
-                     f"ирсэнгүй — snapshot.cgi fallback")
-        # 3) Эцсийн арга — snapshot.cgi. Энэ нь камер дээр «Manual Snapshot»
+            if got is not None:
+                data, source = got
+            else:
+                log.info(f"{plate} {lane_dir}: суваг амьд ч зураг "
+                         f"{max(settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec):.0f}с-д "
+                         f"ирсэнгүй — snapshot.cgi fallback")
+        else:
+            # Суваггүй камер: хүлээх утгагүй (хойшлуулбал машин өнгөрнө) —
+            # хуучин зан төлөв, стримийн санамжид санамсаргүй зураг байвал авна
+            got = await _take_stream_image(camera_ip, t0)
+            if got is not None:
+                data, source = got
+    if data is None and camera_ip:
+        # 2) Эцсийн арга — snapshot.cgi. Энэ нь камер дээр «Manual Snapshot»
         #    бичлэг үүсгэдэг БӨГӨӨД амьд кадр тул машин аль хэдийн өнгөрсөн байж
         #    болно. Стримийн зураг ажиллаж эхэлсэн зогсоолд .env-ээс
         #    PARKING_SNAPSHOT_CGI_FALLBACK=false гэж бүрмөсөн унтраана.
         if not settings.snapshot_cgi_fallback:
             log.info(f"{plate} {lane_dir}: event зураг ирсэнгүй, snapshot.cgi унтраалттай "
                      f"— зураггүй үлдлээ (камер {camera_ip})")
+            return
+        # Хүлээх хугацаанд өөр суваг холбочихсон байж болно — сүүлчийн шалгалт
+        # snapshot.cgi-г дуудахаас ӨМНӨ (өмнө нь ДАРАА нь шалгаад хаядаг байв)
+        if await _snapshot_written(session_id, lane_dir):
+            log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — snapshot.cgi алгасав")
             return
         data = await _fetch_from_camera(camera_ip, creds)
         source = "snapshot.cgi"

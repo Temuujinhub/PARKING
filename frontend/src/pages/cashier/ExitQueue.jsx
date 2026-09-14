@@ -25,7 +25,14 @@ export default function ExitQueue({ exits, selected, onSelect, onRefresh }) {
             </div>
             <div className="text-xs text-slate-500 mt-1">
               Орсон: {fmtDate(s.entry_time)} · {fmtDur(s.fee?.duration_minutes ?? s.duration_minutes)}
-              {s.has_debt && <span className="text-red-400 font-medium"> · ⚠ Нөхөн төлбөрийн өртэй!</span>}
+              {/* Аль гарах камерт уншигдсан — 2+2 эгнээтэй зогсоолд машин аль хаалтан дээр байгааг харна */}
+              {s.exit_device_name && (
+                <span className="text-sky-300"> · {s.exit_device_name}</span>
+              )}
+              {/* Өмнөх өр — одоогийн зогсолтын дүнгээс тусад нь */}
+              {s.has_debt && (
+                <span className="text-red-400 font-medium"> · ⚠ өр {s.debt?.amount ? `${fmt(s.debt.amount)}₮` : 'бий'}</span>
+              )}
             </div>
           </button>
         ))}
