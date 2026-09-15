@@ -1132,6 +1132,25 @@ def revoke_partner_key(key_id: str, db: Session = Depends(get_db),
     return {"ok": True}
 
 
+@router.post("/partner-keys/{key_id}/restore")
+def restore_partner_key(key_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Санамсаргүй хаасан түлхүүрийг СЭРГЭЭНЭ — түлхүүрийн хэш DB-д хэвээр тул
+    партнер ижил түлхүүрээрээ үргэлжлүүлнэ (2026-09-15: админ ardwallet-ийг
+    андуурч хаасан, өөр хүмүүс тэр түлхүүрээр тест хийж байсан)."""
+    from ..models import PartnerKey
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    if k.is_active:
+        return {"ok": True, "already": True}
+    k.is_active = True
+    k.revoked_at = None
+    _audit(db, user, "UPDATE", "partner_key", key_id, {"action": "restore", "name": k.name})
+    db.commit()
+    return {"ok": True}
+
+
 @router.put("/sites/{site_id}/tariff")
 def update_site_tariff(site_id: str, body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("settings", "discounts"))):

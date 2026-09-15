@@ -846,10 +846,21 @@ function PartnerApiPanel() {
   }
 
   const revoke = async (k) => {
-    if (!confirm(`«${k.name}» түлхүүрийг хаах уу? Тэр дороо хүчингүй болно, буцаахгүй.`)) return
+    // Нэрийг нь бичүүлж баталгаажуулна — 2026-09-15 админ ardwallet-ийг андуурч хаасан
+    // (өөр хүмүүс тэр түлхүүрээр тест хийж байсан). Хаасныг «Сэргээх»-ээр буцааж болно.
+    const typed = prompt(`«${k.name}» түлхүүрийг ХААХ гэж байна — партнер тэр дороо ажиллахаа болино.\nБаталгаажуулахын тулд партнерын нэрийг бичнэ үү:`)
+    if (typed === null) return
+    if (typed.trim() !== k.name) { toast('Нэр таарсангүй — хаагдсангүй', 'error'); return }
     try {
       await api(`/api/admin/partner-keys/${k.id}/revoke`, { method: 'POST' })
       toast('Хаагдлаа'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const restore = async (k) => {
+    if (!confirm(`«${k.name}» түлхүүрийг сэргээх үү? Партнер хуучин түлхүүрээрээ дахин ажиллана.`)) return
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/restore`, { method: 'POST' })
+      toast('Сэргээгдлээ'); load()
     } catch (err) { toast(err.message, 'error') }
   }
 
@@ -898,9 +909,13 @@ function PartnerApiPanel() {
                   ? <span className="text-accent text-xs">Идэвхтэй</span>
                   : <span className="text-red-400 text-xs">Хаагдсан</span>}</td>
                 <td className="td text-right">
-                  {k.is_active && (
+                  {k.is_active ? (
                     <button className="btn-secondary py-1 text-xs text-red-400 hover:text-red-300"
                       onClick={() => revoke(k)}>Хаах</button>
+                  ) : (
+                    <button className="btn-secondary py-1 text-xs text-emerald-400 hover:text-emerald-300"
+                      title="Санамсаргүй хаасан бол — ижил түлхүүрээр дахин ажиллана"
+                      onClick={() => restore(k)}>Сэргээх</button>
                   )}
                 </td>
               </tr>
