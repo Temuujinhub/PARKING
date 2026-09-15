@@ -1008,9 +1008,11 @@ def msgbill_global_put(body: dict, db: Session = Depends(get_db),
 
 
 # ─────────── Холболт: гадаад API-ийн партнер түлхүүрүүд ───────────
+# Партнерын түлхүүрийн удирдлага — 2026-09-15-аас ADMIN эрхэд ч нээлттэй
+# (Тэмүүжин: «супер админтай адил болго, тест үүсгэж ажил явагдаж байх хэрэгтэй»).
 @router.get("/partner-keys")
 def list_partner_keys(db: Session = Depends(get_db),
-                      user: User = Depends(require_role("SUPER_ADMIN"))):
+                      user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """DB-ийн түлхүүрүүд + .env-ийн хуучин партнерууд (зөвхөн нэрс).
     Түлхүүр өөрөө хэзээ ч буцаагдахгүй — үүсгэх мөчид л нэг удаа ил гарна."""
     from ..models import PartnerKey
@@ -1035,7 +1037,7 @@ def list_partner_keys(db: Session = Depends(get_db),
 
 @router.post("/partner-keys")
 def create_partner_key(body: dict, db: Session = Depends(get_db),
-                       user: User = Depends(require_role("SUPER_ADMIN"))):
+                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Шинэ түлхүүр үүсгэнэ. body: {name, scopes?, site_id?}.
     Түлхүүр ЗӨВХӨН энэ хариултад ил гарна — DB-д sha256 hash нь л үлдэнэ."""
     import hashlib
@@ -1064,7 +1066,7 @@ def create_partner_key(body: dict, db: Session = Depends(get_db),
 
 @router.post("/partner-keys/{key_id}/webhook")
 def set_partner_webhook(key_id: str, body: dict, db: Session = Depends(get_db),
-                        user: User = Depends(require_role("SUPER_ADMIN"))):
+                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Түншийн webhook URL (төлбөр + e-Barimt мэдэгдэл POST хийх). body: {url} — хоосон = унтраах."""
     from ..models import PartnerKey
     k = db.get(PartnerKey, key_id)
@@ -1081,7 +1083,7 @@ def set_partner_webhook(key_id: str, body: dict, db: Session = Depends(get_db),
 
 @router.post("/partner-keys/{key_id}/webhook/test")
 async def test_partner_webhook(key_id: str, body: dict | None = None, db: Session = Depends(get_db),
-                               user: User = Depends(require_role("SUPER_ADMIN"))):
+                               user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Webhook-ийг ТУРШИНА: сүүлийн бодит төлбөрийн (эсвэл жишээ) payload-ыг илгээж
     түншийн сервер хүлээж авч байгаа эсэхийг (HTTP код, хариу) буцаана."""
     from ..models import PartnerKey, Payment
@@ -1114,7 +1116,7 @@ async def test_partner_webhook(key_id: str, body: dict | None = None, db: Sessio
 
 @router.post("/partner-keys/{key_id}/revoke")
 def revoke_partner_key(key_id: str, db: Session = Depends(get_db),
-                       user: User = Depends(require_role("SUPER_ADMIN"))):
+                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Түлхүүрийг хаана — тэр дороо хүчингүй (restart шаардлагагүй). Буцаахгүй:
     санамсаргүй хаасан бол шинэ түлхүүр үүсгэж партнерт өгнө."""
     from ..models import PartnerKey

@@ -808,8 +808,9 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
 function PartnerApiPanel() {
   const toast = useToast()
   const { user } = useAuth()
-  const isSuper = user?.role === 'SUPER_ADMIN'
-  const [data, setData] = useState(null)      // супер: {keys, env_partners}
+  // 2026-09-15: түлхүүр үүсгэх/хаах/webhook — ADMIN эрхэд ч нээлттэй (супер админтай адил)
+  const isSuper = user?.role === 'SUPER_ADMIN' || user?.role === 'ADMIN'
+  const [data, setData] = useState(null)      // админ/супер: {keys, env_partners}
   const [partners, setPartners] = useState(null)  // энгийн админ: зөвхөн нэрс
   const [sites, setSites] = useState([])
   const [createOpen, setCreateOpen] = useState(false)
@@ -938,7 +939,7 @@ function PartnerApiPanel() {
                 </div>
               )}
           <p className="text-[11px] text-slate-500">
-            Түлхүүрийн удирдлага зөвхөн Супер админд байдаг.
+            Түлхүүрийн удирдлага Админ/Супер админ эрхэд байдаг.
           </p>
         </div>
       )}
