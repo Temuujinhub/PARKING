@@ -777,6 +777,7 @@ def payment_accounts(db: Session = Depends(get_db),
     ADMIN мөн харна, гэхдээ хамрах хүрээгээрээ: «Хариуцах зогсоолууд» эсвэл
     түрээслэгчээр хязгаарлагдсан админ зөвхөн өөрийн зогсоолууд болон тэдгээрийн
     түрээслэгчдийн дансыг харна (өөр түрээслэгчийн merchant задрахгүй)."""
+    from ..models import PartnerKey as _PartnerKey
     from ..services import msgbill as _msgbill
 
     def _own_pair(obj) -> bool:
@@ -871,7 +872,12 @@ def payment_accounts(db: Session = Depends(get_db),
         "bank_accounts": bank_accounts,
         # Гадаад API-ийн партнерууд — зөвхөн НЭРС. АНХААР: partner_map нь
         # {api_key: нэр} тул .keys() нь ТҮЛХҮҮРИЙГ задлана — заавал .values()!
-        "partners": sorted(set(settings.partner_map().values())),
+        # DB-ийн идэвхтэй түлхүүрүүдийн нэрийг ч нэмнэ (2026-09-15): энгийн АДМИН
+        # Холболт → Гадаад API дээр «Партнер бүртгэгдээгүй» гэж хардаг байсан —
+        # UI-аас үүсгэсэн түлхүүрүүд DB-д байдаг тул .env нэрсээр л хайвал хоосон.
+        "partners": sorted(set(settings.partner_map().values())
+                           | {k.name for k in db.query(_PartnerKey.name)
+                              .filter(_PartnerKey.is_active.is_(True)).all()}),
         # e-Barimt сувгуудын бодит байдал (карт дээр харуулна):
         #   QR (QPay) → QPay e-Barimt 3.0 (qpay_mock бол mock)
         #   бэлэн/карт/дансаар → msgbill (түлхүүртэй зогсоол) → PosAPI (mock=false үед) → суваг байхгүй
