@@ -2,6 +2,7 @@
 import os
 import threading
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine, event, text
@@ -108,9 +109,11 @@ def test_upgrade_legacy_rows_backfills_once_without_guessing_company_owner(engin
         db.add_all([session,contact]);db.commit();sid=session.id;cid=contact.id
     # Simulate the schema from before this release, not merely an empty database.
     with engine.begin() as c:
-        for col in ['payment_wait_started_at','last_exit_seen_at','payment_quote_until','payment_quote']:
+        for col in ['payment_wait_started_at','last_exit_seen_at','payment_quote_until','payment_quote',
+                    'entry_snapshot_source','exit_snapshot_source']:
             c.execute(text(f'ALTER TABLE parking_sessions DROP COLUMN {col}'))
-        c.execute(text('ALTER TABLE payments DROP COLUMN fee_snapshot'))
+        for col in ['fee_snapshot','provider_tx_key','partner_key_id']:
+            c.execute(text(f'ALTER TABLE payments DROP COLUMN {col}'))
         c.execute(text('ALTER TABLE company_contacts DROP COLUMN owner_scope CASCADE'))
         c.execute(text('ALTER TABLE company_invoices DROP COLUMN owner_scope CASCADE'))
         c.execute(text('ALTER TABLE company_contacts ADD CONSTRAINT company_contacts_company_key UNIQUE (company)'))
@@ -189,7 +192,7 @@ def test_checkout_session_reservation_is_nowait(engine):
     migrations.run_migrations()
     with Session(engine) as db:
         site=M.ParkingSite(name='Concurrent',site_code='CONCURRENT');db.add(site);db.flush()
-        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА');db.add(s);db.commit();sid=s.id
+        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА',entry_time=datetime.utcnow());db.add(s);db.commit();sid=s.id
     with Session(engine) as first, Session(engine) as second:
         lock_session(first,sid)
         with pytest.raises(HTTPException) as error:lock_session(second,sid)
@@ -203,7 +206,7 @@ def test_snapshot_cas_rejects_stale_writer(engine,monkeypatch):
     migrations.run_migrations()
     with Session(engine) as db:
         site=M.ParkingSite(name='Pictures',site_code='PICTURES');db.add(site);db.flush()
-        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА');db.add(s);db.commit();sid=s.id
+        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА',entry_time=datetime.utcnow());db.add(s);db.commit();sid=s.id
     with Session(engine) as first, Session(engine) as second:
         a=first.get(M.ParkingSession,sid);b=second.get(M.ParkingSession,sid)
         assert attach_saved(first,a,'entry','one.jpg','comet')
