@@ -560,6 +560,13 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
     }
 
 
+async def cancel_invoice(invoice_id: str, acc: QpayAccount | None = None) -> None:
+    acc = acc or global_account()
+    if not acc.mock:
+        from urllib.parse import quote
+        await _api("DELETE", f"/invoice/{quote(invoice_id, safe='')}", acc, timeout=15.0)
+
+
 async def check_payment(invoice_id: str, acc: QpayAccount | None = None) -> dict:
     """POST /v2/payment/check — invoice-ийн төлбөр төлөгдсөн эсэх (webhook ирээгүй үед polling).
     Хариу: paid, paid_amount, count, rows, payment_id (эхний төлбөрийн g_payment_id — ebarimt-д)."""

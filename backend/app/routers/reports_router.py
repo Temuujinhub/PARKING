@@ -1113,13 +1113,13 @@ def site_sessions_excel(site_id: str, date_from: str | None = None, date_to: str
 
 @router.get("/shifts/excel")
 def shifts_excel(date_from: str | None = None, date_to: str | None = None,
-                 db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+                 site_id: str | None = None, db: Session = Depends(get_db), user: User = Depends(require("reports"))):
     """Касс хаалтын тайлангийн Excel."""
     from ..models import CashierShift
     start, end = _range(date_from, date_to)
     shifts = (_flt(db.query(CashierShift).filter(CashierShift.opened_at >= start,
                                                  CashierShift.opened_at < end),
-                   CashierShift.site_id, _scope(user))
+                   CashierShift.site_id, _scope(user, site_id))
               .order_by(CashierShift.opened_at.desc()).limit(2000).all())
     return _excel.shifts_excel(db, shifts)
 

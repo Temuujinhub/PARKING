@@ -35,7 +35,6 @@ from .routers import (
 )
 from .ws import manager
 
-Base.metadata.create_all(bind=engine)
 
 from .migrations import run_migrations  # noqa: E402
 run_migrations()
@@ -79,7 +78,14 @@ for r in (auth_router, lpr_router, admin_router, sessions_router, payments_route
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "app": settings.app_name}
+    from fastapi import HTTPException
+    from .migrations import check_ready
+    try:
+        ready = check_ready()
+    except Exception:
+        log.exception("readiness failed")
+        raise HTTPException(503, "Database/schema not ready")
+    return {"status": "ok", "app": settings.app_name, **ready}
 
 
 # Асаалттай background task-ууд — shutdown дээр ЦЭВЭР зогсоохын тулд хөтөлнө
@@ -307,10 +313,5 @@ async def stop_background_tasks():
 async def ws_site(websocket: WebSocket, site_id: str):
     """Real-time events: dashboard, касс, PAX терминал холбогдоно.
     site_id="all" бол бүх зогсоолын event сонсоно."""
-    key = "*" if site_id == "all" else site_id
-    await manager.connect(websocket, key)
-    try:
-        while True:
-            await websocket.receive_text()  # ping/pong
-    except WebSocketDisconnect:
-        await manager.disconnect(websocket, key)
+    from .ws import serve_site_socket
+    await serve_site_socket(websocket, site_id)

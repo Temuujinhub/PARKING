@@ -331,6 +331,10 @@ class ParkingSession(Base):
     total_fee = Column(Numeric(12, 2), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
+    payment_wait_started_at = Column(DateTime, nullable=True)
+    last_exit_seen_at = Column(DateTime, nullable=True)
+    payment_quote_until = Column(DateTime, nullable=True)
+    payment_quote = Column(JSON, nullable=True)
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
     # Дүн ЦАРЦСАН session: total_fee-г тарифаас ДАХИН бодохгүй, хадгалсан дүнг
     # хэрэглэнэ. Орох уншилтгүй машины суурь хураамж (exit_rules.no_session_fee)
@@ -399,6 +403,7 @@ class Payment(Base):
     qr_text = Column(Text, nullable=True)
     deep_link = Column(Text, nullable=True)
     raw_payload = Column(JSON, nullable=False, default=dict)
+    fee_snapshot = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     session = relationship("ParkingSession", lazy="joined")
@@ -588,7 +593,9 @@ class CompanyContact(Base):
     (registered_drivers.company нь энгийн текст тул харилцахыг эндээс хөтөлнө.)"""
     __tablename__ = "company_contacts"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
-    company = Column(String(160), nullable=False, unique=True)
+    company = Column(String(160), nullable=False)
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
+    __table_args__ = (UniqueConstraint("owner_scope", "company", name="uq_contact_owner_company"),)
     email = Column(String(120), default="")
     register = Column(String(20), default="")   # ТТД (e-Barimt-д хэрэглэж болно)
     # Төлбөрийн горим: POSTPAID=сарын эцэст (өмнөх сарын нэхэмжлэл 1-нд),
@@ -606,6 +613,7 @@ class CompanyInvoice(Base):
     __tablename__ = "company_invoices"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     invoice_no = Column(String(40), unique=True, nullable=False)   # INV-202608-003
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
     period = Column(String(7), nullable=False, index=True)         # "2026-08"
     company = Column(String(160), nullable=False)
     car_count = Column(Integer, nullable=False, default=0)
@@ -620,7 +628,7 @@ class CompanyInvoice(Base):
     note = Column(Text, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    __table_args__ = (UniqueConstraint("period", "company", name="uq_invoice_period_company"),)
+    __table_args__ = (UniqueConstraint("period", "owner_scope", "company", name="uq_invoice_period_owner_company"),)
 
 
 class PartnerKey(Base):

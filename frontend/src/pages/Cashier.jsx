@@ -34,10 +34,22 @@ export default function Cashier() {
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
   const [blAlert, setBlAlert] = useState(null) // хар жагсаалтын машин орж ирсэн анхааруулга
 
+  const currentSite = useRef(siteId)
+  currentSite.current = siteId
+  const loadGeneration = useRef(0)
+  const searchGeneration = useRef(0)
   const loadExits = useCallback((sid) => {
-    if (!sid) return
-    api(`/api/sessions/recent-exits?site_id=${sid}`).then(setExits).catch(() => {})
-    api(`/api/sessions/today-exits?site_id=${sid}`).then(setOverview).catch(() => {})
+    if (!sid || sid !== currentSite.current) return
+    const generation = ++loadGeneration.current
+    const current = () => generation === loadGeneration.current && sid === currentSite.current
+    api(`/api/sessions/recent-exits?site_id=${sid}`).then((rows) => {
+      if (!current()) return
+      setExits(rows)
+      setSelected((old) => old ? rows.find((r) => r.id === old.id) || old : null)
+    }).catch(() => {})
+    api(`/api/sessions/today-exits?site_id=${sid}`).then((data) => {
+      if (current()) setOverview(data)
+    }).catch(() => {})
   }, [])
   const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => {})
 
@@ -55,6 +67,11 @@ export default function Cashier() {
   }, [user])
 
   useEffect(() => {
+    setSelected(null); setQpayInfo(null); setSearchPlate(''); setSearchResults(null)
+    setExits([]); setOverview(null); setBlAlert(null); setManualEntry(null)
+    setFreeExit(false); setSpecialKind(null)
+    clearTimeout(searchDebounce.current)
+    searchGeneration.current += 1
     if (!siteId) return
     loadExits(siteId)
     const close = wsConnect(siteId, (ev) => {
@@ -68,19 +85,24 @@ export default function Cashier() {
         setBlAlert({ ...ev.data, at: new Date().toISOString() })
       }
     })
-    return close
+    const poll = setInterval(() => loadExits(siteId), 15000)
+    return () => { close(); clearInterval(poll); loadGeneration.current += 1 }
   }, [siteId, loadExits])
 
   const search = async (q) => {
+    const generation = ++searchGeneration.current
+    const sid = siteId
     const value = (q ?? searchPlate).trim()
     if (value.length < 2) { setSearchResults(null); return }
     try {
-      setSearchResults(await api(`/api/sessions/check?plate=${encodeURIComponent(value)}&site_id=${siteId}`))
+      const rows = await api(`/api/sessions/check?plate=${encodeURIComponent(value)}&site_id=${sid}`)
+      if (generation === searchGeneration.current && sid === currentSite.current) setSearchResults(rows)
     } catch (e) { toast(e.message, 'error') }
   }
 
   // Live хайлт: эхний 2+ тэмдэгт бичихэд таарах машинууд шууд гарна
   const onSearchChange = (value) => {
+    searchGeneration.current += 1
     const v = value.toUpperCase()
     setSearchPlate(v)
     clearTimeout(searchDebounce.current)
@@ -89,6 +111,9 @@ export default function Cashier() {
   }
 
   const pay = async (method) => {
+    if (!selected || selected.site_id !== siteId) {
+      toast('Энэ зогсоолын машиныг дахин сонгоно уу.', 'error'); return
+    }
     if (!selected) return
     // Дансаар: оператор шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасныг баталгаажуулна
     if (method === 'TRANSFER') {
@@ -265,7 +290,7 @@ export default function Cashier() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Касс</h1>
         <div className="flex items-center gap-3">
-          <select className="input w-56" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол сонгох">
+          <select className="input w-56" value={siteId} disabled={busy} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {testMode && (

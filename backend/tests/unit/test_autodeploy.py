@@ -21,6 +21,7 @@ def test_timer_retries_pending_release_and_respects_guards(tmp_path,pending,remo
     root = Path(__file__).resolve().parents[3]
     (tmp_path/'.git').mkdir()
     (tmp_path/'deploy').mkdir()
+    shutil.copyfile(root/'deploy/approved-release.sh', tmp_path/'deploy/approved-release.sh')
     (tmp_path/'deploy/update.sh').write_text('printf "%s" "$PARKING_DEPLOY_TARGET" > invoked\n')
     if pending:
         (tmp_path/'.git/parking-deploy-pending').write_text('old')
@@ -31,7 +32,8 @@ git() {
   case "$*" in
     "rev-parse --abbrev-ref HEAD") echo main;;
     "rev-parse HEAD") echo same;;
-    "rev-parse origin/main") echo "$TEST_REMOTE";;
+    "rev-parse origin/main^{commit}") echo "$TEST_REMOTE";;
+    "merge-base --is-ancestor "*) return 0;;
     "diff --quiet"|"diff --cached --quiet") return "$TEST_DIRTY";;
     "fetch origin main --quiet") return 0;;
     *) return 99;;
@@ -45,7 +47,7 @@ timeout() { shift; "$@"; }
     script = script.replace('/run/lock/parking-deploy.lock', '"$TEST_REPO/deploy.lock"')
     run = tmp_path/'timer-test.sh'
     run.write_text(prelude+script, encoding='utf-8', newline='\n')
-    env = dict(os.environ, TEST_REPO=tmp_path.as_posix(), TEST_REMOTE=remote,
+    env = dict(os.environ, PARKING_DEPLOY_ROLE='staging', TEST_REPO=tmp_path.as_posix(), TEST_REMOTE=remote,
                TEST_DIRTY=str(int(dirty)), TEST_LOCKED=str(int(locked)))
     result = subprocess.run([BASH, run.as_posix()], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr

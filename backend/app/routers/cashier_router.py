@@ -154,9 +154,8 @@ def hr_worked_days(month: str, db: Session = Depends(get_db), user: User = Depen
     """Хүний нөөц: тухайн сард (YYYY-MM) OPERATOR бүрийн ажилласан өдрүүд.
     Ажилласан өдөр = тухайн өдөр ээлж нээгдсэн (login-д суурилсан). Календарт харуулна."""
     from datetime import datetime as _dt
-    y, m = (int(x) for x in month.split("-"))
-    start = _dt(y, m, 1)
-    end = _dt(y + 1, 1, 1) if m == 12 else _dt(y, m + 1, 1)
+    from ..services.invoicing import month_range_utc
+    start, end = month_range_utc(month)
     ops = (db.query(User).filter(User.role.in_(("OPERATOR", "ONLINE_OPERATOR")),
                                  User.is_active.is_(True)).order_by(User.full_name).all())
     from ..auth import operator_sites
@@ -171,7 +170,7 @@ def hr_worked_days(month: str, db: Session = Depends(get_db), user: User = Depen
         shifts = db.query(CashierShift).filter(
             CashierShift.user_id == op.id, CashierShift.opened_at >= start,
             CashierShift.opened_at < end).all()
-        days = sorted({s.opened_at.strftime("%Y-%m-%d") for s in shifts})
+        days = sorted({(s.opened_at + timedelta(hours=8)).strftime("%Y-%m-%d") for s in shifts})
         out.append({"user_id": op.id, "name": op.full_name or op.username,
                     "username": op.username, "days_count": len(days), "days": days})
     return {"month": month, "operators": out}
@@ -188,10 +187,12 @@ def shift_report(date_from: str | None = None, date_to: str | None = None, site_
         q = q.filter(CashierShift.site_id == site_id)
     elif site_ids:
         q = q.filter(CashierShift.site_id.in_(site_ids))
+    from .reports_router import _range
+    start, end = _range(date_from, date_to)
     if date_from:
-        q = q.filter(CashierShift.opened_at >= datetime.fromisoformat(date_from))
+        q = q.filter(CashierShift.opened_at >= start)
     if date_to:
-        q = q.filter(CashierShift.opened_at < datetime.fromisoformat(date_to) + timedelta(days=1))
+        q = q.filter(CashierShift.opened_at < end)
     shifts = q.order_by(CashierShift.opened_at.desc()).limit(200).all()
     # Бүх ээлжийн provider-аар бүлэглэсэн дүнг НЭГ query-ээр (ээлж тус бүрт query хийхгүй)
     shift_ids = [s.id for s in shifts]

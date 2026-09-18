@@ -29,6 +29,7 @@ export default function EvCharge() {
   const [info, setInfo] = useState(null)
   const [plate, setPlate] = useState('')
   const [phone, setPhone] = useState('')
+  const [walletToken, setWalletToken] = useState('')
   const [wallet, setWallet] = useState(null)     // {plate, balance, wallet_token}
   const [amount, setAmount] = useState(10000)
   const [topup, setTopup] = useState(null)       // QPay invoice
@@ -45,8 +46,9 @@ export default function EvCharge() {
   const lookup = async () => {
     setError(''); setBusy(true)
     try {
-      const w = await publicApi(`/api/public/ev/${key}/lookup`, { method: 'POST', body: { plate, phone } })
+      const w = await publicApi(`/api/public/ev/${key}/lookup`, { method: 'POST', body: { plate, phone, wallet_token: walletToken || localStorage.getItem(`ev-wallet:${key}:${plate.trim().toUpperCase()}`) || '' } })
       setWallet(w)
+      localStorage.setItem(`ev-wallet:${key}:${plate.trim().toUpperCase()}`, w.wallet_token)
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
@@ -84,7 +86,7 @@ export default function EvCharge() {
     setError(''); setBusy(true)
     try {
       const r = await publicApi(`/api/public/ev/${key}/start`,
-        { method: 'POST', body: { plate, phone, amount } })
+        { method: 'POST', body: { plate, phone, amount, wallet_token: wallet.wallet_token } })
       setSessionToken(r.session_token)
       clearInterval(pollRef.current)
       pollRef.current = setInterval(async () => {
@@ -125,7 +127,14 @@ export default function EvCharge() {
             </span>
           </div>
         )}
-        <ErrorBox error={error} />
+        <label className="block text-sm text-slate-300">
+            Дансны хувийн холбоос (өмнө нь бүртгэлтэй бол)
+            <input type="password" autoComplete="off" className="input mt-1 w-full"
+              value={walletToken} onChange={(e) => setWalletToken(e.target.value.trim().split('/').pop())}
+              aria-describedby="wallet-token-help" />
+            <span id="wallet-token-help" className="block mt-1 text-xs text-slate-400">Өөр төхөөрөмжөөс орж байгаа бол хадгалсан дансны холбоосоо оруулна уу.</span>
+          </label>
+          <ErrorBox error={error} />
 
         {/* ── Амьд явц ── */}
         {session ? (

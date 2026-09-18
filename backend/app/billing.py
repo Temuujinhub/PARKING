@@ -157,7 +157,7 @@ def calculate_fee(
     full_days, rem = divmod(chargeable, day_minutes)
     fee = D(0)
     if full_days and template.daily_cap:
-        fee += D(template.daily_cap) * full_days
+        fee += min(tier_price(template, day_minutes), D(template.daily_cap)) * full_days
         fee += min(tier_price(template, rem), D(template.daily_cap)) if rem else D(0)
     else:
         fee = tier_price(template, chargeable)
