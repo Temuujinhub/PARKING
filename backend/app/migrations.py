@@ -1,8 +1,8 @@
-"""Хөнгөн idempotent миграци — production DB-г кодтой тааруулна.
+"""Versioned PostgreSQL startup migrations, serialized in one transaction.
 
-SQLAlchemy create_all() нь шинэ ХҮСНЭГТ үүсгэдэг ч байгаа хүснэгтэд шинэ БАГАНА нэмдэггүй.
-Тиймээс шинэ багана нэмэх бүрд энд `ADD COLUMN IF NOT EXISTS` мөр нэмнэ.
-Startup бүрт ажиллах ба аль хэдийн байгаа бол алгасна (аюулгүй, давтагдах боломжтой).
+Append new SQL statements; do not edit statements already adopted in the ledger.
+Any migration or schema validation failure aborts startup. See
+docs/PAYMENT_WAIT_ROLLOUT.md for legacy adoption and rollout requirements.
 """
 import logging
 
@@ -49,8 +49,8 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_logs (action)",
 
     # v1.7 — Бүрэн бүтэн байдал: нэг зогсоолд нэг дугаараар нэгэн зэрэг ганц идэвхтэй session
-    # (LPR орох урсгалын race-ээс сэргийлнэ). Хэрэв одоо давхардсан идэвхтэй session байвал
-    # энэ index үүсэхгүй (алгасна) — тухайн үед л гараар цэвэрлэнэ.
+    # (LPR орох урсгалын race-ээс сэргийлнэ). Хуучин давхардал байвал migration
+    # бүхэлдээ зогсоно; санхүүгийн түүхийг шалгаж зассаны дараа дахин ажиллуулна.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_session ON parking_sessions (site_id, plate_number) "
     "WHERE status IN ('OPEN','AWAITING_PAYMENT','PAID')",
 

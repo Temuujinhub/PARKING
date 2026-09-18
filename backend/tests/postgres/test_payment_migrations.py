@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app import migrations, models as M
 from app.services import wallet as W
 from app.routers import wallet_router as WR
+from app.database import Base
 
 URL=os.environ.get('PARKING_TEST_DATABASE_URL')
 pytestmark=pytest.mark.skipif(not URL,reason='Disposable PostgreSQL DSN required')
@@ -92,3 +93,68 @@ def test_preloaded_wallet_locks_see_fresh_balance(engine):
     with Session(engine) as db:
         assert db.get(M.Wallet,wid).balance==8000
         assert db.query(M.WalletLedger).count()==2
+
+
+def test_upgrade_legacy_rows_backfills_once_without_guessing_company_owner(engine):
+    from datetime import datetime, timedelta
+    Base.metadata.create_all(engine)
+    start=datetime(2026,9,18,10,0)
+    with Session(engine) as db:
+        site=M.ParkingSite(name='Legacy',site_code='LEGACY')
+        db.add(site);db.flush()
+        session=M.ParkingSession(site_id=site.id,plate_number='1234УБА',
+            entry_time=start-timedelta(hours=1),updated_at=start,status='AWAITING_PAYMENT')
+        contact=M.CompanyContact(company='Legacy company')
+        db.add_all([session,contact]);db.commit();sid=session.id;cid=contact.id
+    # Simulate the schema from before this release, not merely an empty database.
+    with engine.begin() as c:
+        for col in ['payment_wait_started_at','last_exit_seen_at','payment_quote_until','payment_quote']:
+            c.execute(text(f'ALTER TABLE parking_sessions DROP COLUMN {col}'))
+        c.execute(text('ALTER TABLE payments DROP COLUMN fee_snapshot'))
+        c.execute(text('ALTER TABLE company_contacts DROP COLUMN owner_scope CASCADE'))
+        c.execute(text('ALTER TABLE company_invoices DROP COLUMN owner_scope CASCADE'))
+        c.execute(text('ALTER TABLE company_contacts ADD CONSTRAINT company_contacts_company_key UNIQUE (company)'))
+        c.execute(text('ALTER TABLE company_invoices ADD CONSTRAINT uq_invoice_period_company UNIQUE (period,company)'))
+    migrations.run_migrations()
+    with Session(engine) as db:
+        session=db.get(M.ParkingSession,sid)
+        assert session.payment_wait_started_at==start
+        assert session.last_exit_seen_at==start
+        assert session.payment_quote is None
+        assert db.get(M.CompanyContact,cid).owner_scope=='LEGACY'
+        session.note='new metadata';db.commit()
+    migrations.run_migrations()
+    with Session(engine) as db:
+        assert db.get(M.ParkingSession,sid).payment_wait_started_at==start
+        assert db.get(M.CompanyContact,cid).owner_scope=='LEGACY'
+
+
+def test_late_payment_locks_debt_without_outer_join_error(engine,monkeypatch):
+    import asyncio
+    from datetime import datetime
+    from unittest.mock import AsyncMock
+    from app.routers import payments_router as PR
+    from app.config import settings
+    migrations.run_migrations()
+    monkeypatch.setattr(settings,'ebarimt_mock',True)
+    monkeypatch.setattr(settings,'ebarimt_mock_receipts',False)
+    monkeypatch.setattr(settings,'qpay_ebarimt',False)
+    monkeypatch.setattr(PR.msgbill,'account_enabled_for',lambda *args:None)
+    gate=AsyncMock();monkeypatch.setattr(PR,'mark_paid_and_open',gate)
+    with Session(engine,autoflush=False) as db:
+        site=M.ParkingSite(name='Late payment',site_code='LATE')
+        db.add(site);db.flush()
+        session=M.ParkingSession(site_id=site.id,plate_number='1234УБА',
+            entry_time=datetime.utcnow(),status='MANUAL_CLOSED',total_fee=1000)
+        db.add(session);db.flush()
+        debt=M.Compensation(site_id=site.id,session_id=session.id,
+            plate_number=session.plate_number,amount=1000,reason='unpaid_exit')
+        payment=M.Payment(session_id=session.id,provider='QPAY',payment_method='QR',
+            sender_invoice_no='late-test',amount=1000,vat_amount=91,
+            fee_snapshot={'parking_amount':1000,'debts':[]})
+        db.add_all([debt,payment]);db.commit()
+        asyncio.run(PR._finalize_paid(db,payment));db.commit()
+        assert debt.status=='PAID'
+        assert payment.status=='PAID'
+        assert session.status=='MANUAL_CLOSED'
+        gate.assert_not_awaited()

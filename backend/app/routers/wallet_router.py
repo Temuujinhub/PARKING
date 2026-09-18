@@ -144,6 +144,7 @@ async def public_wallet_topup(token: str, body: dict, request: Request,
 def _credit_if_paid(db: Session, payment: Payment) -> bool:
     """PENDING → PAID + данс цэнэглэх. Idempotent: мөрийн түгжээтэй,
     зөвхөн PENDING төлөвөөс шилжинэ (давхар webhook/чек хамгаалагдана)."""
+    db.flush()  # persist the verified provider reference before refreshing the row
     locked = (db.query(Payment).filter(Payment.id == payment.id)
               .enable_eagerloads(False).populate_existing().with_for_update().first())
     if not locked or locked.status == "PAID":

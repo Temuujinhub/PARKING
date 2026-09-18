@@ -127,13 +127,13 @@ export default function EvCharge() {
             </span>
           </div>
         )}
-        <label className="block text-sm text-slate-300">
+        {!wallet && !session && <label className="block text-sm text-slate-300">
             Дансны хувийн холбоос (өмнө нь бүртгэлтэй бол)
             <input type="password" autoComplete="off" className="input mt-1 w-full"
               value={walletToken} onChange={(e) => setWalletToken(e.target.value.trim().split('/').pop())}
               aria-describedby="wallet-token-help" />
             <span id="wallet-token-help" className="block mt-1 text-xs text-slate-400">Өөр төхөөрөмжөөс орж байгаа бол хадгалсан дансны холбоосоо оруулна уу.</span>
-          </label>
+          </label>}
           <ErrorBox error={error} />
 
         {/* ── Амьд явц ── */}

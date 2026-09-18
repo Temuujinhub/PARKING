@@ -219,7 +219,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
             log.warning("finalize: payment=%s мөр түгжигдсэн (давхар finalize) — алгаслаа",
                         payment.id)
             db.rollback()
-            return
+            raise HTTPException(409, "Төлбөр боловсруулагдаж байна. Дахин шалгана уу.") from e
         db.rollback()
         raise HTTPException(409, "Төлбөрийн түгжээ авч чадсангүй. Дахин шалгана уу.") from e
     if row is not None and row[1] == "PAID":
@@ -410,6 +410,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
         remaining = max(0.0, sess_amount)
         debts = (db.query(Compensation).filter(
             Compensation.session_id == session.id, Compensation.status == "PENDING")
+            .enable_eagerloads(False).populate_existing()
             .order_by(Compensation.created_at).with_for_update().all())
         for debt in debts:
             applied = min(float(debt.amount), remaining)
@@ -924,6 +925,19 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
 #   • ONLINE_OPERATOR — pay_transfer эрхтэй атлаа /transfer рүү огт ороогүй
 #     (энэ ролийн БҮХ утга учир нь дансаар төлбөр батлах)
 # free_exit шиг санхүүгийн эрсдэлтэй тусгай үйлдлүүд ХЭВЭЭР тусдаа эрхтэй.
+def _assert_expected_amount(payment, body):
+    if "expected_amount" not in body:
+        return  # legacy POS clients; current cashier always sends its displayed amount
+    from decimal import Decimal, InvalidOperation
+    try:
+        expected = Decimal(str(body["expected_amount"]))
+        valid = expected.is_finite() and abs(expected - Decimal(str(payment.amount))) <= Decimal("0.01")
+    except (InvalidOperation, ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise HTTPException(409, "Үнэ барих хугацаа дууссан эсвэл дүн өөрчлөгдсөн. Шинэ дүнг шалгаж дахин батална уу.")
+
+
 async def _retire_qpay(db, session):
     pending = db.query(Payment).filter(Payment.session_id == session.id,
                                       Payment.provider == "QPAY",
@@ -951,6 +965,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
     payment = _create_payment(db, session, "CASH", "CASH", cashier=user)
+    _assert_expected_amount(payment, body)
     await _retire_qpay(db, session)
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
@@ -984,6 +999,7 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
     payment = _create_payment(db, session, "TRANSFER", "TRANSFER", cashier=user)
+    _assert_expected_amount(payment, body)
     await _retire_qpay(db, session)
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]

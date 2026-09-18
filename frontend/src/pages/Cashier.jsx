@@ -114,22 +114,22 @@ export default function Cashier() {
     if (!selected || selected.site_id !== siteId) {
       toast('Энэ зогсоолын машиныг дахин сонгоно уу.', 'error'); return
     }
-    if (!selected) return
+    const expectedAmount = selected.amount_due ?? selected.fee?.total_fee ?? selected.total_fee
     // Дансаар: оператор шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасныг баталгаажуулна
     if (method === 'TRANSFER') {
       const site = sites.find((s) => s.id === siteId)
       const acc = site?.bank_account
         ? `${site.bank_name || ''} ${site.bank_account} (${site.bank_account_name || ''})` : 'зогсоолын данс'
-      if (!confirm(`${selected.plate_number} — ${fmt(selected.fee?.total_fee)}₮\n\n${acc} руу шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасан уу?\n\nOK = төлбөр баталгаажуулж хаалт нээнэ`)) return
+      if (!confirm(`${selected.plate_number} — ${fmt(expectedAmount)}₮\n\n${acc} руу шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасан уу?\n\nOK = төлбөр баталгаажуулж хаалт нээнэ`)) return
     }
     setBusy(true)
     try {
       if (method === 'CASH') {
-        await api('/api/payments/cash', { method: 'POST', body: { session_id: selected.id } })
+        await api('/api/payments/cash', { method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount } })
         toast('Бэлэн мөнгөөр төлөгдлөө. Хаалт нээгдэж байна.')
         setSelected(null)
       } else if (method === 'TRANSFER') {
-        await api('/api/payments/transfer', { method: 'POST', body: { session_id: selected.id } })
+        await api('/api/payments/transfer', { method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount } })
         toast('Дансаар төлөгдлөө. Хаалт нээгдэж байна.')
         setSelected(null)
       } else if (method === 'QPAY') {
@@ -137,7 +137,7 @@ export default function Cashier() {
         setQpayInfo(inv)
       }
       loadExits(siteId); loadShift()
-    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+    } catch (e) { toast(e.message, 'error'); loadExits(siteId) } finally { setBusy(false) }
   }
 
   const applyDiscount = async (discountId) => {

@@ -1487,6 +1487,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
+    if session is not None:
+        from sqlalchemy.exc import OperationalError
+        try:
+            session = (db.query(ParkingSession).enable_eagerloads(False)
+                       .filter(ParkingSession.id == session.id,
+                               ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+                       .populate_existing().with_for_update(nowait=True).first())
+        except OperationalError:
+            db.rollback()
+            return {"action": "processing", "plate": plate}
+        if session is None:
+            return {"action": "state_changed", "plate": plate}
     if session is not None and paid_exit_expired(db, session, now, site_id):
         # ТӨЛСӨН сешн deadline-аас хойш олон цаг гарах уншилтгүй хэвтээд одоо
         # гарцад уншигдав. Орох уншилт ч алдагдсан (эс бол дээрх орох зам шинэ

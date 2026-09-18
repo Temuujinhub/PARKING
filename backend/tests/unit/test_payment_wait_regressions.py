@@ -207,3 +207,21 @@ def test_wallet_does_not_debit_while_driver_is_paying_qr(db, monkeypatch):
     invoice(db,s)
     assert asyncio.run(SL._wallet_auto_deduct(db,s,1000))==(0.0,False)
     assert w.balance==10000 and db.query(M.WalletLedger).count()==0
+
+
+@pytest.mark.parametrize('shown',[1000, None, 'NaN', 'Infinity', 'bad'])
+def test_changed_or_invalid_cashier_amount_cannot_be_confirmed(db, shown):
+    from fastapi import HTTPException
+    s,_,_=parking(db)
+    payment=PR._create_payment(db,s,'CASH','CASH')
+    payment.amount=2000
+    with pytest.raises(HTTPException) as err:
+        PR._assert_expected_amount(payment,{'expected_amount':shown})
+    assert err.value.status_code in (400,409)
+    assert payment.status!='PAID'
+
+
+def test_matching_cashier_amount_can_be_confirmed(db):
+    s,_,_=parking(db)
+    payment=PR._create_payment(db,s,'CASH','CASH')
+    PR._assert_expected_amount(payment,{'expected_amount':1000})

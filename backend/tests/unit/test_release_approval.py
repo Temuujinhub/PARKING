@@ -27,3 +27,22 @@ def test_only_explicit_approved_sha_reaches_production(tmp_path,role,approved,ta
     if target: env['PARKING_DEPLOY_TARGET']=target
     result=subprocess.run([BASH,script.as_posix()],env=env,capture_output=True,text=True,timeout=10)
     assert (result.returncode==0)==success,result.stderr
+
+
+@pytest.mark.parametrize('role,confirmation,database',[
+    ('production','DELETE_TEST_TRANSACTIONS','parking'),
+    ('staging','','parking_test'),
+    ('staging','DELETE_TEST_TRANSACTIONS','parking'),
+])
+def test_reset_refuses_production_or_unconfirmed_targets(tmp_path,role,confirmation,database):
+    original=Path(__file__).resolve().parents[3]/'tools/reset_test_data.sh'
+    script=tmp_path/'reset.sh'
+    # Windows checkout line endings do not change what the Linux script means.
+    script.write_text(original.read_text(),encoding='utf-8',newline='\n')
+    env=dict(os.environ,PARKING_DEPLOY_ROLE=role,PARKING_RESET_TEST_DATA=confirmation,
+             PARKING_TEST_DATABASE_NAME=database)
+    result=subprocess.run([BASH,script.as_posix()],env=env,capture_output=True,
+                          text=True,encoding='utf-8',timeout=10)
+    assert result.returncode!=0
+    assert 'Refusing reset' in result.stderr or 'production' in result.stderr
+    assert 'DB backup' not in result.stdout
