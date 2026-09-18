@@ -117,8 +117,23 @@ def test_camera_without_ip_is_not_a_relay():
     assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, cams)) is None
 
 
-def test_single_camera_site_serves_every_lane():
-    """Нэг all-in-one төхөөрөмж орох/гарахыг хоёуланг барьдаг зогсоол."""
+def test_single_camera_never_serves_unrelated_lane():
+    """A single remaining camera is not evidence that it controls every gate."""
     cams = [Dev("Цогц камер", "camera", 9, "both", ip="10.0.9.9")]
-    assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, cams)).ip_address == "10.0.9.9"
-    assert pick_relay(OUTER_EXIT, pool(OUTER_EXIT, cams)).ip_address == "10.0.9.9"
+    assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, cams)) is None
+    assert pick_relay(OUTER_EXIT, pool(OUTER_EXIT, cams)) is None
+
+
+def test_opposite_direction_same_lane_is_not_a_fallback():
+    cams = [Dev("Exit", "camera", 1, "exit", ip="10.0.0.1")]
+    assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, cams)) is None
+
+
+def test_duplicate_matching_cameras_fail_closed():
+    cams = [Dev(str(i), "camera", 1, "entry", ip=f"10.0.0.{i}") for i in (1, 2)]
+    assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, cams)) is None
+
+
+def test_explicit_shared_gate_same_lane_still_works():
+    cam = Dev("Shared", "camera", 1, "both", ip="10.0.0.1")
+    assert pick_relay(OUTER_ENTRY, pool(OUTER_ENTRY, [cam])) is cam

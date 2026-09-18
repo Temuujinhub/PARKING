@@ -897,23 +897,15 @@ async def backfill_snapshot(session_id: str, kind: str, db: Session = Depends(ge
         raise HTTPException(400, "Гарах цаг бүртгэлгүй тул гарах зураг хайх боломжгүй")
     device_id = s.entry_device_id if kind == "entry" else s.exit_device_id
     device = db.get(Device, device_id) if device_id else None
-    if not device or not device.ip_address:
-        # Event-ийн төхөөрөмж тодорхойгүй бол тухайн чиглэлийн камерыг хайна
-        lane = "entry" if kind == "entry" else "exit"
-        device = (db.query(Device)
-                  .filter(Device.site_id == s.site_id, Device.device_type == "camera",
-                          Device.lane_dir == lane, Device.status == "active",
-                          Device.ip_address.isnot(None), Device.ip_address != "")
-                  .first())
-    if not device or not device.ip_address:
-        raise HTTPException(400, "Энэ чиглэлийн камерын IP бүртгэлгүй байна")
+    if not device or not device.ip_address or device.site_id != s.site_id:
+        raise HTTPException(400, "Уншилт хийсэн камер тодорхойгүй тул өөр камерын зургаар нөхөхгүй.")
     # UTC event цагийг шууд дамжуулна — fetch_stored_picture өөрөө бүсийн зөрүү,
-    # хайлтын цонхыг тооцож 3 өөр аргаар (RecordFinder → mediaFileFind → амьд кадр) татна
+    # хайлтын цонхыг тооцож хадгалсан event зургийг дугаартай нь тулгаж татна.
     data, err = await fetch_stored_picture(
         device.ip_address, event_time,
         creds=camera_credentials(device),
         tz_offset_hours=cfg.camera_tz_offset_hours,
-        window_seconds=cfg.snapshot_search_window_seconds)
+        window_seconds=cfg.snapshot_search_window_seconds, plate=s.plate_number)
     if not data:
         raise HTTPException(404, f"Камераас зураг олдсонгүй: {err}")
     rel = _save(data, s.plate_number, kind)

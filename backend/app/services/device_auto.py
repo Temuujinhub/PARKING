@@ -53,12 +53,17 @@ def barrier_matches_camera(cam: Device, bar: Device) -> bool:
             and bool(bar.nested_inner) == bool(cam.nested_inner))
 
 
-def ensure_lane_barriers(db: Session) -> dict:
+def ensure_lane_barriers(db: Session, site_ids: list[str] | None = None) -> dict:
     """Идэвхтэй камер бүрд ижил зогсоол+эгнээний идэвхтэй barrier байлгана.
     Буцаана: {"restored": n, "created": n, "moved": n} — лог/мэдээлэлд."""
     restored = created = moved = 0
-    cams = db.query(Device).filter(Device.device_type == "camera",
-                                   Device.status == "active").all()
+    # SessionLocal disables autoflush: persist edited lane/site/status before
+    # querying, or the reconciler sees the old camera placement.
+    db.flush()
+    query = db.query(Device).filter(Device.device_type == "camera", Device.status == "active")
+    if site_ids is not None:
+        query = query.filter(Device.site_id.in_(site_ids))
+    cams = query.all()
     for c in cams:
         # ЭГНЭЭ БҮРД өөрийн хаалт: камер бүр өөрийн эгнээний хаалттай хосолно.
         #
@@ -93,7 +98,8 @@ def ensure_lane_barriers(db: Session) -> dict:
                 Device.lane_dir == c.lane_dir,
                 Device.nested_inner.is_(bool(c.nested_inner)),
                 Device.status == "active").all()
-             if not db.query(Device).filter(
+             if not b.ip_address and (b.name or "").endswith("(авто)")
+             and not db.query(Device).filter(
                  Device.site_id == c.site_id, Device.device_type == "camera",
                  Device.nested_inner.is_(bool(c.nested_inner)),
                  Device.status == "active",
@@ -111,6 +117,7 @@ def ensure_lane_barriers(db: Session) -> dict:
                             if b.status == "deleted" and barrier_matches_camera(c, b)), None)
         if deleted_bar:
             deleted_bar.status = "active"
+            db.flush()
             restored += 1
             continue
         # 2) Огт байхгүй бол камерынхаа эгнээнд шинээр үүсгэнэ
@@ -137,7 +144,7 @@ def ensure_lane_barriers(db: Session) -> dict:
     # Ийм хаалт машин ирэхэд команд ч үүсгэдэггүй тул `barrier_commands`-аас
     # хэзээ ч харагдахгүй — цорын ганц дохио нь энэ лог ба UI-ийн улаан тэмдэг
     # (2026-08-26 Рашбулаг ЭТТ: доторх 2 хаалт 33 цаг чимээгүй үхсэн).
-    broken = relay_broken(db)
+    broken = relay_broken(db, site_ids)
     for b in broken:
         log.error("ХААЛТ РЕЛЕГҮЙ: «%s» (%s, эгнээ %s/%s, дотоод=%s) — машин ирэхэд "
                   "НЭЭГДЭХГҮЙ. Тохиргоо → Төхөөрөмж дээр ижил эгнээний%s камерыг "
@@ -148,9 +155,10 @@ def ensure_lane_barriers(db: Session) -> dict:
             "relay_broken": [b.id for b in broken]}
 
 
-def relay_broken(db: Session) -> list[Device]:
+def relay_broken(db: Session, site_ids: list[str] | None = None) -> list[Device]:
     """Реле олдохгүй идэвхтэй хаалтууд — тохиргооны эрүүл мэндийн шалгалт."""
     from .barrier import relay_note
-    return [b for b in db.query(Device).filter(
-        Device.device_type == "barrier", Device.status == "active").all()
-        if relay_note(db, b)]
+    query = db.query(Device).filter(Device.device_type == "barrier", Device.status == "active")
+    if site_ids is not None:
+        query = query.filter(Device.site_id.in_(site_ids))
+    return [b for b in query.all() if relay_note(db, b)]

@@ -30,20 +30,22 @@ def _payload_picture(raw: dict) -> bytes | None:
     """ITSAPI payload-аас base64 зураг хайна (боломжит бүх байрлал)."""
     if not isinstance(raw, dict):
         return None
-    pic = raw.get("Picture") or {}
-    candidates = [
-        (pic.get("NormalPic") or {}).get("Content"),
-        (pic.get("CutoutPic") or {}).get("Content"),
-        pic.get("Content"),
-        raw.get("NormalPic", {}).get("Content") if isinstance(raw.get("NormalPic"), dict) else None,
-        raw.get("PicData"),
-    ]
-    for c in candidates:
-        if isinstance(c, str) and len(c) > 1000:
-            try:
-                return base64.b64decode(c)
-            except Exception:
-                continue
+    def content(node):
+        return node.get("Content") if isinstance(node, dict) else None
+
+    pic = raw.get("Picture")
+    pic = pic if isinstance(pic, dict) else {}
+    candidates = [content(pic.get("NormalPic")), content(raw.get("NormalPic")),
+                  content(pic), raw.get("PicData"), content(pic.get("CutoutPic"))]
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        try:
+            data = base64.b64decode(candidate, validate=True)
+        except (ValueError, TypeError):
+            continue
+        if valid_jpeg(data):
+            return data
     return None
 
 
@@ -63,97 +65,69 @@ def cgi_state() -> dict:
 
 
 async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> bytes | None:
-    """Камерын snapshot.cgi-ээс одоогийн кадрыг татна (digest auth).
+    """One bounded CGI capture per camera; never bypass the control lock."""
+    import time
+    from .barrier import _rpc_lock, barrier_is_waiting, camera_client, note_rpc_done
 
-    Энэ firmware дээр snapshot.cgi найдвартай ажилладаг нь production дээр
-    батлагдсан (~600KB бүрэн JPEG). ГЭХДЭЭ event-ийн дараахан камер завгүй
-    (ANPR боловсруулалт + encoder ачаалалтай) үед кадр рендерлэх нь удааширдаг
-    тул уншилтын timeout-ыг ӨГӨӨМӨР (25с) авна — өмнө нь 6с байсан тул бүх
-    оролдлого timeout болж, орох/гарах зураг огт хадгалагддаггүй байв."""
-    import time as _time
     st = _CGI_STATE.setdefault(ip, {"url": None, "fails": 0, "quiet_until": 0.0})
-    # Тухайн камер дээр snapshot.cgi дараалан бүтэлгүйтсэн бол ТҮР ЗОГСООНО.
-    # Энэ firmware-үүдийн зарим нь snapshot.cgi-д ямагт «Bad Request» өгдөг —
-    # тэдэн дээр event бүрд 9 хүсэлт (3 оролдлого × 3 URL) илгээх нь камерын
-    # логийг Login бичлэгээр дүүргэж, event subscription-ыг ч холтолдог.
-    if _time.monotonic() < st["quiet_until"]:
+    if time.monotonic() < st["quiet_until"] or ip in _cgi_inflight:
         return None
-
-    auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
-    # холболт хурдан, харин зураг татах уншилт удаан байж болно
-    timeout = httpx.Timeout(connect=5.0, read=25.0, write=5.0, pool=5.0)
-    # Firmware/тохиргооноос хамаарч channel параметр шаардаж болзошгүй. АЖИЛЛАСАН
-    # хувилбарыг цээжилж, дараа нь ЗӨВХӨН түүнийг ашиглана (камерт очих хүсэлт
-    # 3 дахин цөөрнө).
-    all_urls = [f"http://{ip}/cgi-bin/snapshot.cgi",
-                f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
-                f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
-    urls = [st["url"]] if st["url"] else all_urls
-    last_err = ""
-    # Зургийн таталт нь digest auth-тай — камерын хувьд ЭНЭ Ч БАС нэвтрэлт.
-    # Гарах үед зураг татах ба дэлгэц бичих нь ЯГ НЭГ агшинд тохиолддог тул
-    # мөргөлдөж «User or password not valid» (remainLoginTimes буурах) үүсгэдэг
-    # байв (2026-07-29). Тиймээс таталтыг ЗАВСРЫН дүрэмд оруулна: зураг нь
-    # цаг мэдрэмтгий (кадр өөрчлөгдөнө) тул ХҮЛЭЭЛГЭХГҮЙ, харин дэлгэц үүний
-    # дараа завсар барина.
-    from .barrier import (_rpc_lock, barrier_is_waiting, camera_client,
-                          note_rpc_done)
-    # 1) ХААЛТ тэргүүлэх эрхтэй: команд хүлээж байвал эхлээд түүнд зам тавина
-    #    (машин хаалганы өмнө зогсож байна; зураг 0.5с хожуу татагдах нь хамаагүй).
-    for _ in range(int(settings.snapshot_barrier_wait_sec * 10)):
-        if not barrier_is_waiting(ip):
-            break
-        await asyncio.sleep(0.1)
-    # 2) Дэлгэц/хяналттай НЭГ ДАРААЛАЛД орно — зэрэг хандвал камер «нууц үг буруу»
-    #    гэж татгалзаж remainLoginTimes буурдаг. Түгжээг авч чадаагүй ч цааш явна:
-    #    зураг нь цаг мэдрэмтгий (кадр өөрчлөгдөнө).
-    _lock = _rpc_lock(ip)
-    _held = False
+    _cgi_inflight.add(ip)
+    lock = _rpc_lock(ip)
+    held = False
+    attempted = False
+    last_error = "capture deadline exceeded"
     try:
-        await asyncio.wait_for(_lock.acquire(), timeout=settings.snapshot_lock_wait_sec)
-        _held = True
-    except (asyncio.TimeoutError, TimeoutError):
-        log.debug("%s: RPC дараалалд орж чадсангүй — зургийг шууд татна", ip)
-    note_rpc_done(ip)
-    try:
-      for attempt in range(1, 4):
-        for url in urls:
+        async with asyncio.timeout(settings.snapshot_cgi_budget_sec):
+            deadline = time.monotonic() + settings.snapshot_barrier_wait_sec
+            while barrier_is_waiting(ip):
+                if time.monotonic() >= deadline:
+                    return None
+                await asyncio.sleep(0.1)
             try:
-                # Хуваалцсан клиент — машин бүрд шинэ TCP холболт нээвэл камерын
-                # холболтын сан дүүрч хаалтны команд ч хариу авахаа болино
-                client = camera_client(ip)
-                r = await client.get(url, auth=auth, timeout=timeout)
-                if r.status_code == 200 and valid_jpeg(r.content):
-                    if attempt > 1 or url != urls[0]:
-                        log.info(f"{ip}: OK ({len(r.content)}b) ← {url.split('cgi-bin/')[-1]}")
-                    if st["url"] != url:
-                        log.info("%s: snapshot.cgi ажилладаг хувилбар цээжлэв — %s",
-                                 ip, url.split("cgi-bin/")[-1])
+                await asyncio.wait_for(lock.acquire(), settings.snapshot_lock_wait_sec)
+                held = True
+            except TimeoutError:
+                return None
+            if barrier_is_waiting(ip):
+                return None
+            auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
+            timeout = httpx.Timeout(connect=3.0, read=settings.snapshot_cgi_budget_sec,
+                                    write=3.0, pool=3.0)
+            urls = [st["url"]] if st["url"] else [
+                f"http://{ip}/cgi-bin/snapshot.cgi?channel=1",
+                f"http://{ip}/cgi-bin/snapshot.cgi",
+                f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
+            for url in urls:
+                if barrier_is_waiting(ip):
+                    return None
+                attempted = True
+                response = await camera_client(ip).get(url, auth=auth, timeout=timeout)
+                if response.status_code == 200 and valid_jpeg(response.content):
                     st["url"], st["fails"] = url, 0
-                    return r.content
-                last_err = f"{url.split('cgi-bin/')[-1]} → HTTP {r.status_code} ({len(r.content)}b)"
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {str(e)[:50]}"
-        if attempt < 3:
-            await asyncio.sleep(1.5)
+                    return response.content
+                last_error = f"HTTP {response.status_code} ({len(response.content)} bytes)"
+                # Only a rejected channel/URL justifies trying another form.
+                if response.status_code not in (400, 404):
+                    break
+    except (TimeoutError, httpx.HTTPError) as exc:
+        last_error = type(exc).__name__
     finally:
-        note_rpc_done(ip)   # дэлгэц энэ агшнаас хойш завсар барина
-        if _held:
-            _lock.release()
-    # Бүтэлгүйтэл — цээжилсэн хувилбарыг мартаж, дараагийн удаад бүгдийг үзнэ
-    st["url"] = None
-    st["fails"] += 1
-    if st["fails"] >= settings.snapshot_cgi_max_fails:
-        st["quiet_until"] = _time.monotonic() + settings.snapshot_cgi_quiet_minutes * 60
-        st["fails"] = 0
-        log.warning("%s: snapshot.cgi %d удаа дараалан бүтэлгүйтэв — %d минут "
-                    "ЗОГСООЛОО (камерын лог/сешнийг дэмий эзлэхгүйн тулд). "
-                    "Зураг нь event стрим/WS-ээр л ирнэ.",
-                    ip, settings.snapshot_cgi_max_fails,
-                    settings.snapshot_cgi_quiet_minutes)
-    else:
-        log.error(f"{ip}: snapshot.cgi бүх хувилбар бүтэлгүйтэв ({last_err})")
+        if held:
+            note_rpc_done(ip)
+            lock.release()
+        _cgi_inflight.discard(ip)
+    if attempted:
+        st["url"] = None
+        st["fails"] += 1
+        if st["fails"] >= settings.snapshot_cgi_max_fails:
+            st["quiet_until"] = time.monotonic() + settings.snapshot_cgi_quiet_minutes * 60
+            st["fails"] = 0
+        log.warning("%s: snapshot.cgi failed: %s", ip, last_error)
     return None
+
+
+_cgi_inflight: set[str] = set()
 
 
 # Зургийн доод хэмжээ. ANPR-Viewer клиентийн туршлагаас (docs/CAMERA_IMAGE_CAPTURE.md):
@@ -304,18 +278,6 @@ async def _snapshot_written(session_id: str, lane_dir: str) -> bool:
         db.close()
 
 
-async def _wait_event_snapshot(session_id: str, lane_dir: str) -> bool:
-    """WS event зургийг хүлээнэ (snapshot_wait_event_sec). Ирвэл True — snapshot.cgi
-    хэрэггүй (камер дээр илүүц Manual Snapshot бичлэг үүсэхгүй)."""
-    import time as _time
-    deadline = _time.monotonic() + settings.snapshot_wait_event_sec
-    while _time.monotonic() < deadline:
-        await asyncio.sleep(1.0)
-        if await _snapshot_written(session_id, lane_dir):
-            return True
-    return False
-
-
 def image_channel_alive(ip: str) -> bool:
     """Энэ камераас event зураг ӨӨРӨӨ ирэх боломжтой юу — ямар нэг зургийн
     суваг (CGI стрим / comet / WS) АМЬД байна уу.
@@ -353,12 +315,12 @@ async def _wait_camera_image(session_id: str, camera_ip: str, lane_dir: str,
         if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
             _stream_images.pop(camera_ip, None)
             return item[1], item[2]
-        tick += 1
         if tick % 4 == 0 and await _snapshot_written(session_id, lane_dir):
             return True
         if _time.monotonic() >= deadline:
             return None
-        await asyncio.sleep(0.25)
+        tick += 1
+        await asyncio.sleep(min(0.25, max(0, deadline - _time.monotonic())))
 
 
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
@@ -495,4 +457,16 @@ def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,
         asyncio.get_running_loop()
     except RuntimeError:
         return  # event loop-гүй орчин (тест г.м) — алгасна
-    asyncio.create_task(_capture_and_store(session_id, camera_ip or "", plate, lane_dir, raw, creds))
+    key = (session_id, lane_dir)
+    if key in _capture_tasks:
+        return
+    task = asyncio.create_task(_capture_and_store(session_id, camera_ip or "", plate, lane_dir, raw, creds))
+    _capture_tasks[key] = task
+    def done(finished):
+        _capture_tasks.pop(key, None)
+        if not finished.cancelled() and finished.exception():
+            log.error("Snapshot capture failed for %s/%s: %s", *key, finished.exception())
+    task.add_done_callback(done)
+
+
+_capture_tasks: dict[tuple[str, str], asyncio.Task] = {}

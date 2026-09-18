@@ -133,6 +133,18 @@ def has_permission(user: User, module: str) -> bool:
     return "*" in perms or module in perms
 
 
+def can_manage_global_settings(user: User) -> bool:
+    """Global changes affect every tenant, so site-scoped admins cannot make them."""
+    return (user.role in {"SUPER_ADMIN", "ADMIN"}
+            and has_permission(user, "settings")
+            and operator_sites(user) is None)
+
+
+def enforce_global_settings(user: User):
+    if not can_manage_global_settings(user):
+        raise HTTPException(403, "Ерөнхий тохиргоог зөвхөн бүх зогсоолын эрхтэй админ өөрчилнө. Өөрийн зогсоолыг сонгоно уу.")
+
+
 def require(*modules: str):
     """Тухайн модулиудын аль нэгэнд хандах эрх шаардана."""
     def checker(user: User = Depends(get_current_user)) -> User:
@@ -178,6 +190,8 @@ def operator_sites(user: User) -> list[str] | None:
             # Түрээслэгчид зогсоол хараахан оноогоогүй бол ЮУ Ч харахгүй
             # (None буцаавал бүх зогсоол харагдах аюултай)
             return ids or ["00000000-0000-0000-0000-000000000000"]
+        # Detached tenant users must never become unrestricted.
+        return ["00000000-0000-0000-0000-000000000000"]
     return ids or None
 
 

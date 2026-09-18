@@ -10,6 +10,9 @@ UI-аас удирдана. Уншилт нь халуун зам (event/30 ми
 import re
 import time
 
+from sqlalchemy import event, text
+from sqlalchemy.orm import Session
+
 BLACKLIST_KEY = "blacklist_rules"
 OPEN_REASONS_KEY = "open_reasons"
 AUTOCLOSE_KEY = "autoclose_rules"
@@ -263,8 +266,38 @@ CHOICES: dict[tuple[str, str], set] = {
     (ENTRYPLATE_KEY, "site_overrides"): _POLICY_CHOICES,
 }
 
-_cache: dict[str, tuple[float, dict]] = {}
+_cache: dict[str, tuple[float, dict, dict]] = {}
 _CACHE_SEC = 30.0
+
+
+def _mark_changed(db, key):
+    _cache.pop(key, None)
+    if isinstance(db, Session):
+        db.info.setdefault("app_settings_changed", set()).add(key)
+
+
+def _write_row(db, key):
+    """Serialize JSON read/modify/write, including concurrent first inserts.
+
+    Settings writes are rare and short. One transaction-scoped PostgreSQL lock
+    also avoids deadlocks when a form updates several groups in different orders.
+    Refresh a preloaded ORM row after taking the lock to avoid stale merges.
+    """
+    from ..models import AppSetting
+    if isinstance(db, Session):
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext('parking.app_settings'), 0)"))
+        db.flush()
+        return db.get(AppSetting, key, populate_existing=True, with_for_update=True)
+    return db.get(AppSetting, key)  # Lightweight test doubles.
+
+
+@event.listens_for(Session, "after_commit")
+@event.listens_for(Session, "after_rollback")
+def _invalidate_after_transaction(db):
+    # A concurrent reader may rewarm the old value before the writer commits.
+    for key in db.info.pop("app_settings_changed", ()):
+        _cache.pop(key, None)
 
 
 def _load(db, key: str) -> tuple[dict, dict]:
@@ -272,7 +305,8 @@ def _load(db, key: str) -> tuple[dict, dict]:
 
     Анхдагчийг ЭНД холихгүй: `_base()` нь .env-ээс амьдаар уншдаг тул кэшлэвэл
     хуучирна. Давхарга нь түүхий (валидацилагдаагүй) байж болно."""
-    hit = _cache.get(key)
+    pending = isinstance(db, Session) and key in db.info.get("app_settings_changed", ())
+    hit = None if pending else _cache.get(key)
     if hit and time.monotonic() - hit[0] < _CACHE_SEC:
         return hit[1], hit[2]
     from ..models import AppSetting
@@ -284,9 +318,10 @@ def _load(db, key: str) -> tuple[dict, dict]:
             raw = row.value.get(SITE_OVERLAY)
             if isinstance(raw, dict):
                 overlay = {str(sid): dict(v) for sid, v in raw.items() if isinstance(v, dict)}
-    except Exception:  # noqa: BLE001 — тохиргоо уншиж чадахгүй бол default-аар үргэлжилнэ
-        pass
-    _cache[key] = (time.monotonic(), stored, overlay)
+    except Exception:  # noqa: BLE001 — never cache a failed read as saved defaults
+        return stored, overlay
+    if not pending:
+        _cache[key] = (time.monotonic(), stored, overlay)
     return stored, overlay
 
 
@@ -295,7 +330,14 @@ def _coerce(default, v):
     Хөрвүүлж чадахгүй бол None → дуудагч глобал утгыг хэвээр үлдээнэ."""
     try:
         if isinstance(default, bool):
-            return v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "on", "yes")
+            if isinstance(v, bool):
+                return v
+            value = str(v).strip().lower()
+            if value in ("1", "true", "on", "yes"):
+                return True
+            if value in ("0", "false", "off", "no"):
+                return False
+            return None
         if isinstance(default, str):
             return str(v).strip()[:30] or None
         if isinstance(default, dict):
@@ -343,7 +385,7 @@ def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> d
     if key not in DEFAULTS:
         raise ValueError(f"мэдэгдэхгүй бүлэг: {key}")
     allowed_keys = PER_SITE.get(key, set())
-    row = db.get(AppSetting, key)
+    row = _write_row(db, key)
     if row is None:
         row = AppSetting(key=key, value={})
         db.add(row)
@@ -371,7 +413,7 @@ def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> d
     stored[SITE_OVERLAY] = overlay
     row.value = stored
     row.updated_by = username
-    _cache.pop(key, None)
+    _mark_changed(db, key)
     return site
 
 
@@ -385,7 +427,9 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
         v = values[k]
         allowed = CHOICES.get((key, k))
         if isinstance(default, bool):
-            clean[k] = bool(v)
+            cv = _coerce(default, v)
+            if cv is not None:
+                clean[k] = cv
         elif isinstance(default, str):
             v = str(v).strip()[:30]
             if allowed and v not in allowed:
@@ -403,7 +447,7 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
                 clean[k] = max(0, int(v))
             except (TypeError, ValueError):
                 continue
-    row = db.get(AppSetting, key)
+    row = _write_row(db, key)
     if row is None:
         row = AppSetting(key=key, value={})
         db.add(row)
@@ -411,7 +455,7 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
     merged.update(clean)
     row.value = merged
     row.updated_by = username
-    _cache.pop(key, None)  # дараагийн уншилт шинэ утгыг авна
+    _mark_changed(db, key)
     return {**_base(key), **{k: v for k, v in merged.items() if k in DEFAULTS[key]}}
 
 

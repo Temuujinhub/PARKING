@@ -10,9 +10,8 @@
 // зогсоолд ҮЙЛЧИЛЖ БУЙ бодит утгыг эх сурвалжтай нь харуулах, (3) машиныг
 // гацаах тохиргооны ХОСЛОЛУУДЫГ урьдчилан илрүүлэх.
 import { AlertTriangle, Info, RotateCcw, Save, Settings2, ShieldAlert } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../api'
-import { useAuth } from '../../auth'
 import { useToast } from '../../components/ui'
 import OpenReasonsCard from './OpenReasonsCard'
 
@@ -54,13 +53,13 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
     }
     if (row.unit === 'bool') {
       return (
-        <input type="checkbox" className="mt-1" checked={!!shown}
+        <input type="checkbox" className="mt-1" checked={!!shown} aria-label={row.name}
           onChange={(e) => onChange(e.target.checked)} />
       )
     }
     if (row.unit === 'choice') {
       return (
-        <select className="input w-56 text-sm" value={shown}
+        <select className="input w-56 text-sm" value={shown} aria-label={row.name}
           onChange={(e) => onChange(e.target.value)}>
           {Object.entries(POLICY_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
@@ -68,13 +67,13 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
     }
     if (row.unit === 'time') {
       return (
-        <input className="input w-28 font-mono text-sm" type="time" value={shown || ''}
+        <input className="input w-28 font-mono text-sm" type="time" value={shown || ''} aria-label={row.name}
           onChange={(e) => onChange(e.target.value)} />
       )
     }
     return (
       <div className="flex items-center gap-1.5">
-        <input className="input w-28 font-mono text-sm" type="number" min={row.min ?? 0}
+        <input className="input w-28 font-mono text-sm" type="number" min={row.min ?? 0} aria-label={row.name}
           max={row.max ?? undefined} value={shown ?? 0}
           onChange={(e) => onChange(Number(e.target.value))} />
         <span className="text-xs text-slate-500">{UNIT_LABEL[row.unit] || ''}</span>
@@ -131,9 +130,10 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
 
 export default function PaymentRulesSection({ onGotoDevices }) {
   const toast = useToast()
-  const { user } = useAuth()
-  const canGlobal = ['SUPER_ADMIN', 'ADMIN'].includes(user?.role)
   const [index, setIndex] = useState(null)
+  const canGlobal = index?.can_edit_global === true
+  const requestId = useRef(0)
+  const [error, setError] = useState('')
   const [siteId, setSiteId] = useState('')
   const [report, setReport] = useState(null)
   const [draft, setDraft] = useState({})
@@ -143,15 +143,21 @@ export default function PaymentRulesSection({ onGotoDevices }) {
     api('/api/admin/payment-rules').then((d) => {
       setIndex(d)
       // Эхлээд ЕРӨНХИЙ горим (бүх зогсоолын анхдагч), эрхгүй бол эхний зогсоол
-      setSiteId((cur) => cur || (canGlobal ? GLOBAL : (d.sites?.[0]?.id || '')))
-    }).catch((e) => toast(e.message, 'error'))
+      setSiteId((cur) => cur || (d.can_edit_global ? GLOBAL : (d.sites?.[0]?.id || '')))
+    }).catch((e) => { setError(e.message); toast(e.message, 'error') })
   }, [])
 
   const load = useCallback((id) => {
     if (!id) return
+    const current = ++requestId.current
     setReport(null)
     setDraft({})
-    api(`/api/admin/payment-rules/${id}`).then(setReport).catch((e) => toast(e.message, 'error'))
+    setError('')
+    api(`/api/admin/payment-rules/${id}`).then((data) => {
+      if (current === requestId.current) setReport(data)
+    }).catch((e) => {
+      if (current === requestId.current) setError(e.message)
+    })
   }, [])
 
   useEffect(() => { load(siteId) }, [siteId, load])
@@ -169,6 +175,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
 
   const save = async () => {
     setBusy(true)
+    setError('')
     try {
       const fresh = await api(`/api/admin/payment-rules/${siteId}`, { method: 'PUT', body: draft })
       setReport(fresh)
@@ -177,10 +184,12 @@ export default function PaymentRulesSection({ onGotoDevices }) {
       toast(isGlobal
         ? 'Ерөнхий дүрэм хадгалагдлаа — тусгай дүрэмгүй бүх зогсоолд үйлчилнэ'
         : 'Хадгалагдлаа — дараагийн уншилтаас эхлэн үйлчилнэ')
-    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+    } catch (e) { setError(e.message); toast(e.message, 'error') } finally { setBusy(false) }
   }
 
-  if (!index) return <div className="text-sm text-slate-500">Ачаалж байна…</div>
+  if (!index) return error
+    ? <p role="alert" className="text-sm text-slate-100">{error}</p>
+    : <div role="status" className="text-sm text-slate-500">Ачаалж байна…</div>
   if (!index.sites.length && !canGlobal) return <div className="text-sm text-slate-500">Зогсоол алга.</div>
 
   const groups = report
@@ -190,6 +199,8 @@ export default function PaymentRulesSection({ onGotoDevices }) {
 
   return (
     <div className="space-y-5">
+      {error && <p role="alert" className="text-sm text-slate-100 border border-brand-red rounded-lg p-3">{error}</p>}
+      {!canGlobal && <p className="text-sm text-slate-300">Та өөрийн зогсоолын дүрмийг хадгалж болно. Системийн ерөнхий дүрмийг бүх зогсоолын эрхтэй админ удирдана.</p>}
       <div className="card space-y-3">
         <div>
           <h2 className="font-semibold flex items-center gap-2">
@@ -204,7 +215,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select className="input w-auto min-w-[16rem]" value={siteId}
+          <select className="input w-auto min-w-[16rem]" value={siteId} disabled={busy}
             onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
             {canGlobal && <option value={GLOBAL}>Ерөнхий — бүх зогсоолын анхдагч</option>}
             {index.sites.map((s) => (
@@ -264,7 +275,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
 
       {/* ── Дүрмүүд бүлгээр ── */}
       {groups.map(([g, name, rows]) => rows.length > 0 && (
-        <div key={g} className="card">
+        <fieldset key={g} disabled={busy} className="card disabled:opacity-70">
           <h3 className="font-semibold text-sm mb-1">{name}</h3>
           {rows.map((r) => (
             <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal}
@@ -273,7 +284,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
               onChange={(v) => setVal(r.group, r.key, v)}
               onReset={() => resetVal(r.group, r.key)} />
           ))}
-        </div>
+        </fieldset>
       ))}
 
       {/* Нээх шалтгаан — оператор төлбөргүй гаргах шалтгааны жагсаалт (систем даяар) */}

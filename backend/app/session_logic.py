@@ -1026,14 +1026,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # машиныг хэдэн секундын зайтай 2 удаа өөр дугаараар (Х/К, О/0 г.м. андуурч)
     # уншихад 2 тусдаа session үүсдэг байсныг (ж: 5155УХК + 5155УКК) зогсооно.
     recent_plates = [
-        rp for (rp,) in db.query(LprEvent.plate_number).filter(
+        (rp, did) for rp, did in db.query(LprEvent.plate_number, LprEvent.device_id).filter(
             LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
             LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=_dedup_sec),
         ).all()
     ]
-    dup_of = [rp for rp in recent_plates if is_duplicate_read(plate, rp)]
+    dup_of = [rp for rp, did in recent_plates
+              if rp == plate or (did == device.id and is_duplicate_read(plate, rp))]
     # ЗӨВ форматтай уншилт зөвхөн БУРУУ форматтай саяхны уншилтуудтай давхацвал
     # энэ нь junk-аар бүртгэгдсэн (hold-д баригдсан) машины ЖИНХЭНЭ дугаар:
     # dedup-аар хаявал session нь junk дугаартайгаа үлдэж гарахдаа таарахгүй.
@@ -1439,14 +1440,15 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # тэй таарахгүй) LED-д "бүртгэлгүй" текст илгээж, төлбөрийн текстийг дардаг байсныг
     # зогсооно (орох талтай ижил OCR-тэсвэртэй дүрэм).
     recent_plates = [
-        rp for (rp,) in db.query(LprEvent.plate_number).filter(
+        (rp, did) for rp, did in db.query(LprEvent.plate_number, LprEvent.device_id).filter(
             LprEvent.site_id == site_id, LprEvent.lane_dir == "exit",
             LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
             LprEvent.accepted.is_(True),
             LprEvent.created_at >= now - timedelta(seconds=int(_br["dedup_seconds"])),
         ).all()
     ]
-    if any(is_duplicate_read(plate, rp) for rp in recent_plates):
+    if any(rp == plate or (did == device.id and is_duplicate_read(plate, rp))
+           for rp, did in recent_plates):
         # Давхар уншилт — session/төлбөрийг ДАХИН боловсруулахгүй. ГЭХДЭЭ өмнөх
         # уншилтын хаалтны команд амжилтгүй болсон бол машин хаалганы өмнө
         # lpr_dedup_seconds (20с) турш ГАЦНА: жолооч ухраад дахин ойртох бүрд
@@ -1909,7 +1911,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
 
 
 def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | None:
-    """Тухайн lane-ийн barrier төхөөрөмжийг олно (ижил lane_no, эсвэл эхний barrier)."""
+    """Resolve a unique matching lane; never fall back to another gate."""
     # Хосолгох дүрэм НЭГ газар: `barrier_matches_camera` — хаалт ҮҮСГЭХ
     # (`ensure_lane_barriers`) болон хаалт ОЛОХ (энд) хоёр ижил дүрмээр явна.
     # Хоёр нь зөрвөл «үүссэн хаалтаа өөрөө олохгүй» гэсэн чимээгүй анги үүсдэг.
@@ -1921,7 +1923,10 @@ def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | No
         Device.site_id == site_id, Device.device_type == "barrier",
         Device.status == "active",
     ).order_by(Device.created_at, Device.id).all()
-    barrier = next((b for b in bars if barrier_matches_camera(near_device, b)), None)
+    matches = [b for b in bars if barrier_matches_camera(near_device, b)]
+    exact = [b for b in matches if b.lane_dir == near_device.lane_dir]
+    matches = exact or matches
+    barrier = matches[0] if len(matches) == 1 else None
     if barrier:
         return barrier
     # ӨӨР ЭГНЭЭНИЙ хаалт руу ХЭЗЭЭ Ч үсрэхгүй. Өмнө нь чиглэл таарсан ЭХНИЙ

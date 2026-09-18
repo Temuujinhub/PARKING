@@ -31,7 +31,7 @@ function CamSyncCard({ toast }) {
   const [rules, setRules] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  const load = () => api('/api/admin/camsync/rules').then(setRules).catch(() => {})
+  const load = () => api('/api/admin/camsync/rules').then(setRules).catch((e) => toast(e.message, 'error'))
   useEffect(() => { load() }, [])
 
   const save = async () => {
@@ -179,7 +179,7 @@ function CamHealthCard({ toast }) {
   const [rules, setRules] = useState(null)
   const [busy, setBusy] = useState(false)
 
-  const load = () => api('/api/admin/camhealth/rules').then(setRules).catch(() => {})
+  const load = () => api('/api/admin/camhealth/rules').then(setRules).catch((e) => toast(e.message, 'error'))
   useEffect(() => { load() }, [])
 
   const save = async () => {
@@ -327,7 +327,7 @@ function CamHealthCard({ toast }) {
 function AutoCloseRunCard({ toast, onGotoRules }) {
   const [rules, setRules] = useState(null)
   const [busy, setBusy] = useState(false)
-  useEffect(() => { api('/api/admin/autoclose/rules').then(setRules).catch(() => {}) }, [])
+  useEffect(() => { api('/api/admin/autoclose/rules').then(setRules).catch((e) => toast(e.message, 'error')) }, [])
 
   const runNow = async () => {
     if (!window.confirm('Авто цэвэрлэгээг яг одоо ажиллуулах уу?\n\nЗогсоол бүрийн дүрмээр гацсан бүртгэлүүд хаагдаж, зарим нь өр болно.')) return
@@ -373,6 +373,19 @@ function AutoCloseRunCard({ toast, onGotoRules }) {
 
 export default function AutomationSection({ onGotoRules }) {
   const toast = useToast()
+  const [capabilities, setCapabilities] = useState(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    api('/api/admin/settings-capabilities').then(setCapabilities).catch((e) => setError(e.message))
+  }, [])
+  if (error) return <p role="alert" className="text-sm text-slate-100">{error}</p>
+  if (!capabilities) return <p role="status" className="text-sm text-slate-300">Эрх шалгаж байна…</p>
+  if (!capabilities.can_edit_global) return (
+    <div className="card space-y-3">
+      <p className="text-sm text-slate-300">Эдгээр автомат ажил бүх зогсоолд үйлчилдэг тул бүх зогсоолын эрхтэй админ удирдана. Та өөрийн зогсоолын дүрмийг Төлбөрийн дүрэм хэсэгт тохируулна.</p>
+      <button type="button" className="btn-secondary" onClick={onGotoRules}>Өөрийн зогсоолын дүрэм →</button>
+    </div>
+  )
   return (
     <div className="space-y-4">
       <AutoCloseRunCard toast={toast} onGotoRules={onGotoRules} />

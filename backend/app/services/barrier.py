@@ -314,7 +314,7 @@ def is_relay_candidate(device: Device, cam: Device) -> bool:
       дотоод гарах командыг ГАДНА гарах камер гүйцэтгэж, машин төлбөр төлөлгүй
       зогсоолоос шууд гарах эрсдэлтэй.
     """
-    return (cam.device_type == "camera" and cam.status != "deleted"
+    return (cam.device_type == "camera" and cam.status == "active"
             and bool(cam.nested_inner) == bool(device.nested_inner)
             and bool(cam.ip_address))
 
@@ -341,14 +341,12 @@ def pick_relay(device: Device, cams: list[Device]) -> Device | None:
     # бүртгэлтэй байвал ЧИГЛЭЛ (lane_dir) таарсныг нь эхэлж авна: өмнө нь эрэмбэгүй
     # `same_lane[0]` байсан тул дуудалт бүрд ӨӨР камер сонгогдож, нэг удаа
     # ажиллаад дараагийнд нь унадаг «санамсаргүй» хэв маяг үүсгэж байв.
-    same_lane = [c for c in cams if c.lane_no == device.lane_no]
-    if same_lane:
-        return next((c for c in same_lane if c.lane_dir == device.lane_dir), same_lane[0])
-    # 2) Зогсоолд ЯГ НЭГ камертай (нэг all-in-one төхөөрөмж орох/гарах хоёуланд) бол түүнийг
-    if len(cams) == 1:
-        return cams[0]
-    # 3) Олон камертай ч энэ эгнээнийх алга — буруу хаалт нээхээс сэргийлж унана
-    return None
+    same_lane = [c for c in cams if c.lane_no == device.lane_no
+                 and (c.lane_dir == device.lane_dir or "both" in (c.lane_dir, device.lane_dir))]
+    exact = [c for c in same_lane if c.lane_dir == device.lane_dir]
+    candidates = exact or same_lane
+    # Ambiguous or missing wiring is a configuration error, never a random relay.
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def relay_note(db: Session, device: Device) -> str | None:
