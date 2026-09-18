@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import Field
 
 # Кодод бичсэн default secret — production-д энэ утга үлдвэл startup зогсоно (main.py)
 DEFAULT_SECRET_KEY = "change-me-in-production-9f8a7b6c5d4e"
@@ -417,7 +418,7 @@ class Settings(BaseSettings):
     # руу орохын өмнө event зургийг энэ хугацаагаар хүлээнэ — ингэснээр камер дээр
     # илүүц "Manual Snapshot" бичлэг үүсгэхгүй. 0 = хүлээхгүй (хуучин зан төлөв).
     # WS зураг өгдөггүй камерт огт нөлөөгүй (puller_delivers=False → шууд fallback).
-    snapshot_wait_event_sec: float = 8.0
+    snapshot_wait_event_sec: float = 4.0
     # CGI event стрим (eventManager.cgi?action=attach) нь `data={...}` JSON-ы
     # хажуугаар тухайн event-ийн ЖИНХЭНЭ кадрыг binary JPEG-ээр илгээдэг. Түүнийг
     # хэдэн секунд хүлээх вэ. Камер зураг өгдөг нь нэг удаа батлагдсаны ДАРАА л
@@ -427,6 +428,10 @@ class Settings(BaseSettings):
     # үүсгэдэг бөгөөд АМЬД кадр авдаг тул машин өнгөрсний дараа зураг гардаг.
     # Стримийн зураг тогтвортой ажилласны дараа false болгож бүрмөсөн унтраана.
     snapshot_cgi_fallback: bool = True
+    # Total CGI budget includes waiting for the camera lock and HTTP authentication.
+    snapshot_cgi_budget_sec: float = Field(default=5.0, gt=0, le=30)
+    # Fixed window from the FIRST picture, never extended by a continuing burst.
+    snapshot_best_window_sec: float = Field(default=2.5, ge=0, le=10)
     # snapshot.cgi ажиллахгүй камер дээр event бүрд 9 хүсэлт илгээх нь камерын
     # логийг Login бичлэгээр дүүргэж, event subscription-д саад болдог. Дараалан
     # N удаа бүтэлгүйтвэл тухайн камер дээр M минут ЗОГСООНО.
@@ -445,17 +450,16 @@ class Settings(BaseSettings):
     # Сар бүрийн 1-нд өмнөх сарын нэхэмжлэлийг автоматаар DRAFT үүсгэх
     invoice_auto_generate: bool = True
     # Камерын цаг серверийн UTC-ээс хэдэн цагаар түрүүлж явдаг вэ (УБ=+8) —
-    # нөхөн таталтын хайлтын мужид хэрэглэнэ. Камерын цаг эргэлзээтэй байвал
-    # нөхөн таталт бүсийн зөрүүг БОЛОН 0-г хоёуланг оролдоно (тохиргоо буруу байсан ч олдоно).
+    # нөхөн таталтын хайлтын мужид хэрэглэнэ. Камерын timezone-той заавал тааруулна.
     camera_tz_offset_hours: int = 8
-    # Нөхөн таталтын анхны хайлтын хагас-цонх (секунд). Олдохгүй бол ×5, ×20 болгож
-    # аажим өргөтгөнө — камерын цаг зөрсөн ч зургийг барьж авахын тулд.
+    # Нөхөн таталтын хайлтын хагас-цонх (секунд), дээд тал нь 180с.
     snapshot_search_window_seconds: int = 180
     # Камерын хадгалсан зургийг RPC2 (RecordFinder/mediaFileFind)-оор татах эсэх.
     # ODOOGIIN ITC firmware эдгээрийг ДЭМЖДЭГГҮЙ ("Bad Request") тул DEFAULT УНТРААСАН —
-    # backfill дэмий RPC2 login хийж admin эрх түгжих эрсдэл үүсгэхээс сэргийлж, шууд
-    # snapshot.cgi (амьд кадр) рүү очно. Дэмждэг firmware дээр PARKING_SNAPSHOT_STORED_FIND=true.
+    # Дэмждэг firmware дээр PARKING_SNAPSHOT_STORED_FIND=true. Унтраалттай бол
+    # хуучин зураг нөхөх хүсэлт тодорхой тайлбартай буцна; амьд кадр орлуулахгүй.
     snapshot_stored_find: bool = False
+    snapshot_stored_budget_sec: float = Field(default=10.0, gt=0, le=30)
 
     # Гарах хаалтны LED дэлгэц (trafficParking.setScreenDisplay) — гарах камерын
     # LED-д төлбөрийн дүн/мэндчилгээ харуулна. Template-д {amount}, {plate} орлуулна.

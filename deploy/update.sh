@@ -18,6 +18,16 @@ APP_DIR="/root/PARKING"
 BUNDLE="${1:-}"                 # заавал биш: git bundle файлын зам
 SNAP_DIR="${PARKING_SNAPSHOT_DIR:-/var/lib/parking/snapshots}"
 cd "$APP_DIR"
+if [ "${PARKING_DEPLOY_LOCK_HELD:-0}" != 1 ]; then
+  exec 9>/run/lock/parking-deploy.lock
+  flock -n 9 || { echo "Deployment already running"; exit 1; }
+fi
+git diff --quiet && git diff --cached --quiet || {
+  echo "Tracked local changes exist; deployment stopped"; exit 1; }
+PREVIOUS=$(git rev-parse HEAD)
+# Preserve failure state even after reset --hard has advanced HEAD.
+printf '%s\n' "$PREVIOUS" > .git/parking-deploy-pending
+trap 'echo "Deploy failed; pending marker retained for retry. Previous commit: $PREVIOUS"' ERR
 
 echo "==> 1/7 DB backup (аюулгүй байдлын үүднээс)"
 BACKUP="/root/parking-backup-$(date +%Y%m%d-%H%M%S).sql"
@@ -77,21 +87,16 @@ else
     exit 1
   fi
   rm -f "$FETCH_LOG"
-  git reset --hard origin/main   # локал өөрчлөлт байвал дарж бичнэ (production дээр гараар засдаггүй)
+  TARGET=$(git rev-parse --verify "${PARKING_DEPLOY_TARGET:-origin/main}^{commit}")
+  git merge-base --is-ancestor "$TARGET" origin/main
+  git reset --hard "$TARGET"
 fi
 echo "    HEAD: $(git rev-parse --short HEAD)  $(git log -1 --pretty=%s | cut -c1-60)"
 
 echo "==> 3/7 Backend deps"
-# Офлайн/хаалттай сүлжээтэй сервер: pypi.org хүрэхгүй бол pip 5 удаа дахин
-# оролдож МӨНХӨД гацдаг байв (deploy тэр чигтээ зогсоно). Хурдан бууж өгөөд
-# ЦААШ ҮРГЭЛЖИЛНЭ — шинэ хамаарал нь заавал биш (cryptography нь зөвхөн
-# PARKING_SECRET_ENC_KEY тохируулсан үед хэрэгтэй; байхгүй бол шифрлэлт
-# автоматаар унтарч систем хэвийн ажиллана).
-if ! backend/venv/bin/pip install -q --timeout 15 --retries 1 \
-        -r backend/requirements.txt; then
-  echo "    АНХААР: pip амжилтгүй (интернэт хаалттай байж болзошгүй) — цааш үргэлжилж байна."
-  echo "    Дутуу сан байвал лог дээр гарна: journalctl -u parking-backend -n 50"
-fi
+# Mandatory dependencies must be present before replacing the running release.
+backend/venv/bin/pip install -q --timeout 10 --retries 0 -r backend/requirements.txt
+backend/venv/bin/pip check
 # Заавал биш сангууд (cryptography г.м) — амжилтгүй бол ЧИМЭЭГҮЙ алгасна.
 # Эдгээргүйгээр систем бүрэн ажиллана (дэлгэрэнгүй: requirements-optional.txt).
 backend/venv/bin/pip install -q --timeout 10 --retries 0 \
@@ -109,11 +114,8 @@ cd frontend
 # npm install-ыг зөвхөн хамаарал ӨӨРЧЛӨГДСӨН үед (эсвэл node_modules байхгүй үед)
 # ажиллуулна — офлайн серверт шаардлагагүй gacaa үүсгэхгүй.
 if [ ! -d node_modules ] || ! cmp -s package-lock.json node_modules/.parking-lock-stamp; then
-  if npm install --no-audit --no-fund --silent; then
-    cp -f package-lock.json node_modules/.parking-lock-stamp 2>/dev/null || true
-  else
-    echo "    АНХААР: npm install амжилтгүй — байгаа node_modules-ээр build хийж үзнэ."
-  fi
+  npm ci --no-audit --no-fund --silent
+  cp -f package-lock.json node_modules/.parking-lock-stamp
 else
   echo "    npm хамаарал өөрчлөгдөөгүй — install алгасав"
 fi
@@ -125,7 +127,7 @@ cd ..
 echo "==> 6/7 Backend дахин асаах (схем автоматаар шинэчилнэ)"
 # Watchdog: минут тутам health шалгаж, гацсан/унасан бол авто restart (идемпотент)
 install -m 755 tools/watchdog.sh /usr/local/bin/parking-watchdog
-printf '* * * * * root /usr/local/bin/parking-watchdog\\n' > /etc/cron.d/parking-watchdog
+printf '* * * * * root /usr/local/bin/parking-watchdog\n' > /etc/cron.d/parking-watchdog
 chmod 644 /etc/cron.d/parking-watchdog
 # systemd unit өөрчлөгдсөн бол шинэчилнэ (TimeoutStopSec г.м)
 if ! cmp -s deploy/parking-backend.service /etc/systemd/system/parking-backend.service; then
@@ -137,10 +139,17 @@ systemctl restart parking-backend
 systemctl reload nginx
 
 echo "==> 7/7 Шалгах"
-sleep 3
+healthy=0
+for attempt in $(seq 1 15); do
+  if curl --max-time 2 -fsS http://127.0.0.1:8000/api/health >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 2
+done
 # Backend руу ШУУД (127.0.0.1:8000) — nginx-ийн HTTP→HTTPS redirect-д баригдахгүй
-if curl -fsS http://127.0.0.1:8000/api/health >/dev/null; then
-  curl -fsS http://127.0.0.1:8000/api/health && echo
+if [ "$healthy" = 1 ]; then
+  curl --max-time 2 -fsS http://127.0.0.1:8000/api/health && echo
 else
   echo "    health БҮТЭЛГҮЙ — сүүлийн лог:"
   journalctl -u parking-backend -n 25 --no-pager
@@ -150,4 +159,6 @@ fi
 echo "----- snapshot / snap_pull лог (сүүлийн 15) -----"
 journalctl -u parking-backend -n 200 --no-pager | grep -Ei "snap_pull|snapshot|нөхөн таталт" | tail -15 || true
 echo "-------------------------------------------------"
+git rev-parse HEAD > .git/parking-deployed-sha
+rm -f .git/parking-deploy-pending
 echo "Шинэчлэлт дууслаа. Backup: $BACKUP"

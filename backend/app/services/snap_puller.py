@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy import func
 
 from ..config import settings
 from .device_auth import camera_credentials
@@ -35,6 +36,7 @@ from .barrier import DahuaRpc
 log = logging.getLogger("parking.snap_puller")
 
 _tasks: dict[str, asyncio.Task] = {}
+_task_configs: dict[str, tuple] = {}
 
 # ip → сүүлд WS-ээр БОДИТ ЗУРАГ ирсэн цаг (time.monotonic). snapshot.py үүгээр
 # «энэ камер event зургаа WS-ээр өгдөг тул хүлээх үү, шууд snapshot.cgi руу орох
@@ -122,12 +124,13 @@ def plate_from_notify(payload: dict | None) -> str | None:
 # ─── Session-д холбох ────────────────────────────────────────────────────────
 
 async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: bytes,
-                             src: str = "ws"):
+                             src: str = "ws", received_at: datetime | None = None):
     """Зургийг хадгалаад тухайн дугаарын хамгийн сүүлийн session-д холбоно.
     Event боловсруулалт (cgi_poller) зургаас хоцорч болзошгүй тул хэдэнтээ оролдоно."""
     from ..session_logic import normalize_plate
     from .snapshot import _save, note_source
     plate_n = normalize_plate(plate) or plate.strip().upper()
+    received_at = received_at or datetime.utcnow()
     # Дискний бичилт thread дээр — event loop блоклохгүй (хаалт нээх хугацаанд нөлөөлнө)
     rel = await asyncio.to_thread(_save, data, plate_n, lane_dir)
     if not rel:
@@ -137,11 +140,18 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
         try:
             device = db.get(Device, device_id)
             if not device:
-                return
+                break
+            # Awaiting-payment sessions have no exit_time yet; the exit reader
+            # commits exit_device_id and updated_at before a picture is attached.
+            event_time = (func.coalesce(ParkingSession.exit_time, ParkingSession.updated_at)
+                          if lane_dir == "exit" else ParkingSession.entry_time)
+            event_device = ParkingSession.exit_device_id if lane_dir == "exit" else ParkingSession.entry_device_id
             s = (db.query(ParkingSession)
                  .filter(ParkingSession.site_id == device.site_id,
                          ParkingSession.plate_number == plate_n,
-                         ParkingSession.entry_time >= datetime.utcnow() - timedelta(hours=48))
+                         event_device == device_id,
+                         event_time >= received_at - timedelta(seconds=30),
+                         event_time <= received_at + timedelta(seconds=10))
                  .order_by(ParkingSession.entry_time.desc()).first())
             if s:
                 # Өмнө нь өөр суваг (snapshot.cgi-ийн амьд кадр, эсвэл ижил
@@ -172,7 +182,9 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
         finally:
             db.close()
         await asyncio.sleep(1.5)
-    log.warning(f"{plate_n} {lane_dir}: session олдсонгүй, файл {rel} хадгалагдав")
+    from .snapshot import discard_saved
+    await asyncio.to_thread(discard_saved, rel)
+    log.warning("%s %s: matching recent session not found; discarded unattached image", plate_n, lane_dir)
 
 
 # ─── Лайв WS стрим ───────────────────────────────────────────────────────────
@@ -247,10 +259,6 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
                 log.info(f"{ip}: WS зургийн суваг ХОЛБОГДЛОО (subscribe OK, "
                          f"filter={flt.get('Flags')}/{flt.get('Events')})")
 
-                # Дугааргүй notification-д хамгийн сүүлийн дугаарыг оноох (event-ийн
-                # зургууд хэдэн секундын дотор цувж ирдэг)
-                last_plate: str | None = None
-                last_plate_ts = 0.0
                 last_ka = time.monotonic()
                 seen_methods: set[str] = set()  # оношилгоо: анх ирсэн method бүрийг логлоно
                 while True:
@@ -297,11 +305,8 @@ async def _ws_session(ip: str, on_picture, flt: dict, test_mode: bool = False,
                                                                  "ClientIP": "", "result": True},
                                                       "object": obj, "id": msg_id, "session": sid}))
                     plate = plate_from_notify(payload)
-                    now = time.monotonic()
-                    if plate:
-                        last_plate, last_plate_ts = plate, now
-                    elif last_plate and now - last_plate_ts < 5:
-                        plate = last_plate
+                    # A nearby notification may belong to the next car. Only
+                    # attach pictures carrying their own plate metadata.
                     if test_mode:
                         keys = list((payload.get("params") or {}).keys())
                         print(f"  notify: plate={plate!r} binary={len(binary)}b params_keys={keys}")
@@ -600,20 +605,71 @@ async def _comet_session(ip: str, on_picture, flt: dict,
                 ka.cancel()
 
 
+class _PictureBatch:
+    """Share one bounded best-picture selector between comet and WebSocket."""
+
+    def __init__(self, device_id, ip, lane_dir, source):
+        self.device_id, self.ip, self.lane_dir, self.source = device_id, ip, lane_dir, source
+        self.best = {}
+        self.timers = {}
+
+    async def offer(self, plate, data):
+        from .snapshot import valid_jpeg
+        if not plate or not valid_jpeg(data):
+            return
+        if plate in self.best:
+            received, old = self.best[plate]
+            self.best[plate] = (received, data if len(data) > len(old) else old)
+            return
+        if plate in self.timers:
+            return  # This burst is already being attached.
+        self.best[plate] = (datetime.utcnow(), data)
+        self.timers[plate] = asyncio.create_task(self._later(plate))
+
+    async def _later(self, plate):
+        try:
+            await asyncio.sleep(max(0, settings.snapshot_best_window_sec))
+            await self.flush_plate(plate)
+        finally:
+            self.timers.pop(plate, None)
+
+    async def flush_plate(self, plate):
+        item = self.best.pop(plate, None)
+        if item:
+            received, data = item
+            await _attach_to_session(self.device_id, plate, self.lane_dir, data,
+                                     src=self.source, received_at=received)
+
+    async def flush(self, force=False):
+        if force:
+            timers = list(self.timers.values())
+            for plate, timer in list(self.timers.items()):
+                if plate in self.best:
+                    timer.cancel()
+            if timers:
+                await asyncio.gather(*timers, return_exceptions=True)
+            for plate in list(self.best):
+                await self.flush_plate(plate)
+
+    async def close(self):
+        # Discard queued frames on reconfiguration, but let an attachment that
+        # already saved a file finish so no orphaned files/tasks are left behind.
+        waiting = set(self.best)
+        self.best.clear()
+        timers = list(self.timers.values())
+        for plate, timer in list(self.timers.items()):
+            if plate in waiting:
+                timer.cancel()
+        if timers:
+            await asyncio.gather(*timers, return_exceptions=True)
+
+
 async def _comet_one(device_id: str, ip: str, lane_dir: str,
                      creds: tuple[str, str] | None = None,
                      start_delay: float = 0.0):
     """Нэг камерын comet зургийн сувгийг тасралтгүй барина (reconnect-тэй)."""
-    best: dict[str, tuple[float, bytes]] = {}
-
-    async def flush_stale(force: bool = False):
-        now = time.monotonic()
-        for plate in list(best):
-            ts, data = best[plate]
-            if force or now - ts > 2.5:
-                del best[plate]
-                asyncio.create_task(
-                    _attach_to_session(device_id, plate, lane_dir, data, src="comet"))
+    batch = _PictureBatch(device_id, ip, lane_dir, "comet")
+    flush_stale = batch.flush
 
     cur = {"idx": 0}
 
@@ -630,69 +686,61 @@ async def _comet_one(device_id: str, ip: str, lane_dir: str,
         # snapshot.py-д «энэ камер зургаа стримээр өгдөг» гэж мэдэгдэнэ —
         # ингэснээр _capture_and_store нь snapshot.cgi рүү унахаа больж,
         # камер дээр илүүц «Manual Snapshot» бичлэг үүсэхээ болино
-        from .snapshot import offer_stream_image
-        offer_stream_image(ip, data, src="comet")
-        if not plate:
-            return          # дугааргүй зураг — стримийн санамжид л үлдэнэ
-        ts, old = best.get(plate, (0.0, b""))
-        best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
-        await flush_stale()
-        # Burst-ийн СҮҮЛЧИЙН зураг өмнө нь ДАРААГИЙН event иртэл `best`-д гацдаг
-        # байв (flush зөвхөн шинэ зураг дээр дуудагддаг тул шөнийн ганц машины
-        # зураг session-д хэдэн цагаар холбогдохгүй) — 3с дараа заавал шалгана
-        # (ANPR-Viewer клиентийн pendingTimer-тэй ижил санаа).
-        async def _flush_later():
-            await asyncio.sleep(3.0)
-            await flush_stale()
-        asyncio.create_task(_flush_later())
+        # Plate-bearing images have one owner: the batch selector. Publishing the
+        # same frame in the IP-only cache could attach it to another car.
+        await batch.offer(plate, data)
 
     # Бүх камер НЭГ агшинд login хийвэл камерын RPC үйлчилгээ ачаалагдаж
     # attachFileProc массаар татгалздаг (2026-08-14: 20 камерын 14 нь нэг
     # секундэд гологдов) — тиймээс эхлэлийг зориуд тараана.
-    if start_delay:
-        await asyncio.sleep(start_delay)
+    try:
+        if start_delay:
+            await asyncio.sleep(start_delay)
 
-    vi = 0
-    while True:
-        # Батлагдсан филтер байвал ҮРГЭЛЖ түүгээр — татгалзал нь түр зуурын
-        # ачаалал байж болох тул зураг өгдөггүй хувилбар руу шилжихгүй
-        proven = _comet_ok_filter.get(ip)
-        idx = proven if proven is not None else vi % len(COMET_FILTERS)
-        cur["idx"] = idx
-        st = _comet_state.setdefault(ip, {})
-        try:
-            await _comet_session(ip, on_picture, COMET_FILTERS[idx],
-                                 creds=creds, filter_no=idx + 1)
-        except AttachRejected as e:
-            st["last_error"] = f"attach: {e}"
-            if proven is None:
-                vi += 1
-                log.warning("%s: comet filter #%d гологдов (%s) — дараагийнх 10с дараа",
-                            ip, idx + 1, e)
-            else:
-                log.warning("%s: comet filter #%d (батлагдсан) түр гологдов (%s) "
-                            "— 10с дараа ДАХИН түүгээр", ip, idx + 1, e)
+        vi = 0
+        while True:
+            # Батлагдсан филтер байвал ҮРГЭЛЖ түүгээр — татгалзал нь түр зуурын
+            # ачаалал байж болох тул зураг өгдөггүй хувилбар руу шилжихгүй
+            proven = _comet_ok_filter.get(ip)
+            idx = proven if proven is not None else vi % len(COMET_FILTERS)
+            cur["idx"] = idx
+            st = _comet_state.setdefault(ip, {})
+            try:
+                await _comet_session(ip, on_picture, COMET_FILTERS[idx],
+                                     creds=creds, filter_no=idx + 1)
+            except AttachRejected as e:
+                st["last_error"] = f"attach: {e}"
+                if proven is None:
+                    vi += 1
+                    log.warning("%s: comet filter #%d гологдов (%s) — дараагийнх 10с дараа",
+                                ip, idx + 1, e)
+                else:
+                    log.warning("%s: comet filter #%d (батлагдсан) түр гологдов (%s) "
+                                "— 10с дараа ДАХИН түүгээр", ip, idx + 1, e)
+                await flush_stale(force=True)
+                await asyncio.sleep(10)
+                continue
+            except CometSilent as e:
+                st["last_error"] = f"чимээгүй: {e}"
+                if proven is None:
+                    vi += 1
+                    log.warning("%s: comet filter #%d attach хийгдсэн ч %s — дараагийнхыг "
+                                "туршина", ip, idx + 1, e)
+                else:
+                    log.warning("%s: comet filter #%d %s — дахин холбоно", ip, idx + 1, e)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                st["last_error"] = f"{type(e).__name__}: {str(e)[:70]}"
+                log.warning("%s: comet тасарлаа (%s: %s) — 15с дараа дахин",
+                            ip, type(e).__name__, str(e)[:110])
+            st["reconnects"] = st.get("reconnects", 0) + 1
+            st["attached"] = None
             await flush_stale(force=True)
-            await asyncio.sleep(10)
-            continue
-        except CometSilent as e:
-            st["last_error"] = f"чимээгүй: {e}"
-            if proven is None:
-                vi += 1
-                log.warning("%s: comet filter #%d attach хийгдсэн ч %s — дараагийнхыг "
-                            "туршина", ip, idx + 1, e)
-            else:
-                log.warning("%s: comet filter #%d %s — дахин холбоно", ip, idx + 1, e)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"{type(e).__name__}: {str(e)[:70]}"
-            log.warning("%s: comet тасарлаа (%s: %s) — 15с дараа дахин",
-                        ip, type(e).__name__, str(e)[:110])
-        st["reconnects"] = st.get("reconnects", 0) + 1
-        st["attached"] = None
-        await flush_stale(force=True)
-        await asyncio.sleep(15)
+            await asyncio.sleep(15)
+    finally:
+        _comet_state.setdefault(ip, {})["attached"] = None
+        await batch.close()
 
 
 def comet_enabled_for(ip: str) -> bool:
@@ -709,47 +757,35 @@ async def _pull_one(device_id: str, ip: str, lane_dir: str,
     """Нэг камерын зургийн WS сувгийг тасралтгүй барина (reconnect-тэй).
     Event бүрд хэд хэдэн зураг (бүтэн кадр + тайрмал) ирдэг — 2.5с цонхонд
     дугаар тус бүрийн ХАМГИЙН ТОМЫГ нь session-д холбоно."""
-    best: dict[str, tuple[float, bytes]] = {}  # plate → (ирсэн цаг, хамгийн том jpeg)
-
-    async def flush_stale(force: bool = False):
-        now = time.monotonic()
-        for plate in list(best):
-            ts, data = best[plate]
-            if force or now - ts > 2.5:
-                del best[plate]
-                asyncio.create_task(_attach_to_session(device_id, plate, lane_dir, data))
+    batch = _PictureBatch(device_id, ip, lane_dir, "ws")
+    flush_stale = batch.flush
 
     async def on_picture(plate: str, data: bytes):
-        _last_pic[ip] = time.monotonic()  # энэ камер зургаа WS-ээр өгдөг нь батлагдлаа
-        ts, old = best.get(plate, (0.0, b""))
-        best[plate] = (time.monotonic(), data if len(data) > len(old) else old)
-        await flush_stale()
-        # comet замтай ижил: burst-ийн сүүлчийн зураг дараагийн event иртэл
-        # гацахгүйн тулд 3с дараа заавал flush хийнэ
-        async def _flush_later():
-            await asyncio.sleep(3.0)
-            await flush_stale()
-        asyncio.create_task(_flush_later())
+        _last_pic[ip] = time.monotonic()
+        await batch.offer(plate, data)
 
-    if start_delay:
-        await asyncio.sleep(start_delay)
+    try:
+        if start_delay:
+            await asyncio.sleep(start_delay)
 
-    vi = 0  # амжилттай болсон filter хувилбар дээрээ тогтоно
-    while True:
-        flt = ATTACH_FILTERS[vi % len(ATTACH_FILTERS)]
-        try:
-            await _ws_session(ip, on_picture, flt, creds=creds)
-        except AttachRejected as e:
-            log.warning(f"{ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
-                        f"дараагийн хувилбар 10с дараа")
-            vi += 1
+        vi = 0  # амжилттай болсон filter хувилбар дээрээ тогтоно
+        while True:
+            flt = ATTACH_FILTERS[vi % len(ATTACH_FILTERS)]
+            try:
+                await _ws_session(ip, on_picture, flt, creds=creds)
+            except AttachRejected as e:
+                log.warning(f"{ip}: filter #{vi % len(ATTACH_FILTERS) + 1} гологдов ({e}) — "
+                            f"дараагийн хувилбар 10с дараа")
+                vi += 1
+                await flush_stale(force=True)
+                await asyncio.sleep(10)
+                continue
+            except Exception as e:
+                log.warning(f"{ip}: WS тасарлаа ({type(e).__name__}: {str(e)[:120]}) — 15с дараа дахин")
             await flush_stale(force=True)
-            await asyncio.sleep(10)
-            continue
-        except Exception as e:
-            log.warning(f"{ip}: WS тасарлаа ({type(e).__name__}: {str(e)[:120]}) — 15с дараа дахин")
-        await flush_stale(force=True)
-        await asyncio.sleep(15)
+            await asyncio.sleep(15)
+    finally:
+        await batch.close()
 
 
 async def supervisor():
@@ -763,10 +799,13 @@ async def supervisor():
     log.info("идэвхжлээ — камеруудаас event зураг татаж эхэлж байна (WS=%s, comet=%s%s)",
              settings.snap_pull, settings.snap_comet,
              f" [{settings.snap_comet_ips}]" if settings.snap_comet_ips else "")
+    from .camera_tasks import ensure_camera_task, stop_camera_task
     while True:
         db = SessionLocal()
         try:
-            cams = db.query(Device).filter(
+            from ..models import ParkingSite
+            cams = db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id).filter(
+                ParkingSite.is_active.is_(True),
                 Device.device_type == "camera", Device.status == "active",
                 Device.ip_address.isnot(None), Device.ip_address != "",
             ).all()
@@ -780,19 +819,21 @@ async def supervisor():
                 if not use_comet and not settings.snap_pull:
                     continue
                 active.add(c.id)
-                if c.id not in _tasks or _tasks[c.id].done():
-                    runner = _comet_one if use_comet else _pull_one
-                    delay = started * settings.snap_comet_start_stagger_sec
+                creds = camera_credentials(c)
+                config = (c.ip_address, creds, c.site_id, c.lane_no, c.lane_dir,
+                          bool(c.nested_inner), use_comet)
+                runner = _comet_one if use_comet else _pull_one
+                delay = started * settings.snap_comet_start_stagger_sec
+                changed = await ensure_camera_task(
+                    _tasks, _task_configs, c.id, config,
+                    lambda c=c, creds=creds, runner=runner, delay=delay: runner(
+                        c.id, c.ip_address, c.lane_dir or "entry", creds, start_delay=delay))
+                if changed:
                     started += 1
-                    _tasks[c.id] = asyncio.create_task(
-                        runner(c.id, c.ip_address, c.lane_dir or "entry",
-                               camera_credentials(c), start_delay=delay))
-                    log.info("%s (%s) зургийн стрим эхэллээ — %s (+%.0fс)", c.name,
-                             c.ip_address, "comet" if use_comet else "WS", delay)
+                    log.info("%s (%s): picture stream configuration applied", c.name, c.ip_address)
             for did in list(_tasks):
                 if did not in active:
-                    _tasks[did].cancel()
-                    del _tasks[did]
+                    await stop_camera_task(_tasks, _task_configs, did)
         except Exception as e:
             log.error(f"supervisor алдаа: {e}")
         finally:
@@ -800,19 +841,9 @@ async def supervisor():
         await asyncio.sleep(60)
 
 
-# ─── Нөхөн таталт: ОЛОН АРГААР камерын хадгалсан зургийг татах ────────────────
-#
-# Нэг арга (mediaFileFind) найдваргүй байсан тул 3 бие даасан аргыг дараалан
-# оролдоно. Эхнийх нь амжилттай болонгуут зогсоно, бүх аргын оношийг цуглуулна:
-#   1. RecordFinder(TrafficSnapEventInfo) — ANPR event-д ШУУД холбогдсон зураг
-#      (дугаарын event-ийн бичлэгээс замыг авдаг тул хамгийн зөв эх сурвалж)
-#   2. mediaFileFind — цагийн мужийн хадгалсан jpg файлуудыг жагсааж татна
-#   3. snapshot.cgi — камерын ОДООГИЙН амьд кадр (event зураг огт олдоогүйн эцсийн арга)
-#
-# Цаг/бүсийн тохиргоо буруу байх эргэлзээг даван туулахын тулд:
-#   • хайлтын цонхыг аажим өргөтгөнө (window → ×5 → ×20)
-#   • тохируулсан бүсийн зөрүү (tz_offset_hours)-г БОЛОН 0-г хоёуланг оролдож,
-#     олдсон файлуудаас target цагт хамгийн ОЙРхныг сонгоно.
+# ─── Хадгалсан event зургийн нөхөн таталт ──────────────────────────────────
+# RecordFinder → mediaFileFind: нэг цагийн муж, тодорхой timezone, улсын дугаар.
+# Хуучин үйл явдлыг амьд кадраар нөхөхгүй; хугацаа/цагийн бүсийг тааж өргөтгөхгүй.
 
 _FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -868,7 +899,7 @@ async def _download_file(client: httpx.AsyncClient, ip: str, session_id, path: s
 
 
 async def _pick_and_download(client: httpx.AsyncClient, ip: str, session_id,
-                             infos: list, target: datetime) -> bytes | None:
+                             infos: list, target: datetime, plate: str | None = None) -> bytes | None:
     """Олдсон бичлэгүүдээс target цагт хамгийн ОЙРыг (цаггүй бол хамгийн ТОМыг)
     эрэмбэлж, эхний бүтэн jpg татагдтал дараалан оролдоно."""
     def rank(info):
@@ -877,16 +908,21 @@ async def _pick_and_download(client: httpx.AsyncClient, ip: str, session_id,
             return (0, abs((t - target).total_seconds()))
         return (1, -int((info or {}).get("Length") or 0))
 
+    from ..session_logic import normalize_plate
+    from .snapshot import valid_jpeg
     for info in sorted(infos, key=rank):
+        if plate and normalize_plate(plate_from_notify(info) or "") != normalize_plate(plate):
+            continue
         for path in _extract_paths(info):
             data = await _download_file(client, ip, session_id, path)
-            if data:
+            if valid_jpeg(data):
                 return data
     return None
 
 
 async def _find_via_record(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
-                           start: datetime, end: datetime, target: datetime) -> tuple[bytes | None, str]:
+                           start: datetime, end: datetime, target: datetime,
+                           plate: str | None = None) -> tuple[bytes | None, str]:
     """Арга #1 — RecordFinder(TrafficSnapEventInfo): ANPR event бичлэгээс шууд зураг."""
     inst = await rpc._call("RecordFinder.factory.create", {"name": "TrafficSnapEventInfo"})
     obj = inst.get("result")
@@ -910,18 +946,20 @@ async def _find_via_record(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
                 break
         if not infos:
             return None, "event бичлэг олдсонгүй"
-        data = await _pick_and_download(client, ip, rpc.session_id, infos, target)
+        data = await _pick_and_download(client, ip, rpc.session_id, infos, target, plate=plate)
         return (data, "" if data else f"{len(infos)} event олдсон ч зураг татагдсангүй")
     finally:
         try:
-            await rpc._call("RecordFinder.stopFind", obj=obj)
-            await rpc._call("RecordFinder.destroy", obj=obj)
+            async with asyncio.timeout(1):
+                await rpc._call("RecordFinder.stopFind", obj=obj)
+                await rpc._call("RecordFinder.destroy", obj=obj)
         except Exception:
             pass
 
 
 async def _find_via_media(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
-                          start: datetime, end: datetime, target: datetime) -> tuple[bytes | None, str]:
+                          start: datetime, end: datetime, target: datetime,
+                           plate: str | None = None) -> tuple[bytes | None, str]:
     """Арга #2 — mediaFileFind: цагийн мужаар хадгалсан jpg файлуудыг жагсаана."""
     inst = await rpc._call("mediaFileFind.factory.create")
     obj = inst.get("result")
@@ -945,12 +983,13 @@ async def _find_via_media(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
                 break
         if not infos:
             return None, "файл олдсонгүй"
-        data = await _pick_and_download(client, ip, rpc.session_id, infos, target)
+        data = await _pick_and_download(client, ip, rpc.session_id, infos, target, plate=plate)
         return (data, "" if data else f"{len(infos)} файл олдсон ч татагдсангүй")
     finally:
         try:
-            await rpc._call("mediaFileFind.close", obj=obj)
-            await rpc._call("mediaFileFind.destroy", obj=obj)
+            async with asyncio.timeout(1):
+                await rpc._call("mediaFileFind.close", obj=obj)
+                await rpc._call("mediaFileFind.destroy", obj=obj)
         except Exception:
             pass
 
@@ -958,64 +997,56 @@ async def _find_via_media(rpc: DahuaRpc, client: httpx.AsyncClient, ip: str,
 async def fetch_stored_picture(ip: str, event_time_utc: datetime, *,
                                creds: tuple[str, str] | None = None,
                                tz_offset_hours: int = 8,
-                               window_seconds: int = 180) -> tuple[bytes | None, str]:
-    """event-ийн зургийг камераас ОЛОН АРГААР дараалан нөхөж татна.
+                               window_seconds: int = 180,
+                               plate: str | None = None) -> tuple[bytes | None, str]:
+    """Search stored evidence once per supported API in a bounded time window.
 
-    event_time_utc — session-ий орох/гарах цаг (DB-ийн UTC цагаар).
-    Дотроо бүсийн зөрүү + өргөтгөх цонхыг өөрөө боддог тул дуудагч талд
-    цагийн тооцоо хийх шаардлагагүй.
-
-    Буцаах: (зураг|None, тайлбар). Амжилттай бол тайлбар хоосон; үгүй бол
-    оролдсон бүх аргын товч оношийг агуулна."""
-    # Бүсийн зөрүүг БОЛОН 0-г оролдоно (камерын цаг эсвэл тохиргоо буруу байж болзошгүй)
-    offsets: list[int] = []
-    for off in (tz_offset_hours, 0):
-        if off not in offsets:
-            offsets.append(off)
-    windows = [window_seconds, window_seconds * 5, window_seconds * 20]
-    diag: list[str] = []
-    # RPC2 stored-find (RecordFinder/mediaFileFind) энэ firmware дээр ажилладаггүй бол
-    # (default) алгасна — дэмий RPC2 login хийж admin эрх түгжихээс сэргийлж, шууд
-    # snapshot.cgi (амьд кадр) рүү очно.
-    if settings.snapshot_stored_find:
-      try:
-        async with httpx.AsyncClient(timeout=25) as client:
-            rpc = DahuaRpc(client, ip, *(creds or camera_credentials(None)))
-            await rpc.login()
-            try:
-                for w in windows:
-                    for off in offsets:
-                        target = event_time_utc + timedelta(hours=off)
-                        start = target - timedelta(seconds=w)
-                        end = target + timedelta(seconds=w)
-                        for name, fn in (("record", _find_via_record),
-                                         ("media", _find_via_media)):
-                            try:
-                                data, note = await fn(rpc, client, ip, start, end, target)
-                            except Exception as e:
-                                data, note = None, f"{type(e).__name__}: {str(e)[:60]}"
-                            if data:
-                                log.info(f"{ip}: нөхөн таталт OK — "
-                                         f"{name} (off{off:+d}/±{w}s, {len(data)}b)")
-                                return data, ""
-                            diag.append(f"{name}[off{off:+d}/±{w}s]: {note}")
-            finally:
-                await rpc.logout()
-      except Exception as e:
-        diag.append(f"холболт: {type(e).__name__}: {str(e)[:80]}")
-
-    # Амьд кадр — snapshot.cgi (энэ firmware дээр цорын ганц ажилладаг зургийн эх сурвалж)
+    A live frame cannot serve as evidence for an earlier event. Camera timezone
+    must be configured explicitly; guessing timezones/widening windows can pick
+    another vehicle. Cleanup calls have their own short timeout.
+    """
+    if not settings.snapshot_stored_find:
+        return None, "Камерын хадгалсан зураг хайх боломж идэвхгүй; хуучин үйл явдлыг амьд кадраар нөхөхгүй."
+    from .barrier import _rpc_lock, barrier_is_waiting, note_rpc_done
+    target = event_time_utc + timedelta(hours=tz_offset_hours)
+    window = timedelta(seconds=max(1, min(window_seconds, 180)))
+    diag = []
+    lock = _rpc_lock(ip)
+    held = False
     try:
-        from .snapshot import _fetch_from_camera
-        live = await _fetch_from_camera(ip, creds)
-        if live:
-            log.info(f"{ip}: нөхөн таталт — амьд кадраар нөхөв ({len(live)}b)")
-            return live, ""
-        diag.append("snapshot.cgi: амьд кадр татагдсангүй")
-    except Exception as e:
-        diag.append(f"snapshot.cgi: {type(e).__name__}")
-
-    return None, " | ".join(diag[-6:]) or "камераас зураг олдсонгүй"
+        async with asyncio.timeout(settings.snapshot_stored_budget_sec):
+            if barrier_is_waiting(ip):
+                return None, "Камер хаалтны команд боловсруулж байна; дараа дахин оролдоно уу."
+            await asyncio.wait_for(lock.acquire(), settings.snapshot_lock_wait_sec)
+            held = True
+            async with httpx.AsyncClient(timeout=3) as client:
+                rpc = DahuaRpc(client, ip, *(creds or camera_credentials(None)))
+                try:
+                    await rpc.login()
+                    for name, finder in (("record", _find_via_record), ("media", _find_via_media)):
+                        if barrier_is_waiting(ip):
+                            break
+                        data, note = await finder(rpc, client, ip, target-window,
+                                                   target+window, target, plate=plate)
+                        if data:
+                            return data, ""
+                        diag.append(f"{name}: {note}")
+                finally:
+                    try:
+                        async with asyncio.timeout(1):
+                            await rpc.logout()
+                    except (TimeoutError, httpx.HTTPError):
+                        pass
+    except (TimeoutError, httpx.HTTPError) as exc:
+        diag.append(type(exc).__name__)
+    except Exception as exc:
+        log.warning("%s: stored-picture search failed (%s)", ip, type(exc).__name__)
+        diag.append(type(exc).__name__)
+    finally:
+        if held:
+            note_rpc_done(ip)
+            lock.release()
+    return None, " | ".join(diag) or "камераас тохирох зураг олдсонгүй"
 
 
 # ─── Туршилтын горим: DB-гүйгээр WS сувгийг шалгах ──────────────────────────
@@ -1026,20 +1057,21 @@ if __name__ == "__main__":
         sys.exit(1)
     _ip = sys.argv[1]
     print(f"{_ip}: WS зургийн суваг руу холбогдож 120 секунд сонсоно (Ctrl+C зогсооно).")
-    print("Машин өнгөрөхөд notify мөр гарч, зураг /tmp/snaptest-д хадгалагдана.")
+    print("Машин өнгөрөхөд notify мөр гарч, зураг тусдаа түр хавтаст хадгалагдана.")
     print("АНХААР: камер subscribe-ийг ганц сувагт өгдөг — backend сервис ажиллаж"
           " байвал эхлээд: sudo systemctl stop parking-backend (дараа нь start)\n")
 
     async def _test():
-        import os
-        os.makedirs("/tmp/snaptest", exist_ok=True)
+        import tempfile
+        from pathlib import Path
+        destination = Path(tempfile.mkdtemp(prefix="parking-snaptest-"))
         n = 0
 
         async def on_pic(plate, data):
             nonlocal n
             n += 1
-            fn = f"/tmp/snaptest/{plate}_{n}.jpg"
-            open(fn, "wb").write(data)
+            fn = destination / f"{n}.jpg"
+            fn.write_bytes(data)
             print(f"  ЗУРАГ: {plate} {len(data)}b → {fn}")
 
         only = int(sys.argv[2]) if len(sys.argv) > 2 else None  # зөвхөн N-р filter-ийг турших

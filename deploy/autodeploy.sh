@@ -12,8 +12,13 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now parking-autodeploy.timer
 # Лог харах:  journalctl -u parking-autodeploy -n 50
-set -uo pipefail
-cd /root/PARKING || exit 0
+set -euo pipefail
+cd /root/PARKING || exit 1
+
+# Serialize timer and manual deployments. The child inherits descriptor 9.
+exec 9>/run/lock/parking-deploy.lock
+flock -n 9 || exit 0
+export PARKING_DEPLOY_LOCK_HELD=1
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ "$BRANCH" = "main" ] || exit 0   # feature branch дээр байвал хөндөхгүй (гар preview)
@@ -27,7 +32,9 @@ export GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes"
 timeout 60 git fetch origin main --quiet 2>/dev/null || exit 0   # GitHub хаалттай — дараа дахин
 LOCAL=$(git rev-parse HEAD 2>/dev/null)
 REMOTE=$(git rev-parse origin/main 2>/dev/null)
-[ "$LOCAL" = "$REMOTE" ] && exit 0
+# HEAD moves before build/health; equality alone cannot prove deployment succeeded.
+[ "$LOCAL" = "$REMOTE" ] && [ ! -f .git/parking-deploy-pending ] && exit 0
+export PARKING_DEPLOY_TARGET="$REMOTE"
 
 echo "[autodeploy $(date -u +%FT%TZ)] $LOCAL → $REMOTE — update.sh эхэллээ"
 bash deploy/update.sh

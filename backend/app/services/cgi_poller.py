@@ -27,6 +27,7 @@ from ..session_logic import (extract_confidence, handle_entry, handle_exit,
 log = logging.getLogger("parking.cgi_poller")
 
 _tasks: dict[str, asyncio.Task] = {}
+_task_configs: dict[str, tuple] = {}
 
 # ip → сүүлд МАШИН уншигдсан цаг (time.monotonic). Зургийн суваг «би зураг
 # авах ёстой байсан уу» гэдгээ үүгээр мэднэ: машин ирээгүй чимээгүй байдал
@@ -670,6 +671,7 @@ async def supervisor():
         return
     log.info("идэвхжлээ — камеруудаас ANPR татаж эхэлж байна")
     ensure_workers()   # боловсруулах worker-ууд (стримээс тусдаа)
+    from .camera_tasks import ensure_camera_task, stop_camera_task
     while True:
         ensure_workers()   # унасан worker байвал сэргээнэ
         db = SessionLocal()
@@ -686,17 +688,16 @@ async def supervisor():
             active = set()
             for c in cams:
                 active.add(c.id)
-                if c.id not in _tasks or _tasks[c.id].done():
-                    # creds-ийг session амьд байхад мөр болгож шийднэ
-                    _creds = camera_credentials(c)
-                    _tasks[c.id] = asyncio.create_task(_poll_one(c.id, c.ip_address, _creds))
-                    # Хэрэглэгчийн нэрийг логлоно — хаалт (barrier_credentials) ба
-                    # стрим (camera_credentials) өөр аккаунт ашиглаж байвал энд харагдана
-                    log.info(f"{c.name} ({c.ip_address}) сонсож эхэллээ — хэрэглэгч «{_creds[0]}»")
+                creds = camera_credentials(c)
+                config = (c.ip_address, creds, c.site_id, c.lane_no, c.lane_dir, bool(c.nested_inner))
+                changed = await ensure_camera_task(
+                    _tasks, _task_configs, c.id, config,
+                    lambda c=c, creds=creds: _poll_one(c.id, c.ip_address, creds))
+                if changed:
+                    log.info("%s (%s): event stream configuration applied", c.name, c.ip_address)
             for did in list(_tasks):
                 if did not in active:
-                    _tasks[did].cancel()
-                    del _tasks[did]
+                    await stop_camera_task(_tasks, _task_configs, did)
         except Exception as e:
             log.error(f"supervisor алдаа: {e}")
         finally:

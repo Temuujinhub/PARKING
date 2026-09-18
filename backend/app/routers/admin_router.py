@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from ..auth import (ALL_MODULES, enforce_site, get_current_user, grant_site, has_permission,
+from ..auth import (ALL_MODULES, can_manage_global_settings, enforce_global_settings,
+                    enforce_site, get_current_user, grant_site, has_permission,
                     hash_password, operator_sites, require, require_role)
 from ..database import get_db
 from ..models import (
@@ -19,6 +20,11 @@ from ..secretbox import encrypt_secret
 from ..serializers import SECRET_COLUMNS, site_pay_url, to_dict
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+@router.get("/settings-capabilities")
+def settings_capabilities(user: User = Depends(require("settings"))):
+    return {"can_edit_global": can_manage_global_settings(user)}
 
 
 def _qpay_err(e: Exception) -> str:
@@ -1318,7 +1324,7 @@ def _conflicting_camera(db: Session, ip: str | None, device_type: str | None,
 
 def _conflicting_lane(db: Session, site_id: str | None, device_type: str | None,
                       lane_no, lane_dir: str | None,
-                      exclude_id: str | None = None) -> Device | None:
+                      exclude_id: str | None = None, nested_inner: bool = False) -> Device | None:
     """Нэг зогсоолын нэг эгнээ+чиглэлд хоёр дахь ижил төрлийн төхөөрөмж байвал буцаана.
 
     `_resolve_device` нь хаалтыг «ижил эгнээний камер»-аар олдог тул нэг эгнээнд
@@ -1330,7 +1336,8 @@ def _conflicting_lane(db: Session, site_id: str | None, device_type: str | None,
     q = db.query(Device).filter(Device.site_id == site_id,
                                 Device.device_type == device_type,
                                 Device.lane_no == lane_no,
-                                Device.lane_dir == lane_dir,
+                                Device.nested_inner.is_(bool(nested_inner)),
+                                Device.lane_dir.in_(["entry", "exit", "both"] if lane_dir == "both" else [lane_dir, "both"]),
                                 Device.status != "deleted")
     if exclude_id:
         q = q.filter(Device.id != exclude_id)
@@ -1338,8 +1345,8 @@ def _conflicting_lane(db: Session, site_id: str | None, device_type: str | None,
 
 
 def _assert_lane_free(db: Session, site_id: str | None, device_type: str | None,
-                      lane_no, lane_dir: str | None, exclude_id: str | None = None):
-    other = _conflicting_lane(db, site_id, device_type, lane_no, lane_dir, exclude_id)
+                      lane_no, lane_dir: str | None, exclude_id: str | None = None, nested_inner: bool = False):
+    other = _conflicting_lane(db, site_id, device_type, lane_no, lane_dir, exclude_id, nested_inner)
     if other is None:
         return
     what = "камер" if device_type == "camera" else "хаалт"
@@ -1370,7 +1377,8 @@ def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), 
     enforce_site(user, body.get("site_id"))
     _assert_ip_free(db, body.get("ip_address"), body.get("device_type"))
     _assert_lane_free(db, body.get("site_id"), body.get("device_type"),
-                      body.get("lane_no"), body.get("lane_dir"))
+                      body.get("lane_no", 1), body.get("lane_dir", "entry"),
+                      nested_inner=body.get("nested_inner", False))
     device = Device(**{k: body[k] for k in
                        ("site_id", "name", "device_type", "vendor", "model", "ip_address",
                         "lane_no", "lane_dir", "auto_open", "nested_inner", "username", "password")
@@ -1387,7 +1395,7 @@ def create_device(payload: schemas.DeviceCreate, db: Session = Depends(get_db), 
     if device.device_type == "camera":
         # Камер бүртгэмэгц ижил эгнээнд хаалт автоматаар үүснэ/сэргэнэ — админ гараар нэмэхгүй
         from ..services.device_auto import ensure_lane_barriers
-        ensure_lane_barriers(db)
+        ensure_lane_barriers(db, site_ids=[device.site_id])
     db.commit()
     return to_dict(device)
 
@@ -1400,7 +1408,7 @@ def verify_barriers(db: Session = Depends(get_db), user: User = Depends(require(
     сольсныг зөөнө, огт байхгүйг л шинээр үүсгэнэ. Дараа нь реле олдохгүй
     хаалтуудыг нэрээр нь буцаана (тэдгээр нь команд үүссэн ч хөдөлдөггүй)."""
     from ..services.device_auto import ensure_lane_barriers
-    res = ensure_lane_barriers(db)
+    res = ensure_lane_barriers(db, site_ids=operator_sites(user))
     allowed = operator_sites(user)
     broken = []
     for bid in res.get("relay_broken", []):
@@ -1433,7 +1441,8 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
     _assert_lane_free(db, body.get("site_id", device.site_id),
                       body.get("device_type", device.device_type),
                       body.get("lane_no", device.lane_no),
-                      body.get("lane_dir", device.lane_dir), exclude_id=device_id)
+                      body.get("lane_dir", device.lane_dir), exclude_id=device_id,
+                      nested_inner=body.get("nested_inner", device.nested_inner))
     for k in ("name", "device_type", "vendor", "model", "ip_address", "lane_no",
               "lane_dir", "auto_open", "nested_inner", "status", "site_id", "username", "password"):
         if k in body:
@@ -1451,7 +1460,7 @@ def update_device(device_id: str, payload: schemas.DeviceUpdate, db: Session = D
     # зогсоол хаалтгүй үлдэж, дугаар уншсан ч юу ч нээгддэггүй байв.
     if device.device_type == "camera" and device.status == "active":
         from ..services.device_auto import ensure_lane_barriers
-        ensure_lane_barriers(db)
+        ensure_lane_barriers(db, site_ids=[device.site_id])
     db.commit()
     return to_dict(device)
 
@@ -2222,6 +2231,7 @@ def list_open_reasons(active_only: bool = False, db: Session = Depends(get_db),
 def put_open_reasons(body: dict, db: Session = Depends(get_db),
                      user: User = Depends(require("settings"))):
     """Жагсаалтыг бүхэлд нь солино. body: {items: [{code, label, is_active}]}."""
+    enforce_global_settings(user)
     from ..services.app_settings import set_open_reasons
     try:
         items = set_open_reasons(db, body.get("items"), user.username)
@@ -2243,6 +2253,7 @@ def get_autoclose_rules_api(db: Session = Depends(get_db),
 @router.put("/autoclose/rules")
 def put_autoclose_rules(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_autoclose_rules
     rules = set_autoclose_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "autoclose_rules", "-", rules)
@@ -2261,6 +2272,7 @@ def get_entry_plate_rules_api(db: Session = Depends(get_db),
 @router.put("/entry-plate/rules")
 def put_entry_plate_rules(body: dict, db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_entry_plate_rules
     rules = set_entry_plate_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "entry_plate_rules", "-", rules)
@@ -2279,6 +2291,7 @@ def get_exit_rules_api(db: Session = Depends(get_db),
 @router.put("/exit/rules")
 def put_exit_rules(body: dict, db: Session = Depends(get_db),
                    user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_exit_rules
     rules = set_exit_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "exit_rules", "-", rules)
@@ -2297,6 +2310,7 @@ def get_barrier_rules_api(db: Session = Depends(get_db),
 @router.put("/barrier/rules")
 def put_barrier_rules(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_barrier_rules
     rules = set_barrier_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "barrier_rules", "-", rules)
@@ -2322,6 +2336,7 @@ def payment_rules_index(db: Session = Depends(get_db),
     overrides = {g: A.get_site_overrides(db, g) for g in PR.group_names()}
     return {
         "groups": PR.group_names(),
+        "can_edit_global": can_manage_global_settings(user),
         "catalog": PR.catalog(),
         "globals": {g: A.get_rules(db, g) for g in PR.group_names()},
         "site_column_rules": PR.SITE_COLUMN_RULES,
@@ -2362,8 +2377,7 @@ def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_
     from ..services import payment_rules as PR
     is_global = site_id == "global"
     if is_global:
-        if operator_sites(user) is not None:
-            raise HTTPException(403, "Ерөнхий дүрмийг зөвхөн бүх зогсоолын эрхтэй админ өөрчилнө.")
+        enforce_global_settings(user)
         site = None
     else:
         enforce_site(user, site_id)
@@ -2401,6 +2415,7 @@ def get_driver_type_rules_api(db: Session = Depends(get_db),
 def put_driver_type_rules(body: dict, db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
     """Шөнийн цонхыг өөрчлөх — биллингд шууд нөлөөлөх тул зөвхөн тохиргооны эрхтэн."""
+    enforce_global_settings(user)
     import re as _re
     for k in ("night_from", "night_until"):
         v = str((body or {}).get(k, "")).strip()
@@ -2421,6 +2436,7 @@ def run_autoclose_now(db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
     """Авто цэвэрлэгээг ЯГ ОДОО ажиллуулна (30 мин хүлээхгүй) — тохиргоо
     өөрчилсний дараа үр дүнг шууд харах."""
+    enforce_global_settings(user)
     from ..services.auto_close import run_once
     closed = run_once()
     _audit(db, user, "AUTO_CLOSE_MANUAL", "session", "-", {"closed": closed})
@@ -2432,6 +2448,7 @@ def run_autoclose_now(db: Session = Depends(get_db),
 def get_camsync_rules_api(db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
     """Камерын лог нөхөлтийн дүрэм + зогсоол бүрийн watermark."""
+    enforce_global_settings(user)
     from ..services.app_settings import CAMSYNC_STATE, get_camsync_rules, get_state
     rules = get_camsync_rules(db)
     state = get_state(db, CAMSYNC_STATE)
@@ -2443,6 +2460,7 @@ def get_camsync_rules_api(db: Session = Depends(get_db),
 @router.put("/camsync/rules")
 def put_camsync_rules(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_camsync_rules
     rules = set_camsync_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "camsync_rules", "-", rules)
@@ -2454,6 +2472,7 @@ def put_camsync_rules(body: dict, db: Session = Depends(get_db),
 def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
                     user: User = Depends(require("settings"))):
     """Камерын лог нөхөлтийг ЯГ ОДОО ажиллуулна. body: {dry_run: bool}"""
+    enforce_global_settings(user)
     from ..services.camera_sync import run_once
     dry = bool((body or {}).get("dry_run"))
     rows = run_once(dry_run=dry)
@@ -2468,6 +2487,7 @@ def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
 def get_camhealth_rules_api(db: Session = Depends(get_db),
                            user: User = Depends(require("settings"))):
     """Камерын эрүүл мэндийн дүрэм + сүүлийн шалгалтын дүн."""
+    enforce_global_settings(user)
     from ..services.app_settings import CAMHEALTH_KEY, get_rules
     from ..services.camera_health import last_state
     return {**get_rules(db, CAMHEALTH_KEY), "last": last_state()}
@@ -2476,6 +2496,7 @@ def get_camhealth_rules_api(db: Session = Depends(get_db),
 @router.put("/camhealth/rules")
 def put_camhealth_rules(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("settings"))):
+    enforce_global_settings(user)
     from ..services.app_settings import CAMHEALTH_KEY, set_rules
     rules = set_rules(db, CAMHEALTH_KEY, body or {}, user.username)
     _audit(db, user, "UPDATE", "camhealth_rules", "-", rules)
@@ -2488,6 +2509,7 @@ def run_camhealth_now(body: dict | None = None, db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
     """Камерын эрүүл мэндийг ЯГ ОДОО шалгана. body: {dry_run: bool}
     dry_run=true бол зөвхөн ангилна (reboot ХИЙХГҮЙ)."""
+    enforce_global_settings(user)
     from ..services.camera_health import run_once
     dry = bool((body or {}).get("dry_run"))
     out = run_once(dry_run=dry)
@@ -2509,6 +2531,7 @@ def get_blacklist_rules_api(db: Session = Depends(get_db),
 @router.put("/blacklist/rules")
 def put_blacklist_rules(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("blacklist"))):
+    enforce_global_settings(user)
     from ..services.app_settings import set_blacklist_rules
     rules = set_blacklist_rules(db, body or {}, user.username)
     _audit(db, user, "UPDATE", "blacklist_rules", "-", rules)
@@ -2585,15 +2608,24 @@ def _user_sites(u: User) -> set:
     return {s for s in (u.site_ids or []) if s} or ({u.site_id} if u.site_id else set())
 
 
-def _enforce_user_scope(user: User, target_sites: set, action: str):
+def _enforce_user_scope(user: User, target_sites: set, action: str, *,
+                        target_tenant_id: str | None = None, db: Session | None = None):
     """Tenant админ зөвхөн ӨӨРИЙН түрээслэгчийн зогсоолуудын хүрээнд хэрэглэгч
     удирдана. SUPER_ADMIN бүх түрээслэгчид эрхтэй. Шинэ хэрэглэгч creator-ийн
     tenant-д ямагт хязгаарлагддаг тул хоосон target (=түрээслэгчийн бүх зогсоол) OK."""
     allowed = operator_sites(user)
     if allowed is None:
         return  # SUPER_ADMIN эсвэл системийн түвшин
-    # Заасан зогсоолууд өөрийн хүрээнд байх ёстой; хоосон бол tenant-ийн бүх зогсоол
-    if target_sites and not target_sites.issubset(set(allowed)):
+    if user.tenant_id and target_tenant_id != user.tenant_id:
+        raise HTTPException(403, "Өөр түрээслэгчийн хэрэглэгчийг удирдах эрхгүй.")
+    # An empty explicit scope means all sites of the TARGET tenant, or global
+    # access when there is no tenant. Resolve it before authorizing the change.
+    if not target_sites:
+        if not target_tenant_id or db is None:
+            raise HTTPException(403, "Бүх зогсоолын эрхтэй хэрэглэгчийг удирдах эрхгүй.")
+        target_sites = {row[0] for row in db.query(ParkingSite.id).filter(
+            ParkingSite.tenant_id == target_tenant_id).all()}
+    if not target_sites.issubset(set(allowed)):
         raise HTTPException(403, f"Зөвхөн өөрийн хариуцах зогсоолын ажилтныг {action} эрхтэй.")
 
 
@@ -2639,8 +2671,10 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_role(
     if allowed is not None:
         # Tenant админ зөвхөн өөрийн зогсоолуудтай огтлолцсон ажилтнууд + өөрийгөө харна
         aset = set(allowed)
-        users = [u for u in users if u.id == user.id or (_user_sites(u) & aset)
-                 or (user.tenant_id and u.tenant_id == user.tenant_id)]
+        users = [u for u in users if u.id == user.id or (
+            (not user.tenant_id or u.tenant_id == user.tenant_id)
+            and operator_sites(u) is not None
+            and set(operator_sites(u)).issubset(aset))]
     # Түрээслэгчийн нэр — "Бүгд" гэхийн оронд аль байгууллагынх нь харагдана
     tnames = {t.id: t.name for t in db.query(Tenant).all()}
     return [to_dict(u, extra={"tenant_name": tnames.get(u.tenant_id)}) for u in users]
@@ -2656,7 +2690,8 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db), user
         raise HTTPException(400, "role буруу байна (SUPER_ADMIN-ыг зөвхөн DB-ээр үүсгэнэ)")
     new_sites = {s for s in (body.get("site_ids") or []) if s} or (
         {body["site_id"]} if body.get("site_id") else set())
-    _enforce_user_scope(user, new_sites, "нэмэх")
+    target_tenant_id = body.get("tenant_id") if user.role == "SUPER_ADMIN" else user.tenant_id
+    _enforce_user_scope(user, new_sites, "нэмэх", target_tenant_id=target_tenant_id, db=db)
     _check_password(body.get("password", ""))
     # Tenant: SUPER_ADMIN хүссэнээ онооно; түрээслэгчийн админы үүсгэсэн хэрэглэгч
     # ЗААВАЛ түүний түрээслэгчид харьяалагдана (өөр tenant руу гаргахгүй)
@@ -2686,13 +2721,13 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
     if "role" in body and body["role"] not in CREATABLE_ROLES:
         raise HTTPException(400, "role буруу байна")
     if u.id != user.id:
-        _enforce_user_scope(user, _user_sites(u), "засах")
+        _enforce_user_scope(user, _user_sites(u), "засах", target_tenant_id=u.tenant_id, db=db)
     elif user.role != "SUPER_ADMIN":
         _guard_self_privileges(u, body)
     if "site_ids" in body or "site_id" in body:
-        new_sites = {s for s in (body.get("site_ids") or []) if s} or (
-            {body["site_id"]} if body.get("site_id") else set())
-        _enforce_user_scope(user, new_sites, "оноох")
+        new_sites = set(_clean_site_ids(body.get("site_ids", u.site_ids),
+                                       body.get("site_id", u.site_id)) or [])
+        _enforce_user_scope(user, new_sites, "оноох", target_tenant_id=u.tenant_id, db=db)
     for k in ("full_name", "phone", "role", "site_id", "is_active"):
         if k in body:
             setattr(u, k, body[k])
