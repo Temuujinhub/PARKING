@@ -1,17 +1,4 @@
-"""Хаалтны команд таслагдахад _open_inflight леак үүсэхгүй байх (MONNIS 2026-07-28).
-
-Гомдол: картаар төлсөн/удаан шийдэгдсэн гаралтын ДАРАА бүртгэлтэй машин ч
-нээгдэхгүй болж restart хийтэл гацдаг байв. Шалтгаан: төлбөрийн HTTP хүсэлт
-(POS/QPay/камерын push) таслагдахад CancelledError _execute-ийн цэвэрлэгээг
-алгасаж, _open_inflight-д тэмдэглэгээ мөнхөд үлдэж, ensure_entry_barrier/
-ensure_exit_barrier_if_cleared «аль хэдийн нээж байна» гэж худал үзээд
-команд огт илгээхээ больдог байсан.
-
-Шалгах зүйлс:
-  1. Таслагдсан ч in-flight тэмдэглэгээ эцэстээ цэвэрлэгдэнэ.
-  2. Таслагдсан ч хаалт нээх RPC ард нь ДУУСТАЛ явна (shield) — машин гарна.
-  3. Хуучирсан (леак болсон) тэмдэглэгээг open_in_flight өөрөө хүчингүй болгоно.
-"""
+"""Cancellation leaves a durable unknown command, without leaking in-flight state."""
 import asyncio
 import time
 
@@ -24,22 +11,6 @@ from app.services import barrier as B
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-class _FakeDb:
-    def add(self, obj): pass
-    def flush(self): pass
-    def commit(self): pass
-
-
-class _FakeDevice:
-    id = "bar-cancel-test"
-    name = "Тест хаалт"
-    lane_dir = "exit"
-    ip_address = "203.0.113.99"   # TEST-NET — бодит холболт үүсэхгүй (mock RPC)
-    username = ""
-    password = ""
-    site = None
 
 
 @pytest.fixture()
@@ -66,26 +37,34 @@ def _real_barrier(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_cancelled_open_cleans_inflight_and_still_opens(_real_barrier):
-    finished = _real_barrier
-    dev = _FakeDevice()
-    task = asyncio.ensure_future(
-        B.open_barrier(_FakeDb(), dev, None, "payment", plate="1234УБА"))
-    await asyncio.sleep(0.1)
-    assert B.open_in_flight(dev.id), "команд явж байх үед in-flight гэж үзэх ёстой"
-    task.cancel()   # POS/QPay/push хүсэлт таслагдсаныг дуурайна
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    # Хаалт нээх RPC ард нь дуустал явах ёстой (shield) — машин гарна
-    await asyncio.wait_for(finished.wait(), timeout=3.0)
-    # done-callback цэвэрлэгээ хийх завсар
-    for _ in range(50):
-        if not B.open_in_flight(dev.id):
-            break
-        await asyncio.sleep(0.05)
-    assert not B.open_in_flight(dev.id), (
-        "таслагдсаны дараа in-flight тэмдэглэгээ цэвэрлэгдэх ёстой — "
-        "эс бол бүх дараагийн ensure_* нээлт гацна")
+async def test_cancelled_open_is_durable_and_does_not_repeat(_real_barrier):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from app.database import Base
+    from app.models import Device, ParkingSite, BarrierCommand
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        site = ParkingSite(name="Synthetic", site_code="CANCEL")
+        db.add(site); db.flush()
+        dev = Device(site_id=site.id, name="Gate", device_key="cancel-test",
+                     device_type="barrier", ip_address="203.0.113.99", status="active")
+        db.add(dev); db.commit()
+        task = asyncio.create_task(B.open_barrier(db, dev, None, "payment"))
+        await asyncio.sleep(0.1)
+        assert B.open_in_flight(dev.id)
+        with Session(engine) as observer:
+            assert observer.query(BarrierCommand).one().status == "PENDING"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not B.open_in_flight(dev.id)
+        assert not _real_barrier.is_set()
+        command = db.query(BarrierCommand).one()
+        assert command.status == "UNKNOWN"
+        again = await B.open_barrier(db, dev, None, "payment")
+        assert again.id == command.id
+    engine.dispose()
 
 
 @pytest.mark.anyio

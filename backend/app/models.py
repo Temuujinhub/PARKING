@@ -354,6 +354,8 @@ class ParkingSession(Base):
     # Оператор/POS «онцгой гаргалт» (ХБИ, түргэн/цагдаа, бүртгэлгүй, төлөөд
     # нээгдээгүй) хийхийн ӨМНӨ гарах камераас гараар авсан баталгаажуулах зураг —
     # free_exit эрхгүй операторын гаргалтын нотолгоо (2026-09-14).
+    entry_snapshot_source = Column(String(30), nullable=True)
+    exit_snapshot_source = Column(String(30), nullable=True)
     verify_snapshot = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -387,6 +389,8 @@ class Payment(Base):
     provider_invoice_id = Column(String(120), nullable=True)
     # QPay-ийн g_payment_id (payment/check-ээс) — QPay ebarimt_v3 үүсгэхэд ашиглана
     provider_payment_id = Column(String(120), nullable=True)
+    provider_tx_key = Column(String(64), nullable=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=True)
     # e-Barimt хүлээн авагчийн төрөл: CITIZEN (иргэн) | COMPANY (ААН)
     ebarimt_receiver_type = Column(String(20), nullable=True)
     sender_invoice_no = Column(String(120), unique=True, nullable=False)
@@ -410,6 +414,7 @@ class Payment(Base):
 
     __table_args__ = (
         Index("ix_payments_status_paid_at", "status", "paid_at"),  # орлогын тайлангийн hot path
+        Index("uq_payments_provider_tx_key", "provider_tx_key", unique=True),
         Index("ix_payments_created_at", "created_at"),
         Index("ix_payments_shift_id", "shift_id"),
         Index("ix_payments_provider", "provider"),

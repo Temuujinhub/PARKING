@@ -158,3 +158,55 @@ def test_late_payment_locks_debt_without_outer_join_error(engine,monkeypatch):
         assert payment.status=='PAID'
         assert session.status=='MANUAL_CLOSED'
         gate.assert_not_awaited()
+
+def test_provider_transaction_unique_across_concurrent_payments(engine):
+    from fastapi import HTTPException
+    from app.services.payment_validation import claim_reference
+    migrations.run_migrations()
+    with Session(engine) as db:
+        rows=[M.Payment(provider='POS',payment_method='CARD',sender_invoice_no='tx-'+str(i),amount=1000) for i in range(2)]
+        db.add_all(rows);db.commit();ids=[p.id for p in rows]
+    ready=threading.Barrier(2);outcomes=[]
+    def claim(pid):
+        with Session(engine) as db:
+            p=db.get(M.Payment,pid);ready.wait(timeout=10)
+            try:
+                claim_reference(db,p,'terminal:test','same-bank-transaction')
+                p.status='PAID';db.commit();outcomes.append('PAID')
+            except HTTPException as exc:
+                outcomes.append(exc.status_code)
+    workers=[threading.Thread(target=claim,args=(pid,),daemon=True) for pid in ids]
+    for t in workers:t.start()
+    for t in workers:t.join(timeout=20)
+    assert sorted(map(str,outcomes))==['409','PAID']
+    with Session(engine) as db:
+        assert db.query(M.Payment).filter_by(status='PAID').count()==1
+
+
+def test_checkout_session_reservation_is_nowait(engine):
+    from fastapi import HTTPException
+    from app.services.checkout import lock_session
+    migrations.run_migrations()
+    with Session(engine) as db:
+        site=M.ParkingSite(name='Concurrent',site_code='CONCURRENT');db.add(site);db.flush()
+        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА');db.add(s);db.commit();sid=s.id
+    with Session(engine) as first, Session(engine) as second:
+        lock_session(first,sid)
+        with pytest.raises(HTTPException) as error:lock_session(second,sid)
+        assert error.value.status_code==409
+        first.rollback()
+        assert lock_session(second,sid).id==sid
+
+
+def test_snapshot_cas_rejects_stale_writer(engine,monkeypatch):
+    from app.services.snapshot import attach_saved
+    migrations.run_migrations()
+    with Session(engine) as db:
+        site=M.ParkingSite(name='Pictures',site_code='PICTURES');db.add(site);db.flush()
+        s=M.ParkingSession(site_id=site.id,plate_number='1234УБА');db.add(s);db.commit();sid=s.id
+    with Session(engine) as first, Session(engine) as second:
+        a=first.get(M.ParkingSession,sid);b=second.get(M.ParkingSession,sid)
+        assert attach_saved(first,a,'entry','one.jpg','comet')
+        assert not attach_saved(second,b,'entry','two.jpg','ws')
+        second.rollback();second.refresh(b)
+        assert b.entry_snapshot=='one.jpg'

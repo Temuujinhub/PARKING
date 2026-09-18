@@ -329,6 +329,11 @@ MIGRATIONS = [
     "ALTER TABLE company_invoices DROP CONSTRAINT IF EXISTS uq_invoice_period_company",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_contact_owner_company ON company_contacts (owner_scope, company)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_period_owner_company ON company_invoices (period, owner_scope, company)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_tx_key VARCHAR(64)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS partner_key_id UUID REFERENCES partner_keys(id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_provider_tx_key ON payments (provider_tx_key)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot_source VARCHAR(30)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot_source VARCHAR(30)",
 
 ]
 

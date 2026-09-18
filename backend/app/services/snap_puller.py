@@ -128,7 +128,7 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
     """Зургийг хадгалаад тухайн дугаарын хамгийн сүүлийн session-д холбоно.
     Event боловсруулалт (cgi_poller) зургаас хоцорч болзошгүй тул хэдэнтээ оролдоно."""
     from ..session_logic import normalize_plate
-    from .snapshot import _save, note_source
+    from .snapshot import _save, note_source, attach_saved, discard_saved
     plate_n = normalize_plate(plate) or plate.strip().upper()
     received_at = received_at or datetime.utcnow()
     # Дискний бичилт thread дээр — event loop блоклохгүй (хаалт нээх хугацаанд нөлөөлнө)
@@ -139,11 +139,13 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
         db = SessionLocal()
         try:
             device = db.get(Device, device_id)
-            if not device:
+            if (not device or device.status != "active" or device.lane_dir != lane_dir
+                    or not device.site or not device.site.is_active):
                 break
             # Awaiting-payment sessions have no exit_time yet; the exit reader
             # commits exit_device_id and updated_at before a picture is attached.
-            event_time = (func.coalesce(ParkingSession.exit_time, ParkingSession.updated_at)
+            event_time = (func.coalesce(ParkingSession.last_exit_seen_at, ParkingSession.exit_time,
+                                         ParkingSession.payment_wait_started_at)
                           if lane_dir == "exit" else ParkingSession.entry_time)
             event_device = ParkingSession.exit_device_id if lane_dir == "exit" else ParkingSession.entry_device_id
             s = (db.query(ParkingSession)
@@ -159,17 +161,11 @@ async def _attach_to_session(device_id: str, plate: str, lane_dir: str, data: by
                 # (машин яг хаалганы өмнө) — дарж бичээд хуучин файлыг арилгана.
                 # Өмнө нь дарж бичдэг ч файлыг нь орхидог байсан тул retention
                 # хүртэл орфон зурагнууд хуримтлагддаг байв.
-                old_rel = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
-                if lane_dir == "exit":
-                    s.exit_snapshot = rel
-                else:
-                    s.entry_snapshot = rel
                 sess_id, site_id = s.id, s.site_id
-                db.commit()
+                if not attach_saved(db, s, lane_dir, rel, src):
+                    await asyncio.to_thread(discard_saved, rel)
+                    return
                 note_source(src)
-                if old_rel and old_rel != rel:
-                    from .snapshot import discard_saved
-                    await asyncio.to_thread(discard_saved, old_rel)
                 log.info(f"{plate_n} {lane_dir}: OK ({src}, {len(data)}b) → {rel}")
                 # UI-д «зураг бэлэн» мэдэгдэл — касс дээр нээлттэй харагдаж буй
                 # машины зураг refresh-гүйгээр гарч ирнэ
@@ -614,16 +610,17 @@ class _PictureBatch:
         self.timers = {}
 
     async def offer(self, plate, data):
-        from .snapshot import valid_jpeg
-        if not plate or not valid_jpeg(data):
+        from .snapshot import jpeg_score
+        score = await asyncio.to_thread(jpeg_score, data)
+        if not plate or score is None:
             return
         if plate in self.best:
-            received, old = self.best[plate]
-            self.best[plate] = (received, data if len(data) > len(old) else old)
+            received, old, old_score = self.best[plate]
+            self.best[plate] = (received, data, score) if score > old_score else (received, old, old_score)
             return
         if plate in self.timers:
             return  # This burst is already being attached.
-        self.best[plate] = (datetime.utcnow(), data)
+        self.best[plate] = (datetime.utcnow(), data, score)
         self.timers[plate] = asyncio.create_task(self._later(plate))
 
     async def _later(self, plate):
@@ -636,7 +633,7 @@ class _PictureBatch:
     async def flush_plate(self, plate):
         item = self.best.pop(plate, None)
         if item:
-            received, data = item
+            received, data, _score = item
             await _attach_to_session(self.device_id, plate, self.lane_dir, data,
                                      src=self.source, received_at=received)
 

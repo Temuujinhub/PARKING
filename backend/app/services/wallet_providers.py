@@ -24,7 +24,7 @@
 эхлээд INTERNAL, дараа нь тохируулагдсан гадаад wallet-ууд.
 """
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -70,9 +70,11 @@ class _HttpWalletProvider:
                 return {"found": False, "balance": D(0)}
             r.raise_for_status()
             data = r.json()
-            return {"found": bool(data.get("found", True)),
-                    "balance": D(str(data.get("balance") or 0))}
-        except (httpx.HTTPError, ValueError) as e:
+            balance = D(str(data.get("balance") or 0))
+            if not balance.is_finite() or balance < 0:
+                raise ValueError("Invalid wallet balance")
+            return {"found": bool(data.get("found", True)), "balance": balance}
+        except (httpx.HTTPError, ValueError, InvalidOperation) as e:
             # Гадаад систем унасан үед гарах урсгал ГАЦАХГҮЙ — олдоогүйд тооцно
             log.warning("%s balance алдаа (%s) — алгасав", self.name, e)
             return {"found": False, "balance": D(0), "error": str(e)}
@@ -90,7 +92,7 @@ class _HttpWalletProvider:
                                  headers=self._headers(idem=ref))
             r.raise_for_status()
             data = r.json()
-            if not data.get("ok"):
+            if data.get("ok") is not True or not str(data.get("tx_id") or "").strip():
                 raise ProviderError(str(data.get("error") or "debit ok=false"))
             return {"ok": True, "tx_id": str(data.get("tx_id") or "")}
         except httpx.HTTPError as e:

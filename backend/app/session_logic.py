@@ -1751,6 +1751,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             return {"action": "paid_from_wallet", "session_id": session.id,
                     "plate": plate, "amount": deducted}
         if deducted:
+            fee = session_fee_info(db, session)
             due = amount_due(db, session, fee)
 
     # Төлбөртэй — төлбөр хүлээнэ
@@ -2043,15 +2044,10 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
                .with_for_update(nowait=True).one())
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         return 0.0, session.status in ("PAID", "CLOSED")
-    uncertain = db.query(Payment.id).filter(
-        Payment.session_id == session.id, Payment.payment_method == "WALLET",
-        Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first()
+    from .services.checkout import active_attempts
+    uncertain = active_attempts(db, session.id)
     if uncertain:
         return 0.0, False  # reconcile this operation; never try another debit
-    if db.query(Payment.id).filter(Payment.session_id == session.id,
-                                   Payment.provider == "QPAY",
-                                   Payment.status.in_(["PENDING", "REVIEW"])).first():
-        return 0.0, False  # a driver may already be paying this QR
     due = amount_due(db, session, pr.session_fee_info(db, session))
     if due <= 0:
         return 0.0, True
@@ -2076,18 +2072,9 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
         wallet_svc.debit_parking(db, w.id, float(payment.amount), session.id,
                                  note=f"гарах хаалт {plate}")
         session.paid_from_wallet = True
-        if covered:
-            await pr._finalize_paid(db, payment)
-            db.commit()
-            log.info("данснаас БҮТЭН төлөгдөв: %s %s₮ (үлдэгдэл %s₮)",
-                     plate, float(payment.amount), float(w.balance))
-            return float(payment.amount), True
-        # Хэсэгчилсэн: төлбөрийг PAID болгоод (finalize ХИЙХГҮЙ — хаалт нээхгүй)
-        payment.status = "PAID"
-        payment.paid_at = datetime.utcnow()
+        await pr._finalize_paid(db, payment)
         db.commit()
-        log.info("данснаас ХЭСЭГЧЛЭН: %s %s₮/%s₮", plate, take, due)
-        return take, False
+        return float(payment.amount), session.status in ("PAID", "CLOSED")
 
     # ── 2. Гадаад wallet-ууд (бүтэн дүн л) ──
     for provider in external_providers():
@@ -2106,15 +2093,16 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
             res = await provider.debit(plate, float(payment.amount),
                                        ref=f"parking-{payment.id}",
                                        note=f"Зогсоол {site.name if site else ''}")
-            if res.get("ok") is False:
+            if res.get("ok") is not True:
                 raise RuntimeError("Provider did not confirm debit")
-            payment.provider_payment_id = res.get("tx_id") or None
+            from .services.payment_validation import transaction_reference, claim_reference
+            claim_reference(db, payment, "auto-wallet", transaction_reference(res.get("tx_id")))
             session.paid_from_wallet = True
             db.commit()
             await pr._finalize_paid(db, payment)
             db.commit()
             log.info("%s-ээс БҮТЭН төлөгдөв: %s %s₮", provider.name, plate, due)
-            return float(payment.amount), True
+            return float(payment.amount), session.status in ("PAID", "CLOSED")
         except Exception as e:  # noqa: BLE001 — нэг provider унавал дараагийнх
             log.warning("%s auto-deduct алдаа (%s)", provider.name, e)
             db.rollback()
