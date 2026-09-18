@@ -163,6 +163,8 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
 
 
 def _require_pay(partner: PartnerAuth):
+    if str(partner).strip().upper() in {"QPAY", "POS", "CASH", "TRANSFER", "WALLET"}:
+        raise HTTPException(403, "Түншийн нэр дотоод төлбөрийн хэрэгслийн нэртэй давхцсан; админ засна уу")
     if not partner.can_pay():
         raise HTTPException(403, "Энэ түлхүүр зөвхөн лавлах эрхтэй (төлбөрийн эрхгүй)")
 
@@ -173,6 +175,8 @@ def _check_site_scope(partner: PartnerAuth, site_id: str | None):
 
 
 def _check_payment_scope(db, partner, payment):
+    if str(payment.provider).upper() in {"QPAY", "POS", "CASH", "TRANSFER", "WALLET"}:
+        raise HTTPException(403, "Дотоод төлбөрийн хэрэгслийг түншийн API-аар удирдахгүй")
     if payment.provider != partner:
         raise HTTPException(403, "Энэ төлбөр өөр түншийнх")
     if payment.partner_key_id and payment.partner_key_id != partner.key_id:

@@ -399,3 +399,15 @@ def test_pos_reservation_can_only_cancel_with_terminal_no_charge_proof(db):
     out=PR.pos_cancel(intent['payment_id'],{'terminal_id':t.device_key,'outcome':'NOT_CHARGED'},db,u)
     assert out['status']=='CANCELLED'
 
+
+@pytest.mark.parametrize('provider',['QPAY','POS','CASH','TRANSFER','WALLET'])
+def test_partner_name_cannot_impersonate_internal_payment_instrument(db,provider):
+    s=parking(db);p=partner(provider,s.site_id)
+    with pytest.raises(HTTPException) as error:
+        IR.create_payment_intent({'session_id':s.id},db,p)
+    assert error.value.status_code==403
+    existing=M.Payment(session_id=s.id,provider=provider,payment_method='WALLET',
+                       sender_invoice_no='reserved-name',amount=1000)
+    db.add(existing);db.commit()
+    with pytest.raises(HTTPException): IR.payment_status(existing.id,db,p)
+
