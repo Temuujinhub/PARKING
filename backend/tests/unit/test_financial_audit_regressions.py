@@ -294,5 +294,3 @@ def test_existing_wallet_valid_token_preserves_phone_and_can_start(db,monkeypatc
                  json={'plate':w.plate_number,'phone':'88000000','wallet_token':w.public_token,'amount':2000})
         assert r.status_code==200
         db.refresh(w);assert w.balance==8000
-
-
