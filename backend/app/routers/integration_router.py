@@ -383,7 +383,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     """Wallet өөрийн талд төлбөрийг амжилттай авсныг баталгаажуулна.
     body: {transaction_id, amount}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
     нээгдэхгүй). Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
-    from .payments_router import _finalize_paid, _lock_payment, settlement_info
+    from .payments_router import _finalize_paid, _lock_payment, payment_outcome
     _require_pay(partner)
     payment = db.get(Payment, payment_id)
     if not payment:
@@ -399,7 +399,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     if payment.status == "PAID":
         if payment.provider_payment_id != reference or paid_amount != money(payment.amount):
             raise HTTPException(409, "Өмнөх баталгаажуулалтын дугаар эсвэл дүн зөрлөө")
-        return {"status": "PAID", "payment_id": payment.id, **settlement_info(db, payment)}
+        return {"status": "PAID", "payment_id": payment.id, **payment_outcome(db, payment)}
     if payment.status not in ("PENDING", "CANCELLED", "UNKNOWN", "REVIEW"):
         raise HTTPException(400, f"Төлбөрийн төлөв буруу: {payment.status}")
     if paid_amount != money(payment.amount):
@@ -423,13 +423,13 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
                                               _payment_event(db, payment, "payment.paid"), partner))
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
             payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
-            "ebarimt": receipt_info(db, payment), **settlement_info(db, payment)}
+            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}
 
 
 @router.get("/payments/{payment_id}")
 def payment_status(payment_id: str, db: Session = Depends(get_db),
                    partner: PartnerAuth = Depends(require_partner)):
-    from .payments_router import settlement_info
+    from .payments_router import payment_outcome
     payment = db.get(Payment, payment_id)
     if not payment or payment.provider != partner:
         raise HTTPException(404, "Payment олдсонгүй")
@@ -438,4 +438,4 @@ def payment_status(payment_id: str, db: Session = Depends(get_db),
             "amount": float(payment.amount),
             "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
             # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан
-            "ebarimt": receipt_info(db, payment), **settlement_info(db, payment)}
+            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}

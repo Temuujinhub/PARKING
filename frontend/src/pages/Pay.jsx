@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { fmt, fmtDur } from '../api'
 import { LogoMark, LogoText } from '../components/Logo'
+import { paymentOutcome } from '../paymentOutcome'
 
 async function publicApi(path, opts = {}) {
   const res = await fetch(path, {
@@ -18,21 +19,13 @@ async function publicApi(path, opts = {}) {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    // HTTP статусыг алдаанд хавсаргана — дуудагч тал «түр зуурын алдаа» (502/504)
-    // болон «бодит татгалзал» (400/429)-ыг ялгаж, зөвхөн эхнийхийг нь дахин
-    // оролдоход хэрэгтэй.
+    // Preserve the server's reconciliation guidance when an outcome is unknown.
     const err = new Error(data.detail || 'Алдаа гарлаа')
     err.status = res.status
     throw err
   }
   return data
 }
-
-// Түр зуурын гэж үзэх алдаа: сүлжээний саатал (503/504) эсвэл хариу огт ирээгүй.
-// 502 нь QPay БОДИТООР татгалзсан (дүн/талбар буруу), 400 (session төлөв), 404,
-// 429 (throttle) — эдгээр нь дахин оролдоход ЯГ ижил хариу өгнө, давтахгүй.
-const isTransient = (e) => !e?.status || [503, 504].includes(e.status)
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // Алдааны мөр — БҮХ дэлгэцэд нэг загвараар. Өмнө нь зөвхөн хайлтын дэлгэцэд
 // харагддаг байсан тул «QPay-ээр төлөх» дарахад нэхэмжлэл үүсэхгүй (429/502/400)
@@ -117,7 +110,7 @@ export default function Pay() {
     try {
       const s = await publicApi(`/api/public/sessions?plate=${encodeURIComponent(target)}&site=${siteCode}`)
       setSession(s)
-      if (s.paid) setPaid(true)
+      if (s.paid) setPaid({ session_status: s.status, amount_due: s.amount_due })
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
@@ -130,20 +123,8 @@ export default function Pay() {
     try {
       const body = { session_id: session.session_id }
       if (vatType === 'ORG') body.customer_tin = orgTin.trim()
-      // Backend өөрөө QPay руу 3 удаа оролддог (401 дээр шинээр нэвтэрч).
-      // Энэ нь СҮҮЛЧИЙН давхарга: тэр ч амжилтгүй болбол жолоочийг «дахин
-      // дарна уу» гэж албадалгүй, 1.5с-ийн дараа нэг удаа чимээгүй дахина.
-      // (Хэрэв эхний оролдлого сервер дээр PENDING нэхэмжлэл үүсгээд хариу нь
-      // алдагдсан бол backend түүнийг олж дахин ашиглана — давхар нэхэмжлэл
-      // үүсэхгүй.)
-      let inv
-      try {
-        inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
-      } catch (e1) {
-        if (!isTransient(e1)) throw e1
-        await sleep(1500)
-        inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
-      }
+      // One explicit request. An uncertain provider response requires reconciliation.
+      const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
       setPayment(inv)
       // Утасны qPay хэтэвч рүү шилжүүлнэ — зөвхөн qPay-ийн өөрийн deeplink байвал,
       // зөвхөн утсан дээр (өмнө нь banks жагсаалтын эхний дурын апп руу үсэрдэг байсан)
@@ -153,14 +134,14 @@ export default function Pay() {
       pollRef.current = setInterval(async () => {
         try {
           const st = await publicApi(`/api/payments/qpay/check/${inv.payment_id}`, { method: 'POST' })
-          if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(inv.payment_id) }
+          if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(inv.payment_id, st) }
         } catch {}
       }, 5000)
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
-  const onPaid = async (paymentId) => {
-    setPaid(true)
+  const onPaid = async (paymentId, outcome) => {
+    setPaid(outcome || {}); setError('')
     try {
       const r = await publicApi(`/api/public/receipt/${paymentId}`)
       setReceipt({ ...r, qr_png: r.qr_data ? `/api/public/receipt/${paymentId}/qr.png` : null })
@@ -173,7 +154,8 @@ export default function Pay() {
     setBusy(true); setError('')
     try {
       const st = await publicApi(`/api/payments/qpay/check/${payment.payment_id}`, { method: 'POST' })
-      if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(payment.payment_id) }
+      if (st.status === 'PAID') { clearInterval(pollRef.current); onPaid(payment.payment_id, st) }
+      else if (['REVIEW', 'UNKNOWN', 'CREATING'].includes(st.status)) setError('Төлбөрийн үр дүнг тулгах шаардлагатай. Давхар төлөхгүйгээр операторт хандана уу.')
       else setError('Төлбөр хараахан баталгаажаагүй байна. Төлсөн бол хэдэн секундын дараа дахин дарна уу.')
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
@@ -186,20 +168,30 @@ export default function Pay() {
         method: 'POST', body: { payment_status: 'PAID', amount: payment.amount },
       })
       clearInterval(pollRef.current)
-      onPaid(payment.payment_id)
+      await checkNow()
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
   // ─── Дэлгэцүүд ───
   if (paid) {
+    const outcome = paymentOutcome(paid)
     return (
       <Shell site={site}>
         <div className="text-center py-6 space-y-4">
           <CheckCircle2 size={64} className="mx-auto text-accent" aria-hidden />
-          <h2 className="text-2xl font-bold">Төлбөр төлөгдлөө!</h2>
-          <p className="text-slate-300">
-            Хаалт нээгдэнэ — <b>Аяан замдаа сайн яваарай!</b>
-          </p>
+          <h2 className="text-2xl font-bold">{outcome.title}</h2>
+          <p className="text-slate-300" role="status">{outcome.message}</p>
+          <ErrorBox error={error} />
+          {outcome.needsBalanceRefresh ? (
+            <button className="btn-primary w-full justify-center" disabled={busy}
+              onClick={async () => {
+                setPaid(false); setPayment(null); setReceipt(null)
+                await search(session?.plate_number || plate)
+              }}>Үлдэгдэл төлбөрийг шалгах</button>
+          ) : payment && ['gate_attention', 'unknown'].includes(outcome.kind) ? (
+            <button className="btn-secondary w-full justify-center" disabled={busy}
+              onClick={checkNow}>Төлөв дахин шалгах</button>
+          ) : null}
           {receipt && (
             <div className="text-left bg-surface-muted/40 rounded-xl p-4 space-y-2">
               <div className="text-center text-xs font-bold tracking-widest text-slate-400 uppercase pb-1 border-b border-dashed border-surface-border">
@@ -226,9 +218,9 @@ export default function Pay() {
               )}
             </div>
           )}
-          <p className="text-sm text-slate-400">
-            {site?.grace_minutes || 15} минутын дотор гарна уу. Хаалт нээгдэхгүй бол дугаараа гарах камерт дахин уншуулаарай.
-          </p>
+          {outcome.kind === 'ready' && <p className="text-sm text-slate-400">
+            Гарах зөвшөөрлийн хугацаа: {site?.grace_minutes ?? 15} минут.
+          </p>}
         </div>
       </Shell>
     )
@@ -331,6 +323,9 @@ export default function Pay() {
             <span className="font-semibold text-base pt-1 border-t border-surface-border/50">Нийт дүн</span>
             <span className="font-mono text-right text-2xl font-bold text-accent pt-1 border-t border-surface-border/50">{fmt(session.amount_total ?? session.total_fee)}₮</span>
           </div>
+          {session.price_held_until && <p className="text-sm text-slate-300" role="status">
+            Үнэ {fmtTime(session.price_held_until)} хүртэл тогтмол. Дараа нь нийт зогссон хугацаагаар бодно.
+          </p>}
           {session.is_free ? (
             <div className="text-center bg-accent/10 text-accent rounded-xl p-4">
               <CheckCircle2 className="mx-auto mb-1" aria-hidden />

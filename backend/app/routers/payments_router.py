@@ -611,6 +611,12 @@ def settlement_info(db, payment):
             "overpaid_amount": (payment.raw_payload or {}).get("overpaid_amount", 0)}
 
 
+def payment_outcome(db, payment):
+    """Money, remaining balance and device acknowledgment are separate facts."""
+    from ..services.payment_validation import gate_result
+    return {**settlement_info(db, payment), **gate_result(db, payment)}
+
+
 def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
                     cashier: User | None = None, include_debts: bool = False,
                     *, confirmed_amount=None, allow_qpay: bool = False) -> Payment:
@@ -624,9 +630,11 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
         assert_available(db, session.id, allow_qpay=allow_qpay)
     fee = session_fee_info(db, session)
     due = amount_due(db, session, fee)
-    if confirmed_amount is None and due <= 0:
+    comps = (_pending_debts(db, session.plate_number, session.site) if include_debts else [])
+    debt_total = sum(float(c.amount) for c in comps)
+    if confirmed_amount is None and due + debt_total <= 0:
         raise HTTPException(400, "Төлбөр шаардлагагүй эсвэл бүрэн төлөгдсөн байна")
-    parking_amount = money(confirmed_amount) if confirmed_amount is not None else money(due)
+    parking_amount = money(confirmed_amount) if confirmed_amount is not None else money(due, positive=False)
     r = settings.vat_rate
     vat_due = round(float(parking_amount) * r / (1 + r))
     if confirmed_amount is None and due >= fee["total_fee"]:
@@ -635,8 +643,6 @@ def _create_payment(db: Session, session: ParkingSession, provider: str, method:
         session.base_fee, session.vat_amount, session.total_fee = (
             fee["base_fee"], fee["vat_amount"], fee["total_fee"])
         session.duration_minutes = fee["duration_minutes"]
-    comps = (_pending_debts(db, session.plate_number, session.site) if include_debts else [])
-    debt_total = sum(float(c.amount) for c in comps)
     debt_vat = sum(round(float(c.amount) * r / (1 + r)) for c in comps)
     shift = None
     if cashier:
@@ -949,7 +955,7 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
             db.commit()
         # түгжээг webhook авчихсан бол энэ poll юу ч хийхгүй — дараагийн poll-д PAID харагдана
     if payment.status == "PAID":
-        return {"status": "PAID", **_print_payload(db, payment)}
+        return {"status": "PAID", **_print_payload(db, payment), **payment_outcome(db, payment)}
     return {"status": payment.status}
 
 
@@ -1011,7 +1017,8 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     db.add(AuditLog(username=user.username, action="CASH_PAYMENT", entity="payment",
                     entity_id=payment.id, detail={"amount": float(payment.amount)}))
     db.commit()
-    return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
+    return {"ok": True, "status": payment.status, "payment_id": payment.id,
+            "amount": float(payment.amount), **payment_outcome(db, payment)}
 
 
 # ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
@@ -1051,7 +1058,8 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
                             "bank": getattr(site, "bank_name", None),
                             "account": getattr(site, "bank_account", None)}))
     db.commit()
-    return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
+    return {"ok": True, "status": payment.status, "payment_id": payment.id,
+            "amount": float(payment.amount), **payment_outcome(db, payment)}
 
 
 # ─────────────────────────── PAX A9000 POS ───────────────────────────

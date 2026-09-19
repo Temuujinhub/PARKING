@@ -225,3 +225,58 @@ def test_matching_cashier_amount_can_be_confirmed(db):
     s,_,_=parking(db)
     payment=PR._create_payment(db,s,'CASH','CASH')
     PR._assert_expected_amount(payment,{'expected_amount':1000})
+
+
+def test_paid_qpay_check_exposes_remaining_due_without_claiming_gate_open(db):
+    from starlette.requests import Request
+    s, _, _ = parking(db)
+    payment = PR._create_payment(db, s, 'QPAY', 'QR')
+    payment.amount = 400
+    payment.fee_snapshot = {**payment.fee_snapshot, 'parking_amount': 400}
+    payment.status = 'PAID'
+    payment.paid_at = datetime.utcnow()
+    db.commit()
+    request = Request({'type': 'http', 'client': ('outcome-test', 1), 'headers': []})
+    result = asyncio.run(PR.qpay_check(payment.id, request, db))
+    assert result['status'] == 'PAID'
+    assert result['amount_due'] == 600
+    assert result['needs_additional_payment'] is True
+    assert result['barrier_command_status'] == 'NOT_REQUESTED'
+    assert result['barrier_opened'] is False
+
+
+def test_free_stay_with_same_tenant_debt_can_create_debt_only_invoice(db):
+    s, _, _ = parking(db)
+    s.fee_locked = True
+    s.total_fee = s.base_fee = s.vat_amount = 0
+    debt = M.Compensation(site_id=s.site_id, plate_number=s.plate_number,
+                          amount=3000, reason='unpaid_exit', status='PENDING')
+    db.add(debt); db.commit()
+    result = invoice(db, s)
+    payment = db.get(M.Payment, result['payment_id'])
+    assert result['amount'] == 3000
+    assert payment.fee_snapshot['parking_amount'] == 0
+    assert payment.fee_snapshot['debts'] == [{'id': debt.id, 'amount': 3000}]
+
+
+def test_public_checkout_uses_invoice_debt_scope_and_does_not_offer_free_exit(db):
+    from starlette.requests import Request
+    from app.routers import public_router
+    s, _, _ = parking(db)
+    s.fee_locked = True
+    s.total_fee = s.base_fee = s.vat_amount = 0
+    tenant = M.Tenant(name='Unrelated merchant', code='OTHER')
+    db.add(tenant); db.flush()
+    other = M.ParkingSite(name='Other', site_code='OTHER', tenant_id=tenant.id)
+    db.add(other); db.flush()
+    db.add_all([
+        M.Compensation(site_id=s.site_id, plate_number=s.plate_number,
+                       amount=3000, reason='unpaid_exit', status='PENDING'),
+        M.Compensation(site_id=other.id, plate_number=s.plate_number,
+                       amount=19000, reason='unpaid_exit', status='PENDING'),
+    ])
+    db.commit()
+    request = Request({'type': 'http', 'client': ('scope-test', 1), 'headers': []})
+    result = public_router.find_session(s.plate_number, s.site.site_code, request, db)
+    assert result['debt_amount'] == result['amount_total'] == 3000
+    assert result['is_free'] is False
