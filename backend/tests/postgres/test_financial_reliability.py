@@ -129,3 +129,15 @@ def test_upgrade_from_previous_schema_preserves_money_and_replays(engine):
     with Session(engine) as db:
         assert db.query(M.Payment).one().amount==Decimal('1000.25')
         assert db.query(M.FinancialJob).count()==0
+
+
+@pytest.mark.parametrize('broken_schema', [
+    'DROP TABLE financial_jobs',
+    'ALTER TABLE payments DROP COLUMN qpay_check_requested_at',
+])
+def test_readiness_rejects_missing_financial_schema_despite_matching_ledger(engine, broken_schema):
+    migrations.run_migrations()
+    with engine.begin() as conn:
+        conn.execute(text(broken_schema))
+    with pytest.raises(Exception):
+        migrations.check_ready()

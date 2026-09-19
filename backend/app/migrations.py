@@ -414,6 +414,11 @@ def check_ready():
         # Check the critical new columns too; a ledger alone is not readiness.
         conn.execute(text("SELECT payment_wait_started_at, payment_quote_until, payment_quote "
                           "FROM parking_sessions LIMIT 0"))
+        conn.execute(text("SELECT site_id, qpay_last_check_at, qpay_next_check_at, "
+                          "qpay_check_requested_at, qpay_check_attempts FROM payments LIMIT 0"))
+        conn.execute(text("SELECT job_key, kind, payment_id, receipt_id, status, attempts, "
+                          "next_attempt_at, lease_until, lease_token, payload, last_error, "
+                          "created_at, updated_at FROM financial_jobs LIMIT 0"))
     return {"database": "ok", "schema": revision()[:12]}
 
 

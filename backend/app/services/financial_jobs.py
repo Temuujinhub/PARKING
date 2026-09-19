@@ -81,6 +81,10 @@ def enqueue_receipt(db, payment, *, amount=None, vat=None, session_id=None,
         _, payload["account_fingerprint"] = _account(provider, site)
     except Exception as exc:
         blocked = type(exc).__name__ + ": Баримтын сувгийн тохиргоог шалгана уу"
+    # The outbox references this receipt. Explicitly persist its parent row
+    # before adding the job; FK columns alone do not order ORM unit-of-work
+    # inserts without a mapped relationship. Both remain in one transaction.
+    db.flush()
     job = FinancialJob(job_key=f"receipt:{receipt.id}", kind="RECEIPT",
         payment_id=payment.id, receipt_id=receipt.id, payload=payload,
         status="BLOCKED" if blocked else "PENDING", last_error=blocked)

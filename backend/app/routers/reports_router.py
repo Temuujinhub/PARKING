@@ -1689,8 +1689,10 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
                 j["done"] += 1
             if res is None:
                 continue
-            if res.get("ok") or res.get("pending"):
+            if res.get("ok"):
                 j["ok"] += 1
+            elif res.get("pending"):
+                j["queued"] = j.get("queued", 0) + 1
             else:
                 err = (res.get("error") or "?")[:400]
                 j["failed"] += 1
