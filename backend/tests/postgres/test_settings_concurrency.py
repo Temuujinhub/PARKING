@@ -1,24 +1,26 @@
 """Run only against an explicitly supplied disposable PostgreSQL test database."""
-import os
 import threading
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import AppSetting
 from app.services import app_settings as A
 
-URL = os.environ.get('PARKING_TEST_DATABASE_URL')
+from test_payment_migrations import engine, URL
 pytestmark = pytest.mark.skipif(not URL, reason='Dedicated PostgreSQL test database required')
 
 
 @pytest.mark.parametrize('existing', [False, True])
-def test_two_admins_preserve_both_site_overrides(existing):
-    engine = create_engine(URL)
+def test_two_admins_preserve_both_site_overrides(existing, engine):
+    # The shared fixture owns a fresh audit_* schema and removes it afterwards.
+    # Never delete settings in the test database's public schema.
+    with engine.connect() as conn:
+        assert conn.execute(text('SELECT current_schema()')).scalar().startswith('audit_')
     AppSetting.__table__.create(engine, checkfirst=True)
     with Session(engine) as db:
-        db.query(AppSetting).filter_by(key=A.EXITRULES_KEY).delete()
+        assert db.get(AppSetting, A.EXITRULES_KEY) is None
         if existing:
             db.add(AppSetting(key=A.EXITRULES_KEY, value={}))
         db.commit()
@@ -47,5 +49,4 @@ def test_two_admins_preserve_both_site_overrides(existing):
         overlays = db.get(AppSetting, A.EXITRULES_KEY).value[A.SITE_OVERLAY]
         assert overlays['site-a']['no_session_fee'] == 1000
         assert overlays['site-b']['no_session_fee'] == 2000
-    engine.dispose()
     A.invalidate_cache()
