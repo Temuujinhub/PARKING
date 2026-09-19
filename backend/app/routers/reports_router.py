@@ -17,6 +17,10 @@ from . import reports_excel as _excel
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
+# Standalone debt collections have no ParkingSession; scope them explicitly.
+PAY_SITE = func.coalesce(Payment.site_id, ParkingSession.site_id)
+PAY_PLATE = func.coalesce(ParkingSession.plate_number, Payment.raw_payload["plate_number"].as_string())
+
 # DB бүх цагийг UTC-ээр хадгалдаг; хэрэглэгч локал (УБ, UTC+8) өдрөөр сэтгэдэг тул
 # өдрийн зааг, цагийн бүлэглэлтийг TZ-ээр хөрвүүлнэ.
 from ..config import settings as _cfg  # noqa: E402
@@ -70,6 +74,37 @@ def _flt(q, col, scope):
     return q.filter(col == scope)
 
 
+@router.get("/financial-work")
+def financial_work(site_id: str | None = None, limit: int = 100,
+                   db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Read-only reconciliation inventory. PENDING is not evidence of nonpayment.
+
+    No provider calls, no replay endpoint, no secret-bearing payloads returned.
+    Site-scoped users cannot see unallocated/global wallet attempts.
+    """
+    from ..models import FinancialJob
+    scope = _scope(user, site_id)
+    limit = max(1, min(200, limit))
+    payments = _flt(db.query(Payment).outerjoin(ParkingSession, Payment.session_id == ParkingSession.id),
+                    PAY_SITE, scope).filter(Payment.provider == "QPAY",
+        Payment.status.in_(["CREATING", "PENDING", "UNKNOWN", "REVIEW"]),
+        Payment.created_at <= datetime.utcnow() - timedelta(minutes=2))
+    jobs = _flt(db.query(FinancialJob).join(Payment, FinancialJob.payment_id == Payment.id)
+        .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id), PAY_SITE, scope)
+    jobs = jobs.filter(FinancialJob.status != "DONE")
+    return {"read_only": True, "pending_is_not_unpaid": True,
+        "unresolved_payment_count": payments.count(), "outstanding_job_count": jobs.count(),
+        "payments": [{"id": p.id, "kind": p.kind, "status": p.status, "amount": str(p.amount),
+            "created_at": p.created_at, "has_invoice": bool(p.provider_invoice_id),
+            "callback_retry_pending": p.qpay_check_requested_at is not None,
+            "attempts": p.qpay_check_attempts, "next_check_at": p.qpay_next_check_at}
+            for p in payments.order_by(Payment.created_at, Payment.id).limit(limit)],
+        "jobs": [{"id": j.id, "payment_id": j.payment_id, "receipt_id": j.receipt_id,
+            "kind": j.kind, "status": j.status, "attempts": j.attempts,
+            "next_attempt_at": j.next_attempt_at, "created_at": j.created_at}
+            for j in jobs.order_by(FinancialJob.created_at, FinancialJob.id).limit(limit)]}
+
+
 def _daily_rows(db, start, end, site_id):
     """Өдөр өдрөөр орц/гарц + төлбөрийн хэрэгслээр (бэлэн/QPay/карт) орлого.
     daily_report ба daily_excel хоёр ижил логик ашигладаг тул нэг эх сурвалж болгов.
@@ -85,10 +120,11 @@ def _daily_rows(db, start, end, site_id):
           .filter(ParkingSession.entry_time >= lo, ParkingSession.entry_time < hi))
     pay_day = func.date(Payment.paid_at + TZ)
     pq = (db.query(pay_day, Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-          .join(ParkingSession, Payment.session_id == ParkingSession.id)
+          .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
           .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi))
     sq = _flt(sq, ParkingSession.site_id, site_id)
-    pq = _flt(pq, ParkingSession.site_id, site_id)
+    pq = _flt(pq, PAY_SITE, site_id)
     counts = {str(d): (int(n), int(x)) for d, n, x in sq.group_by(sess_day).all()}
     pays = {}
     for d, provider, amt in pq.group_by(pay_day, Payment.provider).all():
@@ -149,13 +185,14 @@ def _daily_site_rows(db, start, end, site_id):
 
     # Мөнгө ОРСОН өдрөөр (paid_at) — кассын өдрийн орлоготой таарна
     pay_day = func.date(Payment.paid_at + TZ)
-    pq = (db.query(pay_day, ParkingSession.site_id, Payment.provider,
+    pq = (db.query(pay_day, PAY_SITE, Payment.provider,
                    func.coalesce(func.sum(Payment.amount), 0))
-          .join(ParkingSession, Payment.session_id == ParkingSession.id)
+          .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
           .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi))
     pays = {}
-    for d, sid, provider, amt in (_flt(pq, ParkingSession.site_id, site_id)
-                                  .group_by(pay_day, ParkingSession.site_id,
+    for d, sid, provider, amt in (_flt(pq, PAY_SITE, site_id)
+                                  .group_by(pay_day, PAY_SITE,
                                             Payment.provider).all()):
         g = pays.setdefault((str(d), sid), dict.fromkeys(_PAY_KEYS, 0.0))
         g[_PAY_GROUP.get(provider, "wallet")] += float(amt or 0)
@@ -215,10 +252,11 @@ def dashboard_stats(rev_days: int = 7,
     today_exits = _flt(db.query(ParkingSession).filter(ParkingSession.exit_time >= today),
                        ParkingSession.site_id, scope).count()
     rev_q = db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
-        Payment.status == "PAID", Payment.paid_at >= today)
+        Payment.status == "PAID", Payment.kind.in_(("PARKING", "DEBT")), Payment.paid_at >= today)
     if scope is not None:
-        rev_q = _flt(rev_q.join(ParkingSession, Payment.session_id == ParkingSession.id),
-                     ParkingSession.site_id, scope)
+        rev_q = _flt(rev_q.outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT"))),
+                     PAY_SITE, scope)
     today_revenue = float(rev_q.scalar())
     total_capacity = _flt(db.query(func.coalesce(func.sum(ParkingSite.capacity), 0)).filter(
         ParkingSite.is_active.is_(True)), ParkingSite.id, scope).scalar()
@@ -228,10 +266,11 @@ def dashboard_stats(rev_days: int = 7,
                        .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
                        .group_by(ParkingSession.site_id).all())
     rev_by_site = {sid: float(a) for sid, a in
-                   db.query(ParkingSession.site_id, func.coalesce(func.sum(Payment.amount), 0))
-                   .join(Payment, Payment.session_id == ParkingSession.id)
-                   .filter(Payment.status == "PAID", Payment.paid_at >= today)
-                   .group_by(ParkingSession.site_id).all()}
+                   db.query(PAY_SITE, func.coalesce(func.sum(Payment.amount), 0)).select_from(Payment)
+                   .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+                   .filter(Payment.kind.in_(("PARKING", "DEBT")))
+                   .filter(Payment.status == "PAID", Payment.kind.in_(("PARKING", "DEBT")), Payment.paid_at >= today)
+                   .group_by(PAY_SITE).all()}
     sites = []
     for s in _flt(db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)),
                   ParkingSite.id, scope).all():
@@ -245,11 +284,12 @@ def dashboard_stats(rev_days: int = 7,
     # Сүүлийн rev_days хоногийн орлого (график) — өдөр бүр query биш, 1 бүлэглэсэн query
     wk_day = func.date(Payment.paid_at + TZ)
     wk_q = (db.query(wk_day, func.coalesce(func.sum(Payment.amount), 0))
-            .filter(Payment.status == "PAID", Payment.paid_at >= today - timedelta(days=rev_days - 1),
+            .filter(Payment.status == "PAID", Payment.kind.in_(("PARKING", "DEBT")), Payment.paid_at >= today - timedelta(days=rev_days - 1),
                     Payment.paid_at < today + timedelta(days=1)))
     if scope is not None:
-        wk_q = _flt(wk_q.join(ParkingSession, Payment.session_id == ParkingSession.id),
-                    ParkingSession.site_id, scope)
+        wk_q = _flt(wk_q.outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT"))),
+                    PAY_SITE, scope)
     wk = {str(d): float(a) for d, a in wk_q.group_by(wk_day).all()}
     week = []
     for i in range(rev_days - 1, -1, -1):
@@ -337,8 +377,9 @@ def revenue_report(date_from: str | None = None, date_to: str | None = None,
             ParkingSession.entry_time < end).scalar()
         # Төлбөрийн төрлөөр задаргаа (easy-park UAT items 1, 4, 6, 7)
         prov = dict(db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-                    .join(ParkingSession, Payment.session_id == ParkingSession.id)
-                    .filter(ParkingSession.site_id == s.id, Payment.status == "PAID",
+                    .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
+                    .filter(PAY_SITE == s.id, Payment.status == "PAID",
                             Payment.paid_at >= start, Payment.paid_at < end)
                     .group_by(Payment.provider).all())
         cash, qpay_amt, pos, transfer = (float(prov.get(k, 0))
@@ -450,9 +491,10 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
               + cast(func.extract("month", Payment.paid_at + TZ), Integer))
     q = (db.query(ymexpr.label("ym"), Payment.provider,
                   func.coalesce(func.sum(Payment.amount), 0), func.count())
-         .join(ParkingSession, Payment.session_id == ParkingSession.id)
+         .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
          .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    q = _flt(q, ParkingSession.site_id, _scope(user, site_id))
+    q = _flt(q, PAY_SITE, _scope(user, site_id))
     months = {}
     for ym, prov, amt, cnt in q.group_by("ym", Payment.provider).all():
         m = months.setdefault(int(ym), {"cash": 0.0, "qpay": 0.0, "pos": 0.0,
@@ -670,19 +712,22 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
     sid = _scope(user, site_id)
     # Хэрэгслээр — төлсөн гүйлгээ
     pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0), func.count())
-          .join(ParkingSession, Payment.session_id == ParkingSession.id)
+          .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
           .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    pq = _flt(pq, ParkingSession.site_id, sid)
+    pq = _flt(pq, PAY_SITE, sid)
     by_method = [{"key": PROVIDER_MN.get(p, p), "amount": float(a), "count": int(c)}
                  for p, a, c in pq.group_by(Payment.provider).all()]
     # Машины төрлөөр — ИЖИЛ төлсөн гүйлгээг session-ий төрлөөр бүлэглэнэ (тэнцвэржинэ)
-    payq = (db.query(Payment).join(ParkingSession, Payment.session_id == ParkingSession.id)
+    payq = (db.query(Payment).outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
             .filter(Payment.status == "PAID", Payment.paid_at >= start, Payment.paid_at < end))
-    payq = _flt(payq, ParkingSession.site_id, sid)
-    buckets = {"Гэрээт": [0, 0.0], "Хөнгөлөлттэй": [0, 0.0], "Энгийн": [0, 0.0]}
+    payq = _flt(payq, PAY_SITE, sid)
+    buckets = {"Гэрээт": [0, 0.0], "Хөнгөлөлттэй": [0, 0.0], "Энгийн": [0, 0.0], "Зогсолтгүй өр": [0, 0.0]}
     for p in payq.all():
-        buckets[_car_type(p.session)][0] += 1
-        buckets[_car_type(p.session)][1] += float(p.amount)
+        bucket = _car_type(p.session) if p.session else "Зогсолтгүй өр"
+        buckets[bucket][0] += 1
+        buckets[bucket][1] += float(p.amount)
     by_car = [{"key": k, "count": v[0], "amount": v[1]} for k, v in buckets.items()]
     # Үнэгүй гарсан машин (орлогогүй — тусад нь тоо) — гарсан огноогоор
     free_q = db.query(ParkingSession).filter(ParkingSession.status == "FREE",
@@ -903,10 +948,11 @@ def _shift_rows(db, start, end, site_id):
         sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= day,
                                              ParkingSession.entry_time < nxt)
         pq = (db.query(Payment.provider, func.coalesce(func.sum(Payment.amount), 0))
-              .join(ParkingSession, Payment.session_id == ParkingSession.id)
+              .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
               .filter(Payment.status == "PAID", Payment.paid_at >= day, Payment.paid_at < nxt))
         sq = _flt(sq, ParkingSession.site_id, site_id)
-        pq = _flt(pq, ParkingSession.site_id, site_id)
+        pq = _flt(pq, PAY_SITE, site_id)
         prov = dict(pq.group_by(Payment.provider).all())
         cash, qpay_amt, pos, transfer = (float(prov.get(k, 0))
                                          for k in ("CASH", "QPAY", "POS", "TRANSFER"))
@@ -956,9 +1002,10 @@ def settlement(site_id: str, date_from: str | None = None, date_to: str | None =
         for d, provider, src, amt in (
                 db.query(pay_day, Payment.provider, Payment.source,
                          func.coalesce(func.sum(Payment.amount), 0))
-                .join(ParkingSession, Payment.session_id == ParkingSession.id)
+                .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+          .filter(Payment.kind.in_(("PARKING", "DEBT")))
                 .filter(Payment.status == "PAID", Payment.paid_at >= lo, Payment.paid_at < hi,
-                        ParkingSession.site_id == site_id)
+                        PAY_SITE == site_id)
                 .group_by(pay_day, Payment.provider, Payment.source).all()):
             pay_map.setdefault(str(d), []).append((provider, src, amt))
         comp_day = func.date(Compensation.created_at + TZ)
@@ -1243,13 +1290,13 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
     shifts = [0.0, -float(_cfg.tz_offset_hours)] if tz_shift is None else [float(tz_shift)]
     pad = timedelta(hours=max(abs(s) for s in shifts) + 1)
     lo, hi = min(t["dt"] for t in tax) - pad, max(t["dt"] for t in tax) + pad
-    q = (db.query(VatReceipt, Payment, ParkingSession.plate_number, ParkingSite.name)
+    q = (db.query(VatReceipt, Payment, PAY_PLATE, ParkingSite.name)
          .join(Payment, VatReceipt.payment_id == Payment.id)
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+         .outerjoin(ParkingSite, PAY_SITE == ParkingSite.id)
          .filter(Payment.paid_at >= lo, Payment.paid_at < hi))
-    q = (q.filter(ParkingSession.site_id.in_(scope_ids)) if scope_ids is not None
-         else _flt(q, ParkingSession.site_id, _scope(user)))
+    q = (q.filter(PAY_SITE.in_(scope_ids)) if scope_ids is not None
+         else _flt(q, PAY_SITE, _scope(user)))
     try:
         ours = q.all()
         r = await _aio.to_thread(_vr.best_shift, tax, ours, shifts, tol)
@@ -1269,13 +1316,13 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         off = timedelta(hours=shift)
         lo_c = min(t["dt"] for t in tax) + off - timedelta(seconds=tol + 5)
         hi_c = max(t["dt"] for t in tax) + off + timedelta(seconds=tol + 5)
-        pq = (db.query(Payment, ParkingSession.plate_number, ParkingSite.name,
-                       ParkingSession.site_id)
+        pq = (db.query(Payment, PAY_PLATE, ParkingSite.name,
+                       PAY_SITE)
               .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
-              .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+              .outerjoin(ParkingSite, PAY_SITE == ParkingSite.id)
               .filter(Payment.paid_at >= lo_c, Payment.paid_at <= hi_c,
                       Payment.status == "PAID"))
-        pq = _flt(pq, ParkingSession.site_id, _scope(user))   # эрхийн хүрээ л барина
+        pq = _flt(pq, PAY_SITE, _scope(user))   # эрхийн хүрээ л барина
         pay_rows = pq.all()
         rec_by_pay: dict[str, list] = {}
         if pay_rows:
@@ -1489,10 +1536,11 @@ def vat_failures(days: int = 7, date_from: str | None = None, date_to: str | Non
                   func.sum(VatReceipt.amount).label("amount"),
                   func.sum(case((VatReceipt.created_at >= now - timedelta(hours=24), 1),
                                 else_=0)).label("active_24h"))
+         .join(Payment, VatReceipt.payment_id == Payment.id)
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start,
+         .filter(VatReceipt.status.in_(("FAILED", "REVIEW")), VatReceipt.created_at >= start,
                  VatReceipt.created_at < end))
-    q = _flt(q, ParkingSession.site_id, _scope(user))
+    q = _flt(q, PAY_SITE, _scope(user))
     rows = (q.group_by(VatReceipt.provider, VatReceipt.receipt_url)
             .order_by(func.count().desc()).limit(20).all())
     return [{"provider": p or "?", "error": (e or "(алдаа бичигдээгүй)")[:400], "count": n,
@@ -1540,8 +1588,9 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
         start, end = datetime.utcnow() - timedelta(days=days), datetime.utcnow() + timedelta(days=1)
 
     q = (db.query(VatReceipt)
+         .join(Payment, VatReceipt.payment_id == Payment.id)
          .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .filter(VatReceipt.status == "FAILED", VatReceipt.created_at >= start,
+         .filter(VatReceipt.status.in_(("FAILED", "REVIEW")), VatReceipt.created_at >= start,
                  VatReceipt.created_at < end))
     if provider in ("?", "NULL", "NONE"):
         # Самбар provider хоосон (хуучин, 2026-08-19-өөс өмнөх мөр) бүлгийг «?» гэж
@@ -1551,7 +1600,7 @@ async def vat_retry_failed(body: dict | None = None, db: Session = Depends(get_d
         q = q.filter(VatReceipt.provider == provider)
     if error:
         q = q.filter(VatReceipt.receipt_url == error)
-    q = _flt(q, ParkingSession.site_id, _scope(user))
+    q = _flt(q, PAY_SITE, _scope(user))
     candidates_total = q.count()
     recs = q.order_by(VatReceipt.created_at).limit(limit).all()
     # Нэг төлбөрт олон бүтэлгүй мөр байж болно — төлбөр бүрд НЭГ л оролдоно
@@ -1642,6 +1691,8 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
                 continue
             if res.get("ok"):
                 j["ok"] += 1
+            elif res.get("pending"):
+                j["queued"] = j.get("queued", 0) + 1
             else:
                 err = (res.get("error") or "?")[:400]
                 j["failed"] += 1
@@ -1681,17 +1732,18 @@ def _vat_receipts_query(db, user, date_from, date_to, q=None, plate=None, ddtd=N
     ХАМТ (AND) үйлчилнэ — 2026-09-01: нэг талбарт бүгдийг холиход зогсоолын
     нэр дугаартай, дүн ДДТД-тэй андуурагдаж олддог байсныг салгав."""
     start, end = _range(date_from, date_to)
-    query = (db.query(VatReceipt, ParkingSession.plate_number, ParkingSite.name)
-             .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-             .outerjoin(ParkingSite, ParkingSession.site_id == ParkingSite.id)
+    query = (db.query(VatReceipt, PAY_PLATE, ParkingSite.name)
+             .join(Payment, VatReceipt.payment_id == Payment.id)
+         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
+             .outerjoin(ParkingSite, PAY_SITE == ParkingSite.id)
              .filter(VatReceipt.created_at >= start, VatReceipt.created_at < end))
     # Tenant хэрэглэгч зөвхөн өөрийн зогсоолын баримт харна (session-гүй баримт орохгүй)
-    query = _flt(query, ParkingSession.site_id, _scope(user))
+    query = _flt(query, PAY_SITE, _scope(user))
     if q and q.strip():
         from sqlalchemy import or_
         term = q.strip()
         like = f"%{term}%"
-        conds = [ParkingSession.plate_number.ilike(like), VatReceipt.ebarimt_id.ilike(like),
+        conds = [PAY_PLATE.ilike(like), VatReceipt.ebarimt_id.ilike(like),
                  VatReceipt.lottery_code.ilike(like), ParkingSite.name.ilike(like),
                  VatReceipt.status.ilike(like), VatReceipt.provider.ilike(like)]
         # Цэвэр тоо бичвэл ДҮНГЭЭР ч хайна (ж: 1500 → 1,500₮-ийн баримтууд)
@@ -1700,7 +1752,7 @@ def _vat_receipts_query(db, user, date_from, date_to, q=None, plate=None, ddtd=N
             conds.append(VatReceipt.amount == float(num))
         query = query.filter(or_(*conds))
     if plate and plate.strip():
-        query = query.filter(ParkingSession.plate_number.ilike(f"%{plate.strip()}%"))
+        query = query.filter(PAY_PLATE.ilike(f"%{plate.strip()}%"))
     if ddtd and ddtd.strip():
         query = query.filter(VatReceipt.ebarimt_id.ilike(f"%{ddtd.strip()}%"))
     if lottery and lottery.strip():

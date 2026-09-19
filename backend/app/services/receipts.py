@@ -31,7 +31,7 @@ from ..models import AuditLog, VatReceipt
 
 log = logging.getLogger("parking.receipts")
 
-_STATUS_RANK = {"SENT": 0, "CANCEL_PENDING": 1, "PENDING": 2, "FAILED": 3, "CANCELLED": 4}
+_STATUS_RANK = {"SENT": 0, "CANCEL_PENDING": 1, "PENDING": 2, "REVIEW": 3, "FAILED": 4, "CANCELLED": 5}
 
 
 def rank_key(rec) -> tuple:

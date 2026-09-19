@@ -2065,21 +2065,22 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
     if w:
         w = wallet_svc.lock_wallet(db, w.id)
     if w and w.status == "ACTIVE" and float(w.balance or 0) > 0:
-        balance = float(w.balance)
-        take = min(balance, due)
-        covered = take >= due - 0.01
+        balance = Decimal(str(w.balance))
+        take = min(balance, Decimal(str(due))).quantize(Decimal("0.01"))
+        covered = take >= Decimal(str(due))
         # Payment-ийг эхлээд PENDING-ээр үүсгэж (дүн нь _create_payment-ийн
         # дотоод дүрмээр), дараа нь данснаас хасна — нэг транзакцид.
         payment = pr._create_payment(db, session, provider="WALLET",
                                      method="WALLET", include_debts=False)
+        payment.amount = take
         if not covered:
-            payment.amount = Decimal(str(round(take)))
-            r = settings.vat_rate
-            payment.vat_amount = Decimal(str(round(take * r / (1 + r))))
+            r = Decimal(str(settings.vat_rate))
+            payment.vat_amount = ((take * r / (1 + r)).quantize(Decimal("0.01"))
+                                  if settings.vat_inclusive and r > 0 else Decimal("0"))
         payment.kind = "PARKING"
         payment.wallet_id = w.id
         payment.source = "WALLET"
-        wallet_svc.debit_parking(db, w.id, float(payment.amount), session.id,
+        wallet_svc.debit_parking(db, w.id, payment.amount, session.id,
                                  note=f"гарах хаалт {plate}")
         session.paid_from_wallet = True
         await pr._finalize_paid(db, payment)

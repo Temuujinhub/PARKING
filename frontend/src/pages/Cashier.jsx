@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, preferredSite, rememberSite, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
+import { paymentOutcome } from '../paymentOutcome'
 import CashierStats from './cashier/CashierStats'
 import ExitQueue from './cashier/ExitQueue'
 import FreeExitModal from './cashier/FreeExitModal'
@@ -124,14 +125,16 @@ export default function Cashier() {
     }
     setBusy(true)
     try {
-      if (method === 'CASH') {
-        await api('/api/payments/cash', { method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount } })
-        toast('Бэлэн мөнгөөр төлөгдлөө. Хаалт нээгдэж байна.')
-        setSelected(null)
-      } else if (method === 'TRANSFER') {
-        await api('/api/payments/transfer', { method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount } })
-        toast('Дансаар төлөгдлөө. Хаалт нээгдэж байна.')
-        setSelected(null)
+      if (method === 'CASH' || method === 'TRANSFER') {
+        const result = await api(`/api/payments/${method === 'CASH' ? 'cash' : 'transfer'}`, {
+          method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount },
+        })
+        const outcome = paymentOutcome(result)
+        toast(`${outcome.title}. ${outcome.message}`)
+        if (outcome.needsBalanceRefresh || outcome.kind === 'gate_attention') {
+          const fresh = await api(`/api/sessions/${selected.id}`)
+          setSelected(fresh)
+        } else setSelected(null)
       } else if (method === 'QPAY') {
         const inv = await api('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: selected.id, source: 'POS' } })
         setQpayInfo(inv)

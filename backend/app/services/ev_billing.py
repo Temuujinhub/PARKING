@@ -272,7 +272,8 @@ async def on_tx_stopped(db: Session, payload: dict):
 
     # ── Орлогын бүртгэл: Payment(kind=EV, PAID) — тайлан/ээлжид харагдана ──
     if actual > 0:
-        payment = Payment(
+        charger = db.get(EvCharger, session.charger_id)
+        payment = Payment(site_id=charger.site_id if charger else None,
             session_id=None, kind="EV", wallet_id=session.wallet_id,
             provider="WALLET", payment_method="WALLET", source="EV",
             # QPay-ийн 45 байтын хязгаар (цэнэглэгчийн ocpp_tx_id урт байж болно)
@@ -286,16 +287,14 @@ async def on_tx_stopped(db: Session, payload: dict):
         db.add(payment)
         db.flush()
         session.payment_id = payment.id
+        from .financial_jobs import enqueue_receipt
+        receipt = enqueue_receipt(db, payment, session_id=session.parking_session_id,
+            description=f"Цахилгаан цэнэглэлт {energy} Wh", key=f"ev-{session.id}")
+        session.vat_receipt_id = receipt.id
     session.status = "SETTLED"
     db.commit()
     log.info("EV дуусав: session=%s %s Wh × %s = %s₮ (буцаалт %s₮), үлдэгдэл %s₮",
              session.id, energy, price, actual, release, w.balance)
-    # e-Barimt (§Шат 4): бодит дүнгээр, best-effort — унасан ч тооцоо алдагдахгүй.
-    if actual > 0 and session.payment_id:
-        try:
-            await _ebarimt_for_charge(db, session)
-        except Exception as e:  # noqa: BLE001
-            log.warning("EV e-Barimt үүсгэж чадсангүй (дараа retry болно): %s", e)
 
 
 def _vat_of(amount: Decimal) -> Decimal:
@@ -304,36 +303,6 @@ def _vat_of(amount: Decimal) -> Decimal:
     if not settings.vat_inclusive or r <= 0:
         return D(0)
     return (amount * r / (1 + r)).quantize(D("0.01"))
-
-
-async def _ebarimt_for_charge(db: Session, session: ChargeSession):
-    """e-Barimt: msgbill идэвхтэй бол «Үйлчилгээ» төрлөөр, Idempotency-Key =
-    session id (§Шат 4). Тохируулаагүй бол алгасна — vat_receipts-т PENDING
-    үлдэхгүй, учир нь Payment.kind=EV тайланд НӨАТ-аа тусад нь харуулна."""
-    from ..models import VatReceipt
-    from . import msgbill
-    charger = db.get(EvCharger, session.charger_id)
-    site = charger.site if charger else None
-    acc = msgbill.account_enabled_for(site, "WALLET") if site else None
-    if not acc:
-        return
-    payment = db.get(Payment, session.payment_id)
-    norm = await msgbill.create_receipt(
-        acc, float(session.total_amount),
-        description=f"Цахилгаан цэнэглэлт {session.energy_wh} Wh",
-        payment_method="QR",  # дансны мөнгө анх QPay QR-аар орж ирсэн
-        idempotency_key=f"ev-{session.id}")
-    ok = norm.get("status") == "SUCCESS"
-    receipt = VatReceipt(
-        payment_id=payment.id, session_id=session.parking_session_id,
-        ebarimt_id=norm.get("billId"), lottery_code=norm.get("lottery"),
-        amount=session.total_amount, vat_amount=payment.vat_amount,
-        receipt_url=norm.get("qrData"), status="SENT" if ok else "PENDING",
-        provider="MSGBILL", provider_ref=norm.get("msgbillId"))
-    db.add(receipt)
-    db.flush()
-    session.vat_receipt_id = receipt.id
-    db.commit()
 
 
 async def expire_stale_starts(db: Session):

@@ -105,10 +105,14 @@ export default function PaymentPanel({
               <>
                 <span className="text-red-300">Өмнөх өр{selected.debt.count > 1 ? ` (${selected.debt.count})` : ''}</span>
                 <span className="font-mono text-right text-red-300 font-semibold">+{fmt(selected.debt.amount)}₮</span>
-                <span className="text-slate-300 font-semibold">Нийт төлөх</span>
+                <span className="text-slate-300 font-semibold">QPay-аар нийт төлөх</span>
                 <span className="font-mono text-right text-lg font-bold text-amber-300">
                   {fmt((Number(selected.amount_due ?? fee?.total_fee) || 0) + Number(selected.debt.amount))}₮
                 </span>
+                <p className="col-span-2 text-slate-300">
+                  Бэлэн/дансаар төлөх товч одоогийн зогсолтын үлдэгдлийг авна.
+                  Өмнөх өрийг «Өр цэвэрлэх» хэсгээс тусад нь төлүүлнэ.
+                </p>
               </>
             )}
             {/* Төлснөөс хойш зогссоор байгаа машин: өмнө төлсөн дүнг хасаад

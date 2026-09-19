@@ -26,6 +26,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
   const parentOptions = isParentItself ? [] : sites.filter(
     (s) => s.id !== editing?.id && !s.parent_site_id)
   const parentName = sites.find((s) => s.id === editing?.parent_site_id)?.name
+  const hasInnerTime = !!(editing?.parent_site_id || editing?.has_inner_lanes)
 
   // Зогсолтын дүрмийн хэдэн тохиргоо default-аас өөр байгааг summary-д харуулна
   const ruleOverrides = editing ? [
@@ -219,10 +220,17 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
 
           {/* ── Дамжин зогсоол: том зогсоолын ДОТОР байрлах жижиг зогсоол.
               Машин дотор байх хугацаанд ГАДНА зогсоолын төлбөрийн тоолуур зогсоно. ── */}
-          <Section title="Дамжин зогсоол (энэ зогсоол өөр зогсоолын дотор байна)"
-            open={!!editing.parent_site_id}
-            status={editing.parent_site_id ? (parentName || 'холбогдсон') : 'тохируулаагүй'}
-            statusClass={editing.parent_site_id ? 'text-accent' : 'text-slate-500'}>
+          <Section title="Дотор зогсоол ба хугацааны хасалт"
+            open={hasInnerTime}
+            status={editing.parent_site_id ? (parentName || 'холбогдсон')
+              : editing.has_inner_lanes ? 'энэ зогсоол дотоод камертай' : 'тохируулаагүй'}
+            statusClass={hasInnerTime ? 'text-accent' : 'text-slate-500'}>
+            {editing.has_inner_lanes && !editing.parent_site_id && (
+              <p className="text-sm text-slate-300">
+                Дотоод камерын орсон, гарсан цагийн хоорондох хугацааг энэ зогсоолын
+                төлбөрөөс хасна. Доорх хугацааг тохируулахад өөр зогсоол сонгох шаардлагагүй.
+              </p>
+            )}
             <Field label="Гадна (эцэг) зогсоол">
               <select className="input" value={editing.parent_site_id || ''} disabled={isParentItself}
                 onChange={(e) => setEditing({ ...editing, parent_site_id: e.target.value || null })}>
@@ -245,18 +253,20 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
                 </div>
               )}
             </Field>
-            {editing.parent_site_id && (
-              <Field label="Дамжин зогсох дээд хугацаа (цаг)">
-                <input className="input" type="number" min="0" max="720" step="1" placeholder="4 (default)"
+            {hasInnerTime && (
+              <div>
+                <label className="label" htmlFor="inner-time-hours">Дотор хугацааг үнэгүй хасах дээд хязгаар (цаг)</label>
+                <input id="inner-time-hours" className="input hover:border-accent/60 disabled:opacity-40"
+                  type="number" min="0" max="720" step="1" placeholder="Системийн ерөнхий утга"
+                  aria-describedby="inner-time-help"
                   value={editing.transit_max_hours ?? ''}
                   onChange={(e) => setEditing({ ...editing, transit_max_hours: e.target.value })} />
-                <div className="text-[11px] text-slate-500 mt-1">
-                  Энэ зогсоолын ГАРАХ камерт уншигдалгүй үлдвэл гадна талын тоолуур
-                  мөнхөд зогсож машин 0₮-өөр гарах эрсдэлтэй. Тиймээс тоолуур зогсох
-                  хугацааг таслана — түүнээс хэтэрсэн хугацаа гадна талд төлбөртэй.
-                  Хоосон = 4 цаг, 0 = хязгааргүй (болгоомжтой).
-                </div>
-              </Field>
+                <p id="inner-time-help" className="text-sm text-slate-300 mt-2">
+                  0 = дотор бүртгэгдсэн бүх хугацааг үнэгүй хасна. Хоосон = системийн
+                  ерөнхий утга. Эерэг тоо = дотогш нэг удаа орсон хугацаанаас хамгийн
+                  ихдээ тэр цагийг хасна; хэтэрсэн хугацаанд гаднах тариф үйлчилнэ.
+                </p>
+              </div>
             )}
           </Section>
 

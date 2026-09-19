@@ -11,7 +11,7 @@ export default function QpayModal({ qpayInfo, onClose }) {
           {qpayInfo.qr_image
             ? <img src={`data:image/png;base64,${qpayInfo.qr_image}`} alt="QPay QR код" className="mx-auto w-52 h-52 rounded-lg bg-white p-2" />
             : <div className="text-sm bg-surface-muted rounded-lg p-4 font-mono break-all">{qpayInfo.qr_text}</div>}
-          <div className="text-sm text-slate-400">Хэрэглэгч QPay апп-аар уншуулж төлнө. Төлөгдмөгц хаалт автоматаар нээгдэнэ.</div>
+          <div className="text-sm text-slate-300">Хэрэглэгч QPay апп-аар уншуулж төлнө. Үлдэгдэлгүй болж баталгаажсаны дараа гарах хаалт нээх хүсэлт явуулна. Хаалт нээгдэхгүй бол төлбөрийг дахин авахгүйгээр төлөвийг шалгана уу.</div>
           {qpayInfo.mock && <div className="text-xs text-amber-400">MOCK горим — бодит QPay холбогдоогүй</div>}
         </div>
       )}
