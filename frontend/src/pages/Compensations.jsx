@@ -16,6 +16,8 @@ export default function Compensations() {
   const [data, setData] = useState({ rows: [], total_pending: 0, total_collected: 0, aging: {} })
   const [status, setStatus] = useState('PENDING')
   const [plate, setPlate] = useState('')
+  const [payBusy, setPayBusy] = useState(false)
+  const [payError, setPayError] = useState('')
   const [payModal, setPayModal] = useState(null) // {comp, method, customer_tin}
   const [shift, setShift] = useState(null)   // одоогийн ээлж
   const [parked, setParked] = useState([])   // зогсоолд байгаа (хаагдах) машинууд
@@ -57,13 +59,16 @@ export default function Compensations() {
   }
 
   const doPay = async () => {
+    if (payBusy) return
+    setPayBusy(true); setPayError('')
     try {
       await api(`/api/compensations/${payModal.comp.id}/pay`, {
         method: 'POST',
-        body: { method: payModal.method, customer_tin: payModal.customer_tin || undefined },
+        body: { method: payModal.method, customer_tin: payModal.customer_tin || undefined,
+          transaction_id: payModal.transaction_id, terminal_id: payModal.terminal_id },
       })
-      toast('Төлөгдөж, e-Barimt үүслээ'); setPayModal(null); load()
-    } catch (e) { toast(e.message, 'error') }
+      toast('Төлөлт бүртгэгдлээ. Баримтын төлөвийг Ибаримтаас шалгана уу'); setPayModal(null); load(); loadShift()
+    } catch (e) { setPayError(e.message) } finally { setPayBusy(false) }
   }
 
   const cancel = async (c) => {
@@ -245,7 +250,7 @@ export default function Compensations() {
       </Table>
 
       {/* Төлүүлэх — хэрэгсэл сонгож e-Barimt өгнө */}
-      <Modal open={!!payModal} onClose={() => setPayModal(null)} title="Нөхөн төлбөр төлүүлэх">
+      <Modal open={!!payModal} onClose={() => { if (!payBusy) { setPayModal(null); setPayError('') } }} title="Нөхөн төлбөр төлүүлэх">
         {payModal && (
           <div className="space-y-4">
             <div className="text-center">
@@ -255,7 +260,7 @@ export default function Compensations() {
             <Field label="Төлбөрийн хэрэгсэл">
               <div className="grid grid-cols-2 gap-2">
                 {[['CASH', 'Бэлэн', Banknote], ['CARD', 'Банкны карт', CreditCard]].map(([v, l, Icon]) => (
-                  <button key={v} type="button" onClick={() => setPayModal({ ...payModal, method: v })}
+                  <button key={v} type="button" disabled={payBusy} onClick={() => setPayModal({ ...payModal, method: v })}
                     className={`px-3 py-2.5 rounded-xl text-sm font-medium border flex items-center justify-center gap-2 cursor-pointer
                       ${payModal.method === v ? 'bg-accent text-white border-accent' : 'bg-surface-muted/40 text-slate-300 border-surface-border'}`}>
                     <Icon size={16} /> {l}
@@ -263,13 +268,29 @@ export default function Compensations() {
                 ))}
               </div>
             </Field>
+            {payModal.method === 'CARD' && (
+              <div className="space-y-3">
+                <p className="text-sm text-slate-300">Банкны терминал дээр төлбөр амжилттай болсон баримтаас бөглөнө. Энэ товч картаас мөнгө татахгүй.</p>
+                <label className="block text-sm">Бүртгэлтэй терминалын дугаар
+                  <input className="input mt-1" autoComplete="off" maxLength={60} disabled={payBusy}
+                    value={payModal.terminal_id || ''} onChange={e => setPayModal({ ...payModal, terminal_id: e.target.value })} />
+                </label>
+                <label className="block text-sm">Банкны гүйлгээний лавлах дугаар
+                  <input className="input mt-1" autoComplete="off" maxLength={120} disabled={payBusy}
+                    value={payModal.transaction_id || ''} onChange={e => setPayModal({ ...payModal, transaction_id: e.target.value })} />
+                </label>
+              </div>
+            )}
+            {payError && <p role="alert" className="text-sm text-red-400">{payError}</p>}
             <Field label="Байгууллагын ТТД (сонголт — ААН баримт)">
               <input className="input font-mono" inputMode="numeric" placeholder="Хоосон = иргэн"
                 value={payModal.customer_tin} maxLength={14}
                 onChange={(e) => setPayModal({ ...payModal, customer_tin: e.target.value.replace(/\D/g, '') })} />
             </Field>
-            <button onClick={doPay} className="btn-primary w-full justify-center py-3">
-              Төлүүлж хаах ({payModal.method === 'CASH' ? 'бэлэн' : 'карт'}) + e-Barimt
+            <button onClick={doPay} disabled={payBusy || (payModal.method === 'CARD' &&
+              (!payModal.terminal_id?.trim() || !payModal.transaction_id?.trim()))}
+              className="btn-primary w-full justify-center py-3 disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-blue-400">
+              {payBusy ? 'Бүртгэж байна…' : `Төлөлт бүртгэх (${payModal.method === 'CASH' ? 'бэлэн' : 'карт'})`}
             </button>
           </div>
         )}
