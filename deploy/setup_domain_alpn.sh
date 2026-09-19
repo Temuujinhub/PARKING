@@ -12,7 +12,8 @@
 # гадаад 443 → энэ серверийн 443 port forwarding ажилладаг байх.
 #
 # Сертификат 60 хоног тутам автоматаар сунгагдана (acme.sh cron);
-# сунгалтын үед nginx ~5 секунд зогсоно (шөнө ажилладаг тул мэдэгдэхгүй).
+# TLS-ALPN сунгалтын үед nginx түр зогсоно; хугацаа нь CA/network-оос хамаарна.
+# Cron-ийн сэргээх хамгаалалт: deploy/nginx/RENEWAL.md.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -66,10 +67,12 @@ for d in "${DOMAINS[@]}"; do
     --post-hook "systemctl start nginx" || true
 
   echo "    - $d: сертификатыг nginx-д суулгах"
+  # acme.sh installs/reloads BEFORE the success post-hook. A reload-only command
+  # fails while the ALPN pre-hook has stopped nginx and can skip the start hook.
   "$ACME" --install-cert -d "$d" \
     --key-file       "$CERT_DIR/$d.key" \
     --fullchain-file "$CERT_DIR/$d.crt" \
-    --reloadcmd "systemctl reload nginx"
+    --reloadcmd "nginx -t && systemctl reload-or-restart nginx"
 done
 
 echo "==> 4/6 Сертификат бүрэн эсэхийг шалгах"
@@ -210,6 +213,6 @@ echo "Дууслаа!"
 echo "  - Үндсэн домэйн (QR + QPay callback): https://$PRIMARY"
 for d in "${OK_DOMAINS[@]}"; do echo "  - Ажиллаж байгаа: https://$d"; done
 echo "  - Дотоод LAN: http://172.16.100.21 хэвээр"
-echo "  - Сунгалт: автомат (acme.sh cron, 60 хоног тутам, nginx ~5с зогсоно)"
+echo "  - Сунгалт: acme.sh cron; TLS-ALPN үед nginx түр зогсоно. deploy/nginx/RENEWAL.md-г мөрдөнө."
 echo "  - АНХААР: Тохиргоо → Зогсоол → QR-ээ ДАХИН ТАТАЖ хэвлэнэ үү"
 echo "    (хэвлэгдчихсэн QR нь $PRIMARY рүү заасан бол дахин хэвлэх шаардлагагүй)"
