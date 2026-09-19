@@ -51,6 +51,10 @@ export default function Pay() {
   const [busy, setBusy] = useState(false)
   const [matches, setMatches] = useState([])
   const [receipt, setReceipt] = useState(null)
+  const [receiptPaymentId, setReceiptPaymentId] = useState(null)
+  const [receiptBusy, setReceiptBusy] = useState(false)
+  const receiptPollRef = useRef(null)
+  const receiptGeneration = useRef(0)
   const [vatType, setVatType] = useState('PERSON') // PERSON | ORG
   const [orgTin, setOrgTin] = useState('')
   // Регистрээр олдсон байгууллагын нэр: {found: true|false|null, name}
@@ -70,6 +74,8 @@ export default function Pay() {
     clearInterval(pollRef.current)
     clearTimeout(debounceRef.current)
     clearTimeout(orgDebounceRef.current)
+    clearTimeout(receiptPollRef.current)
+    receiptGeneration.current += 1
   }, [])
 
   // Байгууллагын регистр бичихэд нэрийг нь ebarimt лавлагаанаас шалгаж харуулна
@@ -140,12 +146,25 @@ export default function Pay() {
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
-  const onPaid = async (paymentId, outcome) => {
-    setPaid(outcome || {}); setError('')
+  const refreshReceipt = async (paymentId, attempts = 0, generation = receiptGeneration.current) => {
+    clearTimeout(receiptPollRef.current)
+    setReceiptBusy(true)
     try {
       const r = await publicApi(`/api/public/receipt/${paymentId}`)
+      if (generation !== receiptGeneration.current) return
       setReceipt({ ...r, qr_png: r.qr_data ? `/api/public/receipt/${paymentId}/qr.png` : null })
-    } catch {}
+      if (!r.ebarimt_id && !['REVIEW', 'FAILED', 'CANCELLED'].includes(r.receipt_status) && attempts < 24) {
+        receiptPollRef.current = setTimeout(() => refreshReceipt(paymentId, attempts + 1, generation), 5000)
+      }
+    } catch {
+      if (generation === receiptGeneration.current) setError('Төлбөр баталгаажсан. Баримтыг дахин шалгана уу; дахин төлөхгүй.')
+    } finally { if (generation === receiptGeneration.current) setReceiptBusy(false) }
+  }
+
+  const onPaid = async (paymentId, outcome) => {
+    setPaid(outcome || {}); setError(''); setReceiptPaymentId(paymentId)
+    receiptGeneration.current += 1
+    await refreshReceipt(paymentId)
   }
 
   // Гар шалгалт — жолооч төлөөд "Төлбөр шалгах" дарахад шууд шалгана (polling-ийг хүлээхгүй)
@@ -185,13 +204,23 @@ export default function Pay() {
           {outcome.needsBalanceRefresh ? (
             <button className="btn-primary w-full justify-center" disabled={busy}
               onClick={async () => {
-                setPaid(false); setPayment(null); setReceipt(null)
+                clearTimeout(receiptPollRef.current); receiptGeneration.current += 1
+                setPaid(false); setPayment(null); setReceipt(null); setReceiptPaymentId(null)
                 await search(session?.plate_number || plate)
               }}>Үлдэгдэл төлбөрийг шалгах</button>
           ) : payment && ['gate_attention', 'unknown'].includes(outcome.kind) ? (
             <button className="btn-secondary w-full justify-center" disabled={busy}
               onClick={checkNow}>Төлөв дахин шалгах</button>
           ) : null}
+          {receiptPaymentId && !receipt?.ebarimt_id && <div className="space-y-2 text-sm text-slate-300" role="status">
+            <p>{['REVIEW', 'FAILED'].includes(receipt?.receipt_status)
+              ? 'Баримтыг санхүүгээр тулгах шаардлагатай. Төлбөрийг дахин төлөхгүй.'
+              : 'Төлбөр баталгаажсан. Баримт боловсруулагдаж байна.'}</p>
+            <button type="button" className="btn-secondary focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-50"
+              disabled={receiptBusy} onClick={() => refreshReceipt(receiptPaymentId)}>
+              {receiptBusy ? 'Шалгаж байна…' : 'Баримт шалгах'}
+            </button>
+          </div>}
           {receipt && (
             <div className="text-left bg-surface-muted/40 rounded-xl p-4 space-y-2">
               <div className="text-center text-xs font-bold tracking-widest text-slate-400 uppercase pb-1 border-b border-dashed border-surface-border">

@@ -8,8 +8,6 @@ QPay цэнэглэлт: Payment(kind=WALLET_TOPUP, session_id=NULL) — §5.1.
 бодитоор ХЭРЭГЛЭГДЭХ үед бодит дүнгээр гарна (§Шат 4).
 """
 import logging
-import secrets
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import or_
@@ -72,7 +70,12 @@ async def wallet_topup_webhook(payment_id: str = "", token: str = "",
     if not (saved and token and _hmac.compare_digest(saved, token)):
         log.warning("wallet webhook token буруу: payment=%s", payment_id)
         return "SUCCESS"
+    from ..services.qpay_recheck import request_verification, finish_verification
+    stamp = request_verification(db, payment)
+    if not payment.provider_invoice_id:
+        raise HTTPException(503, "Нэхэмжлэл хадгалагдаж байна; callback хадгалсан")
     await _verify_and_credit(db, payment)
+    finish_verification(db, payment.id, stamp, completed=True)
     return "SUCCESS"
 
 
@@ -84,7 +87,11 @@ def public_wallet(token: str, request: Request, db: Session = Depends(get_db)):
     moves = (db.query(WalletLedger)
              .filter(WalletLedger.wallet_id == w.id)
              .order_by(WalletLedger.created_at.desc()).limit(20).all())
-    return {"plate": w.plate_number, "balance": float(w.balance or 0),
+    from ..services.wallet_topup import ACTIVE, invoice_response
+    active = (db.query(Payment).filter(Payment.wallet_id == w.id, Payment.kind == "WALLET_TOPUP",
+        Payment.status.in_(ACTIVE)).order_by(Payment.created_at, Payment.id).first())
+    return {"pending_topup": invoice_response(active) if active else None,
+            "plate": w.plate_number, "balance": float(w.balance or 0),
             "status": w.status, "ledger": [_ledger_dict(r) for r in moves]}
 
 
@@ -96,88 +103,13 @@ async def public_wallet_topup(token: str, body: dict, request: Request,
     w = _wallet_by_token(db, token)
     if w.status != "ACTIVE":
         raise HTTPException(409, "Данс идэвхгүй байна")
-    try:
-        amount = int(float(body.get("amount") or 0))
-    except (TypeError, ValueError):
-        raise HTTPException(422, "Дүн буруу")
-    if amount < settings.ev_min_topup:
-        raise HTTPException(422, f"Доод дүн {settings.ev_min_topup}₮")
-    if amount > 1_000_000:
-        raise HTTPException(422, "Дээд дүн 1,000,000₮")
-    webhook_token = secrets.token_urlsafe(24)
-    payment = Payment(
-        session_id=None, kind="WALLET_TOPUP", wallet_id=w.id,
-        provider="QPAY", payment_method="QR", source="QR",
-        # Урт нь QPay-ийн 45 байтын хязгаарт багтана — дугаар нь дипломат/урт
-        # форматтай байж болно, кирилл үсэг 2 байт (2026-08-28-ны сургамж).
-        sender_invoice_no=(qpay.fit_bytes(f"WT-{w.plate_number}",
-                                          qpay.SENDER_INVOICE_NO_MAX - 9)
-                           + f"-{secrets.token_hex(4).upper()}"),
-        amount=amount, vat_amount=0, status="PENDING",
-        raw_payload={"webhook_token": webhook_token})
-    db.add(payment)
-    db.flush()
-    callback = (f"{settings.public_base_url}/api/public/wallet/webhook"
-                f"?payment_id={payment.id}&token={webhook_token}")
-    # Данс цэнэглэлт: e-Barimt-гүй энгийн мөр (баримт хэрэглээний үед гарна)
-    lines = [{"line_description": f"Данс цэнэглэх — {w.plate_number}",
-              "line_quantity": "1.00", "line_unit_price": f"{amount}.00",
-              "amount": amount, "taxes": []}]
-    try:
-        inv = await qpay.create_invoice(
-            payment.sender_invoice_no,
-            f"EasyParking данс цэнэглэх {w.plate_number}",
-            w.phone or "terminal", callback, lines)
-    except Exception as e:  # noqa: BLE001
-        db.rollback()
-        log.warning("wallet topup invoice алдаа: %s", e)
-        raise HTTPException(502, "QPay нэхэмжлэх үүсгэж чадсангүй")
-    payment.provider_invoice_id = inv.get("invoice_id")
-    payment.qr_text = inv.get("qr_text")
-    payment.deep_link = inv.get("deep_link")
-    db.commit()
-    return {"payment_id": payment.id, "amount": amount,
-            "qr_text": inv.get("qr_text"), "qr_image": inv.get("qr_image"),
-            "deep_link": inv.get("deep_link"), "urls": inv.get("urls", [])}
+    from ..services.wallet_topup import create_topup
+    return await create_topup(db, w.id, body.get("amount"), body.get("request_key"))
 
 
-def _credit_if_paid(db: Session, payment: Payment) -> bool:
-    """PENDING → PAID + данс цэнэглэх. Idempotent: мөрийн түгжээтэй,
-    зөвхөн PENDING төлөвөөс шилжинэ (давхар webhook/чек хамгаалагдана)."""
-    db.flush()  # persist the verified provider reference before refreshing the row
-    locked = (db.query(Payment).filter(Payment.id == payment.id)
-              .enable_eagerloads(False).populate_existing().with_for_update().first())
-    if not locked or locked.status == "PAID":
-        return locked is not None and locked.status == "PAID"
-    locked.status = "PAID"
-    locked.paid_at = datetime.utcnow()
-    wallet_svc.credit_topup(db, locked.wallet_id, locked.amount, locked.id,
-                            note="QPay цэнэглэлт")
-    db.commit()
-    log.info("wallet topup PAID: %s %s₮", locked.sender_invoice_no, locked.amount)
-    return True
-
-
-async def _verify_and_credit(db: Session, payment: Payment) -> bool:
-    if payment.status == "PAID":
-        return True
-    if not payment.provider_invoice_id:
-        return False
-    chk = await qpay.check_payment(payment.provider_invoice_id)
-    if chk.get("paid"):
-        from decimal import Decimal, InvalidOperation
-        try:
-            received = Decimal(str(chk.get("paid_amount", 0)))
-        except (InvalidOperation, ValueError):
-            received = Decimal("NaN")
-        if not received.is_finite() or received < Decimal(str(payment.amount)):
-            payment.status = "REVIEW"
-            db.commit()
-            return False
-        if chk.get("payment_id"):
-            payment.provider_payment_id = str(chk["payment_id"])
-        return _credit_if_paid(db, payment)
-    return False
+# Keep the established import points for callers and concurrency regressions.
+from ..services.wallet_topup import (credit_if_paid as _credit_if_paid,
+                                     verify_and_credit as _verify_and_credit)
 
 
 @router.post("/api/public/wallet/{token}/topup/{payment_id}/check")
@@ -189,9 +121,9 @@ async def wallet_topup_check(token: str, payment_id: str, request: Request,
     payment = db.get(Payment, payment_id)
     if not payment or payment.wallet_id != w.id or payment.kind != "WALLET_TOPUP":
         raise HTTPException(404, "Төлбөр олдсонгүй")
-    paid = await _verify_and_credit(db, payment)
+    paid = payment.status == "PAID"
     db.refresh(w)
-    return {"paid": paid, "balance": float(w.balance or 0)}
+    return {"paid": paid, "status": payment.status, "balance": float(w.balance or 0)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

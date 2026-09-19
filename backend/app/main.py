@@ -264,9 +264,11 @@ async def start_vat_auto_send():
     from .services.camera_recovery import supervisor as camera_recovery_supervisor
     _bg_task(camera_recovery_supervisor(), "camera-recovery")
 
-    # Жолооч Pay хуудсаа хаасан/webhook алдагдсан PENDING QPay төлбөрийг сэргээх
+    # Хадгалсан QPay callback-ийн баталгаажуулалт тасарсан бол нөхөх.
     from .services.qpay_recheck import supervisor as qpay_recheck_supervisor
     _bg_task(qpay_recheck_supervisor(), "qpay-recheck")
+    from .services.financial_jobs import supervisor as financial_jobs_supervisor
+    _bg_task(financial_jobs_supervisor(), "financial-jobs")
 
     # EV: RemoteStart-аас хойш 90с-д эхлээгүй цэнэглэлтийн hold-ыг буцаана (§6.4)
     if settings.evhub_url:

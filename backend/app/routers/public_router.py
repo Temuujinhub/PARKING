@@ -166,6 +166,7 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
         "vat_amount": float(payment.vat_amount),
         "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
+        "receipt_status": receipt.status if receipt else "PENDING",
         "lottery_code": receipt.lottery_code if receipt else None,
         "customer_tin": receipt.customer_tin if receipt else None,
         # QR түр санах ойгоос (ТЕГ №11 — DB-д хадгалагдахгүй, 1 цагийн дотор л үзнэ)

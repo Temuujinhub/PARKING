@@ -378,7 +378,9 @@ class Payment(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     # §5.1: данс цэнэглэх (WALLET_TOPUP) төлбөр зогсолтод харьяалагдахгүй тул nullable
     session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True, index=True)
-    # Төлбөрийн ТӨРӨЛ (§5.1): PARKING | WALLET_TOPUP | EV — тайлан, ээлж, e-Barimt-д ялгана
+    # Standalone debt collections retain their site even without a parking stay.
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True, index=True)
+    # Төлбөрийн ТӨРӨЛ: PARKING | DEBT | WALLET_TOPUP | EV
     kind = Column(String(20), nullable=False, default="PARKING", server_default=text("'PARKING'"), index=True)
     # WALLET_TOPUP болон данснаас төлсөн төлбөрийн данс
     wallet_id = Column(UUID(as_uuid=False), ForeignKey("wallets.id"), nullable=True, index=True)
@@ -408,9 +410,14 @@ class Payment(Base):
     deep_link = Column(Text, nullable=True)
     raw_payload = Column(JSON, nullable=False, default=dict)
     fee_snapshot = Column(JSON, nullable=True)
+    qpay_last_check_at = Column(DateTime, nullable=True)
+    qpay_next_check_at = Column(DateTime, nullable=True)
+    qpay_check_requested_at = Column(DateTime, nullable=True)
+    qpay_check_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     session = relationship("ParkingSession", lazy="joined")
+    site = relationship("ParkingSite", lazy="joined")
 
     __table_args__ = (
         Index("ix_payments_status_paid_at", "status", "paid_at"),  # орлогын тайлангийн hot path
@@ -418,7 +425,27 @@ class Payment(Base):
         Index("ix_payments_created_at", "created_at"),
         Index("ix_payments_shift_id", "shift_id"),
         Index("ix_payments_provider", "provider"),
+        Index("ix_payments_qpay_check_due", "provider", "status", "qpay_next_check_at", "created_at"),
     )
+
+
+class FinancialJob(Base):
+    __tablename__ = "financial_jobs"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    job_key = Column(String(160), nullable=False, unique=True)
+    kind = Column(String(30), nullable=False)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=False)
+    receipt_id = Column(UUID(as_uuid=False), ForeignKey("vat_receipts.id"), nullable=True)
+    status = Column(String(20), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    lease_until = Column(DateTime, nullable=True)
+    lease_token = Column(String(36), nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (Index("ix_financial_jobs_due", "status", "next_attempt_at"),)
 
 
 class VatReceipt(Base):

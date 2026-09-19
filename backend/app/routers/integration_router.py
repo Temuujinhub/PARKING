@@ -80,25 +80,6 @@ async def push_partner_webhook(url: str, payload: dict, partner: str,
         return {"ok": False, "status_code": None, "body": None, "error": str(e)[:200]}
 
 
-async def _notify_partner(db_factory, key_id: str | None, url: str, payload: dict, partner: str):
-    """Fire-and-forget: webhook илгээж үр дүнг аудитад бичнэ (өөрийн DB сешнээр)."""
-    res = await push_partner_webhook(url, payload, partner)
-    db = db_factory()
-    try:
-        db.add(AuditLog(username=f"partner:{partner}", action="PARTNER_WEBHOOK",
-                        entity="payment", entity_id=payload.get("payment_id"),
-                        detail={"url": url, "ok": res["ok"], "status": res["status_code"],
-                                "error": res["error"], "event": payload.get("event")}))
-        db.commit()
-    except Exception:  # noqa: BLE001
-        db.rollback()
-    finally:
-        db.close()
-    if not res["ok"]:
-        log.warning("түншийн webhook амжилтгүй [%s] %s: %s", partner, url,
-                    res["error"] or res["status_code"])
-
-
 def _webhook_url_for(db: Session, partner: str) -> str | None:
     key_id = getattr(partner, "key_id", None)
     q = db.query(PartnerKey).filter(PartnerKey.name == partner, PartnerKey.is_active.is_(True))
@@ -406,21 +387,15 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
         raise HTTPException(400, f"Дүн зөрүүтэй: систем {float(payment.amount)}₮ хүлээж байна")
 
     claim_reference(db, payment, partner.key_id or f"legacy:{partner}", reference)
+    hook = _webhook_url_for(db, partner)
     await _finalize_paid(db, payment, raw={"partner": partner, **{
-        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")}})
+        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")}},
+        partner_notification=(hook, partner) if hook else None)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_PAID", entity="payment",
                     entity_id=payment.id, detail={"transaction_id": payment.provider_payment_id,
                                                   "amount": float(payment.amount)}))
     db.commit()
-    # Түншийн webhook (Тохиргоо → Холболт → Гадаад API): төлбөр + e-Barimt-ийг
-    # түншийн сервер рүү шууд илгээнэ — Easy Wallet апп жолоочид ДДТД/сугалаа
-    # харуулна. Хариуг хүлээхгүй (fire-and-forget), үр дүн аудитад.
-    hook = _webhook_url_for(db, partner)
-    if hook:
-        import asyncio
-        from ..database import SessionLocal
-        asyncio.ensure_future(_notify_partner(SessionLocal, None, hook,
-                                              _payment_event(db, payment, "payment.paid"), partner))
+    # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
             payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
             "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}

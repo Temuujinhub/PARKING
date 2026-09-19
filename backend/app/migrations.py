@@ -335,6 +335,25 @@ MIGRATIONS = [
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot_source VARCHAR(30)",
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot_source VARCHAR(30)",
 
+    # Durable reconciliation schedule; old invoices remain eligible without rewriting money.
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_last_check_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_next_check_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_check_requested_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_check_attempts INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS ix_payments_qpay_check_due ON payments "
+    "(provider, status, qpay_next_check_at, created_at)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS site_id UUID REFERENCES parking_sites(id)",
+    "CREATE INDEX IF NOT EXISTS ix_payments_site_id ON payments (site_id)",
+    # Base.metadata creates this new table before replay; the ledger records
+    # this additive change for release/readiness verification.
+    "CREATE TABLE IF NOT EXISTS financial_jobs (id UUID PRIMARY KEY, "
+    "job_key VARCHAR(160) NOT NULL UNIQUE, kind VARCHAR(30) NOT NULL, "
+    "payment_id UUID NOT NULL REFERENCES payments(id), receipt_id UUID REFERENCES vat_receipts(id), "
+    "status VARCHAR(20) NOT NULL, attempts INTEGER NOT NULL, next_attempt_at TIMESTAMP NOT NULL, "
+    "lease_until TIMESTAMP, lease_token VARCHAR(36), payload JSON NOT NULL, last_error TEXT, "
+    "created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS ix_financial_jobs_due ON financial_jobs (status, next_attempt_at)",
+
 ]
 
 
