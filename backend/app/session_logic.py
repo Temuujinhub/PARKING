@@ -533,6 +533,11 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     # хэвээр үлдэж, оператор гараар чөлөөлөх шаардлагатай болдог байв. Зогсоолд
     # байгаа машины төлбөрийг тооцох бүрд ДАХИН шалгаснаар шинээр бүртгэсэн машин
     # ямар ч гар ажиллагаагүйгээр шууд гарна (fee.is_free → хаалт авто нээгдэнэ).
+    from .services.payment_wait import held_fee
+    held = held_fee(s, at)
+    if held is not None:
+        return held
+
     registered = s.is_registered
     drv = find_registered(db, s.plate_number, s.site_id) if db is not None else None
     if not registered and drv is not None and s.status in ("OPEN", "AWAITING_PAYMENT"):
@@ -584,9 +589,21 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
 
 def paid_total(db: Session, s: ParkingSession) -> float:
     """Session-д аль хэдийн төлөгдсөн нийт дүн (PAID төлбөрүүдийн нийлбэр)."""
-    rows = db.query(Payment.amount).filter(Payment.session_id == s.id,
-                                           Payment.status == "PAID").all()
-    return float(sum(float(r[0]) for r in rows))
+    rows = db.query(Payment).filter(Payment.session_id == s.id,
+                                     Payment.status == "PAID").all()
+    total = 0.0
+    from .models import Compensation
+    from sqlalchemy import func
+    for payment in rows:
+        snapshot = payment.fee_snapshot or {}
+        if "parking_amount" in snapshot:
+            total += min(float(payment.amount), float(snapshot["parking_amount"]))
+        else:
+            other_debts = (db.query(func.coalesce(func.sum(Compensation.amount), 0))
+                           .filter(Compensation.payment_id == payment.id,
+                                   Compensation.session_id != s.id).scalar())
+            total += max(0.0, float(payment.amount) - float(other_debts or 0))
+    return round(total, 2)
 
 
 def amount_due(db: Session, s: ParkingSession, fee: dict) -> float:
@@ -666,7 +683,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         # Гарах оролдлоготой машин: exit_time (байвал), үгүй бол сүүлд гарах хаалтанд
         # харагдсан үе (updated_at) дээр төлбөрийг царцаана — дагаж гарсан машинд
         # алга болсноос хойшхи цагийг нэхэхгүй (шударга дүн).
-        at = s.exit_time or s.updated_at or now
+        at = s.exit_time or s.last_exit_seen_at or s.payment_wait_started_at or s.updated_at or now
     else:
         at = now
     # ӨР ҮҮСГЭХГҮЙ + ГАРАХ УНШИЛТ ОГТ БАЙХГҮЙ бол ХУУРАМЧ ДҮН ч бичихгүй.
@@ -904,7 +921,7 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
     if open_in_flight(barrier.id):
         _skip_command(db, barrier, session_id, source, plate,
                       "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
-        return True
+        return False  # Pending is not an acknowledged open.
     _cool = int(_barrier_rules(db, device.site_id)["reopen_cooldown_sec"])
     cooldown = datetime.utcnow() - timedelta(seconds=_cool)
     recent_ok = (db.query(BarrierCommand)
@@ -912,12 +929,14 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
                          BarrierCommand.command == "open",
                          BarrierCommand.status == "SUCCESS",
                          BarrierCommand.created_at >= cooldown)
+                 .order_by(BarrierCommand.created_at.desc())
                  .first())
     if recent_ok:
         _skip_command(db, barrier, session_id, source, plate,
                       f"{_cool:.0f}с дотор аль хэдийн "
                       "нээгдсэн — команд давтсангүй")
-        return True
+        # Preserve the device cooldown without borrowing another car's ACK.
+        return bool(session_id and recent_ok.session_id == session_id)
     cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
     if cmd.status != "SUCCESS":
         log.warning("[nested] %s: дотоод %s хаалт НЭЭГДСЭНГҮЙ — %s", plate,
@@ -1302,6 +1321,14 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
     # зогсдоггүй, машин доторх (үнэгүй) хугацаагаа бүрэн төлдөг байв
     # (2026-08-11 Рашбулаг ЭТТ: 165 машинаас «2 дотор» гэж харагдсан шалтгаан).
     session, fuzzy = match_open_session(db, plate, device.site_id)
+    if session is not None:
+        # Serialize counter changes with camera-log recovery, and refresh after
+        # waiting for the row lock. Never hold this lock during a device request.
+        session = (db.query(ParkingSession)
+                   .filter(ParkingSession.id == session.id,
+                           ParkingSession.status.in_(("OPEN", "AWAITING_PAYMENT", "PAID")))
+                   .populate_existing().with_for_update(of=ParkingSession).first())
+        fuzzy = bool(session and fuzzy)
     if fuzzy:
         log.info("[nested] %s: дотоод камерын уншилтыг OCR-ойролцоо «%s» session-д тохов",
                  plate, session.plate_number)
@@ -1470,6 +1497,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
     session, fuzzy = match_open_session(db, plate, site_id)
+    if session is not None:
+        from sqlalchemy.exc import OperationalError
+        try:
+            session = (db.query(ParkingSession).enable_eagerloads(False)
+                       .filter(ParkingSession.id == session.id,
+                               ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+                       .populate_existing().with_for_update(nowait=True).first())
+        except OperationalError:
+            db.rollback()
+            return {"action": "processing", "plate": plate}
+        if session is None:
+            return {"action": "state_changed", "plate": plate}
     if session is not None and paid_exit_expired(db, session, now, site_id):
         # ТӨЛСӨН сешн deadline-аас хойш олон цаг гарах уншилтгүй хэвтээд одоо
         # гарцад уншигдав. Орох уншилт ч алдагдсан (эс бол дээрх орох зам шинэ
@@ -1593,6 +1632,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 fee_locked=True,
                 note="Орох уншилтгүй — суурь хураамж")
             db.add(session)
+            from .services.payment_wait import begin_wait
+            begin_wait(db, session, session_fee_info(db, session, at=now), now)
             db.commit()
             schedule_capture(session.id, device.ip_address, plate, "exit", raw,
                              camera_credentials(device))
@@ -1651,6 +1692,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                              camera_credentials(device))
 
     fee = session_fee_info(db, session, at=now)
+    from .services.payment_wait import begin_wait
+    if session.status != "PAID" and (not fee["is_free"] or debts):
+        begin_wait(db, session, fee, now)
 
     # Өртэй машин — гарах хаалтыг автоматаар нээхгүй, оператор өрийг цуглуулна.
     # Босгыг Хар жагсаалт → Дүрэм хэсгээс тохируулна (0 = саатуулахгүй).
@@ -1686,6 +1730,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                          allow_open=allow_open)
         # Grace хэтэрсэн — нэмэлт төлбөр шаардана (доор үлдэгдлээр шалгана)
         session.status = "AWAITING_PAYMENT"
+        begin_wait(db, session, fee, now, restart=True)
 
     if fee["is_free"]:
         session.status = "PAID"  # үнэгүй тул шууд гаргана
@@ -1707,7 +1752,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     if due > 0 and _xr.get("wallet_auto_deduct", True):
         try:
             deducted, covered = await _wallet_auto_deduct(db, session, due)
-        except Exception:  # noqa: BLE001 — данс унасан ч гарах урсгал зогсохгүй
+        except Exception:  # the debit and PAID marker must roll back together
+            db.rollback()
             log.exception("wallet auto-deduct алдаа: session=%s", session.id)
             deducted, covered = 0.0, False
         if covered:
@@ -1715,9 +1761,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             return {"action": "paid_from_wallet", "session_id": session.id,
                     "plate": plate, "amount": deducted}
         if deducted:
+            fee = session_fee_info(db, session)
             due = amount_due(db, session, fee)
 
     # Төлбөртэй — төлбөр хүлээнэ
+    begin_wait(db, session, fee, now)
     session.status = "AWAITING_PAYMENT"
     session.duration_minutes = fee["duration_minutes"]
     session.base_fee = fee["base_fee"]
@@ -1950,7 +1998,8 @@ def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | No
     return None
 
 
-async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes: int | None = None) -> None:
+async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes: int | None = None,
+                             fee_snapshot: dict | None = None) -> None:
     """Төлбөр амжилттай болмогц дуудагдана: session-ийг PAID болгож, exit lane-ийн barrier нээнэ."""
     now = datetime.utcnow()
     session.paid_at = now
@@ -1964,7 +2013,7 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     if session.exit_device_id:
         exit_device = db.get(Device, session.exit_device_id)
         if exit_device:
-            fee = session_fee_info(db, session, at=now)
+            fee = fee_snapshot or session_fee_info(db, session, at=now)
             await _close_and_open(db, exit_device, session, now, fee, source="payment")
             return
     db.commit()
@@ -1998,7 +2047,23 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
     plate = normalize_plate(session.plate_number)
 
     # ── 1. Дотоод данс ──
+    # Serialize money decisions for this stay before locking its shared wallet.
+    db.flush()
+    session = (db.query(ParkingSession).enable_eagerloads(False)
+               .filter(ParkingSession.id == session.id).populate_existing()
+               .with_for_update(nowait=True).one())
+    if session.status not in ("OPEN", "AWAITING_PAYMENT"):
+        return 0.0, session.status in ("PAID", "CLOSED")
+    from .services.checkout import active_attempts
+    uncertain = active_attempts(db, session.id)
+    if uncertain:
+        return 0.0, False  # reconcile this operation; never try another debit
+    due = amount_due(db, session, pr.session_fee_info(db, session))
+    if due <= 0:
+        return 0.0, True
     w = wallet_svc.find_wallet(db, tenant_id, plate)
+    if w:
+        w = wallet_svc.lock_wallet(db, w.id)
     if w and w.status == "ACTIVE" and float(w.balance or 0) > 0:
         balance = float(w.balance)
         take = min(balance, due)
@@ -2017,22 +2082,14 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
         wallet_svc.debit_parking(db, w.id, float(payment.amount), session.id,
                                  note=f"гарах хаалт {plate}")
         session.paid_from_wallet = True
+        await pr._finalize_paid(db, payment)
         db.commit()
-        if covered:
-            await pr._finalize_paid(db, payment)
-            db.commit()
-            log.info("данснаас БҮТЭН төлөгдөв: %s %s₮ (үлдэгдэл %s₮)",
-                     plate, float(payment.amount), float(w.balance))
-            return float(payment.amount), True
-        # Хэсэгчилсэн: төлбөрийг PAID болгоод (finalize ХИЙХГҮЙ — хаалт нээхгүй)
-        payment.status = "PAID"
-        payment.paid_at = datetime.utcnow()
-        db.commit()
-        log.info("данснаас ХЭСЭГЧЛЭН: %s %s₮/%s₮", plate, take, due)
-        return take, False
+        return float(payment.amount), session.status in ("PAID", "CLOSED")
 
     # ── 2. Гадаад wallet-ууд (бүтэн дүн л) ──
     for provider in external_providers():
+        payment = None
+        debit_sent = False
         try:
             info = await provider.balance(plate)
             if not info.get("found") or float(info.get("balance") or 0) < due:
@@ -2042,17 +2099,30 @@ async def _wallet_auto_deduct(db: Session, session: ParkingSession,
             payment.kind = "PARKING"
             payment.source = "WALLET"
             db.commit()
+            debit_sent = True
             res = await provider.debit(plate, float(payment.amount),
                                        ref=f"parking-{payment.id}",
                                        note=f"Зогсоол {site.name if site else ''}")
-            payment.provider_payment_id = res.get("tx_id") or None
+            if res.get("ok") is not True:
+                raise RuntimeError("Provider did not confirm debit")
+            from .services.payment_validation import transaction_reference, claim_reference
+            claim_reference(db, payment, "auto-wallet", transaction_reference(res.get("tx_id")))
             session.paid_from_wallet = True
             db.commit()
             await pr._finalize_paid(db, payment)
             db.commit()
             log.info("%s-ээс БҮТЭН төлөгдөв: %s %s₮", provider.name, plate, due)
-            return float(payment.amount), True
+            return float(payment.amount), session.status in ("PAID", "CLOSED")
         except Exception as e:  # noqa: BLE001 — нэг provider унавал дараагийнх
-            log.warning("%s auto-deduct алдаа (%s) — алгасав", provider.name, e)
+            log.warning("%s auto-deduct алдаа (%s)", provider.name, e)
             db.rollback()
+            if debit_sent and payment is not None:
+                payment = db.get(Payment, payment.id)
+                if payment.status != "PAID":
+                    payment.status = "UNKNOWN"
+                    db.add(AuditLog(username="system", action="WALLET_REVIEW",
+                                    entity="payment", entity_id=payment.id,
+                                    detail={"provider": provider.name, "reason": "debit_result_unknown"}))
+                    db.commit()
+                return 0.0, False
     return 0.0, False

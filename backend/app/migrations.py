@@ -1,8 +1,8 @@
-"""Хөнгөн idempotent миграци — production DB-г кодтой тааруулна.
+"""Versioned PostgreSQL startup migrations, serialized in one transaction.
 
-SQLAlchemy create_all() нь шинэ ХҮСНЭГТ үүсгэдэг ч байгаа хүснэгтэд шинэ БАГАНА нэмдэггүй.
-Тиймээс шинэ багана нэмэх бүрд энд `ADD COLUMN IF NOT EXISTS` мөр нэмнэ.
-Startup бүрт ажиллах ба аль хэдийн байгаа бол алгасна (аюулгүй, давтагдах боломжтой).
+Append new SQL statements; do not edit statements already adopted in the ledger.
+Any migration or schema validation failure aborts startup. See
+docs/PAYMENT_WAIT_ROLLOUT.md for legacy adoption and rollout requirements.
 """
 import logging
 
@@ -49,8 +49,8 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_logs (action)",
 
     # v1.7 — Бүрэн бүтэн байдал: нэг зогсоолд нэг дугаараар нэгэн зэрэг ганц идэвхтэй session
-    # (LPR орох урсгалын race-ээс сэргийлнэ). Хэрэв одоо давхардсан идэвхтэй session байвал
-    # энэ index үүсэхгүй (алгасна) — тухайн үед л гараар цэвэрлэнэ.
+    # (LPR орох урсгалын race-ээс сэргийлнэ). Хуучин давхардал байвал migration
+    # бүхэлдээ зогсоно; санхүүгийн түүхийг шалгаж зассаны дараа дахин ажиллуулна.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_session ON parking_sessions (site_id, plate_number) "
     "WHERE status IN ('OPEN','AWAITING_PAYMENT','PAID')",
 
@@ -309,22 +309,94 @@ MIGRATIONS = [
 
     # 2026-09-14 — онцгой гаргалтын баталгаажуулах зураг (гарах камерын гар snapshot)
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS verify_snapshot VARCHAR(255)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_wait_started_at TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS last_exit_seen_at TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_quote_until TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_quote JSON",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS fee_snapshot JSON",
+    # Legacy rows have no immutable first-exit timestamp. Freeze the best known
+    # timestamp ONCE; subsequent metadata writes must not postpone collection.
+    "UPDATE parking_sessions SET payment_wait_started_at = COALESCE(exit_time, updated_at), "
+    "last_exit_seen_at = COALESCE(exit_time, updated_at) "
+    "WHERE status = 'AWAITING_PAYMENT' AND payment_wait_started_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_sessions_payment_wait ON parking_sessions "
+    "(site_id, payment_wait_started_at) WHERE status = 'AWAITING_PAYMENT'",
+    # Existing company rows may mix tenants: retain them as LEGACY, never guess
+    # an owner or delete financial history. Review is required before promotion.
+    "ALTER TABLE company_contacts ADD COLUMN IF NOT EXISTS owner_scope VARCHAR(40) NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE company_invoices ADD COLUMN IF NOT EXISTS owner_scope VARCHAR(40) NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE company_contacts DROP CONSTRAINT IF EXISTS company_contacts_company_key",
+    "ALTER TABLE company_invoices DROP CONSTRAINT IF EXISTS uq_invoice_period_company",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_contact_owner_company ON company_contacts (owner_scope, company)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_period_owner_company ON company_invoices (period, owner_scope, company)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_tx_key VARCHAR(64)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS partner_key_id UUID REFERENCES partner_keys(id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_provider_tx_key ON payments (provider_tx_key)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot_source VARCHAR(30)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot_source VARCHAR(30)",
+
 ]
 
 
+def revision() -> str:
+    import hashlib
+    return hashlib.sha256("\n".join(MIGRATIONS).encode()).hexdigest()
+
+
+def validate_schema(conn):
+    """Reject a partially upgraded database before serving traffic."""
+    from sqlalchemy import inspect
+    from .database import Base
+    inspector = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        missing = set(table.columns.keys()) - present
+        if missing:
+            raise RuntimeError(f"Schema incomplete: {table.name}: {sorted(missing)}")
+
+
 def run_migrations():
-    # ЧУХАЛ: миграц бүр ӨӨРИЙН транзакцаар. Өмнө нь бүгд НЭГ `engine.begin()`
-    # дотор явдаг байсан тул эхний алдаа гарсны дараа Postgres транзакцыг
-    # «aborted» болгож, ҮЛДСЭН БҮХ миграц («current transaction is aborted»
-    # гэж) чимээгүй алгасагддаг байв — нэг эрхийн алдаанаас болж шинэ багана
-    # огт нэмэгдэхгүй, кодоо deploy хийсэн ч ажиллахгүй байх эрсдэлтэй.
-    failed = 0
-    for stmt in MIGRATIONS:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(stmt))
-        except Exception as e:  # нэг миграц алдвал бусдыг зогсоохгүй
-            failed += 1
-            log.warning(f"[migration skip] {stmt[:60]}... — {e}")
-    if failed:
-        log.warning("[migrations] %d миграц алдаатай — дээрх мөрүүдийг шалгана уу", failed)
+    """One serialized, versioned transaction. Any error aborts startup.
+
+    Each historical statement is adopted once into the version ledger. New
+    upgrades append statements; they never rewrite financial rows implicitly.
+    """
+    import hashlib
+    from . import models  # noqa: F401 — register all tables
+    from .database import Base
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(734902118)"))
+        Base.metadata.create_all(bind=conn)
+        conn.execute(text("CREATE TABLE IF NOT EXISTS parking_schema_migrations "
+                          "(version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT now())"))
+        applied = set(conn.execute(text("SELECT version FROM parking_schema_migrations")).scalars())
+        for stmt in MIGRATIONS:
+            version = hashlib.sha256(stmt.encode()).hexdigest()
+            if version in applied:
+                continue
+            conn.execute(text(stmt))
+            conn.execute(text("INSERT INTO parking_schema_migrations (version) VALUES (:version)"),
+                         {"version": version})
+            applied.add(version)
+        validate_schema(conn)
+        conn.execute(text("CREATE TABLE IF NOT EXISTS parking_schema_state "
+                          "(id INTEGER PRIMARY KEY CHECK (id=1), revision VARCHAR(64) NOT NULL)"))
+        conn.execute(text("INSERT INTO parking_schema_state (id, revision) VALUES (1, :revision) "
+                          "ON CONFLICT (id) DO UPDATE SET revision=excluded.revision"),
+                     {"revision": revision()})
+    log.info("Schema ready: %s", revision()[:12])
+
+
+def check_ready():
+    with engine.connect() as conn:
+        actual = conn.execute(text("SELECT revision FROM parking_schema_state WHERE id=1")).scalar()
+        if actual != revision():
+            raise RuntimeError("Schema revision differs from this release")
+        # Check the critical new columns too; a ledger alone is not readiness.
+        conn.execute(text("SELECT payment_wait_started_at, payment_quote_until, payment_quote "
+                          "FROM parking_sessions LIMIT 0"))
+    return {"database": "ok", "schema": revision()[:12]}
+
+
+if __name__ == "__main__":
+    run_migrations()

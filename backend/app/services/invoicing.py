@@ -65,7 +65,13 @@ def _usage(db, plates: set[str], site_ids: set, start, end) -> dict:
     return {"sessions": sessions, "minutes": round(minutes), "visited": len(visited)}
 
 
-def company_scope(db, user) -> set[str] | None:
+def driver_owner(db, driver):
+    from ..models import ParkingSite
+    site = db.get(ParkingSite, driver.site_id) if driver.site_id else None
+    return str((site.tenant_id if site else driver.tenant_id) or "GLOBAL")
+
+
+def company_scope(db, user) -> set[tuple[str, str]] | None:
     """Хэрэглэгчийн харж болох байгууллагууд (нэхэмжлэлийн tenant салгалт).
     Байгууллага нь идэвхтэй машидынхаа бүртгэлтэй зогсоолоор тодорхойлогдоно:
     түрээслэгчийн хэрэглэгч зөвхөн ӨӨРИЙН зогсоолуудад машинтай байгууллагыг
@@ -82,24 +88,29 @@ def company_scope(db, user) -> set[str] | None:
         if comp and (d.site_id in aset
                      or (d.site_id is None and d.tenant_id
                          and d.tenant_id == getattr(user, "tenant_id", None))):
-            comps.add(comp)
+            comps.add((driver_owner(db, d), comp))
     return comps
 
 
 def billing_modes(db) -> dict[str, str]:
     """company → billing_mode (тохиргоогүй бол POSTPAID)."""
-    return {c.company: (c.billing_mode or "POSTPAID")
+    return {(c.owner_scope, c.company): (c.billing_mode or "POSTPAID")
             for c in db.query(CompanyContact).all()}
 
 
 def generate_invoices(db, period: str, created_by: str = "system",
-                      companies: set[str] | None = None) -> list[CompanyInvoice]:
+                      companies: set[tuple[str, str]] | None = None,
+                      allowed_site_ids: list[str] | None = None) -> list[CompanyInvoice]:
     """Тухайн сард (period=YYYY-MM) байгууллага бүрд DRAFT нэхэмжлэл үүсгэнэ.
     Аль хэдийн байгаа (period, company) хосыг алгасна — дахин дуудахад аюулгүй.
     companies өгвөл зөвхөн тэдгээрт (tenant scope); NONE горимтой байгууллагыг
     (нэхэмжлэхгүй, зөвхөн бүртгэл) ямагт алгасна."""
     start, end = month_range_utc(period)
-    existing = {c for (c,) in db.query(CompanyInvoice.company)
+    from sqlalchemy import text
+    if db.bind.dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                   {"key": f"company-invoice:{period}"})
+    existing = {(owner, c) for owner, c in db.query(CompanyInvoice.owner_scope, CompanyInvoice.company)
                 .filter(CompanyInvoice.period == period).all()}
     modes = billing_modes(db)
     # Байгууллага бүрийн идэвхтэй машид
@@ -110,16 +121,19 @@ def generate_invoices(db, period: str, created_by: str = "system",
                       RegisteredDriver.contract_type != "TRANSIT").all()):
         comp = (d.company or "").strip()
         if comp:
-            by_company.setdefault(comp, []).append(d)
+            by_company.setdefault((driver_owner(db, d), comp), []).append(d)
 
     seq = db.query(CompanyInvoice).filter(CompanyInvoice.period == period).count()
     out = []
-    for comp, drivers in sorted(by_company.items()):
-        if comp in existing:
+    for key, drivers in sorted(by_company.items()):
+        owner, comp = key
+        if key in existing:
             continue
-        if companies is not None and comp not in companies:
+        if companies is not None and key not in companies:
             continue
-        if modes.get(comp, "POSTPAID") == "NONE":
+        if ("LEGACY", comp) in existing:
+            raise ValueError(f"{period} {comp}: хуучин нэхэмжлэлийн байгууллагын эзэмшлийг эхлээд баталгаажуулна уу")
+        if modes.get(key, "POSTPAID") == "NONE":
             continue  # нэхэмжлэхгүй — зөвхөн бүртгэл/тайлангийн зорилготой
         cars = [{"plate": d.plate_number, "fee": float(d.monthly_fee or 0),
                  "name": d.full_name or ""} for d in drivers]
@@ -132,13 +146,16 @@ def generate_invoices(db, period: str, created_by: str = "system",
                 dsites.add(d.site_id)
             else:
                 dsites |= tsites.get(d.tenant_id, set()) if d.tenant_id else {None}
+        if allowed_site_ids is not None and (None in dsites or not dsites.issubset(set(allowed_site_ids))):
+            continue  # never issue a partial invoice for a multi-site company
         usage = _usage(db, {c["plate"] for c in cars}, dsites, start, end)
         seq += 1
         inv = CompanyInvoice(
             invoice_no=f"INV-{period.replace('-', '')}-{seq:03d}",
-            period=period, company=comp, car_count=len(cars), amount=amount,
+            period=period, owner_scope=owner, company=comp, car_count=len(cars), amount=amount,
             sessions=usage["sessions"], minutes=usage["minutes"],
-            detail={"cars": cars, "usage": usage, "created_by": created_by})
+            detail={"cars": cars, "usage": usage, "site_ids": sorted(s for s in dsites if s),
+                    "all_sites": None in dsites, "created_by": created_by})
         db.add(inv)
         out.append(inv)
     if out:
@@ -163,9 +180,9 @@ async def supervisor():
                     post = {c for c, m in modes.items() if m == "POSTPAID"}
                     pre = {c for c, m in modes.items() if m == "PREPAID"}
                     # Тохиргоогүй байгууллага = POSTPAID (өмнөх сарынх)
-                    all_comps = {(d.company or "").strip() for d in
+                    all_comps = {(driver_owner(db, d), (d.company or "").strip()) for d in
                                  db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all()}
-                    all_comps.discard("")
+                    all_comps = {key for key in all_comps if key[1]}
                     post |= all_comps - pre - {c for c, m in modes.items() if m == "NONE"}
                     # Сарын эцэст авдаг: ӨМНӨХ сарын нэхэмжлэл (бодит ашиглалттай)
                     generate_invoices(db, prev_period(), created_by="auto", companies=post)

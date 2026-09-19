@@ -31,7 +31,10 @@ git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || {
 export GIT_SSH_COMMAND="ssh -o ConnectTimeout=10 -o BatchMode=yes"
 timeout 60 git fetch origin main --quiet 2>/dev/null || exit 0   # GitHub хаалттай — дараа дахин
 LOCAL=$(git rev-parse HEAD 2>/dev/null)
-REMOTE=$(git rev-parse origin/main 2>/dev/null)
+unset PARKING_DEPLOY_TARGET
+source deploy/approved-release.sh
+REMOTE=$(git rev-parse "${PARKING_DEPLOY_TARGET:-origin/main}^{commit}" 2>/dev/null)
+git merge-base --is-ancestor "$REMOTE" origin/main || exit 1
 # HEAD moves before build/health; equality alone cannot prove deployment succeeded.
 [ "$LOCAL" = "$REMOTE" ] && [ ! -f .git/parking-deploy-pending ] && exit 0
 export PARKING_DEPLOY_TARGET="$REMOTE"

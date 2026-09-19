@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import require, operator_sites
 from ..database import get_db
 from ..models import AuditLog, CompanyContact, CompanyInvoice, User
 from ..serializers import to_dict
@@ -34,20 +34,19 @@ def list_invoices(period: str | None = None, db: Session = Depends(get_db),
     if period:
         q = q.filter(CompanyInvoice.period == period)
     scope = company_scope(db, user)  # түрээслэгч зөвхөн өөрийн байгууллагуудыг харна
-    rows = [r for r in q.limit(1000).all() if scope is None or r.company in scope][:500]
+    rows = [r for r in q.limit(1000).all() if _visible(user, r, scope)][:500]
     # Байгууллагын хадгалсан и-мэйл/горим (илгээх модал + горимын тэмдэг)
-    contacts = {c.company: c for c in db.query(CompanyContact).all()}
+    contacts = {(c.owner_scope, c.company): c for c in db.query(CompanyContact).all()}
     return [to_dict(r, extra={
-        "company_email": getattr(contacts.get(r.company), "email", ""),
-        "billing_mode": getattr(contacts.get(r.company), "billing_mode", "POSTPAID"),
+        "company_email": getattr(contacts.get((r.owner_scope, r.company)), "email", ""),
+        "billing_mode": getattr(contacts.get((r.owner_scope, r.company)), "billing_mode", "POSTPAID"),
     }) for r in rows]
 
 
 @router.get("/periods")
 def list_periods(db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    rows = (db.query(CompanyInvoice.period).distinct()
-            .order_by(CompanyInvoice.period.desc()).all())
-    return [p for (p,) in rows]
+    scope = company_scope(db, user)
+    return sorted({r.period for r in db.query(CompanyInvoice).all() if _visible(user, r, scope)}, reverse=True)
 
 
 @router.post("/generate")
@@ -55,8 +54,13 @@ def generate(body: dict, db: Session = Depends(get_db), user: User = Depends(req
     period = (body.get("period") or prev_period()).strip()
     if len(period) != 7 or period[4] != "-":
         raise HTTPException(400, "period нь YYYY-MM хэлбэртэй байна")
-    created = generate_invoices(db, period, created_by=user.username,
-                                companies=company_scope(db, user))
+    try:
+        created = generate_invoices(db, period, created_by=user.username,
+                                    companies=company_scope(db, user),
+                                    allowed_site_ids=operator_sites(user))
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(409, str(e)) from e
     _audit(db, user, "INVOICE_GENERATE", period, {"created": len(created)})
     db.commit()
     return {"period": period, "created": len(created)}
@@ -77,12 +81,21 @@ def _invoice_excel(inv: CompanyInvoice):
         total_row=["НИЙТ", f"{inv.car_count} машин", "", f"{float(inv.amount):,.0f}"])
 
 
+def _visible(user, inv, scope):
+    if scope is None:
+        return True
+    detail = inv.detail or {}
+    return ((inv.owner_scope, inv.company) in scope and not detail.get("all_sites")
+            and bool(detail.get("site_ids"))
+            and set(detail["site_ids"]).issubset(set(operator_sites(user) or [])))
+
+
 def _get_scoped(db, user, invoice_id: str) -> CompanyInvoice:
     inv = db.get(CompanyInvoice, invoice_id)
     if not inv:
         raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
     scope = company_scope(db, user)
-    if scope is not None and inv.company not in scope:
+    if not _visible(user, inv, scope):
         raise HTTPException(403, "Энэ нэхэмжлэл таны байгууллагынх биш байна")
     return inv
 
@@ -95,14 +108,17 @@ def set_contact(body: dict, db: Session = Depends(get_db),
     if not company:
         raise HTTPException(400, "company заавал")
     scope = company_scope(db, user)
-    if scope is not None and company not in scope:
+    owner = str(body.get("owner_scope") or getattr(user, "tenant_id", None) or "GLOBAL")
+    if owner == "LEGACY":
+        raise HTTPException(409, "Хуучин байгууллагын эзэмшлийг эхлээд баталгаажуулна уу")
+    if scope is not None and (owner, company) not in scope:
         raise HTTPException(403, "Энэ байгууллага таных биш байна")
     mode = (body.get("billing_mode") or "POSTPAID").upper()
     if mode not in ("POSTPAID", "PREPAID", "NONE"):
         raise HTTPException(400, "billing_mode: POSTPAID/PREPAID/NONE")
-    c = db.query(CompanyContact).filter(CompanyContact.company == company).first()
+    c = db.query(CompanyContact).filter(CompanyContact.company == company, CompanyContact.owner_scope == owner).first()
     if not c:
-        c = CompanyContact(company=company)
+        c = CompanyContact(company=company, owner_scope=owner)
         db.add(c)
     c.email = (body.get("email") or c.email or "").strip()
     c.billing_mode = mode
@@ -155,9 +171,9 @@ async def send_invoice(invoice_id: str, body: dict, db: Session = Depends(get_db
     inv.sent_to = email
     inv.sent_at = datetime.utcnow()
     # Байгууллагын и-мэйлийг санана
-    c = db.query(CompanyContact).filter(CompanyContact.company == inv.company).first()
+    c = db.query(CompanyContact).filter(CompanyContact.company == inv.company, CompanyContact.owner_scope == inv.owner_scope).first()
     if not c:
-        db.add(CompanyContact(company=inv.company, email=email))
+        db.add(CompanyContact(company=inv.company, owner_scope=inv.owner_scope, email=email))
     else:
         c.email = email
     _audit(db, user, "INVOICE_SEND", inv.id, {"to": email, "no": inv.invoice_no})

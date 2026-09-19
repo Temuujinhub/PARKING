@@ -32,7 +32,7 @@ function ContactModal({ inv, onClose, onDone }) {
     e.preventDefault(); setBusy(true)
     try {
       await api('/api/invoices/contacts', { method: 'POST',
-        body: { company: inv.company, email: f.email, billing_mode: f.billing_mode } })
+        body: { company: inv.company, owner_scope: inv.owner_scope, email: f.email, billing_mode: f.billing_mode } })
       toast('Хадгалагдлаа'); onClose(); onDone()
     } catch (err) { toast(err.message, 'error') } finally { setBusy(false) }
   }

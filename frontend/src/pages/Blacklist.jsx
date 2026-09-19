@@ -6,86 +6,6 @@ import { PLATE_HINT, clampNum, isPlate, normalizePlate } from '../validation'
 
 // Хар жагсаалтад ЯМАР нөхцөлд машин ордог, орсон машиныг ХЭРХЭН харьцах дүрэм.
 // Backend-ийн app_settings-д хадгалагдана — deploy шаардахгүй, админ өөрөө өөрчилнө.
-function RulesCard({ toast }) {
-  const [rules, setRules] = useState(null)
-  const [saving, setSaving] = useState(false)
-  const [open, setOpen] = useState(false)
-  useEffect(() => { api('/api/admin/blacklist/rules').then(setRules).catch(() => {}) }, [])
-
-  const save = async () => {
-    setSaving(true)
-    try {
-      setRules(await api('/api/admin/blacklist/rules', { method: 'PUT', body: rules }))
-      toast('Дүрэм хадгалагдлаа — шинэ event-үүдэд шууд үйлчилнэ')
-    } catch (e) { toast(e.message, 'error') } finally { setSaving(false) }
-  }
-  if (!rules) return null
-  const set = (k, v) => setRules({ ...rules, [k]: v })
-
-  return (
-    <div className="card space-y-3">
-      <button className="flex items-center justify-between w-full text-left"
-        onClick={() => setOpen((o) => !o)}>
-        <span className="font-semibold flex items-center gap-2">
-          <Settings2 size={16} className="text-accent" /> Дүрэм — хэзээ хар жагсаалтад орох, хэрхэн харьцах
-        </span>
-        <span className="text-xs text-slate-400">
-          {rules.auto_enabled
-            ? `авто: ${rules.debt_count || '—'} өр хуримтлагдвал${rules.debt_amount ? ` эсвэл ${rules.debt_amount.toLocaleString()}₮` : ''}`
-            : 'авто хориг унтраалттай'} · {open ? 'хаах' : 'нээх'}
-        </span>
-      </button>
-
-      {open && (
-        <div className="space-y-4 pt-1">
-          <label className="flex items-start gap-2 text-sm cursor-pointer">
-            <input type="checkbox" className="mt-0.5" checked={rules.auto_enabled}
-              onChange={(e) => set('auto_enabled', e.target.checked)} />
-            <span>Төлбөргүй гарсан машиныг <b>автоматаар</b> хар жагсаалтад оруулах
-              <span className="block text-xs text-slate-500">Унтраавал зөвхөн гараар нэмсэн машин л жагсаалтад орно.</span>
-            </span>
-          </label>
-
-          <div className="grid sm:grid-cols-2 gap-3">
-            <Field label="Хэдэн удаагийн өр хуримтлагдсан үед (0 = хэрэглэхгүй)">
-              <input className="input font-mono" type="number" min="0" max="100" step="1" value={rules.debt_count}
-                disabled={!rules.auto_enabled}
-                onChange={(e) => set('debt_count', clampNum(e.target.value, { min: 0, max: 100 }))} />
-            </Field>
-            <Field label="Эсвэл нийт өр энэ дүнд хүрвэл (₮, 0 = хэрэглэхгүй)">
-              <input className="input font-mono" type="number" min="0" max="100000000" step="1000" value={rules.debt_amount}
-                disabled={!rules.auto_enabled}
-                onChange={(e) => set('debt_amount', clampNum(e.target.value, { min: 0, max: 100_000_000 }))} />
-            </Field>
-          </div>
-
-          <div className="border-t border-surface-border/60 pt-3 space-y-3">
-            <label className="flex items-start gap-2 text-sm cursor-pointer">
-              <input type="checkbox" className="mt-0.5" checked={rules.block_entry}
-                onChange={(e) => set('block_entry', e.target.checked)} />
-              <span>Хар жагсаалтын машиныг <b>зогсоолд оруулахгүй</b> (орох хаалт нээгдэхгүй)
-                <span className="block text-xs text-slate-500">
-                  Унтраасан (зөвлөмж) үед машин ОРНО, харин операторт улаан анхааруулга гарч
-                  өрийг нь гарахад авах боломжтой болно — гадаа үлдээвэл өр хэзээ ч төлөгддөггүй.
-                </span>
-              </span>
-            </label>
-            <Field label="Гарахад саатуулах: хэдэн өртэй бол хаалт автоматаар нээхгүй вэ (0 = саатуулахгүй)">
-              <input className="input font-mono w-40" type="number" min="0" max="100" step="1"
-                value={rules.block_exit_debt_count}
-                onChange={(e) => set('block_exit_debt_count', clampNum(e.target.value, { min: 0, max: 100 }))} />
-            </Field>
-          </div>
-
-          <button className="btn-primary" onClick={save} disabled={saving}>
-            <Save size={15} /> {saving ? 'Хадгалж байна…' : 'Дүрмийг хадгалах'}
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
 export default function Blacklist() {
   const toast = useToast()
   const [rows, setRows] = useState([])
@@ -162,7 +82,7 @@ export default function Blacklist() {
           </button>
         </div>
       </div>
-      <RulesCard toast={toast} />
+      <p className="text-sm text-slate-400">Хар жагсаалтын дүрмийг Тохиргоо → Төлбөрийн дүрэм хэсэгт зогсоолоо сонгож өөрчилнө.</p>
 
       <div className="card py-3 text-sm text-slate-400">
         Хар жагсаалтын машин орох үед операторт <b className="text-red-400">улаан анхааруулга</b> очиж,

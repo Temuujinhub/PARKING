@@ -18,6 +18,7 @@ APP_DIR="/root/PARKING"
 BUNDLE="${1:-}"                 # заавал биш: git bundle файлын зам
 SNAP_DIR="${PARKING_SNAPSHOT_DIR:-/var/lib/parking/snapshots}"
 cd "$APP_DIR"
+source deploy/approved-release.sh
 if [ "${PARKING_DEPLOY_LOCK_HELD:-0}" != 1 ]; then
   exec 9>/run/lock/parking-deploy.lock
   flock -n 9 || { echo "Deployment already running"; exit 1; }
@@ -44,7 +45,9 @@ if [ -n "$BUNDLE" ]; then
   [ -f "$BUNDLE" ] || { echo "    АЛДАА: bundle олдсонгүй: $BUNDLE"; exit 1; }
   git bundle verify "$BUNDLE" >/dev/null 2>&1 || { echo "    АЛДАА: bundle эвдэрсэн"; exit 1; }
   git fetch --quiet "$BUNDLE" 'refs/heads/main:refs/remotes/bundle/main'
-  git reset --hard bundle/main
+  TARGET=$(git rev-parse --verify "${PARKING_DEPLOY_TARGET:-bundle/main}^{commit}")
+  git merge-base --is-ancestor "$TARGET" bundle/main
+  git reset --hard "$TARGET"
   echo "    bundle-аас шинэчлэв: $BUNDLE"
 else
   # ── GitHub горим (default) ──────────────────────────────────────────────

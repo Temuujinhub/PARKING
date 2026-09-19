@@ -74,7 +74,7 @@ def get_or_create(db: Session, tenant_id: str | None, plate: str,
 def lock_wallet(db: Session, wallet_id: str) -> Wallet:
     """Мөрийн түгжээтэй унших — үлдэгдэл өөрчлөхийн ӨМНӨ заавал."""
     w = (db.query(Wallet).filter(Wallet.id == wallet_id)
-         .with_for_update().first())
+         .populate_existing().with_for_update().first())
     if not w:
         raise WalletError("Данс олдсонгүй")
     return w

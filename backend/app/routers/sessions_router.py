@@ -838,6 +838,8 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
     db.add(s)
     db.flush()
     fee = session_fee_info(db, s, at=now)
+    from ..services.payment_wait import begin_wait
+    begin_wait(db, s, fee, now)
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     db.add(AuditLog(username=user.username, action="TEST_AWAITING", entity="session",
@@ -939,7 +941,14 @@ def apply_discount(session_id: str, body: dict, db: Session = Depends(get_db),
     if s.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-д хөнгөлөлт хэрэглэнэ")
     s.discount_id = body.get("discount_id")
-    fee = session_fee_info(db, s)
+    db.flush()
+    db.expire(s, ["discount"])
+    now = datetime.utcnow()
+    held_at = (s.payment_wait_started_at if s.payment_quote_until and now < s.payment_quote_until else now)
+    s.payment_quote = None
+    fee = session_fee_info(db, s, at=held_at)
+    if s.payment_quote_until and now < s.payment_quote_until:
+        s.payment_quote = dict(fee)
     s.discount_amount = fee["discount_amount"]
     if s.status == "AWAITING_PAYMENT":
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]

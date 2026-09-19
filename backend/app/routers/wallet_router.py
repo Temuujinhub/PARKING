@@ -16,6 +16,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import require
+from ..services.resource_scope import tenant_filter, enforce_tenant
 from ..config import settings
 from ..database import get_db
 from ..models import AuditLog, Payment, User, Wallet, WalletLedger
@@ -55,6 +56,24 @@ def _wallet_by_token(db: Session, token: str) -> Wallet:
     if not w:
         raise HTTPException(404, "Данс олдсонгүй")
     return w
+
+
+@router.get("/api/public/wallet/webhook")
+@router.post("/api/public/wallet/webhook")
+async def wallet_topup_webhook(payment_id: str = "", token: str = "",
+                               db: Session = Depends(get_db)):
+    """QPay callback. Мөнгө орсныг ЗААВАЛ /payment/check-ээр баталгаажуулна
+    (callback нь зөвхөн дохио — итгэхгүй)."""
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.kind != "WALLET_TOPUP":
+        return "SUCCESS"  # QPay-д алдаа буцаахгүй (дахин илгээсээр байдаг)
+    saved = (payment.raw_payload or {}).get("webhook_token", "")
+    import hmac as _hmac
+    if not (saved and token and _hmac.compare_digest(saved, token)):
+        log.warning("wallet webhook token буруу: payment=%s", payment_id)
+        return "SUCCESS"
+    await _verify_and_credit(db, payment)
+    return "SUCCESS"
 
 
 @router.get("/api/public/wallet/{token}")
@@ -125,8 +144,9 @@ async def public_wallet_topup(token: str, body: dict, request: Request,
 def _credit_if_paid(db: Session, payment: Payment) -> bool:
     """PENDING → PAID + данс цэнэглэх. Idempotent: мөрийн түгжээтэй,
     зөвхөн PENDING төлөвөөс шилжинэ (давхар webhook/чек хамгаалагдана)."""
+    db.flush()  # persist the verified provider reference before refreshing the row
     locked = (db.query(Payment).filter(Payment.id == payment.id)
-              .with_for_update().first())
+              .enable_eagerloads(False).populate_existing().with_for_update().first())
     if not locked or locked.status == "PAID":
         return locked is not None and locked.status == "PAID"
     locked.status = "PAID"
@@ -145,28 +165,19 @@ async def _verify_and_credit(db: Session, payment: Payment) -> bool:
         return False
     chk = await qpay.check_payment(payment.provider_invoice_id)
     if chk.get("paid"):
+        from decimal import Decimal, InvalidOperation
+        try:
+            received = Decimal(str(chk.get("paid_amount", 0)))
+        except (InvalidOperation, ValueError):
+            received = Decimal("NaN")
+        if not received.is_finite() or received < Decimal(str(payment.amount)):
+            payment.status = "REVIEW"
+            db.commit()
+            return False
         if chk.get("payment_id"):
             payment.provider_payment_id = str(chk["payment_id"])
         return _credit_if_paid(db, payment)
     return False
-
-
-@router.get("/api/public/wallet/webhook")
-@router.post("/api/public/wallet/webhook")
-async def wallet_topup_webhook(payment_id: str = "", token: str = "",
-                               db: Session = Depends(get_db)):
-    """QPay callback. Мөнгө орсныг ЗААВАЛ /payment/check-ээр баталгаажуулна
-    (callback нь зөвхөн дохио — итгэхгүй)."""
-    payment = db.get(Payment, payment_id)
-    if not payment or payment.kind != "WALLET_TOPUP":
-        return "SUCCESS"  # QPay-д алдаа буцаахгүй (дахин илгээсээр байдаг)
-    saved = (payment.raw_payload or {}).get("webhook_token", "")
-    import hmac as _hmac
-    if not (saved and token and _hmac.compare_digest(saved, token)):
-        log.warning("wallet webhook token буруу: payment=%s", payment_id)
-        return "SUCCESS"
-    await _verify_and_credit(db, payment)
-    return "SUCCESS"
 
 
 @router.post("/api/public/wallet/{token}/topup/{payment_id}/check")
@@ -187,11 +198,19 @@ async def wallet_topup_check(token: str, payment_id: str, request: Request,
 # АДМИН / КАСС
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _admin_wallet(db, user, wallet_id):
+    w = db.get(Wallet, wallet_id)
+    if not w:
+        raise HTTPException(404, "Данс олдсонгүй")
+    enforce_tenant(db, user, w.tenant_id)
+    return w
+
+
 @router.get("/api/admin/wallets")
 def admin_wallets(q: str = "", limit: int = 50, db: Session = Depends(get_db),
                   user: User = Depends(require("cashier", "reports"))):
     """Хайлт: дугаар эсвэл утас (§8)."""
-    query = db.query(Wallet).order_by(Wallet.updated_at.desc())
+    query = db.query(Wallet).filter(tenant_filter(db, user, Wallet.tenant_id)).order_by(Wallet.updated_at.desc())
     s = (q or "").strip()
     if s:
         p = normalize_plate(s)
@@ -211,7 +230,7 @@ def admin_wallets(q: str = "", limit: int = 50, db: Session = Depends(get_db),
 @router.get("/api/admin/wallets/{wallet_id}")
 def admin_wallet_detail(wallet_id: str, db: Session = Depends(get_db),
                         user: User = Depends(require("cashier", "reports"))):
-    w = db.get(Wallet, wallet_id)
+    w = _admin_wallet(db, user, wallet_id)
     if not w:
         raise HTTPException(404, "Данс олдсонгүй")
     moves = (db.query(WalletLedger).filter(WalletLedger.wallet_id == w.id)
@@ -224,7 +243,9 @@ def admin_wallet_detail(wallet_id: str, db: Session = Depends(get_db),
 def admin_wallet_adjust(wallet_id: str, body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("cashier"))):
     """Гар засвар — ЗААВАЛ тайлбартай, audit log-той (§8)."""
+    _admin_wallet(db, user, wallet_id)
     direction = str(body.get("direction") or "").upper()
+    _admin_wallet(db, user, wallet_id)
     amount = body.get("amount")
     note = str(body.get("note") or "").strip()
     if direction not in ("CREDIT", "DEBIT"):
@@ -247,6 +268,7 @@ def admin_wallet_adjust(wallet_id: str, body: dict, db: Session = Depends(get_db
 def admin_wallet_cashout(wallet_id: str, body: dict, db: Session = Depends(get_db),
                          user: User = Depends(require("cashier"))):
     """Бэлнээр буцаах — оператор баталгаажуулна (§1.2, §8)."""
+    _admin_wallet(db, user, wallet_id)
     amount = body.get("amount")
     note = str(body.get("note") or "")
     try:
@@ -264,7 +286,7 @@ def admin_wallet_cashout(wallet_id: str, body: dict, db: Session = Depends(get_d
 @router.post("/api/admin/wallets/{wallet_id}/block")
 def admin_wallet_block(wallet_id: str, body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier"))):
-    w = db.get(Wallet, wallet_id)
+    w = _admin_wallet(db, user, wallet_id)
     if not w:
         raise HTTPException(404, "Данс олдсонгүй")
     w.status = "BLOCKED" if body.get("blocked", True) else "ACTIVE"

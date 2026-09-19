@@ -38,15 +38,20 @@ class EvError(Exception):
 
 
 def default_plan(db: Session, charger: EvCharger) -> EvPricePlan:
+    from .resource_scope import plan_matches_site
     plan = charger.price_plan
-    if plan and plan.is_active:
+    if plan and plan.is_active and plan_matches_site(plan, charger.site):
         return plan
     plan = (db.query(EvPricePlan)
-            .filter(EvPricePlan.is_active.is_(True))
+            .filter(EvPricePlan.is_active.is_(True),
+                    EvPricePlan.tenant_id == (charger.site.tenant_id if charger.site else None),
+                    EvPricePlan.site_id == charger.site_id)
             .order_by(EvPricePlan.created_at).first())
     if not plan:
         # Анхны суулгацад default тариф автоматаар (1 Wh = 1₮)
-        plan = EvPricePlan(name="Үндсэн (1 Wh = 1₮)", price_per_wh=1)
+        plan = EvPricePlan(name="Үндсэн (1 Wh = 1₮)", price_per_wh=1,
+                           site_id=charger.site_id,
+                           tenant_id=charger.site.tenant_id if charger.site else None)
         db.add(plan)
         db.flush()
     return plan
@@ -76,7 +81,10 @@ def wh_limit_for(amount, price_per_wh: Decimal) -> int:
 
 
 def energy_amount_for(energy_wh: int, price_per_wh: Decimal) -> Decimal:
-    return (D(int(energy_wh)) * price_per_wh).quantize(D("0.01"))
+    energy = D(str(energy_wh))
+    if not energy.is_finite() or energy < 0 or not price_per_wh.is_finite() or price_per_wh < 0:
+        raise EvError("Эрчим хүч эсвэл тарифын утга буруу")
+    return (D(int(energy)) * price_per_wh).quantize(D("0.01"))
 
 
 async def start_charge(db: Session, charger: EvCharger, connector_id: int,
@@ -85,6 +93,8 @@ async def start_charge(db: Session, charger: EvCharger, connector_id: int,
     RemoteStart команд. Аль нэг алхам унавал бүгд rollback."""
     plan = default_plan(db, charger)
     amt = D(str(amount)).quantize(D("0.01"))
+    if not amt.is_finite() or amt <= 0:
+        raise EvError("Дүн эерэг тоо байх ёстой")
     if amt < D(str(plan.min_amount or 0)):
         raise EvError(f"Доод дүн {plan.min_amount}₮")
     if plan.max_amount and amt > D(str(plan.max_amount)):
@@ -228,7 +238,11 @@ async def on_tx_stopped(db: Session, payload: dict):
     if energy is None and payload.get("meter_stop_wh") is not None \
             and session.meter_start_wh is not None:
         energy = max(0, int(payload["meter_stop_wh"]) - int(session.meter_start_wh))
-    energy = int(energy or 0)
+    # Reject invalid meter data; do not settle/refund an unverified reading.
+    checked_energy = D(str(energy or 0))
+    if not checked_energy.is_finite() or checked_energy < 0:
+        raise EvError("Эрчим хүчний заалт буруу — тооцоо баталгаажаагүй")
+    energy = int(checked_energy)
     price = D(str(session.price_per_wh))
     raw_amount = energy_amount_for(energy, price)
     authorized = D(str(session.authorized_amount))

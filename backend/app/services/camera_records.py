@@ -190,19 +190,19 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
                     Device.status == "active", Device.ip_address != "")
             .all())
     # creds-ийг db session амьд байхад энгийн мөр болгож шийднэ
-    targets = [(c.name or c.ip_address, c.ip_address, c.lane_dir or "entry",
+    targets = [(c.id, c.name or c.ip_address, c.ip_address, c.lane_dir or "entry",
                 camera_credentials(c), bool(c.nested_inner)) for c in cams]
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
 
-    async def _one(name, ip, lane_dir, creds, inner):
+    async def _one(device_id, name, ip, lane_dir, creds, inner):
         try:
             recs = await asyncio.wait_for(
                 fetch_snap_events(ip, creds[0], creds[1], start, end), timeout=15)
-            return name, ip, lane_dir, recs, None, inner
+            return device_id, name, ip, lane_dir, recs, None, inner
         except Exception as e:  # noqa: BLE001
-            return name, ip, lane_dir, [], f"{type(e).__name__}: {str(e)[:120]}", inner
+            return device_id, name, ip, lane_dir, [], f"{type(e).__name__}: {str(e)[:120]}", inner
 
     async def _all():
         return await asyncio.gather(*(_one(*t) for t in targets))
@@ -210,14 +210,15 @@ def site_camera_events(db, site_id: str, hours: float = AUDIT_HOURS) -> dict:
     results = asyncio.run(_all()) if targets else []
 
     cameras, events, inner_events = [], [], []
-    for name, ip, lane_dir, recs, err, inner in results:
-        cameras.append({"name": name, "ip": ip, "lane_dir": lane_dir,
+    for device_id, name, ip, lane_dir, recs, err, inner in results:
+        cameras.append({"device_id": device_id, "name": name, "ip": ip, "lane_dir": lane_dir,
                         "events": len(recs), "error": err, "nested_inner": inner})
         for r in recs:
             t = r.get("Time")
             if not isinstance(t, (int, float)):
                 continue
             ev = {
+                "device_id": device_id,
                 "plate": normalized_plate(r),
                 "raw_plate": r.get("PlateNumber"),
                 "time": from_camera_epoch(t),

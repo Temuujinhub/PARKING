@@ -122,17 +122,23 @@ def test_401_twice_gives_up(calls):
 
 
 # ────────────────── Түр зуурын алдаа: 5xx / сүлжээ ──────────────────
-def test_502_retried(calls):
-    """QPay-ийн 502 нь түр зуурын — дахин илгээнэ, жолооч мэдэхгүй."""
+def test_502_invoice_is_not_replayed(calls):
     seen, queue = calls
-    queue += [TOKEN_OK, FakeResponse(502), FakeResponse(200, {"invoice_id": "I", "qr_text": "Q"})]
-    inv = run(qpay.create_invoice("S4", "тест", "terminal", "https://cb", [], acc=ACC))
-    assert inv["invoice_id"] == "I"
-    assert paths(seen).count("/invoice") == 2
+    queue += [TOKEN_OK, FakeResponse(502)]
+    with pytest.raises(httpx.HTTPStatusError):
+        run(qpay.create_invoice("S4", "test", "terminal", "https://cb", [], acc=ACC))
+    assert paths(seen).count("/invoice") == 1
 
 
-def test_timeout_retried(monkeypatch):
-    """Сүлжээний timeout — дахин илгээнэ (жолоочид алдаа гаргахгүй)."""
+def test_502_payment_check_is_retried(calls):
+    seen, queue = calls
+    queue += [TOKEN_OK, FakeResponse(502), FakeResponse(200, {"rows": []})]
+    run(qpay.check_payment("invoice", acc=ACC))
+    assert paths(seen).count("/payment/check") == 2
+
+
+def test_invoice_timeout_is_not_replayed(monkeypatch):
+    """An accepted invoice with a lost response must not be created twice."""
     seen = []
     state = {"invoice_calls": 0}
 
@@ -161,9 +167,9 @@ def test_timeout_retried(monkeypatch):
     qpay._tokens.clear()
     monkeypatch.setattr(qpay, "_BACKOFF_SEC", (0.0, 0.0))
     monkeypatch.setattr(httpx, "AsyncClient", FlakyClient)
-    inv = run(qpay.create_invoice("S5", "тест", "terminal", "https://cb", [], acc=ACC))
-    assert inv["invoice_id"] == "I2"
-    assert state["invoice_calls"] == 2
+    with pytest.raises(httpx.ReadTimeout):
+        run(qpay.create_invoice("S5", "тест", "terminal", "https://cb", [], acc=ACC))
+    assert state["invoice_calls"] == 1
 
 
 def test_400_not_retried(calls):

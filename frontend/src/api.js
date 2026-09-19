@@ -95,8 +95,8 @@ export function wsConnect(siteId = 'all', onMessage) {
   const connect = () => {
     ws = new WebSocket(`${proto}://${location.host}/ws/sites/${siteId}`)
     ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)) } catch {} }
-    ws.onclose = () => { if (!closed) timer = setTimeout(connect, 3000) }
-    ws.onopen = () => { /* keepalive */ }
+    ws.onclose = (event) => { if (!closed && event.code !== 1008 && getToken()) timer = setTimeout(connect, 3000) }
+    ws.onopen = () => { ws.send(JSON.stringify({ token: getToken() })) }
   }
   connect()
   const ping = setInterval(() => { if (ws?.readyState === 1) ws.send('ping') }, 30000)

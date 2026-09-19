@@ -271,29 +271,15 @@ def health_snapshot() -> list[dict]:
 
 async def _api(method: str, path: str, acc: QpayAccount, *,
                json: dict | None = None, timeout: float = 20.0) -> httpx.Response:
-    """QPay API руу нэг дуудлага — токен, 401 сэргээлт, түр зуурын алдааны давталттай.
+    """Retry reads/checks after transient errors; never replay uncertain mutations.
 
-    ЯАГААД (2026-08-28): өмнө нь дуудлага бүр «токен ав → НЭГ УДАА POST →
-    raise_for_status» байсан. Хоёр нүх байв:
-
-      1. **401 үхлийн гогцоо.** QPay нэг мерчант дансанд нэг л access_token
-         амьд байлгадаг. Хэд хэдэн сервер (TEST + зогсоол бүрийн PROD) НЭГ
-         дансаар ажилладаг тул аль нэг нь шинэ токен авмагц бусдын кэшлэсэн
-         токен QPay талд ҮХНЭ. Кэш нь дуусах хугацаагаараа (QPay `expires_in`
-         epoch-оор ~24ц) хүчинтэй мэт харагдсаар байдаг тул дараагийн БҮХ
-         нэхэмжлэл 401 болж, тухайн серверийн БҮХ зогсоол дээр «QPay-тэй
-         холбогдож чадсангүй» гэж QR ОГТ үүсэхгүй болно — backend-ийг гараар
-         restart хийх (эсвэл 24ц өнгөрөх) хүртэл.
-      2. **Түр зуурын саатал = алдаа.** QPay-ийн 502/504 эсвэл нэг timeout
-         шууд жолоочийн нүүрэн дээр гарч, кассын дараалал үүсгэдэг байв.
-
-    Одоо: 401/403 → токеныг хаяж, ШИНЭЭР нэвтэрч дахин илгээнэ (нэг дуудлагын
-    дотор, жолооч мэдэхгүй). 408/425/429/5xx/сүлжээний алдаа → богино
-    хүлээлттэйгээр дахин илгээнэ. Бусад 4xx (ж: VAT_AMOUNT_INVALID) нь БОДИТ
-    алдаа тул давтахгүй — шууд дээшээ гаргана."""
+    A rejected authentication response can refresh the token. A timeout or 5xx
+    after invoice/receipt creation cannot prove failure and must be reconciled.
+    """
     url = f"{acc.base_url}{path}"
     st = _stat(acc)
     force_auth = False
+    safe_retry = method in ("GET", "HEAD") or path == "/payment/check"
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             token = await _get_token(acc, force=force_auth)
@@ -309,7 +295,7 @@ async def _api(method: str, path: str, acc: QpayAccount, *,
                 resp = await client.request(method, url, json=json,
                                             headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError as e:
-            if attempt >= _MAX_ATTEMPTS:
+            if not safe_retry or attempt >= _MAX_ATTEMPTS:
                 st["fail"] += 1
                 st["consecutive_fail"] += 1
                 st["last_error"] = f"{method} {path}: {type(e).__name__}: {e}"
@@ -325,7 +311,7 @@ async def _api(method: str, path: str, acc: QpayAccount, *,
                         resp.status_code, acc.username)
             force_auth = True
             continue
-        if resp.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
+        if safe_retry and resp.status_code in _RETRY_STATUS and attempt < _MAX_ATTEMPTS:
             log.warning("QPay %s %s → HTTP %s (%s): түр зуурын алдаа — %d/%d дахин оролдоно",
                         method, path, resp.status_code, acc.username, attempt, _MAX_ATTEMPTS)
             await asyncio.sleep(_backoff(attempt))
@@ -558,6 +544,13 @@ async def create_invoice(sender_invoice_no: str, description: str, receiver_code
         "urls": urls,  # бүх банкны deeplink (нэр, лого, линк) — апп/веб сонголт харуулна
         "mock": False,
     }
+
+
+async def cancel_invoice(invoice_id: str, acc: QpayAccount | None = None) -> None:
+    acc = acc or global_account()
+    if not acc.mock:
+        from urllib.parse import quote
+        await _api("DELETE", f"/invoice/{quote(invoice_id, safe='')}", acc, timeout=15.0)
 
 
 async def check_payment(invoice_id: str, acc: QpayAccount | None = None) -> dict:

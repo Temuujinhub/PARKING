@@ -72,6 +72,9 @@ export default function PaymentPanel({
             </span>
             <Badge value={selected.status} />
           </div>
+          {fee?.price_held_until && <p role="status" className="text-sm text-accent">
+            Үнэ {fmtDate(fee.price_held_until)} хүртэл тогтмол. Дараа нь нийт зогссон хугацаагаар бодно.
+          </p>}
           <div className="grid grid-cols-2 gap-2 text-sm bg-surface-muted/30 rounded-lg p-3">
             <span className="text-slate-400">Орсон цаг</span>
             <span className="font-mono text-right">

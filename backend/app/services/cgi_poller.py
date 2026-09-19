@@ -20,7 +20,7 @@ from ..config import settings
 from .device_auth import camera_credentials
 from .snapshot import offer_stream_image
 from ..database import SessionLocal
-from ..models import Device, LprEvent
+from ..models import Device, LprEvent, ParkingSite
 from ..session_logic import (extract_confidence, handle_entry, handle_exit,
                              handle_inner_pass, normalize_plate)
 
@@ -242,13 +242,13 @@ _queue: asyncio.Queue | None = None
 _workers: list = []
 
 
-def _enqueue(device_id: str, data: dict):
+def _enqueue(device_id: str, data: dict, mapping: tuple | None = None):
     """Дараалал дүүрсэн ч стримийг гацаахгүй — хамгийн хуучныг хаяна
     (шинэ event нь хуучнаас чухал: машин хаалганы өмнө байна)."""
     global _queue
     if _queue is None:
         _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
-    item = (device_id, data, time.monotonic())
+    item = (device_id, data, time.monotonic(), mapping)
     try:
         _queue.put_nowait(item)
     except asyncio.QueueFull:
@@ -268,7 +268,7 @@ async def _event_worker(idx: int):
         _queue = asyncio.Queue(maxsize=settings.camera_event_queue_size)
     log.info("event worker #%d эхэллээ", idx)
     while True:
-        device_id, data, ts = await _queue.get()
+        device_id, data, ts, mapping = await _queue.get()
         try:
             # Дараалалд гацаж ХОЦОРСОН event хаалт нээх эрхгүй: машиныг ажилтан
             # аль хэдийн гараар оруулчихсан байхад хожуу ирсэн команд хоосон
@@ -277,7 +277,7 @@ async def _event_worker(idx: int):
             allow_open = age <= settings.camera_event_stale_open_sec
             if not allow_open:
                 log.warning("event %.1fс хоцорчээ — бүртгэнэ, хаалт НЭЭХГҮЙ", age)
-            await _process_event(device_id, data, allow_open=allow_open)
+            await _process_event(device_id, data, allow_open=allow_open, expected_mapping=mapping)
         except Exception as e:  # noqa: BLE001 — нэг event-ийн алдаа бусдыг зогсоохгүй
             log.error("event боловсруулахад алдаа: %r", e)
         finally:
@@ -347,12 +347,24 @@ def _dump_event(device: Device, data: dict) -> None:
              keys[:600], tc_keys[:600], "; ".join(refs)[:900] or "ОЛДСОНГҮЙ")
 
 
-async def _process_event(device_id: str, data: dict, allow_open: bool = True):
+def _event_mapping(device):
+    return (device.site_id, device.ip_address, device.lane_no, device.lane_dir,
+            bool(device.nested_inner))
+
+
+async def _process_event(device_id: str, data: dict, allow_open: bool = True,
+                         expected_mapping: tuple | None = None):
     """Нэг ANPR event-ийг боловсруулж session үүсгэнэ."""
     db = SessionLocal()
     try:
         device = db.get(Device, device_id)
         if not device:
+            return
+        site = db.get(ParkingSite, device.site_id)
+        if device.status != "active" or not site or not site.is_active:
+            return
+        if expected_mapping is not None and _event_mapping(device) != expected_mapping:
+            log.warning("camera %s: discarded event from previous site/lane mapping", device.id)
             return
         device.last_seen = datetime.utcnow()
         db.commit()  # ямар ч event ирвэл камер онлайн болно
@@ -409,7 +421,8 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True):
         db.close()
 
 
-async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = None):
+async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = None,
+                    mapping: tuple | None = None):
     """Нэг камерын event stream-ийг тасралтгүй сонсоно (reconnect-тэй).
     codes=[All] — камерын бүх event-ийг авч, дугаартайг нь л боловсруулна (дибагт хялбар)."""
     hb = settings.camera_event_heartbeat_sec
@@ -639,7 +652,7 @@ async def _poll_one(device_id: str, ip: str, creds: tuple[str, str] | None = Non
                             # chunk-аа уншина. Өмнө нь энд `await _process_event(...)`
                             # байсан тул DB бичих хугацаанд стрим зогсож, камерын
                             # буферт event хуримтлагдаж саатал үүсгэдэг байв.
-                            _enqueue(device_id, data)
+                            _enqueue(device_id, data, mapping)
                             saw_event = True
                             last_ev = time.monotonic()
                     # Стрим ЭВ ЗҮЙТЭЙ дуусав (watchdog таслав эсвэл камер сешн
@@ -692,7 +705,7 @@ async def supervisor():
                 config = (c.ip_address, creds, c.site_id, c.lane_no, c.lane_dir, bool(c.nested_inner))
                 changed = await ensure_camera_task(
                     _tasks, _task_configs, c.id, config,
-                    lambda c=c, creds=creds: _poll_one(c.id, c.ip_address, creds))
+                    lambda c=c, creds=creds: _poll_one(c.id, c.ip_address, creds, _event_mapping(c)))
                 if changed:
                     log.info("%s (%s): event stream configuration applied", c.name, c.ip_address)
             for did in list(_tasks):

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Device, LprEvent
+from ..models import Device, LprEvent, ParkingSite
 from ..session_logic import (extract_confidence, handle_entry, handle_exit, handle_inner_pass,
                              normalize_plate, strip_images)
 
@@ -149,12 +149,16 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
         # 200 буцаая — камер дахин дахин оролдож логоо дүүргэхгүйн тулд (шалтгаан логонд бий)
         return {"ok": False, "error": "camera not registered", "ip": client_ip}
 
+    site = db.get(ParkingSite, device.site_id)
+    if device.status != "active" or not site or not site.is_active:
+        return {"ok": False, "error": "camera or site disabled"}
+
     device.last_seen = datetime.utcnow()
     # Цагийн зөрүүг пассив хэмжинэ (ITSAPI push-д RealUTC ирвэл). 1139ba3-д
     # бодит callback-аас буруу хуулагдаж `events` гэсэн байхгүй нэр ашигласнаар
     # simulate бүхэлдээ 500 өгдөг болсон байв — simulate-д ганц raw event бий.
     from ..services.clock_drift import note_event as _drift_note_event
-    _drift_note_event(device.id, raw)
+    _drift_note_event(device.id, payload)
     # Multipart-аар ирсэн зургийг event бүрт base64-оор шингээнэ — snapshot.cgi татах
     # шаардлагагүйгээр (найдвартай) яг event-ийн зураг хадгалагдана.
     if image:

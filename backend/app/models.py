@@ -331,6 +331,10 @@ class ParkingSession(Base):
     total_fee = Column(Numeric(12, 2), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
+    payment_wait_started_at = Column(DateTime, nullable=True)
+    last_exit_seen_at = Column(DateTime, nullable=True)
+    payment_quote_until = Column(DateTime, nullable=True)
+    payment_quote = Column(JSON, nullable=True)
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
     # Дүн ЦАРЦСАН session: total_fee-г тарифаас ДАХИН бодохгүй, хадгалсан дүнг
     # хэрэглэнэ. Орох уншилтгүй машины суурь хураамж (exit_rules.no_session_fee)
@@ -350,6 +354,8 @@ class ParkingSession(Base):
     # Оператор/POS «онцгой гаргалт» (ХБИ, түргэн/цагдаа, бүртгэлгүй, төлөөд
     # нээгдээгүй) хийхийн ӨМНӨ гарах камераас гараар авсан баталгаажуулах зураг —
     # free_exit эрхгүй операторын гаргалтын нотолгоо (2026-09-14).
+    entry_snapshot_source = Column(String(30), nullable=True)
+    exit_snapshot_source = Column(String(30), nullable=True)
     verify_snapshot = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -383,6 +389,8 @@ class Payment(Base):
     provider_invoice_id = Column(String(120), nullable=True)
     # QPay-ийн g_payment_id (payment/check-ээс) — QPay ebarimt_v3 үүсгэхэд ашиглана
     provider_payment_id = Column(String(120), nullable=True)
+    provider_tx_key = Column(String(64), nullable=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=True)
     # e-Barimt хүлээн авагчийн төрөл: CITIZEN (иргэн) | COMPANY (ААН)
     ebarimt_receiver_type = Column(String(20), nullable=True)
     sender_invoice_no = Column(String(120), unique=True, nullable=False)
@@ -399,12 +407,14 @@ class Payment(Base):
     qr_text = Column(Text, nullable=True)
     deep_link = Column(Text, nullable=True)
     raw_payload = Column(JSON, nullable=False, default=dict)
+    fee_snapshot = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     session = relationship("ParkingSession", lazy="joined")
 
     __table_args__ = (
         Index("ix_payments_status_paid_at", "status", "paid_at"),  # орлогын тайлангийн hot path
+        Index("uq_payments_provider_tx_key", "provider_tx_key", unique=True),
         Index("ix_payments_created_at", "created_at"),
         Index("ix_payments_shift_id", "shift_id"),
         Index("ix_payments_provider", "provider"),
@@ -588,7 +598,9 @@ class CompanyContact(Base):
     (registered_drivers.company нь энгийн текст тул харилцахыг эндээс хөтөлнө.)"""
     __tablename__ = "company_contacts"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
-    company = Column(String(160), nullable=False, unique=True)
+    company = Column(String(160), nullable=False)
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
+    __table_args__ = (UniqueConstraint("owner_scope", "company", name="uq_contact_owner_company"),)
     email = Column(String(120), default="")
     register = Column(String(20), default="")   # ТТД (e-Barimt-д хэрэглэж болно)
     # Төлбөрийн горим: POSTPAID=сарын эцэст (өмнөх сарын нэхэмжлэл 1-нд),
@@ -606,6 +618,7 @@ class CompanyInvoice(Base):
     __tablename__ = "company_invoices"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     invoice_no = Column(String(40), unique=True, nullable=False)   # INV-202608-003
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
     period = Column(String(7), nullable=False, index=True)         # "2026-08"
     company = Column(String(160), nullable=False)
     car_count = Column(Integer, nullable=False, default=0)
@@ -620,7 +633,7 @@ class CompanyInvoice(Base):
     note = Column(Text, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    __table_args__ = (UniqueConstraint("period", "company", name="uq_invoice_period_company"),)
+    __table_args__ = (UniqueConstraint("period", "owner_scope", "company", name="uq_invoice_period_owner_company"),)
 
 
 class PartnerKey(Base):
