@@ -49,6 +49,7 @@ REBOOTS_KEY = "reboots"
 
 async def _snapshot_probe(c, ip, auth, samples: int) -> dict:
     ok, bad, lat_bad, jpeg_bytes = 0, 0, [], 0
+    fast_400, failure_statuses, transport_errors = 0, {}, 0
     good_url = None
     for i in range(samples):
         for path in (SNAP_URLS if good_url is None else (good_url,)):
@@ -64,13 +65,22 @@ async def _snapshot_probe(c, ip, auth, samples: int) -> dict:
                     break
                 bad += 1
                 lat_bad.append(dt)
+                key = str(r.status_code)
+                failure_statuses[key] = failure_statuses.get(key, 0) + 1
+                if r.status_code == 400 and dt < INSTANT_400:
+                    fast_400 += 1
             except Exception:  # noqa: BLE001
                 bad += 1
+                transport_errors += 1
                 lat_bad.append(time.monotonic() - t0)
         if i < samples - 1:
             await asyncio.sleep(0.6)
     return {"ok": ok, "bad": bad, "jpeg_kb": jpeg_bytes // 1024,
-            "min_bad_lat": min(lat_bad) if lat_bad else None}
+            "min_bad_lat": min(lat_bad) if lat_bad else None,
+            "failure_statuses": failure_statuses, "transport_errors": transport_errors,
+            # A quick failure alone is not the observed HTTP 400 signature.
+            # Mixed status codes, slow failures and network errors need diagnosis.
+            "fast_400_only": bad > 0 and fast_400 == bad}
 
 
 async def _event_alive(c, ip, auth) -> bool | None:
@@ -79,14 +89,14 @@ async def _event_alive(c, ip, auth) -> bool | None:
                                     f"?action=attach&codes=[All]&heartbeat=5",
                             auth=auth, timeout=httpx.Timeout(6, read=4)) as r:
             return r.status_code == 200
-    except httpx.ReadTimeout:
-        return True   # холбогдсон ч энэ агшинд event гараагүй — веб амьд
     except Exception:  # noqa: BLE001
+        # A timeout can precede response headers. Only an actual HTTP 200
+        # (or a recent poller heartbeat in _classify) proves this check alive.
         return None
 
 
 def classify_verdict(snap_ok: bool, event_alive: bool | None,
-                     min_bad_lat: float | None) -> str:
+                     min_bad_lat: float | None, *, fast_400_only: bool = False) -> str:
     """Цэвэр шийдэл (сүлжээгүй, тестлэх боломжтой):
       • healthy     — snapshot JPEG өгсөн
       • hung        — веб АМЬД (event 200) атлаа snapshot ШУУД (<0.2с) 400
@@ -94,7 +104,8 @@ def classify_verdict(snap_ok: bool, event_alive: bool | None,
       • busy        — snapshot унасан ч ШУУД биш (ачаалал/давхцал байж болно)"""
     if snap_ok:
         return "healthy"
-    if event_alive and min_bad_lat is not None and min_bad_lat < INSTANT_400:
+    if (event_alive and fast_400_only and min_bad_lat is not None
+            and min_bad_lat < INSTANT_400):
         return "hung"
     if event_alive is None:
         return "unreachable"
@@ -124,7 +135,7 @@ async def _classify(ip: str, name: str, creds: tuple[str, str], samples: int,
             if snap["ok"]:
                 ev = None
             elif last_seen is not None and \
-                    (datetime.utcnow() - last_seen).total_seconds() < 180:
+                    0 <= (datetime.utcnow() - last_seen).total_seconds() < 180:
                 # cgi_poller саяхан event хүлээж авсан = веб АМЬД. Хоёр дахь
                 # attach стрим нээх нь камерын ховор холболтыг дэмий эзэлнэ
                 # (мөн poller-ийн стримтэй өрсөлдөнө).
@@ -133,7 +144,8 @@ async def _classify(ip: str, name: str, creds: tuple[str, str], samples: int,
                 ev = await _event_alive(c, ip, auth)
         finally:
             note_rpc_done(ip)
-    verdict = classify_verdict(bool(snap["ok"]), ev, snap["min_bad_lat"])
+    verdict = classify_verdict(bool(snap["ok"]), ev, snap["min_bad_lat"],
+                               fast_400_only=snap["fast_400_only"])
     return {"ip": ip, "name": name, "verdict": verdict, **snap}
 
 

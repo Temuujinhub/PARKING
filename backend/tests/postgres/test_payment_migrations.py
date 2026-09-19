@@ -263,3 +263,39 @@ def test_snapshot_cas_rejects_stale_writer(engine,monkeypatch):
         assert not attach_saved(second,b,'entry','two.jpg','ws')
         second.rollback();second.refresh(b)
         assert b.entry_snapshot=='one.jpg'
+
+
+def test_preboot_gate_recovery_serializes_with_executor_and_keeps_audit_atomic(engine):
+    from datetime import timedelta
+    from sqlalchemy.exc import OperationalError
+    from app.services.gate_recovery import recover_preboot_command
+    migrations.run_migrations()
+    now=datetime.utcnow();boot=now-timedelta(minutes=1)
+    with Session(engine) as db:
+        site=M.ParkingSite(name='Recovery',site_code='RECOVERY');db.add(site);db.flush()
+        gate=M.Device(site_id=site.id,name='Gate',device_type='barrier',status='active')
+        stay=M.ParkingSession(site_id=site.id,plate_number='1234УБА',entry_time=boot,status='OPEN')
+        db.add_all([gate,stay]);db.flush()
+        cmd=M.BarrierCommand(device_id=gate.id,session_id=stay.id,command='open',
+            command_source='auto_entry',status='PENDING',created_at=boot-timedelta(seconds=10))
+        db.add(cmd);db.commit();did,cid=gate.id,cmd.id
+    with Session(engine) as executor, Session(engine) as recovery:
+        # Same lock held by the actual gate executor; recovery must not steal it.
+        executor.query(M.Device.id).filter_by(id=did).with_for_update().one()
+        saved=[]
+        with pytest.raises(OperationalError):
+            recover_preboot_command(recovery,cid,boot,saved.append,now=now)
+        recovery.rollback();assert not saved
+        executor.rollback()
+        assert recover_preboot_command(recovery,cid,boot,saved.append,now=now)['changed']
+        # PostgreSQL must lock only the base rows, not nullable eager joins.
+        recovery.rollback()
+        assert recovery.get(M.BarrierCommand,cid).status=='PENDING'
+        assert recovery.query(M.AuditLog).count()==0
+        assert recover_preboot_command(recovery,cid,boot,saved.append,now=now)['changed']
+        recovery.commit()
+    with Session(engine) as db:
+        cmd=db.get(M.BarrierCommand,cid)
+        assert cmd.status=='UNKNOWN' and cmd.executed_at is None
+        assert db.query(M.AuditLog).filter_by(action='BARRIER_PREBOOT_RECOVERY').count()==1
+        assert not recover_preboot_command(db,cid,boot,saved.append,now=now)['changed']
