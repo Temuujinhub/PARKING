@@ -921,7 +921,7 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
     if open_in_flight(barrier.id):
         _skip_command(db, barrier, session_id, source, plate,
                       "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
-        return True
+        return False  # Pending is not an acknowledged open.
     _cool = int(_barrier_rules(db, device.site_id)["reopen_cooldown_sec"])
     cooldown = datetime.utcnow() - timedelta(seconds=_cool)
     recent_ok = (db.query(BarrierCommand)
@@ -929,12 +929,14 @@ async def ensure_inner_barrier(db: Session, device: Device, session_id: str | No
                          BarrierCommand.command == "open",
                          BarrierCommand.status == "SUCCESS",
                          BarrierCommand.created_at >= cooldown)
+                 .order_by(BarrierCommand.created_at.desc())
                  .first())
     if recent_ok:
         _skip_command(db, barrier, session_id, source, plate,
                       f"{_cool:.0f}с дотор аль хэдийн "
                       "нээгдсэн — команд давтсангүй")
-        return True
+        # Preserve the device cooldown without borrowing another car's ACK.
+        return bool(session_id and recent_ok.session_id == session_id)
     cmd = await open_barrier(db, barrier, session_id, source, plate=plate)
     if cmd.status != "SUCCESS":
         log.warning("[nested] %s: дотоод %s хаалт НЭЭГДСЭНГҮЙ — %s", plate,
@@ -1319,6 +1321,14 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
     # зогсдоггүй, машин доторх (үнэгүй) хугацаагаа бүрэн төлдөг байв
     # (2026-08-11 Рашбулаг ЭТТ: 165 машинаас «2 дотор» гэж харагдсан шалтгаан).
     session, fuzzy = match_open_session(db, plate, device.site_id)
+    if session is not None:
+        # Serialize counter changes with camera-log recovery, and refresh after
+        # waiting for the row lock. Never hold this lock during a device request.
+        session = (db.query(ParkingSession)
+                   .filter(ParkingSession.id == session.id,
+                           ParkingSession.status.in_(("OPEN", "AWAITING_PAYMENT", "PAID")))
+                   .populate_existing().with_for_update(of=ParkingSession).first())
+        fuzzy = bool(session and fuzzy)
     if fuzzy:
         log.info("[nested] %s: дотоод камерын уншилтыг OCR-ойролцоо «%s» session-д тохов",
                  plate, session.plate_number)

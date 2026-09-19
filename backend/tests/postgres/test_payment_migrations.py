@@ -17,6 +17,56 @@ URL=os.environ.get('PARKING_TEST_DATABASE_URL')
 pytestmark=pytest.mark.skipif(not URL,reason='Disposable PostgreSQL DSN required')
 
 
+def test_concurrent_inner_recovery_credits_once_and_live_lock_handles_joins(engine, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from app import session_logic as SL
+    from app.services import camera_sync as CS
+    migrations.run_migrations()
+    when = datetime.utcnow() - timedelta(hours=12)
+    with Session(engine) as db:
+        site = M.ParkingSite(name='Synthetic inner',site_code='INNER',transit_max_hours=12)
+        db.add(site);db.flush()
+        cams = [M.Device(site_id=site.id,name=direction,device_type='camera',
+                         device_key='inner-'+direction,nested_inner=True,
+                         lane_dir=direction,lane_no=lane,status='active')
+                for direction,lane in [('entry',4),('exit',3)]]
+        stay = M.ParkingSession(site_id=site.id,plate_number='1234УБА',
+                                entry_time=when,status='OPEN')
+        db.add_all([stay,*cams]);db.commit()
+        sid,site_id = stay.id,site.id
+        records = [{'device_id':c.id,'plate':stay.plate_number,'lane_dir':c.lane_dir,
+                    'event':'gate_pass','time':when+timedelta(minutes=1,hours=i*10)}
+                   for i,c in enumerate(cams)]
+        entry_camera_id = cams[0].id
+    ready = threading.Barrier(2);errors=[];results=[]
+    def recover():
+        try:
+            with Session(engine,autoflush=False) as db:
+                site=db.get(M.ParkingSite,site_id)
+                original=db.get(M.ParkingSession,sid)
+                ready.wait(timeout=10)
+                results.append(CS._sync_inner(db,site,{'inner_events':records},when,
+                    when+timedelta(hours=12),{'skip_invalid_plate':True},False))
+        except Exception as exc: errors.append(exc)
+    workers=[threading.Thread(target=recover,daemon=True) for _ in range(2)]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join(timeout=20)
+    assert not any(worker.is_alive() for worker in workers)
+    assert not errors,errors
+    assert tuple(map(sum,zip(*results))) == (1,1)
+    with Session(engine) as db:
+        stay=db.get(M.ParkingSession,sid)
+        assert stay.paused_since is None and stay.paused_minutes==600
+        assert db.query(M.LprEvent).count()==2
+        assert db.query(M.AuditLog).filter_by(action='CAMERA_SYNC_INNER').count()==2
+        monkeypatch.setattr(SL,'notify',lambda *a: None)
+        out=asyncio.run(SL.handle_inner_pass(db,db.get(M.Device,entry_camera_id),
+                                            stay.plate_number,99,{},allow_open=False))
+        assert out['counter_changed'] is True and out['barrier_opened'] is False
+        assert stay.paused_since is not None
+
+
 @pytest.fixture
 def engine(monkeypatch):
     schema='audit_'+uuid.uuid4().hex
