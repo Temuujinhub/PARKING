@@ -117,10 +117,16 @@ def close_shift(body: dict | None = None, db: Session = Depends(get_db),
         for s in db.query(ParkingSession).filter(
                 ParkingSession.site_id == shift.site_id,
                 ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT"])).all():
+            from ..services.checkout import lock_session
+            s = lock_session(db, s.id)
+            if s.status not in ("OPEN", "AWAITING_PAYMENT"):
+                continue
             fee = session_fee_info(db, s, at=now)
             s.exit_time, s.duration_minutes = now, fee["duration_minutes"]
             s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
             s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+            from ..services.hospital_benefits import finish_hospital_usage
+            finish_hospital_usage(s, fee)
             # Өр үүсгэх эсэх — Тохиргоо → Авто цэвэрлэгээ (2026-08-21-ээс өмнө
             # хатуу бичигдсэн байсан тул ээлж хаах бүрд өр хуримтлагддаг байв)
             from ..services.app_settings import get_autoclose_rules

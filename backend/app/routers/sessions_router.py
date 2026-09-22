@@ -671,6 +671,8 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
     db.flush()
     db.add(AuditLog(username=user.username, action="MANUAL_ENTRY", entity="session",
                     entity_id=s.id, detail={"plate": plate, "entry_time": entry_time.isoformat()}))
+    from ..services.hospital_benefits import attach_daily_grant
+    attach_daily_grant(db, s)
     db.commit()
     await manager.broadcast(site_id, "ENTRY_EVENT", {
         "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),
@@ -751,6 +753,8 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
                     pass
             db.add(s)
             db.flush()
+            from ..services.hospital_benefits import attach_daily_grant
+            attach_daily_grant(db, s)
             due = 0.0
             if s.status == "AWAITING_PAYMENT":
                 # exit_time дээр төлбөрийг царцааж хаана; төлөгдөөгүй тул өр үүснэ
@@ -797,6 +801,11 @@ async def bulk_remove(body: dict, db: Session = Depends(get_db),
             skipped += 1
             continue
         if allowed is not None and s.site_id not in allowed:
+            skipped += 1
+            continue
+        from ..services.checkout import lock_session
+        s = lock_session(db, s.id)
+        if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
             skipped += 1
             continue
         debt = close_session_forced(db, s, "admin_remove", user.username, create_comp)
@@ -934,7 +943,8 @@ def get_session(session_id: str, db: Session = Depends(get_db),
 @router.post("/{session_id}/apply-discount")
 def apply_discount(session_id: str, body: dict, db: Session = Depends(get_db),
                    user: User = Depends(require("cashier", "discounts"))):
-    s = db.get(ParkingSession, session_id)
+    from ..services.checkout import lock_session
+    s = lock_session(db, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
@@ -966,13 +976,16 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
     """Камер алдаатай уншсан дугаарыг засах (easy-park UAT items 18, 21, 24).
     Зассаны дараа төлбөр/хайлт шинэ дугаараар хэвийн ажиллана."""
     from ..session_logic import is_valid_plate
-    s = db.get(ParkingSession, session_id)
+    from ..services.checkout import lock_session
+    s = lock_session(db, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
     if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-ий дугаарыг засна")
     new_plate = normalize_plate(body.get("plate_number", ""))
+    if getattr(s, "hospital_grant_id", None) and new_plate != s.plate_number:
+        raise HTTPException(409, "Эмнэлгийн баталгаажуулалттай дугаарыг өөр машин руу шилжүүлэх боломжгүй")
     if not is_valid_plate(new_plate) and not body.get("force"):
         raise HTTPException(400, f"«{new_plate}» формат буруу. Зөв: 4 орон + 3 кирилл үсэг (1234УБА). "
                                  "Дипломат/тусгай дугаар бол force=true илгээнэ.")
@@ -1003,7 +1016,8 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     `reason_code` нь Тохиргоо → Нээх шалтгааны жагсаалтаас (кодоор хадгалагдана
     тул тайланд бүлэглэгдэнэ). Чөлөөт `reason` текст нь «Бусад» сонголтын
     тайлбар болж хамт хадгалагдана."""
-    s = db.get(ParkingSession, session_id)
+    from ..services.checkout import lock_session
+    s = lock_session(db, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     # Шалтгааныг жагсаалттай тулгана — танигдахгүй код ирвэл татгалзана
@@ -1032,6 +1046,8 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     if s.total_fee is None:
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+    from ..services.hospital_benefits import finish_hospital_usage
+    finish_hospital_usage(s, fee)
 
     # Төлбөргүй гаргаж буй бол нөхөн төлбөрийн нэхэмжлэл үүсгэх сонголт
     if body.get("create_compensation") and not s.paid_at and not fee["is_free"]:
@@ -1172,7 +1188,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     spec = SPECIAL_EXIT_KINDS.get(kind)
     if not spec:
         raise HTTPException(400, f"kind буруу — {', '.join(SPECIAL_EXIT_KINDS)}")
-    s = db.get(ParkingSession, session_id)
+    from ..services.checkout import lock_session
+    s = lock_session(db, session_id)
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)
@@ -1258,6 +1275,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     if s.total_fee is None:
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     s.status = "CLOSED" if s.paid_at else "MANUAL_CLOSED"
+    from ..services.hospital_benefits import finish_hospital_usage
+    finish_hospital_usage(s, fee)
     if cam and not s.exit_device_id:
         s.exit_device_id = cam.id
     s.note = f"{s.note + ' | ' if s.note else ''}Онцгой гаргалт: {reason_text}"[:1000]

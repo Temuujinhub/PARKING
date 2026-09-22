@@ -26,3 +26,6 @@ qrcode[pil]==8.2
 
 # Snapshot validation decodes camera JPEGs directly.
 pillow==12.3.0
+
+# Hospital API credentials require encryption at rest (same audited pin as before).
+cryptography==50.0.0

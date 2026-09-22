@@ -389,11 +389,17 @@ async def night_close(body: dict, db: Session = Depends(get_db),
     now = datetime.utcnow()
     created = 0
     for s in sessions:
+        from ..services.checkout import lock_session
+        s = lock_session(db, s.id)
+        if s.status not in ("OPEN", "AWAITING_PAYMENT"):
+            continue
         fee = session_fee_info(db, s, at=now)
         s.exit_time = now
         s.duration_minutes = fee["duration_minutes"]
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
         s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+        from ..services.hospital_benefits import finish_hospital_usage
+        finish_hospital_usage(s, fee)
         # Session тутмын бүртгэл — site-ийн түвшний NIGHT_CLOSE нь Түүхийн
         # мөр бүрийг тайлбарлаж чаддаггүй (2026-08-16).
         db.add(AuditLog(username=user.username, action="NIGHT_CLOSE_CAR",
