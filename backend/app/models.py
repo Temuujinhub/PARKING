@@ -66,14 +66,14 @@ class Tenant(Base):
     # (зогсоол бүрт тохируулах шаардлагагүй; зогсоолын түвшний талбар нь
     # онцгой тохиолдлын override болж үлдсэн). password шифрлэгдэж хадгалагдана.
     qpay_username = Column(String(80), nullable=True)
-    qpay_password = Column(String(160), nullable=True)   # API-аар БУЦААХГҮЙ
+    qpay_password = Column(Text, nullable=True)   # Fernet ciphertext; API-аар БУЦААХГҮЙ
     qpay_invoice_code = Column(String(80), nullable=True)
     qpay_branch_code = Column(String(40), nullable=True)
     qpay_district_code = Column(String(10), nullable=True)
     # msgbill.mn Partner API түлхүүр (bsk_...) — дансаар/бэлэн/картын e-Barimt-ыг
     # msgbill-ээр үүсгэхэд. Шифрлэгдэж хадгалагдана (secretbox), UI-д зөвхөн *_set.
-    msgbill_api_key = Column(String(160), nullable=True)
-    msgbill_webhook_secret = Column(String(160), nullable=True)  # whsec_… (шифрлэгдсэн)
+    msgbill_api_key = Column(Text, nullable=True)
+    msgbill_webhook_secret = Column(Text, nullable=True)  # whsec_… (шифрлэгдсэн)
     # ─── Түрээслэгчийн e-Barimt (ТЕГ PosAPI) хувийн мэдээлэл ───────────────
     # Баримт ХЭНИЙ нэр дээр гарахыг тодорхойлно. Өмнө нь ЗӨВХӨН .env-ийн глобал
     # ТТД байсан тул Моннисын зогсоолын картын баримт EasyParking-ийн нэр дээр
@@ -137,7 +137,7 @@ class ParkingSite(Base):
     # тэдний данс руу орж, e-Barimt нь тэдний ТТД-ээр үүснэ. Хоосон талбарууд
     # нь .env-ийн глобал тохиргоо руу уналт хийнэ (config.qpay_*).
     qpay_username = Column(String(80), nullable=True)      # client_id
-    qpay_password = Column(String(160), nullable=True)     # client_secret — API-аар БУЦААХГҮЙ
+    qpay_password = Column(Text, nullable=True)     # encrypted client_secret — API-аар БУЦААХГҮЙ
     qpay_invoice_code = Column(String(80), nullable=True)
     qpay_branch_code = Column(String(40), nullable=True)
     # НӨАТ-ын дүүрэг+хороо (4 орон, ж: 2318 = Хан-Уул 18-р хороо)
@@ -180,7 +180,7 @@ class Device(Base):
     # глобал camera_username/password руу уналт хийнэ — зогсоол бүр өөр нууц
     # үгтэй камертай байж болох тул. password нь API-аар БУЦААГДАХГҮЙ.
     username = Column(String(60), nullable=True)
-    password = Column(String(160), nullable=True)
+    password = Column(Text, nullable=True)  # Fernet expansion must not truncate device credentials
     device_key = Column(String(80), unique=True, nullable=True)  # LPR callback-д төхөөрөмж таних түлхүүр
     extra = Column(JSON, nullable=False, default=dict)
     last_seen = Column(DateTime, nullable=True)
