@@ -376,6 +376,15 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_parking_sessions_hospital_grant_id ON parking_sessions (hospital_grant_id)",
     "CREATE INDEX IF NOT EXISTS ix_hospital_integrations_site_id ON hospital_integrations (site_id)",
 
+    # Enabling encryption also protects existing QPay/device credential writes.
+    # A 64-character secret expands to 188 characters with the enc: prefix.
+    # Widen storage only: never rewrite, truncate or re-encrypt existing values.
+    "ALTER TABLE tenants ALTER COLUMN qpay_password TYPE TEXT",
+    "ALTER TABLE tenants ALTER COLUMN msgbill_api_key TYPE TEXT",
+    "ALTER TABLE tenants ALTER COLUMN msgbill_webhook_secret TYPE TEXT",
+    "ALTER TABLE parking_sites ALTER COLUMN qpay_password TYPE TEXT",
+    "ALTER TABLE devices ALTER COLUMN password TYPE TEXT",
+
 ]
 
 
@@ -444,6 +453,16 @@ def check_ready():
         conn.execute(text("SELECT hospital_grant_id, hospital_allowance_minutes, hospital_used_minutes, "
                           "hospital_fee_snapshot FROM parking_sessions LIMIT 0"))
         conn.execute(text("SELECT benefit_date, daily_minutes FROM hospital_daily_grants LIMIT 0"))
+        secret_columns = conn.execute(text("""
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema=current_schema() AND data_type='text'
+            AND (table_name,column_name) IN (
+                ('tenants','qpay_password'),('tenants','msgbill_api_key'),
+                ('tenants','msgbill_webhook_secret'),('parking_sites','qpay_password'),
+                ('devices','password'))
+        """)).scalar()
+        if secret_columns != 5:
+            raise RuntimeError("Encrypted credential storage has a length limit or is missing")
     return {"database": "ok", "schema": revision()[:12]}
 
 
