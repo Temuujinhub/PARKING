@@ -31,7 +31,7 @@ from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     dr_router, ev_router, health_router, integration_router, legacy_router, lpr_router,
     payments_router, public_router, reports_router, sessions_router, billing_router,
-    wallet_router,
+    wallet_router, hospital_router,
 )
 from .ws import manager
 
@@ -72,7 +72,7 @@ app.add_middleware(
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
           health_router, integration_router, legacy_router, dr_router, billing_router,
-          ev_router, wallet_router):
+          ev_router, wallet_router, hospital_router):
     app.include_router(r.router)
 
 

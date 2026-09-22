@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
+    BigInteger, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
     UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -335,6 +335,10 @@ class ParkingSession(Base):
     last_exit_seen_at = Column(DateTime, nullable=True)
     payment_quote_until = Column(DateTime, nullable=True)
     payment_quote = Column(JSON, nullable=True)
+    hospital_grant_id = Column(UUID(as_uuid=False), ForeignKey("hospital_daily_grants.id"), nullable=True, index=True)
+    hospital_allowance_minutes = Column(Integer, nullable=True)
+    hospital_used_minutes = Column(Integer, nullable=True)
+    hospital_fee_snapshot = Column(JSON, nullable=True)
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
     # Дүн ЦАРЦСАН session: total_fee-г тарифаас ДАХИН бодохгүй, хадгалсан дүнг
     # хэрэглэнэ. Орох уншилтгүй машины суурь хураамж (exit_rules.no_session_fee)
@@ -371,6 +375,45 @@ class ParkingSession(Base):
         Index("uq_active_session", "site_id", "plate_number", unique=True,
               postgresql_where=text("status IN ('OPEN','AWAITING_PAYMENT','PAID')")),
     )
+
+
+class HospitalIntegration(Base):
+    """A credential may grant hospital benefits only at its explicitly selected site."""
+    __tablename__ = "hospital_integrations"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    name = Column(String(120), nullable=False)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True, index=True)
+    daily_minutes = Column(Integer, nullable=False, default=120)
+    is_active = Column(Boolean, nullable=False, default=False)
+    signing_secret = Column(Text, nullable=True)
+    key_version = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class HospitalDailyGrant(Base):
+    __tablename__ = "hospital_daily_grants"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    integration_id = Column(UUID(as_uuid=False), ForeignKey("hospital_integrations.id"), nullable=False)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False)
+    plate_number = Column(String(20), nullable=False)
+    benefit_date = Column(Date, nullable=False)
+    daily_minutes = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("site_id", "plate_number", "benefit_date", name="uq_hospital_daily_grant"),)
+
+
+class HospitalGrantRequest(Base):
+    """Signed visit identifiers are durable idempotency keys, without patient data."""
+    __tablename__ = "hospital_grant_requests"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    integration_id = Column(UUID(as_uuid=False), ForeignKey("hospital_integrations.id"), nullable=False)
+    visit_id = Column(String(100), nullable=False)
+    body_hash = Column(String(64), nullable=False)
+    grant_id = Column(UUID(as_uuid=False), ForeignKey("hospital_daily_grants.id"), nullable=False)
+    response = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("integration_id", "visit_id", name="uq_hospital_visit_request"),)
 
 
 class Payment(Base):
