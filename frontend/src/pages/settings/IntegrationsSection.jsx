@@ -11,16 +11,18 @@
 // байгаа» нь жагсаалтаар шууд харагдана. SUPER_ADMIN бүгдийг, ADMIN өөрийн хамрах
 // хүрээний зогсоол/дансыг харна (backend шүүнэ); түрээслэгчийн данс засах нь
 // зөвхөн SUPER_ADMIN.
-import { CreditCard, KeyRound, Plug, Plus } from 'lucide-react'
+import { CreditCard, KeyRound, Plug, Plus, Stethoscope } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../auth'
 import { Field, Modal, PasswordInput, Table, useToast } from '../../components/ui'
 import QpayTestModal from './QpayTestModal'
+import HospitalBenefitsPanel from './HospitalBenefitsPanel'
 
 const SUBTABS = [
   ['pay', 'Төлбөрийн данс', CreditCard],
   ['api', 'Гадаад API', KeyRound],
+  ['hospital', 'Эмнэлгийн хөнгөлөлт', Stethoscope],
 ]
 
 export default function IntegrationsSection() {
@@ -39,6 +41,7 @@ export default function IntegrationsSection() {
       </div>
       {sub === 'pay' && <PaymentAccountsPanel />}
       {sub === 'api' && <PartnerApiPanel />}
+      {sub === 'hospital' && <HospitalBenefitsPanel />}
     </div>
   )
 }

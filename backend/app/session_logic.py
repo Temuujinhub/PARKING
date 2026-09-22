@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .billing import calculate_fee
+from .services.hospital_benefits import apply_hospital_benefit, attach_daily_grant, finish_hospital_usage
 from .config import settings
 from .services.device_auth import camera_credentials
 from .models import (
@@ -509,6 +510,9 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
 def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None) -> dict:
     site: ParkingSite = s.site
     template = site.tariff_template if site else None
+    if (s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID")
+            and getattr(s, "hospital_fee_snapshot", None)):
+        return dict(s.hospital_fee_snapshot)
     # Дүн ЦАРЦСАН session (орох уншилтгүй машины суурь хураамж г.м): тарифаас
     # дахин бодохгүй, хадгалсан дүнг буцаана. Эс бол 0 минутын session «үнэгүй»
     # болж дараагийн гарах уншилтад хаалт төлбөргүйгээр нээгдэнэ.
@@ -536,7 +540,7 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
     from .services.payment_wait import held_fee
     held = held_fee(s, at)
     if held is not None:
-        return held
+        return apply_hospital_benefit(s, held, template)
 
     registered = s.is_registered
     drv = find_registered(db, s.plate_number, s.site_id) if db is not None else None
@@ -580,11 +584,12 @@ def session_fee_info(db: Session, s: ParkingSession, at: datetime | None = None)
         registered_free = False
         paused += int(drv.free_first_minutes)
 
-    return calculate_fee(
+    fee = calculate_fee(
         template, s.entry_time, at,
         discount=s.discount, is_registered=registered_free,
         paused_minutes=paused, no_charge=bool(site and getattr(site, "no_charge", False)),
     )
+    return apply_hospital_benefit(s, fee, template)
 
 
 def paid_total(db: Session, s: ParkingSession) -> float:
@@ -646,6 +651,7 @@ def close_paid_as_inferred_exit(db: Session, s: ParkingSession, trigger: str) ->
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     s.status = "CLOSED"
+    finish_hospital_usage(s, fee)
     s.note = (f"{s.note + ' | ' if s.note else ''}төлсөн ч гарах уншилт алдагдсан — "
               f"deadline ({(at + timedelta(hours=settings.tz_offset_hours)):%m-%d %H:%M}) дээр "
               f"гарсан гэж үзэж төлсөн дүнгээр хаав ({trigger})")[:1000]
@@ -715,6 +721,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     # ТӨЛӨВ нь ЮУ БОЛСНЫГ хэлнэ, ХЭН хаасныг биш (түүнийг `closed_by` хэлдэг):
+    finish_hospital_usage(s, fee)
     #   CLOSED        — төлбөр барагдсан
     #   FREE          — төлбөр 0₮ (үнэгүй хугацаа/гэрээт/хөнгөлөлт)
     #   MANUAL_CLOSED — «гарах уншилтгүй», төлбөр үлдсэн
@@ -1108,7 +1115,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         if is_valid_plate(plate) and not get_open_session(db, plate, site_id):
             prev_session = get_open_session(db, burst_prev.plate_number, site_id)
             # Зөвхөн саяхан (энэ burst-д) үүссэн session-ийг л засна
-            if prev_session and prev_session.entry_time >= now - timedelta(seconds=60):
+            if (prev_session and not getattr(prev_session, "hospital_grant_id", None)
+                    and prev_session.entry_time >= now - timedelta(seconds=60)):
                 old_plate = prev_session.plate_number
                 prev_session.plate_number = plate
                 db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
@@ -1144,6 +1152,11 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     registered = find_registered(db, plate, site_id)
 
     existing = get_open_session(db, plate, site_id)
+    if existing:
+        from .services.checkout import lock_session
+        existing = lock_session(db, existing.id)
+        if existing.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+            existing = None
     if existing and paid_exit_expired(db, existing, now, site_id):
         # ТӨЛСӨН машин deadline-аас хойш олон цаг «дотор» гэж тоологдож байгаад
         # ОРОХ камерт дахин уншигдав — энэ нь өөрөө гарсны нотолгоо (машин
@@ -1160,7 +1173,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # Хуучин session дээр наалдвал шинэ зогсолт огт бүртгэгдэхгүй (7/12, 7/20-ны гацаа).
         # Тиймээс: хуучныг өр (нөхөн төлбөр) үүсгэн хааж, шинэ session нээнэ.
         from .routers.compensations_router import create_compensation
-        existing.exit_time = existing.updated_at or now
+        existing.exit_time = (existing.last_exit_seen_at or existing.payment_wait_started_at
+                              or existing.updated_at or now)
         existing.exit_confirmed = True   # гарах эгнээнд уншигдсан — бодит
         old_fee = session_fee_info(db, existing, at=existing.exit_time)
         existing.duration_minutes = old_fee["duration_minutes"]
@@ -1169,6 +1183,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             existing.vat_amount = old_fee["vat_amount"]
             existing.total_fee = old_fee["total_fee"]
         existing.status = "FREE" if old_fee["is_free"] else "MANUAL_CLOSED"
+        finish_hospital_usage(existing, old_fee)
         due = amount_due(db, existing, old_fee)
         # Өр үүсгэх эсэх нь Тохиргоо → Авто цэвэрлэгээ хуудаснаас удирдагдана
         # (өмнө нь кодод хатуу бичигдсэн байв — 2026-08-21).
@@ -1203,6 +1218,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         )
         db.add(session)
         db.flush()
+
+        attach_daily_grant(db, session)
 
     # Nested: энэ зогсоол өөр зогсоолын ДОТОР бол гадна session-ий төлбөрийн
     # тоолуурыг зогсооно. Давхар уншилтад найдвартай (аль хэдийн зогссоныг
@@ -1375,6 +1392,7 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
                 note="Дотоод камераас нөхөж үүсгэв (гадна орох уншилт алдагдсан)")
             db.add(session)
             db.flush()
+            attach_daily_grant(db, session)
             log.info("[nested] %s: гадна орох уншилт алдагдсан — session нөхөж үүсгэв (%s)",
                      plate, session.id[:8])
 
@@ -1550,7 +1568,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # ОРОХ ДУТУУ уншсан байсан бол гарах ЗӨВ дугаараар ЗАСНА — цэвэр дата
         # үлдээж, дараагийн тайлан/хайлт зөв дугаараар ажиллана. Төлбөр нь
         # session-ий entry_time-аар бодогдох тул орсон цаг зөв хэвээр.
-        corrected = not is_valid_plate(old_plate) and is_valid_plate(plate)
+        corrected = (not is_valid_plate(old_plate) and is_valid_plate(plate)
+                     and not getattr(session, "hospital_grant_id", None))
         if corrected:
             session.plate_number = plate
             note = f"Орох дутуу уншилт «{old_plate}» → гарах зөв «{plate}» (засав; төлбөр орсон цагаар)"
@@ -1930,6 +1949,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         session.vat_amount = fee["vat_amount"]
         session.total_fee = fee["total_fee"]
     session.status = "FREE" if (fee["is_free"] and not session.paid_at) else "CLOSED"
+    finish_hospital_usage(session, fee)
 
     # ЧУХАЛ: session-ий өөрчлөлтийг хаалт нээхийн ӨМНӨ commit хийнэ.
     # Өмнө нь хаалтны RPC (15с хүртэл) хугацаанд транзакц нээлттэй байж

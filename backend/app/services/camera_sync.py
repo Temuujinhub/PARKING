@@ -260,6 +260,8 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 s.status = "AWAITING_PAYMENT"
             db.add(s)
             db.flush()
+            from .hospital_benefits import attach_daily_grant
+            attach_daily_grant(db, s)
             due = 0.0
             if ex:
                 # `ex` байна = камерын логт ГАРСАН нь тогтоогдсон → баримттай

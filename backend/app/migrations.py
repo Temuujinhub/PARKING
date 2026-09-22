@@ -354,6 +354,28 @@ MIGRATIONS = [
     "created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
     "CREATE INDEX IF NOT EXISTS ix_financial_jobs_due ON financial_jobs (status, next_attempt_at)",
 
+    # Hospital credentials and daily entitlements are additive; no historical fees are rewritten.
+    "CREATE TABLE IF NOT EXISTS hospital_integrations (id UUID PRIMARY KEY, "
+    "name VARCHAR(120) NOT NULL, site_id UUID REFERENCES parking_sites(id), "
+    "daily_minutes INTEGER NOT NULL, is_active BOOLEAN NOT NULL, signing_secret TEXT, "
+    "key_version INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS hospital_daily_grants (id UUID PRIMARY KEY, "
+    "integration_id UUID NOT NULL REFERENCES hospital_integrations(id), "
+    "site_id UUID NOT NULL REFERENCES parking_sites(id), plate_number VARCHAR(20) NOT NULL, "
+    "benefit_date DATE NOT NULL, daily_minutes INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, "
+    "CONSTRAINT uq_hospital_daily_grant UNIQUE (site_id,plate_number,benefit_date))",
+    "CREATE TABLE IF NOT EXISTS hospital_grant_requests (id UUID PRIMARY KEY, "
+    "integration_id UUID NOT NULL REFERENCES hospital_integrations(id), visit_id VARCHAR(100) NOT NULL, "
+    "body_hash VARCHAR(64) NOT NULL, grant_id UUID NOT NULL REFERENCES hospital_daily_grants(id), "
+    "response JSON NOT NULL, created_at TIMESTAMP NOT NULL, "
+    "CONSTRAINT uq_hospital_visit_request UNIQUE (integration_id,visit_id))",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_grant_id UUID REFERENCES hospital_daily_grants(id)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_allowance_minutes INTEGER",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_used_minutes INTEGER",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_fee_snapshot JSON",
+    "CREATE INDEX IF NOT EXISTS ix_parking_sessions_hospital_grant_id ON parking_sessions (hospital_grant_id)",
+    "CREATE INDEX IF NOT EXISTS ix_hospital_integrations_site_id ON hospital_integrations (site_id)",
+
 ]
 
 
@@ -419,6 +441,9 @@ def check_ready():
         conn.execute(text("SELECT job_key, kind, payment_id, receipt_id, status, attempts, "
                           "next_attempt_at, lease_until, lease_token, payload, last_error, "
                           "created_at, updated_at FROM financial_jobs LIMIT 0"))
+        conn.execute(text("SELECT hospital_grant_id, hospital_allowance_minutes, hospital_used_minutes, "
+                          "hospital_fee_snapshot FROM parking_sessions LIMIT 0"))
+        conn.execute(text("SELECT benefit_date, daily_minutes FROM hospital_daily_grants LIMIT 0"))
     return {"database": "ok", "schema": revision()[:12]}
 
 
