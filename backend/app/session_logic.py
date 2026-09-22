@@ -1173,7 +1173,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # Хуучин session дээр наалдвал шинэ зогсолт огт бүртгэгдэхгүй (7/12, 7/20-ны гацаа).
         # Тиймээс: хуучныг өр (нөхөн төлбөр) үүсгэн хааж, шинэ session нээнэ.
         from .routers.compensations_router import create_compensation
-        existing.exit_time = existing.updated_at or now
+        existing.exit_time = (existing.last_exit_seen_at or existing.payment_wait_started_at
+                              or existing.updated_at or now)
         existing.exit_confirmed = True   # гарах эгнээнд уншигдсан — бодит
         old_fee = session_fee_info(db, existing, at=existing.exit_time)
         existing.duration_minutes = old_fee["duration_minutes"]

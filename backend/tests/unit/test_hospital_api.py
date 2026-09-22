@@ -184,6 +184,21 @@ def test_external_client_signature_matches_server(context):
         client_module.submit("http://parking.test" + PATH, integration.id, SECRET, raw)
 
 
+def test_terminal_hospital_snapshot_replaces_expired_cached_unpaid_amount(context):
+    db, _, _, integration, _, stay, client = context
+    assert send(client, integration).status_code == 200
+    db.refresh(stay)
+    stay.total_fee = 3000
+    final = SL.session_fee_info(db, stay, at=NOW.replace(tzinfo=None) + timedelta(hours=1))
+    assert final["total_fee"] == 6000
+    finish_hospital_usage(stay, final)
+    assert stay.total_fee == stay.hospital_fee_snapshot["total_fee"] == 6000
+    stay.paid_at = NOW.replace(tzinfo=None)
+    stay.total_fee = 3000
+    finish_hospital_usage(stay, final)
+    assert stay.total_fee == 3000  # settled row is never repriced by quota cleanup
+
+
 def test_reentry_spends_remaining_minutes_then_full_tariff(context):
     db, site, _, integration, _, stay, client = context
     stay.entry_time = NOW.replace(tzinfo=None) - timedelta(minutes=60)

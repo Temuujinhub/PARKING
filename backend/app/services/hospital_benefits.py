@@ -97,3 +97,8 @@ def finish_hospital_usage(stay, fee):
     stay.hospital_used_minutes = used
     stay.hospital_allowance_minutes = used
     stay.hospital_fee_snapshot = dict(fee)
+    if not stay.paid_at:
+        # An earlier exit quote may be cached on the row. Final reports/debts
+        # must use this final discounted quote, without rewriting settled money.
+        stay.base_fee, stay.vat_amount, stay.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+        stay.discount_amount = fee["discount_amount"]

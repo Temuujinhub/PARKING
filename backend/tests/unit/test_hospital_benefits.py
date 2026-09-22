@@ -24,7 +24,7 @@ def template():
 
 
 def stay(minutes=120):
-    return SimpleNamespace(hospital_grant_id=ID, hospital_allowance_minutes=minutes, fee_locked=False)
+    return SimpleNamespace(hospital_grant_id=ID, hospital_allowance_minutes=minutes, fee_locked=False, paid_at=None)
 
 
 @pytest.mark.parametrize("duration,allowance,expected,used", [
