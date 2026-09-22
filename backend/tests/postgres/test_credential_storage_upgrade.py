@@ -21,7 +21,7 @@ def test_widening_preserves_legacy_values_and_long_encrypted_credentials(engine,
     migrations.run_migrations()
     monkeypatch.setattr(settings, "secret_enc_key", Fernet.generate_key().decode())
     with Session(engine) as db:
-        tenant = M.Tenant(name="Synthetic credential storage")
+        tenant = M.Tenant(name="Synthetic credential storage", code="CRED_STORAGE")
         site = M.ParkingSite(name="Synthetic credential storage", site_code="CRED_STORAGE")
         db.add_all([tenant, site]); db.flush()
         device = M.Device(site_id=site.id, name="Synthetic", device_type="camera")
