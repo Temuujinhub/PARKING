@@ -287,3 +287,28 @@ def test_https_and_bounded_body_required(context):
     assert client.post("http://parking.test" + PATH, json=payload()).status_code == 400
     assert client.post(PATH, content=b"x"*4097, headers={"content-type": "application/json"}).status_code == 413
     assert client.post(PATH, content="bad", headers={"content-type": "text/plain"}).status_code == 415
+
+
+def test_grants_report_lists_plates_per_site_and_day_with_scope(context):
+    db, site, other, integration, user, stay, client = context
+    assert send(client, integration).status_code == 200
+    assert send(client, integration, payload(visit_id="visit-2")).status_code == 200
+    day = NOW.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+    report = client.get(H.REPORT_PATH, params={"date_from": day, "date_to": day}).json()
+    assert [r["plate_number"] for r in report["rows"]] == ["1234УБА"]
+    row = report["rows"][0]
+    assert row["site_name"] == "Synthetic" and row["integration_name"] == "Hospital"
+    assert [v["visit_id"] for v in row["visits"]] == ["visit-1", "visit-2"]
+    assert row["daily_minutes"] == 120 and row["stays"][0]["session_id"] == stay.id
+    assert report["summary"] == [{"benefit_date": day, "site_id": site.id, "site_name": "Synthetic",
+                                  "grants": 1, "stays": 1, "used_minutes": 0, "discount_amount": 0.0}]
+    # Өөр зогсоол шүүвэл хоосон; өчигдөр хоосон; буруу муж 422
+    assert client.get(H.REPORT_PATH, params={"site_id": other.id}).json()["rows"] == []
+    yesterday = (NOW - timedelta(days=1)).astimezone(timezone(timedelta(hours=8))).date().isoformat()
+    assert client.get(H.REPORT_PATH, params={"date_from": yesterday, "date_to": yesterday}).json()["rows"] == []
+    assert client.get(H.REPORT_PATH, params={"date_from": day, "date_to": yesterday}).status_code == 422
+    assert client.get(H.REPORT_PATH, params={"date_from": "2026-01-01", "date_to": "2026-12-31"}).status_code == 422
+    # Tenant хүрээ: зөвхөн «Other» зогсоолын админ энэ эрхийг харахгүй, өөр зогсоол асуувал 403
+    user.role, user.site_ids = "ADMIN", [other.id]
+    assert client.get(H.REPORT_PATH).json()["rows"] == []
+    assert client.get(H.REPORT_PATH, params={"site_id": site.id}).status_code == 403

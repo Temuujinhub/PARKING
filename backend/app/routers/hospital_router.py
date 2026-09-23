@@ -243,3 +243,94 @@ async def grant_visit(request: Request, db: Session = Depends(get_db)):
     except (OperationalError, IntegrityError) as exc:
         db.rollback()
         raise HTTPException(409, "RETRY_SAME_VISIT_ID") from exc
+
+
+# ── Тайлан: эмнэлгийн хөнгөлөлт авсан машинууд (зогсоол · өдрөөр) ─────────
+# Зөвхөн УНШИНА — эрх олгохгүй, төлбөр өөрчлөхгүй. Оператор/админы tenant хүрээ
+# (operator_sites) хэвээр үйлчилнэ. Өвчтөний мэдээлэл системд огт байдаггүй тул
+# зөвхөн дугаар, visit_id (эмнэлгийн opaque ID), зогсолт, минут, дүн харагдана.
+REPORT_PATH = "/api/hospital/grants"
+REPORT_MAX_DAYS = 92
+
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+def _stay_view(stay):
+    """Нэг зогсолтын хөнгөлөлтийн үр дүн. Хаагдсан бол эцсийн snapshot, идэвхтэй бол
+    түр үнийн санал (payment_quote) эсвэл зөвхөн нөөцөлсөн минут."""
+    fee = stay.hospital_fee_snapshot or {}
+    if not fee and (stay.payment_quote or {}).get("hospital_grant_id") == stay.hospital_grant_id:
+        fee = stay.payment_quote
+    final = stay.hospital_used_minutes is not None
+    return {
+        "session_id": stay.id, "status": stay.status,
+        "entry_time": _iso(stay.entry_time), "exit_time": _iso(stay.exit_time), "paid_at": _iso(stay.paid_at),
+        "allowance_minutes": stay.hospital_allowance_minutes,
+        "used_minutes": stay.hospital_used_minutes if final else fee.get("hospital_used_minutes"),
+        "final": final,
+        "discount_amount": fee.get("hospital_discount_amount"),
+        "original_fee": fee.get("hospital_original_fee"),
+        "total_fee": float(stay.total_fee) if stay.total_fee is not None else fee.get("total_fee"),
+    }
+
+
+@router.get(REPORT_PATH)
+def grants_report(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
+                  plate: str | None = None, db: Session = Depends(get_db),
+                  user: User = Depends(require("reports", "discounts", "settings"))):
+    from collections import defaultdict
+    from datetime import date
+    today = local_date(datetime.now(timezone.utc))
+    try:
+        start = date.fromisoformat(date_from) if date_from else today
+        end = date.fromisoformat(date_to) if date_to else start
+    except ValueError:
+        raise HTTPException(422, "Огноо YYYY-MM-DD хэлбэртэй байна")
+    if end < start:
+        raise HTTPException(422, "Эхлэх огноо дуусахаас хойш байж болохгүй")
+    if (end - start).days >= REPORT_MAX_DAYS:
+        raise HTTPException(422, f"Хамгийн ихдээ {REPORT_MAX_DAYS} хоногийн муж")
+    allowed = operator_sites(user)
+    if site_id:
+        enforce_site(user, site_id)
+    query = (db.query(HospitalDailyGrant, ParkingSite.name, HospitalIntegration.name)
+             .join(ParkingSite, ParkingSite.id == HospitalDailyGrant.site_id)
+             .join(HospitalIntegration, HospitalIntegration.id == HospitalDailyGrant.integration_id)
+             .filter(HospitalDailyGrant.benefit_date >= start, HospitalDailyGrant.benefit_date <= end))
+    if site_id:
+        query = query.filter(HospitalDailyGrant.site_id == site_id)
+    elif allowed is not None:
+        query = query.filter(HospitalDailyGrant.site_id.in_(allowed))
+    if plate and plate.strip():
+        query = query.filter(HospitalDailyGrant.plate_number.ilike(f"%{plate.strip().upper()}%"))
+    grants = query.order_by(HospitalDailyGrant.benefit_date.desc(), ParkingSite.name,
+                            HospitalDailyGrant.created_at.desc()).limit(2000).all()
+    ids = [g.id for g, _, _ in grants]
+    visits, stays = defaultdict(list), defaultdict(list)
+    if ids:
+        for r in (db.query(HospitalGrantRequest).filter(HospitalGrantRequest.grant_id.in_(ids))
+                  .order_by(HospitalGrantRequest.created_at).all()):
+            visits[r.grant_id].append({"visit_id": r.visit_id, "at": _iso(r.created_at)})
+        for s in (db.query(ParkingSession).enable_eagerloads(False)
+                  .filter(ParkingSession.hospital_grant_id.in_(ids)).order_by(ParkingSession.entry_time).all()):
+            stays[s.hospital_grant_id].append(_stay_view(s))
+    rows, summary = [], {}
+    for g, site_name, integration_name in grants:
+        st = stays[g.id]
+        used = sum(int(x["used_minutes"] or 0) for x in st)
+        discount = sum(float(x["discount_amount"] or 0) for x in st)
+        rows.append({"grant_id": g.id, "benefit_date": g.benefit_date.isoformat(), "site_id": g.site_id,
+                     "site_name": site_name, "integration_name": integration_name,
+                     "plate_number": g.plate_number, "daily_minutes": g.daily_minutes,
+                     "granted_at": _iso(g.created_at), "visits": visits[g.id], "stays": st,
+                     "used_minutes": used, "remaining_minutes": max(0, g.daily_minutes - used),
+                     "discount_amount": round(discount, 2)})
+        key = (g.benefit_date.isoformat(), g.site_id)
+        agg = summary.setdefault(key, {"benefit_date": key[0], "site_id": g.site_id, "site_name": site_name,
+                                       "grants": 0, "stays": 0, "used_minutes": 0, "discount_amount": 0.0})
+        agg["grants"] += 1; agg["stays"] += len(st); agg["used_minutes"] += used
+        agg["discount_amount"] = round(agg["discount_amount"] + discount, 2)
+    return {"rows": rows, "summary": list(summary.values()),
+            "date_from": start.isoformat(), "date_to": end.isoformat(), "today": today.isoformat()}
