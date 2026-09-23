@@ -35,6 +35,7 @@ BACKUP="/root/parking-backup-$(date +%Y%m%d-%H%M%S).sql"
 umask 077                       # backup дотор нууц үг байж болзошгүй — зөвхөн root уншина
 sudo -u postgres pg_dump parking > "$BACKUP"
 chmod 600 "$BACKUP"
+umask 022                       # ЗААВАЛ буцаана: 077 хэвээр бол frontend build-ийн файлууд 0600 болж nginx 403 (сайт хар) өгдөг (2026-09-23 прод дээр гарсан)
 echo "    хадгалав: $BACKUP"
 # 14 хоногоос хуучин backup-уудыг цэвэрлэнэ (диск дүүрэхээс сэргийлнэ)
 find /root -maxdepth 1 -name 'parking-backup-*.sql' -mtime +14 -delete 2>/dev/null || true
@@ -125,6 +126,7 @@ fi
 NODE_OPTIONS=--max-old-space-size=1400 npm run build
 cp -r dist/* /var/www/parking/
 chown -R www-data:www-data /var/www/parking
+chmod -R a+rX /var/www/parking   # umask-аас үл хамааран nginx уншиж чадна
 cd ..
 
 echo "==> 6/7 Backend дахин асаах (схем автоматаар шинэчилнэ)"
