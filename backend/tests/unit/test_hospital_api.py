@@ -312,3 +312,60 @@ def test_grants_report_lists_plates_per_site_and_day_with_scope(context):
     user.role, user.site_ids = "ADMIN", [other.id]
     assert client.get(H.REPORT_PATH).json()["rows"] == []
     assert client.get(H.REPORT_PATH, params={"site_id": site.id}).status_code == 403
+
+
+def test_delete_unused_integration_removes_row(context):
+    db, _, _, _, _, _, client = context
+    created = client.post(H.ADMIN_PATH, json={"name": "Туршилт"}).json()
+    listed = client.get(H.ADMIN_PATH).json()["integrations"]
+    assert any(r["id"] == created["id"] and r["has_history"] is False for r in listed)
+    res = client.delete(H.ADMIN_PATH + "/" + created["id"])
+    assert res.status_code == 200 and res.json()["mode"] == "deleted"
+    assert db.get(M.HospitalIntegration, created["id"]) is None
+    assert all(r["id"] != created["id"] for r in client.get(H.ADMIN_PATH).json()["integrations"])
+    audit = db.query(M.AuditLog).filter_by(action="HOSPITAL_DELETE", entity_id=created["id"]).one()
+    assert audit.detail["mode"] == "deleted" and "signing_secret" not in json.dumps(audit.detail)
+    assert client.delete(H.ADMIN_PATH + "/" + created["id"]).status_code == 404
+
+
+def test_delete_used_integration_archives_and_revokes_key(context):
+    db, site, _, integration, _, _, client = context
+    assert send(client, integration).status_code == 200           # эрх олгосон — түүхтэй
+    assert client.get(H.ADMIN_PATH).json()["integrations"][0]["has_history"] is True
+    res = client.delete(H.ADMIN_PATH + "/" + integration.id)
+    assert res.status_code == 200 and res.json()["mode"] == "archived"
+    db.expire_all()
+    row = db.get(M.HospitalIntegration, integration.id)
+    assert row is not None and row.deleted_at is not None
+    assert row.is_active is False and row.signing_secret is None
+    assert client.get(H.ADMIN_PATH).json()["integrations"] == []
+    # Эмнэлэг цаашид хүсэлт илгээж чадахгүй; засах/түлхүүр солих боломжгүй
+    assert send(client, integration, payload(visit_id="visit-9")).status_code == 401
+    body = {"name": "Revived", "site_id": site.id, "daily_minutes": 60, "is_active": False}
+    assert client.put(H.ADMIN_PATH + "/" + integration.id, json=body).status_code == 404
+    assert client.post(H.ADMIN_PATH + "/" + integration.id + "/rotate-key").status_code == 404
+    # Түүх (тайлан) хэвээр
+    day = NOW.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+    report = client.get(H.REPORT_PATH, params={"date_from": day, "date_to": day}).json()
+    assert [r["integration_name"] for r in report["rows"]] == ["Hospital"]
+
+
+def test_scoped_admin_cannot_delete_other_site_integration(context):
+    db, _, other, integration, user, _, client = context
+    user.role = "ADMIN"; user.site_id = other.id
+    db.commit()
+    assert client.delete(H.ADMIN_PATH + "/" + integration.id).status_code == 403
+    db.expire_all()
+    assert db.get(M.HospitalIntegration, integration.id).deleted_at is None
+
+
+def test_has_history_counts_request_only_integration(context):
+    db, site, _, integration, _, _, client = context
+    assert send(client, integration).status_code == 200            # A-ийн өдрийн эрх
+    b = M.HospitalIntegration(name="B", site_id=site.id, daily_minutes=120, is_active=True,
+                              key_version=1, signing_secret=encrypt_secret(SECRET))
+    db.add(b); db.commit()
+    assert send(client, b, payload(visit_id="visit-b")).status_code == 200   # A-ийн эрхийг дахин ашиглана
+    flags = {r["name"]: r["has_history"] for r in client.get(H.ADMIN_PATH).json()["integrations"]}
+    assert flags == {"Hospital": True, "B": True}
+    assert client.delete(H.ADMIN_PATH + "/" + b.id).json()["mode"] == "archived"

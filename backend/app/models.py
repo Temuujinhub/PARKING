@@ -387,6 +387,9 @@ class HospitalIntegration(Base):
     is_active = Column(Boolean, nullable=False, default=False)
     signing_secret = Column(Text, nullable=True)
     key_version = Column(Integer, nullable=False, default=0)
+    # Түүхтэй (эрх олгож байсан) холболтыг устгахад мөрийг хадгалж архивлана —
+    # өдрийн эрх, зогсолтын хөнгөлөлт, тайлан түүн рүү заадаг.
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { KeyRound, Plus, ShieldCheck } from 'lucide-react'
+import { KeyRound, Plus, ShieldCheck, Trash2 } from 'lucide-react'
 import { api } from '../../api'
 
 const URL = '/api/admin/hospital-integrations'
 const emptyForm = { name: '', site_id: '', daily_minutes: 120, is_active: false }
 const focus = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed'
 const button = 'min-h-11 rounded-lg border border-surface-border px-3 py-2 text-sm text-slate-200 hover:bg-surface-muted ' + focus
+const danger = 'min-h-11 rounded-lg border border-red-800 px-3 py-2 text-sm text-red-300 hover:bg-red-950 ' + focus
 const primary = 'min-h-11 rounded-lg bg-emerald-800 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-900 ' + focus
 
 export default function HospitalBenefitsPanel() {
@@ -51,6 +52,27 @@ export default function HospitalBenefitsPanel() {
       setNotice('Түлхүүр үүслээ. Доорх утга зөвхөн энэ удаа харагдана.')
     } catch (e) { setError(e.message) }
     finally { setBusy(false) }
+  }
+
+  async function remove(row) {
+    const msg = row.has_history
+      ? `«${row.name}» холболтыг устгах уу?\n\nЭнэ холболтоор эрх олгож байсан тул түүх (тайлан, зогсолтын хөнгөлөлт) хадгалагдана. Холболт идэвхгүй болж, API түлхүүр тэр даруй хүчингүй болох бөгөөд жагсаалтаас алга болно.`
+      : `«${row.name}» холболтыг БҮРМӨСӨН устгах уу? Энэ үйлдлийг буцаах боломжгүй.`
+    if (!window.confirm(msg)) return
+    setError(''); setNotice(''); setBusy(true)
+    try {
+      const result = await api(URL + '/' + row.id, { method: 'DELETE' })
+      if (form?.id === row.id) setForm(null)
+      if (secret?.id === row.id) setSecret(null)
+      await load()
+      setNotice(result.mode === 'archived'
+        ? `«${row.name}» устгагдлаа — түүх хадгалагдсан, түлхүүр хүчингүй болсон.`
+        : `«${row.name}» бүрмөсөн устгагдлаа.`)
+    } catch (e) {
+      setError(e.message)
+      if (form?.id === row.id) setForm(null)
+      load().catch(() => {})   // өөр админ аль хэдийн устгасан бол жагсаалт шинэчлэгдэнэ
+    } finally { setBusy(false) }
   }
 
   async function copySecret() {
@@ -133,6 +155,8 @@ export default function HospitalBenefitsPanel() {
           <button type="button" className={button} disabled={busy} onClick={() => { setForm({ ...row }); setError(''); setNotice('') }}>Тохируулах</button>
           <button type="button" className={button + ' flex items-center gap-2'} disabled={busy || !row.site_id || !data.encryption_ready || Boolean(secret)}
             onClick={() => rotate(row)}><KeyRound size={15} aria-hidden="true" /> {row.key_set ? 'Түлхүүр солих' : 'Түлхүүр үүсгэх'}</button>
+          <button type="button" className={danger + ' flex items-center gap-2'} disabled={busy}
+            onClick={() => remove(row)}><Trash2 size={15} aria-hidden="true" /> Устгах</button>
         </div>
       </article>)}
     </div>

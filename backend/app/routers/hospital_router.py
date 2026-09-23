@@ -63,7 +63,9 @@ def check_scope(user, site_id):
 
 def admin_row(db, row_id, user):
     try:
-        row = db.query(HospitalIntegration).filter(HospitalIntegration.id == str(row_id)).with_for_update(nowait=True).first()
+        row = (db.query(HospitalIntegration)
+               .filter(HospitalIntegration.id == str(row_id), HospitalIntegration.deleted_at.is_(None))
+               .with_for_update(nowait=True).first())
     except OperationalError as exc:
         db.rollback()
         raise HTTPException(409, "Тохиргоог өөр хэрэглэгч засаж байна. Дахин оролдоно уу") from exc
@@ -101,11 +103,18 @@ def apply_config(db, row, body, user):
 
 @router.get(ADMIN_PATH)
 def list_integrations(db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    query = db.query(HospitalIntegration)
+    query = db.query(HospitalIntegration).filter(HospitalIntegration.deleted_at.is_(None))
     allowed = operator_sites(user)
     if allowed is not None:
         query = query.filter(HospitalIntegration.site_id.in_(allowed))
-    return {"integrations": [public_config(row) for row in query.order_by(HospitalIntegration.created_at).all()],
+    rows = query.order_by(HospitalIntegration.created_at).all()
+    ids = [r.id for r in rows]
+    used = set()
+    if ids:   # устгах шийдвэртэй ижил дүрэм: өдрийн эрх ЭСВЭЛ хүсэлтийн түүх
+        for model in (HospitalDailyGrant, HospitalGrantRequest):
+            used |= {i for (i,) in db.query(model.integration_id)
+                     .filter(model.integration_id.in_(ids)).distinct()}
+    return {"integrations": [{**public_config(row), "has_history": row.id in used} for row in rows],
             "can_leave_unassigned": allowed is None,
             "encryption_ready": bool(settings.secret_enc_key), "endpoint": PATH}
 
@@ -218,7 +227,8 @@ async def grant_visit(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(401, "INVALID_HOSPITAL_SIGNATURE")
     try:
         integration = db.query(HospitalIntegration).filter(HospitalIntegration.id == integration_id).first()
-        if not integration or not integration.is_active or not integration.site_id or not integration.signing_secret:
+        if (not integration or integration.deleted_at or not integration.is_active
+                or not integration.site_id or not integration.signing_secret):
             raise HTTPException(401, "INVALID_HOSPITAL_SIGNATURE")
         if not verify(decrypt_secret(integration.signing_secret), integration_id,
                       request.headers.get("x-hospital-timestamp", ""), raw,
@@ -228,10 +238,12 @@ async def grant_visit(request: Request, db: Session = Depends(get_db)):
             raise HTTPException(429, "RATE_LIMITED", headers={"Retry-After": "60"})
         # Authenticate before locking, then revalidate any concurrent key rotation.
         integration = (db.query(HospitalIntegration).filter(HospitalIntegration.id == integration_id)
-                       .populate_existing().with_for_update(nowait=True).one())
-        if not integration.is_active or not verify(decrypt_secret(integration.signing_secret),
+                       .populate_existing().with_for_update(nowait=True).first())
+        if (integration is None or integration.deleted_at or not integration.is_active
+                or not integration.signing_secret
+                or not verify(decrypt_secret(integration.signing_secret),
                 integration_id, request.headers.get("x-hospital-timestamp", ""), raw,
-                request.headers.get("x-hospital-signature", ""), int(time.time())):
+                request.headers.get("x-hospital-signature", ""), int(time.time()))):
             raise HTTPException(401, "INVALID_HOSPITAL_SIGNATURE")
         try:
             visit = VisitInput.model_validate_json(raw)
@@ -243,6 +255,31 @@ async def grant_visit(request: Request, db: Session = Depends(get_db)):
     except (OperationalError, IntegrityError) as exc:
         db.rollback()
         raise HTTPException(409, "RETRY_SAME_VISIT_ID") from exc
+
+
+@router.delete(ADMIN_PATH + "/{row_id}")
+def delete_integration(row_id: UUID, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """Холболт устгах. Ашиглагдаагүй бол бүрмөсөн устгана. Эрх олгож байсан бол
+    (өдрийн эрх/хүсэлт, зогсолтын хөнгөлөлт, тайлан түүн рүү заадаг) мөрийг
+    хадгалж АРХИВЛАНА: идэвхгүй, түлхүүр хүчингүй, жагсаалтаас нуугдана —
+    эмнэлэг цаашид хүсэлт илгээж чадахгүй, түүх эвдрэхгүй."""
+    row = admin_row(db, row_id, user)
+    used = (db.query(HospitalDailyGrant.id).filter(HospitalDailyGrant.integration_id == row.id).first()
+            is not None or
+            db.query(HospitalGrantRequest.id).filter(HospitalGrantRequest.integration_id == row.id).first()
+            is not None)
+    row_id_str, mode = row.id, ("archived" if used else "deleted")
+    detail = {**public_config(row), "mode": mode}
+    if used:
+        row.is_active = False
+        row.signing_secret = None
+        row.deleted_at = datetime.utcnow()
+    else:
+        db.delete(row)
+    db.add(AuditLog(username=user.username, action="HOSPITAL_DELETE", entity="hospital_integration",
+                    entity_id=row_id_str, detail=detail))
+    db.commit()
+    return {"id": row_id_str, "mode": mode}
 
 
 # ── Тайлан: эмнэлгийн хөнгөлөлт авсан машинууд (зогсоол · өдрөөр) ─────────

@@ -385,6 +385,9 @@ MIGRATIONS = [
     "ALTER TABLE parking_sites ALTER COLUMN qpay_password TYPE TEXT",
     "ALTER TABLE devices ALTER COLUMN password TYPE TEXT",
 
+    # Эмнэлгийн холболт устгах: түүхтэйг архивлана (мөр хадгалагдана).
+    "ALTER TABLE hospital_integrations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
+
 ]
 
 
