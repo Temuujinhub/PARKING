@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, fmt, preferredSite, rememberSite, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
+import { paymentOutcome } from '../paymentOutcome'
 import CashierStats from './cashier/CashierStats'
 import ExitQueue from './cashier/ExitQueue'
 import FreeExitModal from './cashier/FreeExitModal'
@@ -34,10 +35,22 @@ export default function Cashier() {
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
   const [blAlert, setBlAlert] = useState(null) // хар жагсаалтын машин орж ирсэн анхааруулга
 
+  const currentSite = useRef(siteId)
+  currentSite.current = siteId
+  const loadGeneration = useRef(0)
+  const searchGeneration = useRef(0)
   const loadExits = useCallback((sid) => {
-    if (!sid) return
-    api(`/api/sessions/recent-exits?site_id=${sid}`).then(setExits).catch(() => {})
-    api(`/api/sessions/today-exits?site_id=${sid}`).then(setOverview).catch(() => {})
+    if (!sid || sid !== currentSite.current) return
+    const generation = ++loadGeneration.current
+    const current = () => generation === loadGeneration.current && sid === currentSite.current
+    api(`/api/sessions/recent-exits?site_id=${sid}`).then((rows) => {
+      if (!current()) return
+      setExits(rows)
+      setSelected((old) => old ? rows.find((r) => r.id === old.id) || old : null)
+    }).catch(() => {})
+    api(`/api/sessions/today-exits?site_id=${sid}`).then((data) => {
+      if (current()) setOverview(data)
+    }).catch(() => {})
   }, [])
   const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => {})
 
@@ -55,6 +68,11 @@ export default function Cashier() {
   }, [user])
 
   useEffect(() => {
+    setSelected(null); setQpayInfo(null); setSearchPlate(''); setSearchResults(null)
+    setExits([]); setOverview(null); setBlAlert(null); setManualEntry(null)
+    setFreeExit(false); setSpecialKind(null)
+    clearTimeout(searchDebounce.current)
+    searchGeneration.current += 1
     if (!siteId) return
     loadExits(siteId)
     const close = wsConnect(siteId, (ev) => {
@@ -68,19 +86,24 @@ export default function Cashier() {
         setBlAlert({ ...ev.data, at: new Date().toISOString() })
       }
     })
-    return close
+    const poll = setInterval(() => loadExits(siteId), 15000)
+    return () => { close(); clearInterval(poll); loadGeneration.current += 1 }
   }, [siteId, loadExits])
 
   const search = async (q) => {
+    const generation = ++searchGeneration.current
+    const sid = siteId
     const value = (q ?? searchPlate).trim()
     if (value.length < 2) { setSearchResults(null); return }
     try {
-      setSearchResults(await api(`/api/sessions/check?plate=${encodeURIComponent(value)}&site_id=${siteId}`))
+      const rows = await api(`/api/sessions/check?plate=${encodeURIComponent(value)}&site_id=${sid}`)
+      if (generation === searchGeneration.current && sid === currentSite.current) setSearchResults(rows)
     } catch (e) { toast(e.message, 'error') }
   }
 
   // Live хайлт: эхний 2+ тэмдэгт бичихэд таарах машинууд шууд гарна
   const onSearchChange = (value) => {
+    searchGeneration.current += 1
     const v = value.toUpperCase()
     setSearchPlate(v)
     clearTimeout(searchDebounce.current)
@@ -89,30 +112,35 @@ export default function Cashier() {
   }
 
   const pay = async (method) => {
-    if (!selected) return
+    if (!selected || selected.site_id !== siteId) {
+      toast('Энэ зогсоолын машиныг дахин сонгоно уу.', 'error'); return
+    }
+    const expectedAmount = selected.amount_due ?? selected.fee?.total_fee ?? selected.total_fee
     // Дансаар: оператор шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасныг баталгаажуулна
     if (method === 'TRANSFER') {
       const site = sites.find((s) => s.id === siteId)
       const acc = site?.bank_account
         ? `${site.bank_name || ''} ${site.bank_account} (${site.bank_account_name || ''})` : 'зогсоолын данс'
-      if (!confirm(`${selected.plate_number} — ${fmt(selected.fee?.total_fee)}₮\n\n${acc} руу шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасан уу?\n\nOK = төлбөр баталгаажуулж хаалт нээнэ`)) return
+      if (!confirm(`${selected.plate_number} — ${fmt(expectedAmount)}₮\n\n${acc} руу шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас шалгасан уу?\n\nOK = төлбөр баталгаажуулж хаалт нээнэ`)) return
     }
     setBusy(true)
     try {
-      if (method === 'CASH') {
-        await api('/api/payments/cash', { method: 'POST', body: { session_id: selected.id } })
-        toast('Бэлэн мөнгөөр төлөгдлөө. Хаалт нээгдэж байна.')
-        setSelected(null)
-      } else if (method === 'TRANSFER') {
-        await api('/api/payments/transfer', { method: 'POST', body: { session_id: selected.id } })
-        toast('Дансаар төлөгдлөө. Хаалт нээгдэж байна.')
-        setSelected(null)
+      if (method === 'CASH' || method === 'TRANSFER') {
+        const result = await api(`/api/payments/${method === 'CASH' ? 'cash' : 'transfer'}`, {
+          method: 'POST', body: { session_id: selected.id, expected_amount: expectedAmount },
+        })
+        const outcome = paymentOutcome(result)
+        toast(`${outcome.title}. ${outcome.message}`)
+        if (outcome.needsBalanceRefresh || outcome.kind === 'gate_attention') {
+          const fresh = await api(`/api/sessions/${selected.id}`)
+          setSelected(fresh)
+        } else setSelected(null)
       } else if (method === 'QPAY') {
         const inv = await api('/api/payments/qpay/invoice', { method: 'POST', body: { session_id: selected.id, source: 'POS' } })
         setQpayInfo(inv)
       }
       loadExits(siteId); loadShift()
-    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+    } catch (e) { toast(e.message, 'error'); loadExits(siteId) } finally { setBusy(false) }
   }
 
   const applyDiscount = async (discountId) => {
@@ -265,7 +293,7 @@ export default function Cashier() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Касс</h1>
         <div className="flex items-center gap-3">
-          <select className="input w-56" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол сонгох">
+          <select className="input w-56" value={siteId} disabled={busy} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }} aria-label="Зогсоол сонгох">
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {testMode && (

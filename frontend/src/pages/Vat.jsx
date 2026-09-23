@@ -14,7 +14,7 @@ const TABS = [['receipts', 'Баримт'], ['recon', 'ТЕГ тулгалт']]
 // дугаартай, дүн ДДТД-тэй андуурагдаж олддог байсныг салгав (2026-09-01)
 const EMPTY_FILTERS = { plate: '', ddtd: '', lottery: '', site: '', provider: '', status: '', amount: '' }
 const STATUS_OPTS = [['', 'Төлөв: бүгд'], ['SENT', 'Илгээсэн'], ['FAILED', 'Амжилтгүй'],
-  ['PENDING', 'Хүлээгдэж буй'], ['CANCELLED', 'Цуцалсан'], ['CANCEL_PENDING', 'Цуцлалт хүлээгдэж буй']]
+  ['PENDING', 'Хүлээгдэж буй'], ['REVIEW', 'Тулгах шаардлагатай'], ['CANCELLED', 'Цуцалсан'], ['CANCEL_PENDING', 'Цуцлалт хүлээгдэж буй']]
 const PROVIDER_OPTS = [['', 'Суваг: бүгд'], ['QPAY', 'QPay'], ['MSGBILL', 'msgbill.mn'],
   ['POSAPI', 'PosAPI'], ['TERMINAL', 'POS терминал']]
 
@@ -82,10 +82,10 @@ export default function Vat() {
         else if (bulking) {
           setBulking(false)
           const top = (j.top_errors || [])[0]
-          toast(`${j.ok} баримт үүсэв · ${j.failed} унав · ${j.skipped} алгасав`
+          toast(`${j.ok} баримт баталгаажсан · ${j.queued || 0} хүлээгдэж буй · ${j.failed} шалгах шаардлагатай · ${j.skipped} алгассан`
             + (j.remaining ? ` · ${j.remaining} үлдсэн — дахин дарна уу` : '')
             + (j.stopped ? ` — ${j.stopped}` : top ? ` · «${top.error.slice(0, 70)}»` : ''),
-            j.ok ? 'success' : 'error')
+            j.ok || j.queued ? 'success' : 'error')
           reloadFails().then(() => setFailsAt(new Date())); reloadRows(); reloadInfo()
         }
       } catch { /* статус татагдахгүй бол дараагийн дарахад л мэдэгдэнэ */ }
@@ -120,9 +120,9 @@ export default function Vat() {
       const more = total > pre.candidates
         ? `\n\nНийт ${total} байгаагаас энэ удаа ${pre.candidates}-ыг оролдоно (нэг дарахад дээд тал нь ${pre.limit || 500}) — дуусмагц ДАХИН дарна уу.`
         : ''
-      if (!window.confirm(`${pre.candidates} төлбөрийн ДДТД-г дахин үүсгэх үү?${more}\n\n`
-        + 'Төлбөрийг ДАХИН АВАХГҮЙ — зөвхөн баримт үүснэ. ДДТД аль хэдийн үүссэн '
-        + 'баримтыг алгасна. Квот дүүрвэл тэр дороо зогсоно.\n\n'
+      if (!window.confirm(`${pre.candidates} төлбөрийн баримтын нөхөлтийг хүсэх үү?${more}\n\n`
+        + 'Төлбөрийг дахин авахгүй. Аюулгүй нөхөж болох баримтын ажлыг хадгална. '
+        + 'Үр дүн нь тодорхойгүй хуучин баримтыг эхлээд сувгаар тулгана.\n\n'
         + 'Гадны шалтгааныг (квот/ТТД бүртгэл) ЗАССАН эсэхээ эхлээд шалгаарай — '
         + 'эс бол бүгд дахин унана.')) { setBulking(false); return }
       const r = await api('/api/reports/vat-retry-failed', { method: 'POST', body: base })
@@ -144,7 +144,8 @@ export default function Vat() {
     try {
       const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`,
         { method: 'POST', ...(opts ? { body: opts } : {}) })
-      toast(`Баримт үүслээ — ДДТД ${res.ebarimt_id}`)
+      if (res.ok && res.ebarimt_id) toast(`Баримт баталгаажсан — ДДТД ${res.ebarimt_id}`)
+      else toast(res.error || 'Баримтын ажил хүлээгдэж байна; дахин төлөхгүй', res.pending ? 'success' : 'error')
       reloadRows(); reloadFails()
     } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
   }
@@ -268,7 +269,7 @@ export default function Vat() {
           {job && (
             <div className={`text-xs rounded px-2 py-1 ${job.running ? 'bg-sky-900/40 text-sky-200' : 'bg-slate-800 text-slate-300'}`}>
               {job.running ? '⏳ Нөхөлт явагдаж байна' : '✔ Сүүлийн нөхөлт дууссан'} · {job.done}/{job.total}
-              {' '}· үүссэн <b className="font-mono">{job.ok}</b> · унасан <b className="font-mono">{job.failed}</b>
+              {' '}· баталгаажсан <b className="font-mono">{job.ok}</b> · хүлээгдэж буй <b className="font-mono">{job.queued || 0}</b> · шалгах <b className="font-mono">{job.failed}</b>
               {job.skipped ? ` · алгассан ${job.skipped}` : ''}
               {job.remaining ? ` · үлдсэн ${fmt(job.remaining)} (дахин дарна)` : ''}
               {job.stopped ? ` · ${job.stopped}` : ''}
@@ -379,7 +380,7 @@ export default function Vat() {
               {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : r.provider === 'TERMINAL' ? 'POS терминал' : r.provider === 'POSAPI' ? 'PosAPI' : r.provider}</div>}
             </td>
             <td className={`td text-[11px] max-w-[14rem] break-words ${r.status === 'CANCELLED' ? 'text-slate-400' : 'text-amber-400'}`}>
-              {['FAILED', 'CANCELLED', 'CANCEL_PENDING'].includes(r.status) ? (r.receipt_url || '—') : ''}
+              {['FAILED', 'REVIEW', 'CANCELLED', 'CANCEL_PENDING'].includes(r.status) ? (r.receipt_url || '—') : ''}
             </td>
             <td className="td whitespace-nowrap">
               <div className="flex items-center gap-1">

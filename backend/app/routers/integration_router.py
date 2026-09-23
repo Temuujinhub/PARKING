@@ -50,6 +50,7 @@ def receipt_info(db: Session, payment: Payment) -> dict | None:
 
 
 def _payment_event(db: Session, payment: Payment, event: str) -> dict:
+    from .payments_router import settlement_info
     sess = db.get(ParkingSession, payment.session_id) if payment.session_id else None
     site = db.get(ParkingSite, sess.site_id) if sess else None
     return {"event": event, "payment_id": payment.id, "status": payment.status,
@@ -59,7 +60,7 @@ def _payment_event(db: Session, payment: Payment, event: str) -> dict:
             "plate": sess.plate_number if sess else None,
             "site_code": site.site_code if site else None,
             "site_name": site.name if site else None,
-            "ebarimt": receipt_info(db, payment)}
+            "ebarimt": receipt_info(db, payment), **settlement_info(db, payment)}
 
 
 async def push_partner_webhook(url: str, payload: dict, partner: str,
@@ -79,29 +80,16 @@ async def push_partner_webhook(url: str, payload: dict, partner: str,
         return {"ok": False, "status_code": None, "body": None, "error": str(e)[:200]}
 
 
-async def _notify_partner(db_factory, key_id: str | None, url: str, payload: dict, partner: str):
-    """Fire-and-forget: webhook илгээж үр дүнг аудитад бичнэ (өөрийн DB сешнээр)."""
-    res = await push_partner_webhook(url, payload, partner)
-    db = db_factory()
-    try:
-        db.add(AuditLog(username=f"partner:{partner}", action="PARTNER_WEBHOOK",
-                        entity="payment", entity_id=payload.get("payment_id"),
-                        detail={"url": url, "ok": res["ok"], "status": res["status_code"],
-                                "error": res["error"], "event": payload.get("event")}))
-        db.commit()
-    except Exception:  # noqa: BLE001
-        db.rollback()
-    finally:
-        db.close()
-    if not res["ok"]:
-        log.warning("түншийн webhook амжилтгүй [%s] %s: %s", partner, url,
-                    res["error"] or res["status_code"])
-
-
 def _webhook_url_for(db: Session, partner: str) -> str | None:
-    k = (db.query(PartnerKey).filter(PartnerKey.name == partner, PartnerKey.is_active.is_(True))
-         .order_by(PartnerKey.created_at.desc()).first())
-    return (k.webhook_url or "").strip() or None if k else None
+    key_id = getattr(partner, "key_id", None)
+    q = db.query(PartnerKey).filter(PartnerKey.name == partner, PartnerKey.is_active.is_(True))
+    if key_id:
+        q = q.filter(PartnerKey.id == key_id)
+    else:
+        q = q.filter(PartnerKey.site_id.is_(None))
+    rows = q.limit(2).all()
+    return (rows[0].webhook_url or "").strip() or None if len(rows) == 1 else None
+
 
 OPEN_STATUSES = ("OPEN", "AWAITING_PAYMENT", "PAID")
 
@@ -112,9 +100,10 @@ class PartnerAuth(str):
     scopes/site_id хязгаарлалтыг авч явна (.env түлхүүрт хязгаарлалтгүй)."""
     scopes: str = "read,pay"
     site_id: str | None = None
+    key_id: str | None = None
 
     def can_pay(self) -> bool:
-        return "pay" in self.scopes
+        return "pay" in {scope.strip() for scope in self.scopes.split(",")}
 
 
 def _auth_fail(request: Request):
@@ -143,6 +132,7 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
             auth = PartnerAuth(row.name)
             auth.scopes = row.scopes or "read"
             auth.site_id = row.site_id
+            auth.key_id = row.id
             return auth
     partners = settings.partner_map()
     if not partners and not db.query(PartnerKey.id).first():
@@ -154,13 +144,28 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
 
 
 def _require_pay(partner: PartnerAuth):
+    if str(partner).strip().upper() in {"QPAY", "POS", "CASH", "TRANSFER", "WALLET"}:
+        raise HTTPException(403, "Түншийн нэр дотоод төлбөрийн хэрэгслийн нэртэй давхцсан; админ засна уу")
     if not partner.can_pay():
         raise HTTPException(403, "Энэ түлхүүр зөвхөн лавлах эрхтэй (төлбөрийн эрхгүй)")
 
 
 def _check_site_scope(partner: PartnerAuth, site_id: str | None):
-    if partner.site_id and site_id and partner.site_id != site_id:
+    if partner.site_id and partner.site_id != site_id:
         raise HTTPException(403, "Энэ түлхүүр өөр зогсоолын мэдээлэлд хандах эрхгүй")
+
+
+def _check_payment_scope(db, partner, payment):
+    if str(payment.provider).upper() in {"QPAY", "POS", "CASH", "TRANSFER", "WALLET"}:
+        raise HTTPException(403, "Дотоод төлбөрийн хэрэгслийг түншийн API-аар удирдахгүй")
+    if payment.provider != partner:
+        raise HTTPException(403, "Энэ төлбөр өөр түншийнх")
+    if payment.partner_key_id and payment.partner_key_id != partner.key_id:
+        raise HTTPException(403, "Энэ төлбөр өөр түншийн түлхүүрт харьяалагдана")
+    session = db.get(ParkingSession, payment.session_id) if payment.session_id else None
+    if not session:
+        raise HTTPException(404, "Зогсолтын бүртгэл олдсонгүй")
+    _check_site_scope(partner, session.site_id)
 
 
 def _session_payload(db: Session, s: ParkingSession) -> dict:
@@ -298,10 +303,9 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
     болмогц /payments/{id}/confirm-ыг дуудна. Идэвхтэй PENDING intent
     байвал (дүн зөрөөгүй бол) шинээр үүсгэлгүй түүнийгээ буцаана."""
     from .payments_router import _create_payment
+    from ..services.checkout import lock_session
     _require_pay(partner)
-    session = db.get(ParkingSession, body.get("session_id", ""))
-    if not session:
-        raise HTTPException(404, "Session олдсонгүй")
+    session = lock_session(db, body.get("session_id", ""))
     _check_site_scope(partner, session.site_id)
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
@@ -310,14 +314,15 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
                 .filter(Payment.session_id == session.id, Payment.provider == partner,
                         Payment.status == "PENDING").first())
     if existing:
+        _check_payment_scope(db, partner, existing)
         current_due = amount_due(db, session, session_fee_info(db, session))
-        if abs(float(existing.amount) - current_due) <= 1:
-            return {"payment_id": existing.id, "amount": float(existing.amount),
-                    "vat_amount": float(existing.vat_amount), "status": "PENDING"}
-        existing.status = "CANCELLED"  # хугацаа өнгөрч дүн өссөн — шинэ intent
-        db.flush()
+        if abs(float(existing.amount) - current_due) > 0.01:
+            raise HTTPException(409, "Үнэ өөрчлөгдсөн. Өмнөх wallet оролдлогыг баталгаажуулах эсвэл цуцална уу")
+        return {"payment_id": existing.id, "amount": float(existing.amount),
+                "vat_amount": float(existing.vat_amount), "status": "PENDING"}
 
     payment = _create_payment(db, session, partner, "WALLET")
+    payment.partner_key_id = partner.key_id
     payment.source = "WALLET"
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_INTENT", entity="payment",
                     entity_id=payment.id,
@@ -328,59 +333,84 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
             "plate_number": session.plate_number}
 
 
+@router.post("/payments/{payment_id}/cancel")
+def cancel_payment_intent(payment_id: str, body: dict, db: Session = Depends(get_db),
+                          partner: PartnerAuth = Depends(require_partner)):
+    """Release an unpaid intent only after the partner confirms no debit occurred."""
+    from .payments_router import _lock_payment
+    _require_pay(partner)
+    payment = db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(404, "Payment олдсонгүй")
+    _check_payment_scope(db, partner, payment)
+    if body.get("outcome") != "NOT_CHARGED":
+        raise HTTPException(422, "Wallet талаас мөнгө татаагүйг NOT_CHARGED гэж батална уу")
+    payment = _lock_payment(db, payment.id)
+    if payment is None:
+        raise HTTPException(409, "Төлбөр боловсруулагдаж байна")
+    if payment.status == "PAID":
+        raise HTTPException(409, "Төлөгдсөн төлбөрийг intent цуцлалтаар өөрчлөхгүй")
+    payment.status = "CANCELLED"
+    db.add(AuditLog(username=f"partner:{partner}", action="WALLET_INTENT_CANCELLED",
+                    entity="payment", entity_id=payment.id,
+                    detail={"outcome": "NOT_CHARGED"}))
+    db.commit()
+    return {"payment_id": payment.id, "status": payment.status}
+
+
 @router.post("/payments/{payment_id}/confirm")
 async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get_db),
                           partner: PartnerAuth = Depends(require_partner)):
     """Wallet өөрийн талд төлбөрийг амжилттай авсныг баталгаажуулна.
     body: {transaction_id, amount}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
     нээгдэхгүй). Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
-    from .payments_router import _finalize_paid, _lock_payment
+    from .payments_router import _finalize_paid, _lock_payment, payment_outcome
     _require_pay(partner)
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
-    if payment.provider != partner:
-        raise HTTPException(403, "Энэ төлбөр өөр түншийнх")
+    _check_payment_scope(db, partner, payment)
+    from ..services.payment_validation import money, transaction_reference, claim_reference
+    paid_amount = money(body.get("amount"))
+    reference = transaction_reference(body.get("transaction_id"))
     # Мөрийг түгжинэ — wallet-ийн давхар confirm/retry зэрэг ирвэл нэг нь л finalize хийнэ
     payment = _lock_payment(db, payment.id)
     if payment is None:
         raise HTTPException(409, "Төлбөр боловсруулагдаж байна — дахин оролдоно уу")
     if payment.status == "PAID":
-        return {"status": "PAID", "payment_id": payment.id}  # idempotent
-    if payment.status != "PENDING":
+        if payment.provider_payment_id != reference or paid_amount != money(payment.amount):
+            raise HTTPException(409, "Өмнөх баталгаажуулалтын дугаар эсвэл дүн зөрлөө")
+        return {"status": "PAID", "payment_id": payment.id, **payment_outcome(db, payment)}
+    if payment.status not in ("PENDING", "CANCELLED", "UNKNOWN", "REVIEW"):
         raise HTTPException(400, f"Төлбөрийн төлөв буруу: {payment.status}")
-    if abs(float(body.get("amount", 0)) - float(payment.amount)) > 1:
+    if paid_amount != money(payment.amount):
         raise HTTPException(400, f"Дүн зөрүүтэй: систем {float(payment.amount)}₮ хүлээж байна")
 
-    payment.provider_payment_id = str(body.get("transaction_id") or "")[:120]
+    claim_reference(db, payment, partner.key_id or f"legacy:{partner}", reference)
+    hook = _webhook_url_for(db, partner)
     await _finalize_paid(db, payment, raw={"partner": partner, **{
-        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")}})
+        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")}},
+        partner_notification=(hook, partner) if hook else None)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_PAID", entity="payment",
                     entity_id=payment.id, detail={"transaction_id": payment.provider_payment_id,
                                                   "amount": float(payment.amount)}))
     db.commit()
-    # Түншийн webhook (Тохиргоо → Холболт → Гадаад API): төлбөр + e-Barimt-ийг
-    # түншийн сервер рүү шууд илгээнэ — Easy Wallet апп жолоочид ДДТД/сугалаа
-    # харуулна. Хариуг хүлээхгүй (fire-and-forget), үр дүн аудитад.
-    hook = _webhook_url_for(db, partner)
-    if hook:
-        import asyncio
-        from ..database import SessionLocal
-        asyncio.ensure_future(_notify_partner(SessionLocal, None, hook,
-                                              _payment_event(db, payment, "payment.paid"), partner))
+    # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
             payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
-            "ebarimt": receipt_info(db, payment)}
+            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}
 
 
 @router.get("/payments/{payment_id}")
 def payment_status(payment_id: str, db: Session = Depends(get_db),
                    partner: PartnerAuth = Depends(require_partner)):
+    from .payments_router import payment_outcome
     payment = db.get(Payment, payment_id)
     if not payment or payment.provider != partner:
         raise HTTPException(404, "Payment олдсонгүй")
+    _check_payment_scope(db, partner, payment)
     return {"payment_id": payment.id, "status": payment.status,
             "amount": float(payment.amount),
             "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
             # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан
-            "ebarimt": receipt_info(db, payment)}
+            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}

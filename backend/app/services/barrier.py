@@ -399,8 +399,33 @@ def _resolve_ip(db: Session, device: Device) -> str | None:
 
 
 async def _execute(db: Session, device: Device, command: str, session_id: str | None,
-                   source: str, issued_by: str | None = None, plate: str = "",
-                   screen_text: str = "") -> BarrierCommand:
+                    source: str, issued_by: str | None = None, plate: str = "",
+                    screen_text: str = "") -> BarrierCommand:
+    # Serialize reservation across workers, then persist it before any device IO.
+    # An interrupted request leaves evidence and cannot silently send a second pulse.
+    from sqlalchemy import or_, and_
+    from fastapi import HTTPException
+    from sqlalchemy.exc import OperationalError
+    db.flush()
+    try:
+        db.query(Device.id).filter(Device.id == device.id).with_for_update(nowait=True).one()
+    except OperationalError as exc:
+        db.rollback()
+        raise HTTPException(409, "Хаалтны команд боловсруулагдаж байна") from exc
+    pending = (db.query(BarrierCommand).filter(BarrierCommand.device_id == device.id,
+               or_(BarrierCommand.status == "PENDING",
+                   and_(BarrierCommand.status == "UNKNOWN",
+                        BarrierCommand.session_id == session_id)))
+               .order_by(BarrierCommand.created_at.desc()).first())
+    active_reservation = (pending and pending.status == "PENDING" and
+                          (datetime.utcnow() - pending.created_at).total_seconds()
+                          < settings.barrier_total_budget_sec + 10)
+    if pending and (active_reservation or not (issued_by and source == "manual")):
+        db.commit()
+        return pending
+    if pending:
+        # An explicit operator command is the recovery action; keep the old record.
+        pending.status = "REVIEWED"
     cmd = BarrierCommand(
         session_id=session_id, device_id=device.id, command=command,
         command_source=source, issued_by=issued_by,
@@ -418,6 +443,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     try:
         db.add(cmd)
         db.flush()
+        db.commit()
 
         ip, target = _resolve_device(db, device)
 
@@ -444,7 +470,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
 
         # Нэвтрэлт нь командыг ХҮЛЭЭН АВАХ төхөөрөмжийнх (хаалт камерын IP зээлсэн бол камерынх)
         username, password = barrier_credentials(target)
-        cmd.status = "FAILED"
+        cmd.status = "PENDING"
         # Машин хаалганы өмнө зогсож байгаа тул нэг удаагийн сүлжээний саатлаар
         # бууж өгөхгүй — timeout/холболтын алдаанд хэд дахин оролдоно.
         attempts = max(1, settings.barrier_retries + 1)
@@ -490,18 +516,22 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                   # 4 удаа оролдоно — сэргэх магадлал 2 дахин их, хүлээлт 3 дахин бага.
                   _timeout = min(_remaining, settings.barrier_attempt_timeout_sec
                                  + (settings.barrier_screen_timeout_sec if screen_text else 0))
+                  command_sent = False
                   async def _one_attempt():
                       """Нэг оролдлого — бүхэлдээ _timeout дотор багтах ёстой.
 
                       Хуваалцсан клиент: шинэ TCP холболт нээхгүй, камерын холболтын
                       санг шавхахгүй (дээрх camera_client-ийн тайлбарыг үзнэ үү)."""
-                      nonlocal _gate_ms
+                      nonlocal _gate_ms, command_sent
                       if True:
                           client = camera_client(ip)
                           if command == "open" and settings.barrier_open_path:
                               # Өөр загварын (CGI дэмждэг) төхөөрөмжид зориулсан гар тохиргоо
                               auth = httpx.DigestAuth(username, password)
+                              command_sent = True
                               resp = await client.get(f"http://{ip}{settings.barrier_open_path}", auth=auth)
+                              if resp.status_code >= 500:
+                                  resp.raise_for_status()
                               body = (resp.text or "").strip()
                               if resp.status_code == 200 and "error" not in body.lower():
                                   cmd.status = "SUCCESS"
@@ -511,6 +541,7 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                               rpc = DahuaRpc(client, ip, username, password)
                               await rpc.login()
                               try:
+                                  command_sent = True
                                   res = await rpc.strobe(RPC_METHODS[command],
                                                          settings.barrier_channel, plate)
                                   cmd.status = "SUCCESS"
@@ -551,6 +582,10 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                   except (asyncio.TimeoutError, TimeoutError):
                       if cmd.status == "SUCCESS":
                           break   # хаалт нээгдчихсэн (дэлгэц удаассан) — ДАХИН нээхгүй
+                      if command_sent:
+                          cmd.status = "UNKNOWN"
+                          cmd.response_text = "Команд илгээгдсэн, хариу тодорхойгүй — автоматаар давтаагүй"
+                          break
                       last_err = f"хугацаа хэтэрлээ ({_timeout:.1f}с)"
                       cmd.response_text = (f"{last_err} — {attempt + 1}/{attempts} оролдлого"
                                            if attempt + 1 < attempts
@@ -558,6 +593,10 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
                   except Exception as e:
                       if cmd.status == "SUCCESS":
                           break   # хаалт нээгдчихсэн — дараагийн алдаа түүнийг үгүйсгэхгүй
+                      if command_sent:
+                          cmd.status = "UNKNOWN"
+                          cmd.response_text = f"Командын үр дүн тодорхойгүй ({type(e).__name__}) — автоматаар давтаагүй"
+                          break
                       last_err = f"{type(e).__name__}: {str(e)[:300]}"
                       # ЭРХИЙН алдаанд ДАХИН ОРОЛДОХГҮЙ. Буруу нэвтрэлт дахин
                       # илгээх нь хэзээ ч амжилтад хүргэхгүй, зөвхөн камерын
@@ -576,21 +615,19 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
 
         _task = asyncio.ensure_future(_attempts())
         try:
-            # shield: дуудагчийн хүсэлт таслагдсан ч (камер push-аа хаях, POS/QPay
-            # bridge timeout, оператор таб хаах) хаалт нээх RPC-г ХАМТ ТАСЛАХГҮЙ —
-            # машин хаалганы өмнө зогсож байгаа тул нээлт заавал дуустал явна.
-            await asyncio.shield(_task)
+            # Cancellation is recorded durably; no detached task can use a closed DB session.
+            await _task
+        except TimeoutError:
+            cmd.status = "FAILED"
+            cmd.response_text = "Камерын RPC түгжээ завгүй; команд илгээгээгүй"
         except asyncio.CancelledError:
-            _detached = True
-
-            def _bg_done(t: asyncio.Task):
-                _open_inflight.pop(device.id, None)
-                _exc = t.exception()
-                log.warning("хаалт %s: дуудагчийн хүсэлт таслагдсан ч команд ард нь "
-                            "дууслаа [%s] status=%s%s", command, ip, cmd.status,
-                            f" ({_exc!r})" if _exc else "")
-            _task.add_done_callback(_bg_done)
+            cmd.status = "UNKNOWN"
+            cmd.response_text = "Хүсэлт тасарсан; төхөөрөмжийн төлөвийг оператор шалгана"
+            db.commit()
             raise
+
+        if cmd.status == "PENDING":
+            cmd.status = "FAILED"
 
         cmd.executed_at = datetime.utcnow()
         # Хугацааны хэмжилт — «хаалт удаан нээгдэж байна» гомдлыг тоогоор нотлох
@@ -815,8 +852,8 @@ class _BarrierPriority:
             self.held = True
         except (asyncio.TimeoutError, TimeoutError):
             # Түгжээг авч чадсангүй — ХҮЛЭЭХГҮЙ. Хаалт нээх нь бүхнээс чухал.
-            log.warning("%s: RPC түгжээг %.1fс дотор авч чадсангүй — команд ЯГ ОДОО явуулж байна",
-                        self.ip, settings.barrier_lock_wait_sec)
+            _barrier_waiting[self.ip] = max(0, _barrier_waiting.get(self.ip, 1) - 1)
+            raise TimeoutError("Camera RPC lock is busy; command was not sent")
         return self
 
     async def __aexit__(self, *exc):

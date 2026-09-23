@@ -23,3 +23,9 @@ psutil==7.2.2
 python-multipart==0.0.32
 # QPay QR зургийг сервер дээр зурах (QPay qr_image хоосон/давтан хүсэлтэд) — qpay.qr_png_b64
 qrcode[pil]==8.2
+
+# Snapshot validation decodes camera JPEGs directly.
+pillow==12.3.0
+
+# Hospital API credentials require encryption at rest (same audited pin as before).
+cryptography==50.0.0

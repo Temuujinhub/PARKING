@@ -72,6 +72,9 @@ export default function PaymentPanel({
             </span>
             <Badge value={selected.status} />
           </div>
+          {fee?.price_held_until && <p role="status" className="text-sm text-accent">
+            Үнэ {fmtDate(fee.price_held_until)} хүртэл тогтмол. Дараа нь нийт зогссон хугацаагаар бодно.
+          </p>}
           <div className="grid grid-cols-2 gap-2 text-sm bg-surface-muted/30 rounded-lg p-3">
             <span className="text-slate-400">Орсон цаг</span>
             <span className="font-mono text-right">
@@ -102,10 +105,14 @@ export default function PaymentPanel({
               <>
                 <span className="text-red-300">Өмнөх өр{selected.debt.count > 1 ? ` (${selected.debt.count})` : ''}</span>
                 <span className="font-mono text-right text-red-300 font-semibold">+{fmt(selected.debt.amount)}₮</span>
-                <span className="text-slate-300 font-semibold">Нийт төлөх</span>
+                <span className="text-slate-300 font-semibold">QPay-аар нийт төлөх</span>
                 <span className="font-mono text-right text-lg font-bold text-amber-300">
                   {fmt((Number(selected.amount_due ?? fee?.total_fee) || 0) + Number(selected.debt.amount))}₮
                 </span>
+                <p className="col-span-2 text-slate-300">
+                  Бэлэн/дансаар төлөх товч одоогийн зогсолтын үлдэгдлийг авна.
+                  Өмнөх өрийг «Өр цэвэрлэх» хэсгээс тусад нь төлүүлнэ.
+                </p>
               </>
             )}
             {/* Төлснөөс хойш зогссоор байгаа машин: өмнө төлсөн дүнг хасаад

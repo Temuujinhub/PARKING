@@ -117,6 +117,7 @@ DEFAULTS: dict[str, dict] = {
         "site_overrides": {},
     },
     EXITRULES_KEY: {
+        "payment_hold_minutes": 3,  # exit quote; afterwards bill total elapsed time
         # Гарах хаалтны дүрэм. no_session_fee: орох уншилтгүй, гэрээт биш машин
         # гарцад ирвэл нэхэмжлэх СУУРЬ ХУРААМЖ (₮). 0 = унтраах (хуучин зан:
         # операторт мэдэгдээд хүлээнэ). Registered-only болон төлбөргүй
@@ -248,7 +249,7 @@ PER_SITE: dict[str, set[str]] = {
                     "create_debt_reentry", "create_debt_shift_close",
                     "create_debt_night_close"},
     ENTRYPLATE_KEY: {"policy", "hold_seconds"},
-    EXITRULES_KEY: {"no_session_fee", "min_stay_seconds", "fake_exit_minutes",
+    EXITRULES_KEY: {"payment_hold_minutes", "no_session_fee", "min_stay_seconds", "fake_exit_minutes",
                     "reopen_max_hours", "reopen_skip_exit_read",
                     "paid_wait_fallback_minutes", "wallet_auto_deduct"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",

@@ -20,7 +20,7 @@ from ..ratelimit import throttle
 from ..serializers import to_dict
 from ..services import ebarimt, msgbill, qpay
 from ..services.receipts import assign_ebarimt_id, primary_receipt
-from ..session_logic import amount_due, mark_paid_and_open, session_fee_info
+from ..session_logic import amount_due, paid_total, mark_paid_and_open, session_fee_info
 
 log = logging.getLogger("parking.payments")
 
@@ -30,6 +30,35 @@ QPAY_INVOICE_NO_MAX = qpay.SENDER_INVOICE_NO_MAX
 _fit_bytes = qpay.fit_bytes
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
+
+
+@router.post("/{payment_id}/wallet-reconcile")
+async def reconcile_wallet(payment_id: str, body: dict, db: Session = Depends(get_db),
+                           user: User = Depends(require("reports", "settings"))):
+    """An authorized operator records the provider's verified outcome, never retries a debit."""
+    if user.role not in ("SUPER_ADMIN", "ADMIN", "FINANCE"):
+        raise HTTPException(403, "Санхүүгийн тулгалтын эрх шаардлагатай")
+    payment = _lock_payment(db, payment_id)
+    if not payment or not payment.session_id or payment.payment_method != "WALLET":
+        raise HTTPException(404, "Дансны гүйлгээ олдсонгүй")
+    enforce_site(user, payment.session.site_id)
+    if payment.status == "PAID":
+        return {"status": "PAID"}
+    if payment.status not in ("UNKNOWN", "PENDING", "REVIEW"):
+        raise HTTPException(409, "Тулгах боломжгүй төлөв")
+    outcome = body.get("outcome")
+    reference = str(body.get("reference") or "").strip()[:200]
+    if outcome not in ("PAID", "FAILED") or not reference:
+        raise HTTPException(422, "PAID/FAILED үр дүн, үйлчилгээ үзүүлэгчийн баталгааны дугаар шаардлагатай")
+    if outcome == "PAID":
+        payment.provider_payment_id = reference[:120]
+        await _finalize_paid(db, payment)
+    else:
+        payment.status = "FAILED"
+    db.add(AuditLog(username=user.username, action="WALLET_RECONCILE", entity="payment",
+                    entity_id=payment.id, detail={"outcome": outcome, "reference": reference}))
+    db.commit()
+    return {"status": payment.status}
 
 
 def secrets_compare(a: str, b: str) -> bool:
@@ -55,14 +84,11 @@ def _lock_payment(db: Session, payment_id: str) -> Payment | None:
                 .populate_existing().with_for_update(nowait=True).first())
     except OperationalError:
         db.rollback()  # түгжээ авч чадсангүй — өөр request боловсруулж байна
-        return None
+        raise HTTPException(409, "Төлбөрийн баталгаажуулалт үргэлжилж байна. Дахин оролдоно уу.")
 
 
 def _site_of(payment: Payment):
-    """Төлбөрийн зогсоол — QPay данс/e-Barimt-ыг тухайн түрээслэгчээр сонгоход.
-    Session-гүй төлбөр практикт үүсдэггүй; тэр тохиолдолд глобал данс үйлчилнэ."""
-    sess = getattr(payment, "session", None)
-    return getattr(sess, "site", None) if sess is not None else None
+    return payment.site or (payment.session.site if payment.session else None)
 
 
 def _receipt_desc(payment: Payment, extra: str | None = None) -> str:
@@ -151,7 +177,7 @@ def _invoice_no(session: ParkingSession) -> str:
 
 
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
-                         external_receipt: dict | None = None):
+                         external_receipt: dict | None = None, partner_notification=None):
     """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
 
     Нэгдсэн (өр багтсан) төлбөрт: session-ий хэсэгт нэг баримт, холбогдсон ӨР ТУС
@@ -190,185 +216,103 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
             log.warning("finalize: payment=%s мөр түгжигдсэн (давхар finalize) — алгаслаа",
                         payment.id)
             db.rollback()
-            return
-        log.error("finalize: түгжээний алдаа (үргэлжлүүлнэ): %s", msg[:160])
+            raise HTTPException(409, "Төлбөр боловсруулагдаж байна. Дахин шалгана уу.") from e
         db.rollback()
-        row = None
+        raise HTTPException(409, "Төлбөрийн түгжээ авч чадсангүй. Дахин шалгана уу.") from e
     if row is not None and row[1] == "PAID":
         return
+    session = (db.query(ParkingSession).enable_eagerloads(False)
+               .filter(ParkingSession.id == payment.session_id)
+               .populate_existing().with_for_update(nowait=True).one())
+    was_closed = session.status not in ("OPEN", "AWAITING_PAYMENT")
+    settlement_fee = session_fee_info(db, session)
+    already_paid = paid_total(db, session)
     payment.status = "PAID"
     payment.paid_at = datetime.utcnow()
     if raw:
-        payment.raw_payload = raw
+        payment.raw_payload = {**(payment.raw_payload or {}), **raw}
 
     # Энэ төлбөрт багтсан (QR-аар нийлүүлж төлсөн) өрүүд — тус бүрийн НӨАТ,
     # session-ий хэсгийн дүнг ялгаж тооцно
+    snapshot = payment.fee_snapshot or {}
+    debt_ids = [d["id"] for d in snapshot.get("debts", [])]
     comps = (db.query(Compensation)
-             .filter(Compensation.payment_id == payment.id,
-                     Compensation.status == "PENDING").all())
+             .filter(Compensation.id.in_(debt_ids) if "debts" in snapshot
+                     else Compensation.payment_id == payment.id,
+                     Compensation.status == "PENDING")
+             .enable_eagerloads(False).populate_existing().order_by(Compensation.id)
+             .with_for_update().all())
     vat_r = settings.vat_rate
     comp_vats = {c.id: round(float(c.amount) * vat_r / (1 + vat_r)) for c in comps}
-    sess_amount = float(payment.amount) - sum(float(c.amount) for c in comps)
+    sess_amount = min(float(payment.amount), float(snapshot["parking_amount"])) if "parking_amount" in snapshot else float(payment.amount) - sum(float(c.amount) for c in comps)
     sess_vat = float(payment.vat_amount) - sum(comp_vats.values())
 
-    receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
-    # QR-аар (QPay) төлсөн бол QPay-ийн ebarimt_v3-аар; бэлэн/картаар бол локал PosAPI-аар.
-    #
-    # 2026-08-12: өмнө нь `and not comps` нөхцөлтэй байсан — ӨР БАГТСАН QPay
-    # төлбөр локал PosAPI руу уначихдаг байв. Тэр зам нь (а) ebarimt_mock=true
-    # үед ХУУРАМЧ баримт буцаадаг (production дээр яг тийм байсан), (б) ГЛОБАЛ
-    # merchant TIN хэрэглэдэг — зогсоолын түрээслэгчийнхээр БИШ. Өөрөөр хэлбэл
-    # өргүй жолооч жинхэнэ баримт авч, өртэй жолооч хуурамч баримт авдаг байв.
-    #
-    # Одоо: өр нь QPay-ийн нэхэмжлэлд АЛЬ ХЭДИЙН тусдаа мөрөөр орсон байдаг тул
-    # ebarimt_v3 нь бүтэн дүнг (өнөөдрийн төлбөр + өр бүр) хамарсан НЭГ ЖИНХЭНЭ
-    # баримт үүсгэнэ — түрээслэгчийн ТТД-ээр. Өрүүд ижил баримтад холбогдоно.
-    use_qpay_eb = (settings.qpay_ebarimt and payment.provider == "QPAY"
-                   and bool(payment.provider_payment_id))
-    # msgbill.mn (Үйлчилгээ 3 — eBarimt API): QPay-ээр төлөөгүй төлбөрт (анхдагчаар
-    # ДАНСААР = online operator) локал PosAPI-ийн оронд msgbill-ээр ЖИНХЭНЭ баримт.
-    # Түлхүүр: түрээслэгч → глобал (services/msgbill.api_key_for-ийн дүрмээр).
-    # ТЕРМИНАЛ дээр аль хэдийн үүссэн баримт (PAX/банкны POS өөрөө e-Barimt гаргадаг
-    # тохиргоотой бол апп pos/confirm-д ebarimt_id-г дамжуулна) — давхар баримт
-    # үүсгэхгүй, терминалынхыг бүртгэнэ
-    use_external = bool(external_receipt and external_receipt.get("billId"))
-    mb_acc = None if (use_qpay_eb or use_external) else msgbill.account_enabled_for(
-        _site_of(payment), payment.payment_method)
-    use_msgbill = mb_acc is not None
-    # PosAPI суугаагүй (MOCK) + msgbill түлхүүргүй → хуурамч баримт ҮҮСГЭХГҮЙ,
-    # FAILED гэж бүртгээд шалтгааныг бичнэ (дараа msgbill тохируулаад «Дахин үүсгэх»)
-    no_channel = (settings.ebarimt_mock and not settings.ebarimt_mock_receipts
-                  and not use_qpay_eb and not use_msgbill and not use_external)
-    if no_channel:
-        log.warning("e-Barimt: payment=%s %s₮ — бодит баримтын суваг байхгүй (PosAPI MOCK, "
-                    "msgbill түлхүүргүй) → FAILED гэж бүртгэв", payment.id, float(payment.amount))
-    elif settings.ebarimt_mock and not use_qpay_eb and not use_msgbill:
-        log.warning("e-Barimt MOCK: payment=%s %s₮ — ХУУРАМЧ баримт үүслээ. "
-                    "Production дээр PARKING_EBARIMT_MOCK=false байх ёстой.",
-                    payment.id, float(payment.amount))
-    # ВАЖНО: e-Barimt амжилтгүй болсон ч төлбөрийг PAID болгож ХААЛТЫГ НЭЭНЭ —
-    # жолооч төлсөн атлаа гацахгүй. Баримтыг FAILED болгож дараа дахин үүсгэж болно.
-    receipt_raw, ebarimt_error = {}, None
-    _NO_CHANNEL_MSG = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), msgbill түлхүүр "
-                       "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API-д түлхүүр тавиад "
-                       "«Дахин үүсгэх» дарна уу")
-    try:
-        if use_external:
-            receipt_raw = dict(external_receipt)
-        elif no_channel:
-            ebarimt_error = _NO_CHANNEL_MSG
-        elif use_qpay_eb:
-            receipt_raw = await qpay.create_ebarimt(
-                payment.provider_payment_id, receiver_type,
-                # COMPANY үед ААН-ы 7 оронтой регистрийг ebarimt_receiver болгон дамжуулна
-                receiver=await _qpay_receiver(payment, receiver_type),
-                # Зогсоолын өөрийн QPay данс — баримт нь тухайн түрээслэгчийн ТТД-ээр үүснэ
-                acc=qpay.account_for(_site_of(payment)),
-            )
-        elif use_msgbill:
-            receipt_raw = await msgbill.create_receipt(
-                mb_acc, sess_amount,
-                description=_receipt_desc(payment),
-                payment_method=payment.payment_method,   # TRANSFER→BANK_TRANSFER, CASH, CARD
-                # Idempotency-Key = payment id: давхар finalize/retry-д давхар баримт үүсэхгүй
-                idempotency_key=f"pay-{payment.id}",
-                # Форматаар нь таньж receipt_type-ыг тодорхойлно (ААН регистр/ТТД
-                # → ORGANIZATION, иргэний регистр → CITIZEN нэрийн баримт)
-                payer_reg_no=payment.customer_tin,
-            )
-            if not receipt_raw.get("billId"):
-                ebarimt_error = _err_text(receipt_raw.get("error")
-                                 or f"msgbill төлөв {receipt_raw.get('state') or '?'} — ДДТД ирээгүй")
-        else:
-            receipt_raw = await ebarimt.create_receipt(
-                sess_amount, sess_vat,
-                # eBarimt 3.0-д зөвхөн CASH/PAYMENT_CARD код бий — дансаар (TRANSFER)
-                # шилжүүлсэн төлбөрийг CASH кодоор бүртгэнэ (API мөнгөн урсгал шалгадаггүй)
-                "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
-                customer_tin=payment.customer_tin,  # байгууллагаар авах бол B2B баримт
-                # Баримт ТУХАЙН ТҮРЭЭСЛЭГЧИЙН ТТД-ээр гарна (Моннисын зогсоолын
-                # баримт EasyParking-ийн нэр дээр гарах ёсгүй)
-                merchant=ebarimt.merchant_for(_site_of(payment)),
-            )
-    except Exception as e:  # noqa: BLE001 — баримтын алдаа хаалтыг зогсоохгүй
-        ebarimt_error = _ebarimt_err(e)
-        log.error(f"e-Barimt амжилтгүй: payment={payment.id}: {ebarimt_error}")
-    rcpt_provider = ((external_receipt.get("provider") or "TERMINAL") if use_external else
-                     "QPAY" if use_qpay_eb else ("MSGBILL" if use_msgbill else "POSAPI"))
-
-    # ТЕГ шаардлага №11: qrData-г DB-д ХАДГАЛАХГҮЙ — түр санах ойд (баримт үзүүлэх/хэвлэх хугацаанд)
-    ebarimt.cache_qr(payment.id, receipt_raw.get("qrData"))
-    # QPay-ийн ebarimt_v3 нь ТӨЛБӨРИЙН БҮТЭН дүнгээр (нэхэмжлэлийн мөр бүрийг
-    # багтаасан) НЭГ баримт үүсгэдэг — тиймээс өр багтсан үед ч дүнг задалж
-    # бичихгүй, бүтнээр нь бүртгэнэ. Локал PosAPI үед л хэсэг тус бүрд тусдаа.
-    head_amount = float(payment.amount) if use_qpay_eb else sess_amount
-    head_vat = float(payment.vat_amount) if use_qpay_eb else sess_vat
-    db.add(VatReceipt(
-        payment_id=payment.id, session_id=payment.session_id,
-        ebarimt_id=receipt_raw.get("billId"),
-        # ААН-ны баримтад сугалаа олгогдохгүй (шаардлага №1, №16)
-        lottery_code=None if receiver_type == "COMPANY" else receipt_raw.get("lottery"),
-        amount=head_amount, vat_amount=head_vat,
-        customer_tin=payment.customer_tin,
-        # Баримт үүссэн бол SENT, алдаатай бол FAILED (дараа дахин оролдоно), тэмдэглэлд алдаа.
-        # msgbill FAILED/PENDING үед provider_ref (rcp_…) хадгалж дараа GET-ээр нөхнө.
-        status="SENT" if receipt_raw.get("billId") else "FAILED",
-        receipt_url=ebarimt_error,
-        provider=rcpt_provider, provider_ref=receipt_raw.get("msgbillId"),
-        raw={"create": receipt_raw.get("raw")} if receipt_raw.get("raw") else None,
-    ))
-
+    from ..services.financial_jobs import enqueue_receipt, enqueue_partner
+    # Receipts are committed atomically with the payment, then delivered by a
+    # durable worker. A paid driver never waits for a tax-provider HTTP call.
+    full_receipt = bool(external_receipt and external_receipt.get("billId")) or (
+        settings.qpay_ebarimt and payment.provider == "QPAY" and payment.provider_payment_id)
+    enqueue_receipt(db, payment,
+        amount=payment.amount if full_receipt else sess_amount,
+        vat=payment.vat_amount if full_receipt else sess_vat,
+        description=_receipt_desc(payment), external=external_receipt)
     for comp in comps:
-        comp_amount, comp_vat = float(comp.amount), comp_vats[comp.id]
-        if use_qpay_eb:
-            # Өр нь дээрх НЭГ ЖИНХЭНЭ баримтад аль хэдийн багтсан (QPay
-            # нэхэмжлэлд тусдаа мөрөөр орсон) — давхар баримт үүсгэхгүй.
-            ebarimt.cache_qr(comp.id, receipt_raw.get("qrData"))
-        else:
-            # Локал PosAPI / msgbill (бэлэн/карт/дансаар): хэсэг тус бүрд тусдаа баримт
-            comp_receipt, comp_error = {}, None
-            try:
-                if no_channel:
-                    comp_error = _NO_CHANNEL_MSG
-                elif use_msgbill:
-                    comp_receipt = await msgbill.create_receipt(
-                        mb_acc, comp_amount,
-                        description=_receipt_desc(payment, f"өр {comp.plate_number or ''}".strip()),
-                        payment_method=payment.payment_method,
-                        idempotency_key=f"pay-{payment.id}-comp-{comp.id}",
-                        customer_tin=payment.customer_tin)
-                    if not comp_receipt.get("billId"):
-                        comp_error = (comp_receipt.get("error")
-                                      or f"msgbill төлөв {comp_receipt.get('state') or '?'}")
-                else:
-                    comp_receipt = await ebarimt.create_receipt(
-                        comp_amount, comp_vat, "CARD", customer_tin=payment.customer_tin,
-                        merchant=ebarimt.merchant_for(_site_of(payment)))
-            except Exception as e:  # noqa: BLE001
-                comp_error = _ebarimt_err(e)
-                log.error(f"e-Barimt амжилтгүй: compensation={comp.id}: {comp_error}")
-            ebarimt.cache_qr(comp.id, comp_receipt.get("qrData"))
-            db.add(VatReceipt(
-                # Өрийн анхны session (байхгүй бол одоо төлж буй session-д) холбоно
-                payment_id=payment.id, session_id=comp.session_id or payment.session_id,
-                ebarimt_id=comp_receipt.get("billId"),
-                lottery_code=None if receiver_type == "COMPANY" else comp_receipt.get("lottery"),
-                amount=comp_amount, vat_amount=comp_vat, customer_tin=payment.customer_tin,
-                status="SENT" if comp_receipt.get("billId") else "FAILED",
-                receipt_url=comp_error,
-                provider=rcpt_provider, provider_ref=comp_receipt.get("msgbillId"),
-                raw={"create": comp_receipt.get("raw")} if comp_receipt.get("raw") else None,
-            ))
-        comp.status = "PAID"
-        comp.paid_at = datetime.utcnow()
-        comp.paid_by = f"{payment.provider}:QR"
-        log.info(f"өр төлөгдөв: {comp.plate_number} {comp_amount:.0f}₮ "
-              f"(comp {comp.id}, payment {payment.id}, "
-              f"баримт={rcpt_provider})")
+        if not full_receipt:
+            enqueue_receipt(db, payment, amount=comp.amount, vat=comp_vats[comp.id],
+                session_id=comp.session_id, key=f"pay-{payment.id}-comp-{comp.id}",
+                description=_receipt_desc(payment, f"өр {comp.plate_number or ''}".strip()))
+        comp.payment_id, comp.status = payment.id, "PAID"
+        comp.paid_at, comp.paid_by = payment.paid_at, f"{payment.provider}:QR"
+    if partner_notification:
+        db.flush()  # Event balance/receipt reads must include this transaction.
+        enqueue_partner(db, payment, *partner_notification)
 
     _t1 = _mark("ebarimt", _p0)
-    session = db.get(ParkingSession, payment.session_id)
-    await mark_paid_and_open(db, session)
+    if was_closed:
+        # A late bank callback settles the receivable; it cannot resurrect the
+        # stay or open a barrier after the vehicle left the payment queue.
+        remaining = max(0.0, sess_amount)
+        debts = (db.query(Compensation).filter(
+            Compensation.session_id == session.id, Compensation.status == "PENDING")
+            .enable_eagerloads(False).populate_existing()
+            .order_by(Compensation.created_at).with_for_update().all())
+        for debt in debts:
+            applied = min(float(debt.amount), remaining)
+            if applied <= 0:
+                break
+            old_amount = float(debt.amount)
+            remaining -= applied
+            if applied >= old_amount:
+                debt.status = "PAID"
+                debt.paid_at = payment.paid_at
+                debt.paid_by = f"{payment.provider}:late"
+                debt.payment_id = payment.id
+            else:
+                debt.amount = old_amount - applied
+            db.add(AuditLog(username="system", action="LATE_PAYMENT_DEBT",
+                            entity="compensation", entity_id=debt.id,
+                            detail={"payment_id": payment.id, "applied": applied,
+                                    "previous_amount": old_amount}))
+        db.commit()
+    else:
+        db.flush()  # amount_due must include this confirmed financial fact
+        remaining_due = amount_due(db, session, settlement_fee)
+        if remaining_due > 0:
+            session.base_fee, session.vat_amount, session.total_fee = (
+                settlement_fee["base_fee"], settlement_fee["vat_amount"], settlement_fee["total_fee"])
+            session.duration_minutes = settlement_fee["duration_minutes"]
+            db.add(AuditLog(username="system", action="PAYMENT_PARTIAL", entity="payment",
+                            entity_id=payment.id, detail={"remaining_due": remaining_due}))
+            db.commit()
+        else:
+            await mark_paid_and_open(db, session, fee_snapshot=settlement_fee)
+    overpaid = max(0.0, round(already_paid + sess_amount - settlement_fee["total_fee"], 2))
+    if overpaid:
+        # Preserve the received money and flag a refund/reconciliation; never silently drop it.
+        payment.raw_payload = {**(payment.raw_payload or {}), "overpaid_amount": overpaid}
+        db.add(AuditLog(username="system", action="PAYMENT_OVERPAYMENT", entity="payment",
+                        entity_id=payment.id, detail={"overpaid_amount": overpaid}))
+        db.commit()
     _mark("хаалт+session", _t1)
     total = int((_t.monotonic() - _p0) * 1000)
     (log.warning if total >= settings.payment_slow_warn_ms else log.info)(
@@ -386,30 +330,29 @@ async def _confirm_qpay(db: Session, payment: Payment) -> bool:
             payment.provider_payment_id = f"MOCK-PAY-{uuid.uuid4().hex[:12]}"
         await _finalize_paid(db, payment)
         return True
-    res = await qpay.check_payment(payment.provider_invoice_id,
-                                   acc=qpay.account_for(_site_of(payment)))
+    from decimal import Decimal, InvalidOperation
+    from ..services.payment_validation import claim_reference
+    pid, invoice, acc = payment.id, payment.provider_invoice_id, qpay.account_for(_site_of(payment))
+    db.commit()  # No payment/session lock is held during provider HTTP.
+    res = await qpay.check_payment(invoice, acc=acc)
     if not res.get("paid"):
         return False
-    paid_amount = float(res.get("paid_amount") or 0)
-    expected = float(payment.amount)
-    # ДУТУУ төлсөн бол л REVIEW — жолоочийг гаргахгүй, оператор шалгана.
-    # ИЛҮҮ төлсөн тохиолдолд машиныг зогсоолд ХОРИХ нь буруу: мөнгө нь бүрэн
-    # ирсэн байтал хаалт нээгдэхгүй үлддэг байв (мерчантын НӨАТ-ын тохиргооноос
-    # болж QPay нэхэмжлэлийн дүн дээр татвар нэмж тооцох тохиолдол бий).
-    if paid_amount < expected - 1:
+    payment = _lock_payment(db, pid)
+    if payment.status == "PAID":
+        return True
+    try:
+        received = Decimal(str(res.get("paid_amount", 0)))
+    except (InvalidOperation, ValueError):
+        received = Decimal("NaN")
+    reference = res.get("payment_id")
+    if (not received.is_finite() or received < Decimal(str(payment.amount)) or
+            not isinstance(reference, str) or not reference.strip() or len(reference.strip()) > 120
+            or any(ord(c) < 32 for c in reference)):
         payment.status = "REVIEW"
-        payment.raw_payload = res.get("raw") or {}
+        payment.raw_payload = {**(payment.raw_payload or {}), "verification": "amount_or_reference_mismatch"}
         db.commit()
-        log.warning(f"ДУТУУ төлөгдсөн: {payment.id} нэхэмжлэл={expected:.2f} "
-              f"төлсөн={paid_amount:.2f} → REVIEW")
         return False
-    if paid_amount > expected + 1:
-        # Илүү төлсөнийг бүртгэлд үлдээнэ (санхүү тулгахад хэрэгтэй) ч гаргана
-        log.warning(f"ИЛҮҮ төлөгдсөн: {payment.id} нэхэмжлэл={expected:.2f} "
-              f"төлсөн={paid_amount:.2f} зөрүү={paid_amount - expected:.2f} "
-              f"— хаалтыг нээж байна. QPay мерчантын НӨАТ тохиргоог шалгана уу.")
-    if res.get("payment_id"):
-        payment.provider_payment_id = res["payment_id"]
+    claim_reference(db, payment, "qpay:" + acc.username, reference.strip())
     await _finalize_paid(db, payment, raw=res.get("raw"))
     return True
 
@@ -515,51 +458,69 @@ def _pending_debts(db: Session, plate: str, site=None) -> list[Compensation]:
     return q.all()
 
 
-def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
-                    cashier: User | None = None, include_debts: bool = False) -> Payment:
-    fee = session_fee_info(db, session)
-    if fee["total_fee"] <= 0:
-        raise HTTPException(400, "Төлбөр шаардлагагүй (үнэгүй) session байна")
-    # Grace хэтэрч дахин ирсэн session: өмнө төлснийг хасаад зөвхөн үлдэгдлийг нэхнэ
-    due = amount_due(db, session, fee)
-    if due <= 0:
-        raise HTTPException(400, "Төлбөр бүрэн төлөгдсөн байна — нэмэлт төлбөр шаардлагагүй")
-    if due >= fee["total_fee"]:
-        vat_due = fee["vat_amount"]  # анхны төлбөр — тооцоолсон НӨАТ-ыг шууд ашиглана
+def settlement_info(db, payment):
+    session = db.get(ParkingSession, payment.session_id)
+    if not session:
+        return {}
+    if session.status in ("OPEN", "AWAITING_PAYMENT"):
+        due = amount_due(db, session, session_fee_info(db, session))
     else:
-        # Үлдэгдэлд ногдох НӨАТ (total_fee ямагт НӨАТ багтсан эцсийн дүн)
-        r = settings.vat_rate
-        vat_due = round(due * r / (1 + r))
-    session.base_fee, session.vat_amount, session.total_fee = (
-        fee["base_fee"], fee["vat_amount"], fee["total_fee"])
-    session.duration_minutes = fee["duration_minutes"]
+        due = sum(float(c.amount) for c in db.query(Compensation).filter(
+            Compensation.session_id == session.id, Compensation.status == "PENDING").all())
+    return {"session_status": session.status, "amount_due": due,
+            "needs_additional_payment": due > 0,
+            "overpaid_amount": (payment.raw_payload or {}).get("overpaid_amount", 0)}
 
-    # Өмнөх өрийг нийлүүлж нэхэмжлэх: дүн + өр тус бүрийн НӨАТ (үнэд багтсан)
-    comps: list[Compensation] = (_pending_debts(db, session.plate_number, session.site)
-                                 if include_debts else [])
+
+def payment_outcome(db, payment):
+    """Money, remaining balance and device acknowledgment are separate facts."""
+    from ..services.payment_validation import gate_result
+    return {**settlement_info(db, payment), **gate_result(db, payment)}
+
+
+def _create_payment(db: Session, session: ParkingSession, provider: str, method: str,
+                    cashier: User | None = None, include_debts: bool = False,
+                    *, confirmed_amount=None, allow_qpay: bool = False) -> Payment:
+    from ..services.checkout import lock_session, assert_available
+    from ..services.payment_validation import money
+    session = lock_session(db, session.id)
+    # Confirmations record money already received; reservations must never compete.
+    if confirmed_amount is None:
+        if session.status not in ("OPEN", "AWAITING_PAYMENT"):
+            raise HTTPException(409, "Бүртгэлийн төлөв өөрчлөгдсөн. Жагсаалтаа шинэчилнэ үү")
+        assert_available(db, session.id, allow_qpay=allow_qpay)
+    fee = session_fee_info(db, session)
+    due = amount_due(db, session, fee)
+    comps = (_pending_debts(db, session.plate_number, session.site) if include_debts else [])
     debt_total = sum(float(c.amount) for c in comps)
-    debt_vat = sum(round(float(c.amount) * settings.vat_rate / (1 + settings.vat_rate))
-                   for c in comps)
-
+    if confirmed_amount is None and due + debt_total <= 0:
+        raise HTTPException(400, "Төлбөр шаардлагагүй эсвэл бүрэн төлөгдсөн байна")
+    parking_amount = money(confirmed_amount) if confirmed_amount is not None else money(due, positive=False)
+    r = settings.vat_rate
+    vat_due = round(float(parking_amount) * r / (1 + r))
+    if confirmed_amount is None and due >= fee["total_fee"]:
+        vat_due = fee["vat_amount"]
+    if session.status in ("OPEN", "AWAITING_PAYMENT"):
+        session.base_fee, session.vat_amount, session.total_fee = (
+            fee["base_fee"], fee["vat_amount"], fee["total_fee"])
+        session.duration_minutes = fee["duration_minutes"]
+    debt_vat = sum(round(float(c.amount) * r / (1 + r)) for c in comps)
     shift = None
     if cashier:
         shift = db.query(CashierShift).filter(CashierShift.user_id == cashier.id,
-                                              CashierShift.status == "OPEN").first()
+                                             CashierShift.status == "OPEN").first()
     payment = Payment(
         session_id=session.id, provider=provider, payment_method=method,
         sender_invoice_no=_invoice_no(session),
-        amount=due + debt_total, vat_amount=vat_due + debt_vat,
-        cashier_id=cashier.id if cashier else None,
-        shift_id=shift.id if shift else None,
-    )
+        amount=float(parking_amount) + debt_total, vat_amount=vat_due + debt_vat,
+        fee_snapshot={**fee, "parking_amount": float(parking_amount),
+                      "debts": [{"id": c.id, "amount": float(c.amount)} for c in comps]},
+        cashier_id=cashier.id if cashier else None, shift_id=shift.id if shift else None)
     db.add(payment)
     db.flush()
-    # Өрүүдийг энэ төлбөрт холбоно (PENDING статус л эрх мэдэлтэй — өмнөх орхигдсон
-    # invoice-ийн холбоосыг дарж бичихэд аюулгүй)
     for comp in comps:
         comp.payment_id = payment.id
-    # Дуудагч талд шууд хэрэглэх (autoflush=False тул дахин query найдваргүй)
-    payment._debt_comps = comps  # type: ignore[attr-defined]
+    payment._debt_comps = comps
     return payment
 
 
@@ -601,6 +562,16 @@ def _log_qpay_failure(db: Session, session: ParkingSession, acc, reason: str,
 
 
 # ─────────────────────────── QPay ───────────────────────────
+def _record_invoice_outcome_unknown(db, payment_id):
+    db.rollback()
+    payment = _lock_payment(db, payment_id)
+    if payment is not None and payment.status != "PAID":
+        payment.status = "UNKNOWN"
+        db.add(AuditLog(username="system", action="QPAY_INVOICE_UNKNOWN", entity="payment",
+                        entity_id=payment.id, detail={"sender_invoice_no": payment.sender_invoice_no}))
+        db.commit()
+
+
 @router.post("/qpay/invoice")
 async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_db)):
     """QPay invoice үүсгэх. body: {session_id}. Public pay page + касс хоёулаа ашиглана."""
@@ -608,11 +579,22 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     # ирдэг тул ачаалалтай зогсоолд 20 нь хүрэлцэхгүй, «товч анивчаад юу ч
     # болохгүй» (429 чимээгүй) гомдол гарч байв.
     _throttle_qpay(request, "invoice", limit=60)
-    session = db.get(ParkingSession, body.get("session_id", ""))
+    from sqlalchemy.exc import OperationalError
+    try:
+        session = (db.query(ParkingSession).enable_eagerloads(False)
+                   .filter(ParkingSession.id == body.get("session_id", ""))
+                   .populate_existing().with_for_update(nowait=True).first())
+    except OperationalError:
+        db.rollback()
+        raise HTTPException(409, "Төлбөр боловсруулагдаж байна. Түр хүлээнэ үү.")
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
+    if db.query(Payment.id).filter(Payment.session_id == session.id,
+                                  Payment.payment_method == "WALLET",
+                                  Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first():
+        raise HTTPException(409, "Дансны гүйлгээг шалгаж байна. Давхар нэхэмжлэл үүсгэхгүй.")
 
     # Өмнөх өрийг QR-д нийлүүлж нэхэмжилнэ (body-д include_debts=false өгвөл зөвхөн
     # одоогийн төлбөр — кассын тусгай хэрэглээнд)
@@ -629,7 +611,7 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         if include_debts:
             current_due += sum(float(c.amount)
                                for c in _pending_debts(db, session.plate_number, session.site))
-        if abs(float(existing.amount) - current_due) <= 1:
+        if abs(float(existing.amount) - current_due) <= 0.01:
             # qr_image-ыг заавал буцаана: өмнө нь энэ (ДАВТАН хүсэлтийн) зам
             # түүнийг огт өгдөггүй байсан тул хуудсаа сэргээсэн жолоочид QR-ийн
             # оронд түүхий текст гарч, төлж чаддаггүй байв (2026-08-14 гомдол)
@@ -642,7 +624,13 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
                     "qr_image": qpay.qr_png_b64(existing.qr_text or ""),
                     "deep_link": existing.deep_link, "urls": _raw.get("invoice_urls") or [],
                     "amount": float(existing.amount), "mock": settings.qpay_mock}
-        existing.status = "CANCELLED"  # дүн зөрсөн — шинэ invoice үүсгэнэ
+        try:
+            await qpay.cancel_invoice(existing.provider_invoice_id,
+                                      acc=qpay.account_for(session.site))
+        except httpx.HTTPError:
+            raise HTTPException(409, "Өмнөх QPay нэхэмжлэлийг цуцалж чадсангүй. "
+                                     "Шинэ нэхэмжлэл үүсгээгүй; төлөлтөө шалгана уу.")
+        existing.status = "CANCELLED"
         db.flush()
 
     payment = _create_payment(db, session, "QPAY", "QR", include_debts=include_debts)
@@ -693,6 +681,9 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     # (а) жолоочид ойлгомжгүй, (б) rollback болохоор DB-д ЯМАР Ч ул мөр үлддэггүй
     # тул «хэдэн удаа тохиолдов» гэдгийг хойшоо хэмжих боломжгүй байв. Одоо
     # шалтгааныг логлож, хүнд ойлгомжтой 502 буцаана (frontend дахин оролдоно).
+    payment.status = "CREATING"
+    operation_id = payment.id
+    db.commit()
     try:
         inv = await qpay.create_invoice(
             payment.sender_invoice_no,
@@ -700,49 +691,56 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             f"terminal_{session.site.site_code if session.site else 'X'}", callback,
             lines, receiver_data=receiver_data, acc=acc,
         )
+        if not isinstance(inv.get("invoice_id"), str) or not inv["invoice_id"].strip():
+            raise ValueError("Provider invoice ID missing")
     except httpx.HTTPStatusError as e:
         body_txt = (e.response.text or "")[:400]
         log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): HTTP %s — %s",
                   session.plate_number, acc.username, e.response.status_code, body_txt)
-        db.rollback()
+        _record_invoice_outcome_unknown(db, operation_id)
         _log_qpay_failure(db, session, acc, "HTTP",
                           {"status": e.response.status_code, "body": body_txt,
                            "amount": float(payment_amount)})
         raise HTTPException(502, "QPay-тэй холбогдож чадсангүй — QR үүсгэж чадаагүй. "
-                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+                                 "Үр дүн тодорхойгүй тул дахин төлөхгүй; нэхэмжлэлийг тулгана уу.")
     except httpx.HTTPError as e:  # timeout, DNS, холболт тасрах
         log.error("QPay invoice БҮТЭЛГҮЙ (%s, %s): %r", session.plate_number, acc.username, e)
-        db.rollback()
+        _record_invoice_outcome_unknown(db, operation_id)
         _log_qpay_failure(db, session, acc, "NETWORK",
                           {"error": f"{type(e).__name__}: {e}"[:200],
                            "amount": float(payment_amount)})
         # 503 = ТҮР ЗУУРЫН. Frontend зөвхөн үүнд автоматаар дахин оролддог;
         # QPay-ийн татгалзал (502) нь дахин оролдоход ижил хариу өгнө.
         raise HTTPException(503, "QPay хариу өгсөнгүй (сүлжээ) — QR үүсгэж чадаагүй. "
-                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+                                 "Үр дүн тодорхойгүй тул дахин төлөхгүй; нэхэмжлэлийг тулгана уу.")
     except ValueError as e:  # талбарын хязгаар (sender_invoice_no гэх мэт)
         log.error("QPay invoice талбар буруу (%s): %s", session.plate_number, e)
-        db.rollback()
+        _record_invoice_outcome_unknown(db, operation_id)
         _log_qpay_failure(db, session, acc, "BAD_FIELD", {"error": str(e)[:200]})
         raise HTTPException(502, "Нэхэмжлэлийн талбар буруу — QR үүсгэж чадаагүй. "
-                                 "Кассаар төлнө үү.")
+                                 "Өмнөх нэхэмжлэлийг тулгаж байж дахин оролдоно уу.")
     except KeyError as e:  # QPay 200 буцаасан ч хүлээгдсэн талбар алга
         log.error("QPay invoice хариу дутуу (%s): талбар %s алга", session.plate_number, e)
-        db.rollback()
+        _record_invoice_outcome_unknown(db, operation_id)
         _log_qpay_failure(db, session, acc, "BAD_RESPONSE", {"missing_field": str(e)[:60]})
         raise HTTPException(502, "QPay-ээс ирсэн хариу дутуу байна — QR үүсгэж чадаагүй. "
-                                 "Дахин оролдоно уу, эсвэл кассаар төлнө үү.")
+                                 "Үр дүн тодорхойгүй тул дахин төлөхгүй; нэхэмжлэлийг тулгана уу.")
+    payment = _lock_payment(db, operation_id)
+    if payment is None:
+        raise HTTPException(409, "Нэхэмжлэлийн төлөв шинэчлэгдэж байна. Дахин шалгана уу")
     payment.provider_invoice_id = inv["invoice_id"]
-    payment.qr_text = inv["qr_text"]
-    payment.deep_link = inv["deep_link"]
+    if payment.status in ("CREATING", "UNKNOWN"):
+        payment.status = "PENDING"
+    payment.qr_text = inv.get("qr_text") or ""
+    payment.deep_link = inv.get("deep_link") or ""
     # Банкны deeplink-үүдийг хадгална — давтан хүсэлт (хуудас сэргээх/буцаж орох)
     # ижил нэхэмжлэлийг бүрэн (QR + банкны товчнууд) буцаахад хэрэгтэй.
     # finalize үед raw_payload QPay-ийн төлбөрийн хариугаар дарагдана — зүгээр.
-    payment.raw_payload = {"invoice_urls": inv.get("urls", [])[:40]}
+    payment.raw_payload = {**(payment.raw_payload or {}), "invoice_urls": inv.get("urls", [])[:40]}
     db.commit()
     return {"payment_id": payment.id, "invoice_id": inv["invoice_id"],
-            "qr_text": inv["qr_text"], "qr_image": inv.get("qr_image", ""),
-            "deep_link": inv["deep_link"], "urls": inv.get("urls", []),
+            "qr_text": payment.qr_text, "qr_image": inv.get("qr_image", ""),
+            "deep_link": payment.deep_link, "urls": inv.get("urls", []),
             "amount": float(payment.amount), "debt_amount": debt_total,
             "mock": inv.get("mock", False)}
 
@@ -764,16 +762,15 @@ async def _webhook_handler(payment_id: str, token: str, qpay_payment_id: str,
             Payment.sender_invoice_no == body["sender_invoice_no"]).first()
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
-    # Мөрийг түгжинэ — polling/давхар webhook зэрэг орж ирвэл нэг нь л боловсруулна
-    payment = _lock_payment(db, payment.id)
-    if payment is None:
-        return  # өөр request яг одоо баталгаажуулж байна — QPay-д SUCCESS буцаахад хангалттай
-    # QPay-ийн дамжуулсан payment_id-г эхлээд авна (баталгаажуулалтын check амжилтгүй бол ч)
-    if qpay_payment_id:
-        payment.provider_payment_id = str(qpay_payment_id)
-    # Бодит баталгаажуулалт: payment/check → paid + дүн + g_payment_id
+    if payment.provider != "QPAY" or payment.kind != "PARKING":
+        raise HTTPException(400, "Энэ callback зогсоолын QPay төлбөрт хамаарахгүй")
+    from ..services.qpay_recheck import request_verification, finish_verification
+    pid = payment.id
+    stamp = request_verification(db, payment)
+    if not payment.provider_invoice_id:
+        raise HTTPException(503, "Нэхэмжлэлийн үр дүн тодорхойгүй; callback хадгалагдсан")
     await _confirm_qpay(db, payment)
-    db.commit()
+    finish_verification(db, pid, stamp, completed=True)
 
 
 @router.get("/qpay/webhook")
@@ -808,15 +805,10 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
-    if payment.status != "PAID" and payment.provider == "QPAY" and payment.provider_invoice_id:
-        locked = _lock_payment(db, payment.id)
-        if locked is not None:
-            payment = locked
-            await _confirm_qpay(db, payment)
-            db.commit()
-        # түгжээг webhook авчихсан бол энэ poll юу ч хийхгүй — дараагийн poll-д PAID харагдана
+    # Browser polling reads our durable result. Bank verification is triggered
+    # by callback, as required by QPay, not by every foreground polling request.
     if payment.status == "PAID":
-        return {"status": "PAID", **_print_payload(db, payment)}
+        return {"status": "PAID", **_print_payload(db, payment), **payment_outcome(db, payment)}
     return {"status": payment.status}
 
 
@@ -828,6 +820,34 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
 #   • ONLINE_OPERATOR — pay_transfer эрхтэй атлаа /transfer рүү огт ороогүй
 #     (энэ ролийн БҮХ утга учир нь дансаар төлбөр батлах)
 # free_exit шиг санхүүгийн эрсдэлтэй тусгай үйлдлүүд ХЭВЭЭР тусдаа эрхтэй.
+def _assert_expected_amount(payment, body):
+    if "expected_amount" not in body:
+        return  # legacy POS clients; current cashier always sends its displayed amount
+    from decimal import Decimal, InvalidOperation
+    try:
+        expected = Decimal(str(body["expected_amount"]))
+        valid = expected.is_finite() and abs(expected - Decimal(str(payment.amount))) <= Decimal("0.01")
+    except (InvalidOperation, ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise HTTPException(409, "Үнэ барих хугацаа дууссан эсвэл дүн өөрчлөгдсөн. Шинэ дүнг шалгаж дахин батална уу.")
+
+
+async def _retire_qpay(db, session):
+    pending = db.query(Payment).filter(Payment.session_id == session.id,
+                                      Payment.provider == "QPAY",
+                                      Payment.status.in_(["PENDING", "CREATING", "UNKNOWN", "REVIEW"])).all()
+    for p in pending:
+        if p.status != "PENDING" or not p.provider_invoice_id:
+            raise HTTPException(409, "QPay-ийн өмнөх оролдлогын үр дүнг эхлээд тулгана уу")
+        if p.provider_invoice_id:
+            try:
+                await qpay.cancel_invoice(p.provider_invoice_id, acc=qpay.account_for(session.site))
+            except httpx.HTTPError as e:
+                raise HTTPException(409, "Өмнөх QPay нэхэмжлэл идэвхтэй байж болзошгүй. Төлөлтийг шалгана уу.") from e
+        p.status = "CANCELLED"
+
+
 @router.post("/cash")
 async def cash_payment(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier"))):
@@ -839,7 +859,9 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
-    payment = _create_payment(db, session, "CASH", "CASH", cashier=user)
+    payment = _create_payment(db, session, "CASH", "CASH", cashier=user, allow_qpay=True)
+    _assert_expected_amount(payment, body)
+    await _retire_qpay(db, session)
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
         payment.ebarimt_receiver_type = "COMPANY"
@@ -848,7 +870,8 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     db.add(AuditLog(username=user.username, action="CASH_PAYMENT", entity="payment",
                     entity_id=payment.id, detail={"amount": float(payment.amount)}))
     db.commit()
-    return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
+    return {"ok": True, "status": payment.status, "payment_id": payment.id,
+            "amount": float(payment.amount), **payment_outcome(db, payment)}
 
 
 # ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
@@ -871,7 +894,9 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
     enforce_site(user, session.site_id)  # оператор зөвхөн өөрийн зогсоолын төлбөр
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
-    payment = _create_payment(db, session, "TRANSFER", "TRANSFER", cashier=user)
+    payment = _create_payment(db, session, "TRANSFER", "TRANSFER", cashier=user, allow_qpay=True)
+    _assert_expected_amount(payment, body)
+    await _retire_qpay(db, session)
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
         payment.ebarimt_receiver_type = "COMPANY"
@@ -886,7 +911,8 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
                             "bank": getattr(site, "bank_name", None),
                             "account": getattr(site, "bank_account", None)}))
     db.commit()
-    return {"ok": True, "payment_id": payment.id, "amount": float(payment.amount)}
+    return {"ok": True, "status": payment.status, "payment_id": payment.id,
+            "amount": float(payment.amount), **payment_outcome(db, payment)}
 
 
 # ─────────────────────────── PAX A9000 POS ───────────────────────────
@@ -901,6 +927,7 @@ def _find_terminal(db: Session, terminal_id: str):
             .filter(Device.device_key == terminal_id,
                     Device.device_type.in_(["pax_terminal", "pos"]),
                     Device.status == "active").first())
+
 
 
 @router.get("/ebarimt/payer")
@@ -1081,6 +1108,44 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
     }
 
 
+@router.post("/pos/prepare")
+async def pos_prepare(body: dict, db: Session = Depends(get_db),
+                      user: User = Depends(require("cashier"))):
+    """Reserve checkout BEFORE asking the bank terminal to collect money."""
+    from ..services.checkout import lock_session
+    session = lock_session(db, body.get("session_id", ""))
+    enforce_site(user, session.site_id)
+    terminal = _find_terminal(db, body.get("terminal_id", ""))
+    if terminal is None or terminal.site_id != session.site_id:
+        raise HTTPException(403, "Энэ зогсоолын бүртгэлтэй терминал шаардлагатай")
+    payment = _create_payment(db, session, "POS", "CARD", cashier=user, allow_qpay=True)
+    _assert_expected_amount(payment, body)
+    await _retire_qpay(db, session)
+    payment.terminal_id = body["terminal_id"]
+    db.commit()
+    return {"payment_id": payment.id, "amount": float(payment.amount), "status": payment.status}
+
+
+@router.post("/pos/{payment_id}/cancel")
+def pos_cancel(payment_id: str, body: dict, db: Session = Depends(get_db),
+               user: User = Depends(require("cashier"))):
+    """Release a reservation only after the terminal confirms it did not charge."""
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.provider != "POS" or not payment.session_id:
+        raise HTTPException(404, "POS оролдлого олдсонгүй")
+    enforce_site(user, payment.session.site_id)
+    if body.get("outcome") != "NOT_CHARGED" or body.get("terminal_id") != payment.terminal_id:
+        raise HTTPException(422, "Терминалын NOT_CHARGED баталгаа шаардлагатай")
+    payment = _lock_payment(db, payment.id)
+    if payment is None or payment.status == "PAID":
+        raise HTTPException(409, "Төлөгдсөн эсвэл боловсруулагдаж байгаа төлбөр")
+    payment.status = "CANCELLED"
+    db.add(AuditLog(username=user.username, action="POS_INTENT_CANCELLED", entity="payment",
+                    entity_id=payment.id, detail={"outcome": "NOT_CHARGED"}))
+    db.commit()
+    return {"payment_id": payment.id, "status": payment.status}
+
+
 @router.post("/pos/confirm")
 async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db),
                       user: User = Depends(require("cashier"))):
@@ -1093,17 +1158,27 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     # POS апп-ийн offline queue 30 сек тутам retry хийдэг — эхний хүсэлт удааширч
     # давхар ирвэл ижил transaction_id-тай ТӨЛӨГДСӨН payment-ийг idempotent буцаана
     # (картаас мөнгө нэг л удаа гарсан тул алдаа биш, амжилт гэж хариулна)
-    txn_id = str(body.get("transaction_id") or "")[:120]
+    from sqlalchemy import or_
+    from ..services.payment_validation import (money, transaction_reference,
+                                               reference_key, claim_reference, gate_result)
+    paid_amount = money(body.get("amount"))
+    txn_id = transaction_reference(body.get("transaction_id"))
+    terminal = _find_terminal(db, body.get("terminal_id", ""))
+    if terminal and terminal.site_id != session.site_id:
+        raise HTTPException(403, "Терминал өөр зогсоолд харьяалагдана")
+    account = f"terminal:{terminal.id}" if terminal else "legacy-global"
+    tx_key = reference_key("POS", account, txn_id)
     if txn_id:
         dup = (db.query(Payment)
-               .filter(Payment.session_id == session.id, Payment.provider == "POS",
-                       Payment.provider_payment_id == txn_id, Payment.status == "PAID")
+               .filter(Payment.provider == "POS", or_(Payment.provider_tx_key == tx_key,
+                       (Payment.provider_tx_key.is_(None) & (Payment.provider_payment_id == txn_id))),
+                       Payment.status == "PAID")
                .first())
         if dup:
-            return {"status": "PAID", "payment_id": dup.id, "barrier_opened": True,
-                    **_print_payload(db, dup)}
-    if session.status not in ("OPEN", "AWAITING_PAYMENT"):
-        raise HTTPException(400, f"Session төлөв буруу: {session.status}")
+            if dup.session_id != session.id or money(dup.amount) != paid_amount:
+                raise HTTPException(409, "Гүйлгээний дугаар өөр зогсолт эсвэл өөр дүнгээр бүртгэгдсэн")
+            return {"status": "PAID", "payment_id": dup.id, **gate_result(db, dup),
+                    **_print_payload(db, dup), **settlement_info(db, dup)}
     # Session мөрийг түгжинэ — нэг session дээр хоёр confirm ЗЭРЭГ орж ирвэл
     # (retry + удаан анхны хүсэлт) давхар Payment/баримт үүсэхээс сэргийлнэ
     from sqlalchemy.exc import OperationalError
@@ -1115,8 +1190,6 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
         db.rollback()
         raise HTTPException(409, "Энэ session-ий төлбөр боловсруулагдаж байна — "
                                  "түр хүлээгээд дахин оролдоно уу")
-    if session.status not in ("OPEN", "AWAITING_PAYMENT"):
-        raise HTTPException(400, f"Session төлөв буруу: {session.status}")
     # Терминал бүртгэлтэй бол зогсоолын харьяаллыг тулгана — А зогсоолын POS
     # Б зогсоолын машинд төлбөр авахаас (буруу тооцоо) сэргийлнэ
     terminal = _find_terminal(db, body.get("terminal_id", ""))
@@ -1127,14 +1200,21 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
         raise HTTPException(400, f"Энэ терминал «{terminal.site.name if terminal.site else '?'}» "
                                  "зогсоолд харьяалагддаг — өөр зогсоолын машинд төлбөр авах боломжгүй")
 
-    payment = _create_payment(db, session, "POS", "CARD", cashier=user)
-    if abs(float(body.get("amount", 0)) - float(payment.amount)) > 1:
-        db.rollback()
-        raise HTTPException(400, f"Дүн зөрүүтэй: систем {float(payment.amount)}₮")
+    if body.get("payment_id"):
+        payment = _lock_payment(db, body["payment_id"])
+        if (payment is None or payment.provider != "POS" or payment.session_id != session.id
+                or payment.terminal_id != body.get("terminal_id")
+                or money(payment.amount) != paid_amount):
+            raise HTTPException(409, "POS оролдлого, терминал эсвэл дүн зөрлөө")
+    else:
+        # Older terminal apps report only AFTER collection. Preserve the bank fact;
+        # migrate these clients to prepare -> bank -> confirm(payment_id).
+        payment = _create_payment(db, session, "POS", "CARD", cashier=user,
+                                  confirmed_amount=paid_amount)
     payment.card_last4 = body.get("card_last4")
     payment.card_brand = body.get("card_brand")
     payment.terminal_id = body.get("terminal_id")
-    payment.provider_payment_id = txn_id or None  # retry-ийн idempotency түлхүүр
+    claim_reference(db, payment, account, txn_id)
     # Худалдан авагчийн дугаар: `payer_reg_no` (шинэ — 3 форматыг таньдаг) эсвэл
     # хуучин `customer_tin`. Иргэний регистр (АА00112233) өгвөл баримт ИРГЭНИЙ
     # нэр дээр гарч сугалаанд оролцоно; ААН регистр (7 орон)/ТТД (11–14) өгвөл
@@ -1147,10 +1227,16 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     _c0 = _t.monotonic()
     # Терминал өөрөө e-Barimt гаргасан бол (банкны PosLink-ийн Ибаримт үйлчилгээ)
     # апп ДДТД-г дамжуулна → систем давхар баримт үүсгэхгүй, терминалынхыг бүртгэнэ
+    try:
+        await _retire_qpay(db, session)
+    except HTTPException:
+        # Card was already charged. Keep that fact even when old QR cancellation is uncertain.
+        db.add(AuditLog(username=user.username, action="PAYMENT_PROVIDER_CONFLICT", entity="payment",
+                        entity_id=payment.id, detail={"reason": "QPay cancellation unconfirmed"}))
     await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body))
     db.commit()
-    out = {"status": "PAID", "payment_id": payment.id, "barrier_opened": True,
-           **_print_payload(db, payment)}
+    out = {"status": "PAID", "payment_id": payment.id, **gate_result(db, payment),
+           **_print_payload(db, payment), **settlement_info(db, payment)}
     _ms = int((_t.monotonic() - _c0) * 1000)
     (log.warning if _ms >= settings.payment_slow_warn_ms else log.info)(
         "POS confirm: %dмс (session=%s)", _ms, session.plate_number)
@@ -1165,12 +1251,14 @@ def list_payments(
     db: Session = Depends(get_db), user: User = Depends(require("payments", "reports", "cashier")),
 ):
     from datetime import timedelta
-    q = db.query(Payment).join(ParkingSession, Payment.session_id == ParkingSession.id)
+    from sqlalchemy import func
+    site_column = func.coalesce(Payment.site_id, ParkingSession.site_id)
+    q = db.query(Payment).outerjoin(ParkingSession, Payment.session_id == ParkingSession.id).filter(Payment.kind.in_(("PARKING", "DEBT")))
     site_id, site_ids = scoped_site(user, site_id)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолууд
     if site_id:
-        q = q.filter(ParkingSession.site_id == site_id)
+        q = q.filter(site_column == site_id)
     elif site_ids:
-        q = q.filter(ParkingSession.site_id.in_(site_ids))
+        q = q.filter(site_column.in_(site_ids))
     if status:
         q = q.filter(Payment.status == status)
     if provider:
@@ -1185,8 +1273,8 @@ def list_payments(
     total = q.count()
     rows = q.order_by(Payment.created_at.desc()).offset(offset).limit(min(limit, 500)).all()
     return {"total": total, "rows": [
-        to_dict(p, extra={"plate_number": p.session.plate_number if p.session else None,
-                          "site_name": p.session.site.name if p.session and p.session.site else None})
+        to_dict(p, extra={"plate_number": p.session.plate_number if p.session else (p.raw_payload or {}).get("plate_number"),
+                          "site_name": _site_of(p).name if _site_of(p) else None})
         for p in rows]}
 
 
@@ -1207,119 +1295,11 @@ async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
 
 
 async def retry_ebarimt(db: Session, payment: Payment) -> dict:
-    """Бүтэлгүйтсэн e-Barimt баримтыг ДАХИН үүсгэнэ (төлбөрийг дахин авахгүй).
-
-    Хэрэглээ: QPay талд «И баримт» тохиргоо идэвхжээгүй байх үед баримт
-    EBARIMT_NOT_ENABLED алдаатай унадаг. Тохиргоо асаагдмагц энэ функцээр
-    хуучин төлбөрүүдийн баримтыг нөхөж үүсгэнэ — жолоочоос дахин мөнгө авахгүй.
-
-    Буцаах: {ok, ebarimt_id, lottery, error}
-    """
+    """Resume a saved receipt job; never issue an untracked second receipt."""
     if payment.status != "PAID":
-        return {"ok": False, "error": "Төлбөр PAID биш — эхлээд төлбөрөө баталгаажуулна уу"}
-
-    # ЦУЦЛАГДСАН баримтыг тооцохгүй — цуцалсны дараа «Дахин үүсгэх» ШИНЭ баримт
-    # үүсгэж тусдаа мөрөөр бүртгэнэ (түүх хадгалагдана)
-    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
-                                       VatReceipt.status != "CANCELLED")
-           .order_by(VatReceipt.created_at.desc()).first())
-    if rec and rec.ebarimt_id:
-        return {"ok": True, "ebarimt_id": rec.ebarimt_id, "lottery": rec.lottery_code,
-                "error": "Баримт аль хэдийн үүссэн байна"}
-
-    receiver_type = payment.ebarimt_receiver_type or (
-        "COMPANY" if payment.customer_tin else "CITIZEN")
-    is_qpay = payment.provider == "QPAY" and bool(payment.provider_payment_id)
-    mb_acc = None if is_qpay else msgbill.account_enabled_for(
-        _site_of(payment), payment.payment_method)
-    rcpt_provider = "QPAY" if is_qpay else ("MSGBILL" if mb_acc else "POSAPI")
-    try:
-        if is_qpay:
-            raw = await qpay.create_ebarimt(
-                payment.provider_payment_id, receiver_type,
-                receiver=await _qpay_receiver(payment, receiver_type),
-                acc=qpay.account_for(_site_of(payment)))
-        elif mb_acc:
-            raw = {}
-            # Өмнө msgbill-д илгээгдсэн (rcp_…) бол эхлээд төлөвийг нь асууна —
-            # msgbill FAILED-ийг өөрөө retry хийдэг тул CREATED болсон байж магадгүй
-            prev_ref = getattr(rec, "provider_ref", None) if rec else None
-            if prev_ref:
-                try:
-                    raw = await msgbill.get_receipt(mb_acc, prev_ref)
-                except msgbill.MsgbillError as e:
-                    if e.status != 404:
-                        raise
-                    raw = {}
-            if not raw.get("billId"):
-                if raw.get("state") and raw["state"] not in ("FAILED", "UNKNOWN"):
-                    # PENDING/QUEUED — msgbill боловсруулж байна, дахин POST хийхгүй
-                    err = f"msgbill боловсруулж байна (төлөв {raw['state']}) — түр хүлээгээд дахин шалгана уу"
-                    if rec:
-                        rec.receipt_url = err
-                        db.commit()
-                    return {"ok": False, "error": err, "pending": True}
-                # ШИНЭ Idempotency-Key — өмнөх FAILED хариуг msgbill буцааж өгөхөөс сэргийлнэ
-                raw = await msgbill.create_receipt(
-                    mb_acc, float(payment.amount),
-                    description=_receipt_desc(payment),
-                    payment_method=payment.payment_method,
-                    idempotency_key=f"pay-{payment.id}-retry-{int(datetime.utcnow().timestamp())}",
-                    customer_tin=payment.customer_tin)
-                if rec is not None:
-                    rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
-                    rec.provider = "MSGBILL"
-                if not raw.get("billId"):
-                    err = _err_text(raw.get("error") or f"msgbill төлөв {raw.get('state') or '?'} — ДДТД ирээгүй")
-                    if rec:
-                        rec.receipt_url = err
-                    db.commit()
-                    return {"ok": False, "error": err}
-        else:
-            if settings.ebarimt_mock and not settings.ebarimt_mock_receipts:
-                err = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), энэ зогсоолд msgbill "
-                       "түлхүүр тохируулаагүй (Тохиргоо → Холболт → e-Barimt API)")
-                if rec:
-                    rec.receipt_url = err
-                    db.commit()
-                return {"ok": False, "error": err}
-            raw = await ebarimt.create_receipt(
-                float(payment.amount), float(payment.vat_amount),
-                "CASH" if payment.payment_method in ("CASH", "TRANSFER") else "CARD",
-                customer_tin=payment.customer_tin,
-                merchant=ebarimt.merchant_for(_site_of(payment)))
-    except Exception as e:  # noqa: BLE001
-        err = _ebarimt_err(e)
-        if rec:
-            rec.receipt_url = err
-            db.commit()
-        return {"ok": False, "error": err}
-
-    if not raw.get("billId"):
-        return {"ok": False, "error": "Баримтын дугаар (ДДТД) буцаасангүй"}
-
-    ebarimt.cache_qr(payment.id, raw.get("qrData"))
-    if rec:
-        rec.provider = rcpt_provider
-        rec.provider_ref = raw.get("msgbillId") or rec.provider_ref
-        rec.lottery_code = None
-        assign_ebarimt_id(db, rec, raw.get("billId"), source="retry",
-                          lottery=None if receiver_type == "COMPANY" else raw.get("lottery"),
-                          raw=raw.get("raw"), allow_replace=True)
-        rec.status = "SENT"
-        rec.receipt_url = None
-    else:
-        rec = VatReceipt(
-            id=str(uuid.uuid4()),   # аудит мөрөнд entity_id хэрэгтэй (flush-гүйгээр)
-            payment_id=payment.id, session_id=payment.session_id,
-            lottery_code=None if receiver_type == "COMPANY" else raw.get("lottery"),
-            amount=payment.amount, vat_amount=payment.vat_amount,
-            customer_tin=payment.customer_tin, status="SENT",
-            provider=rcpt_provider, provider_ref=raw.get("msgbillId"))
-        db.add(rec)
-        assign_ebarimt_id(db, rec, raw.get("billId"), source="retry", raw=raw.get("raw"))
-    db.commit()
-    return {"ok": True, "ebarimt_id": raw.get("billId"), "lottery": raw.get("lottery")}
+        return {"ok": False, "error": "Төлбөр PAID биш"}
+    from ..services.financial_jobs import retry_payment_receipts
+    return retry_payment_receipts(db, payment)
 
 
 async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
@@ -1471,7 +1451,8 @@ async def msgbill_webhook(request: Request, db: Session = Depends(get_db)):
     data = body.get("data") if isinstance(body.get("data"), dict) else {}
     rid = str(data.get("receipt_id") or "")
     if event in ("receipt.created", "receipt.cancelled") and rid:
-        recs = db.query(VatReceipt).filter(VatReceipt.provider_ref == rid).all()
+        recs = (db.query(VatReceipt).filter(VatReceipt.provider_ref == rid)
+                .order_by(VatReceipt.id).populate_existing().with_for_update().all())
         for rec in recs:
             _apply_msgbill_event(db, rec, event, data)
         db.add(AuditLog(username="msgbill-webhook", action="MSGBILL_WEBHOOK", entity="vat_receipt",
@@ -1491,7 +1472,7 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
     body: {ebarimt_id (ДДТД, заавал), lottery_code?, qr_data?, ebarimt_provider? (≤20,
     анхдагч TERMINAL), ebarimt_ref? (гадны системийн ID)}.
     Идэвхтэй (SENT) баримт аль хэдийн байвал 409 — эхлээд «Цуцлах»."""
-    payment = db.get(Payment, payment_id)
+    payment = _lock_payment(db, payment_id)
     if not payment:
         raise HTTPException(404, "Төлбөр олдсонгүй")
     site = _site_of(payment)
@@ -1501,6 +1482,11 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
     ext = _external_receipt(body)
     if not ext:
         raise HTTPException(400, "ebarimt_id (ДДТД) заавал")
+    from ..models import FinancialJob
+    jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
+            .order_by(FinancialJob.id).populate_existing().with_for_update().all())
+    if any(j.status == "SENDING" for j in jobs):
+        raise HTTPException(409, "Баримтын хүсэлт боловсруулагдаж байна; дууссаны дараа тулгана уу")
     live = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
                                         VatReceipt.status.in_(["SENT", "CANCEL_PENDING"])).first())
     if live and live.ebarimt_id == ext["billId"]:
@@ -1509,9 +1495,12 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
         raise HTTPException(409, f"Энэ төлбөрт идэвхтэй баримт ({live.ebarimt_id}, {live.provider or 'POSAPI'}) "
                                  "аль хэдийн байна — давхар бүртгэхгүй. Эхлээд «Цуцлах» дарна уу")
     receiver_type = payment.ebarimt_receiver_type or ("COMPANY" if payment.customer_tin else "CITIZEN")
-    rec = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
-                                       VatReceipt.status == "FAILED")
-           .order_by(VatReceipt.created_at.desc()).first())
+    unresolved = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+        VatReceipt.status.in_(["PENDING", "FAILED", "REVIEW"]))
+        .order_by(VatReceipt.id).populate_existing().with_for_update().all())
+    if len(unresolved) > 1:
+        raise HTTPException(409, "Олон баримтыг тус бүрээр нь санхүү тулгах шаардлагатай")
+    rec = unresolved[0] if unresolved else None
     if rec is None:
         rec = VatReceipt(payment_id=payment.id, session_id=payment.session_id,
                          amount=payment.amount, vat_amount=payment.vat_amount,
@@ -1525,6 +1514,9 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
                       username=user.username, raw=dict(body), allow_replace=True)
     rec.status, rec.receipt_url = "SENT", None
     rec.provider, rec.provider_ref = ext["provider"], ext["msgbillId"]
+    for job in jobs:
+        if job.receipt_id == rec.id:
+            job.status, job.last_error = "DONE", None
     ebarimt.cache_qr(payment.id, ext["qrData"])
     db.add(AuditLog(username=user.username, action="EBARIMT_ATTACH", entity="payment",
                     entity_id=payment_id, detail={"ebarimt_id": ext["billId"], "provider": ext["provider"]}))
@@ -1655,6 +1647,12 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
     if payment is None:
         raise HTTPException(409, "Баримт үүсгэх ажиллагаа явагдаж байна — түр хүлээнэ үү")
     body = body or {}
+    if body.get("customer_tin") or body.get("receiver_type"):
+        from ..models import FinancialJob
+        jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
+                .order_by(FinancialJob.id).with_for_update().all())
+        if not jobs or any(j.attempts or j.status == "SENDING" for j in jobs):
+            raise HTTPException(409, "Өмнөх баримтыг эхлээд сувгаар тулгаж цуцална уу; илгээсэн оролдлогын дүн/хүлээн авагчийг өөрчлөхгүй")
     changed = {}
     if body.get("customer_tin"):
         reg, rtype = msgbill.classify_reg_no(body.get("customer_tin"))
@@ -1669,11 +1667,17 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
         payment.customer_tin = None
         payment.ebarimt_receiver_type = "CITIZEN"
     if changed:
+        for job in jobs:
+            job.payload = {**job.payload, "customer_tin": payment.customer_tin,
+                           "receiver_type": payment.ebarimt_receiver_type}
+            receipt = db.get(VatReceipt, job.receipt_id)
+            if receipt:
+                receipt.customer_tin = payment.customer_tin
         db.flush()
     res = await retry_ebarimt(db, payment)
     db.add(AuditLog(username=user.username, action="EBARIMT_RETRY", entity="payment",
                     entity_id=payment_id, detail={**res, **({"changed": changed} if changed else {})}))
     db.commit()
-    if not res.get("ok"):
+    if not res.get("ok") and not res.get("pending"):
         raise HTTPException(400, f"Баримт үүсгэж чадсангүй: {res.get('error')}")
     return res

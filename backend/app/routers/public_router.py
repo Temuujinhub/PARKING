@@ -166,6 +166,7 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
         "vat_amount": float(payment.vat_amount),
         "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
+        "receipt_status": receipt.status if receipt else "PENDING",
         "lottery_code": receipt.lottery_code if receipt else None,
         "customer_tin": receipt.customer_tin if receipt else None,
         # QR түр санах ойгоос (ТЕГ №11 — DB-д хадгалагдахгүй, 1 цагийн дотор л үзнэ)
@@ -273,12 +274,8 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
     fee = session_fee_info(db, s)
     due = amount_due(db, s, fee)
     # Өмнөх өр (нөхөн төлбөр) — QR-ийн нэхэмжлэхэд нийлүүлж төлүүлдэг тул задаргааг харуулна
-    from sqlalchemy import func as _f
-
-    from ..models import Compensation
-    debt = float(db.query(_f.coalesce(_f.sum(Compensation.amount), 0))
-                 .filter(Compensation.plate_number == plate,
-                         Compensation.status == "PENDING").scalar() or 0)
+    from .payments_router import _pending_debts
+    debt = sum(float(c.amount) for c in _pending_debts(db, plate, site_obj))
     vr = settings.vat_rate
     return {
         "session_id": s.id, "plate_number": s.plate_number,
@@ -296,8 +293,9 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
         "debt_vat": round(debt * vr / (1 + vr)) if debt else 0,
         "vat_total": fee["vat_amount"] + (round(debt * vr / (1 + vr)) if debt else 0),
         "amount_total": due + debt,
-        "is_free": fee["is_free"], "free_reason": fee["reason"],
+        "is_free": due + debt <= 0, "free_reason": fee["reason"],
+        "price_held_until": fee.get("price_held_until"),
         "status": s.status,
-        "paid": s.status == "PAID" and due <= 0,
+        "paid": s.status == "PAID" and due + debt <= 0,
         "exit_deadline": s.exit_deadline.isoformat() if s.exit_deadline else None,
     }

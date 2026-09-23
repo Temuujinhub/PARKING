@@ -10,6 +10,7 @@ import Compensations from './pages/Compensations'
 import Dashboard from './pages/Dashboard'
 import Debts from './pages/Debts'
 import Discounts from './pages/Discounts'
+import HospitalGrants from './pages/HospitalGrants'
 import Drivers from './pages/Drivers'
 import Health from './pages/Health'
 import History from './pages/History'
@@ -67,6 +68,7 @@ export default function App() {
             <Route path="check" element={<Protected module="check"><Check /></Protected>} />
             <Route path="history" element={<Protected module="history"><History /></Protected>} />
             <Route path="discounts" element={<Protected module="discounts"><Discounts /></Protected>} />
+            <Route path="hospital-grants" element={<Protected module="reports"><HospitalGrants /></Protected>} />
             <Route path="drivers" element={<Protected module="drivers"><Drivers /></Protected>} />
             <Route path="reports" element={<Protected module="reports"><Reports /></Protected>} />
             <Route path="vat" element={<Protected module="vat"><Vat /></Protected>} />

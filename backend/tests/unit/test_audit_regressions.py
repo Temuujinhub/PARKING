@@ -19,7 +19,14 @@ from app.routers import admin_router as admin
 from app.services import app_settings as A, snapshot as S, snap_puller as SP
 from app.services.camera_tasks import ensure_camera_task, stop_camera_task
 
-JPEG = b'\xff\xd8' + b'x' * 1100 + b'\xff\xd9'
+def jpeg_fixture(size=(64, 64)):
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new('RGB', size, 'red').save(out, format='JPEG')
+    return out.getvalue()
+
+JPEG = jpeg_fixture()
 
 
 @pytest.fixture
@@ -135,11 +142,11 @@ def test_best_picture_burst_has_fixed_deadline_and_one_timer(monkeypatch):
         await batch.offer('1234УБА',JPEG)
         first=batch.timers['1234УБА']
         await asyncio.sleep(.02)
-        await batch.offer('1234УБА',JPEG+b'larger')
+        await batch.offer('1234УБА',jpeg_fixture((128, 128)))
         assert batch.timers['1234УБА'] is first
         await asyncio.wait_for(first,.08)
         assert attach.await_count == 1
-        assert attach.await_args.args[3] == JPEG+b'larger'
+        assert attach.await_args.args[3] == jpeg_fixture((128, 128))
         assert not batch.best and not batch.timers
     asyncio.run(scenario())
 
@@ -312,7 +319,7 @@ def test_long_stay_exit_picture_attaches_while_awaiting_payment(db, monkeypatch)
     db.add(cam); db.flush()
     session = models.ParkingSession(site_id=site.id,plate_number='1234УБА',
                     entry_time=datetime.utcnow()-timedelta(days=4), exit_device_id=cam.id,
-                    status='AWAITING_PAYMENT')
+                    status='AWAITING_PAYMENT', last_exit_seen_at=datetime.utcnow())
     db.add(session); db.commit()
     monkeypatch.setattr(SP, 'SessionLocal', lambda: Session(db.bind))
     monkeypatch.setattr(S, '_save', lambda *a:'test/exit.jpg')

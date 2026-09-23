@@ -12,8 +12,9 @@ class ConnectionManager:
         self.connections: dict[str, set[WebSocket]] = {}
         self.lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket, site_id: str = "*"):
-        await ws.accept()
+    async def connect(self, ws: WebSocket, site_id: str = "*", *, accept=True):
+        if accept:
+            await ws.accept()
         async with self.lock:
             self.connections.setdefault(site_id, set()).add(ws)
 
@@ -38,6 +39,54 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+async def serve_site_socket(websocket: WebSocket, site_id: str, session_factory=None):
+    """Authenticate before subscribing; bearer tokens never appear in URLs/logs."""
+    from fastapi import HTTPException, WebSocketDisconnect
+    from .auth import get_current_user, operator_sites, has_permission
+    from .database import SessionLocal
+    factory = session_factory or SessionLocal
+    keys = []
+    await websocket.accept()
+    try:
+        auth = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+        token = auth.get("token", "") if isinstance(auth, dict) else ""
+
+        def allowed_keys():
+            with factory() as db:
+                user = get_current_user(token=token, db=db)
+                if not any(has_permission(user, m) for m in ("dashboard", "cashier", "history", "reports", "devices")):
+                    raise HTTPException(403, "Event эрхгүй")
+                allowed = operator_sites(user)
+                if site_id == "all":
+                    return ["*"] if allowed is None else list(allowed)
+                if allowed is not None and site_id not in allowed:
+                    raise HTTPException(403, "Зогсоолын эрхгүй")
+                return [site_id]
+
+        keys = allowed_keys()
+        for key in keys:
+            await manager.connect(websocket, key, accept=False)
+        await websocket.send_json({"type": "READY"})
+        while True:
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+            if set(allowed_keys()) != set(keys):
+                break
+    except WebSocketDisconnect:
+        return
+    except (HTTPException, ValueError, asyncio.TimeoutError):
+        pass
+    finally:
+        for key in keys:
+            await manager.disconnect(websocket, key)
+        try:
+            await websocket.close(code=1008)
+        except RuntimeError:
+            pass
 
 
 def notify(site_id: str, event_type: str, data: dict):

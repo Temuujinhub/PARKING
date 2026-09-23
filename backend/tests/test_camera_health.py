@@ -31,12 +31,13 @@ check("JPEG ирсэн → healthy", classify_verdict(True, None, None), "health
 check("JPEG ирсэн (lat үл хамаарна)", classify_verdict(True, True, 0.01), "healthy")
 
 # ГАЦСАН гарын үсэг: event амьд + snapshot ШУУД 400
-check("event 200 + шууд 400 → hung", classify_verdict(False, True, 0.02), "hung")
-check("event 200 + 0.19с 400 → hung", classify_verdict(False, True, 0.19), "hung")
+check("event 200 + шууд 400 → hung", classify_verdict(False, True, 0.02, fast_400_only=True), "hung")
+check("event 200 + 0.19с 400 → hung", classify_verdict(False, True, 0.19, fast_400_only=True), "hung")
+check("HTTP төлөвгүй хурдан алдаа → busy", classify_verdict(False, True, 0.02), "busy")
 
 # Хил дээр: 0.2с ба түүнээс удаан бол «гацсан» гэж ЯАРАХГҮЙ (reboot хийхгүй)
-check("event 200 + 0.20с → busy (шууд биш)", classify_verdict(False, True, 0.20), "busy")
-check("event 200 + удаан 400 → busy", classify_verdict(False, True, 2.5), "busy")
+check("event 200 + 0.20с → busy (шууд биш)", classify_verdict(False, True, 0.20, fast_400_only=True), "busy")
+check("event 200 + удаан 400 → busy", classify_verdict(False, True, 2.5, fast_400_only=True), "busy")
 
 # Веб бүхэлдээ хариугүй (event ч өгсөнгүй) → hung биш, unreachable (reboot биш)
 check("event хариугүй → unreachable", classify_verdict(False, None, 0.02), "unreachable")

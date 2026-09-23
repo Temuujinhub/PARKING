@@ -13,7 +13,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from ..auth import require
+from ..auth import require, operator_sites
+from ..services.resource_scope import (tenant_filter, enforce_tenant, enforce_site_resource,
+                                       enforce_plan, plan_matches_site)
 from ..config import settings
 from ..database import get_db
 from ..models import (AppSetting, AuditLog, ChargeSession, EvCharger,
@@ -163,6 +165,11 @@ async def public_ev_info(key: str, request: Request, db: Session = Depends(get_d
     }
 
 
+def _verify_wallet_token(wallet, token):
+    if not wallet or not isinstance(token, str) or not token or not hmac.compare_digest(wallet.public_token.encode(), token.encode()):
+        raise HTTPException(403, "Дансны хувийн холбоос шаардлагатай. Хадгалсан холбоосоо ашиглах эсвэл операторт хандана уу.")
+
+
 @router.post("/api/public/ev/{key}/lookup")
 def public_ev_lookup(key: str, body: dict, request: Request,
                      db: Session = Depends(get_db)):
@@ -176,7 +183,20 @@ def public_ev_lookup(key: str, body: dict, request: Request,
     if len(phone) < 8:
         raise HTTPException(422, "Утасны дугаараа зөв оруулна уу")
     tenant_id = charger.site.tenant_id if charger.site else None
-    w = wallet_svc.get_or_create(db, tenant_id, plate, phone)
+    w = wallet_svc.find_wallet(db, tenant_id, plate)
+    if w:
+        _verify_wallet_token(w, body.get("wallet_token"))
+    else:
+        # A newly-created, empty wallet returns its bearer token once. Existing
+        # wallets require that token; phone/plate alone never prove ownership.
+        from sqlalchemy.exc import IntegrityError
+        w = Wallet(tenant_id=tenant_id, plate_number=plate, phone=phone)
+        db.add(w)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "Данс үүссэн байна. Хувийн холбоосоороо нэвтэрнэ үү.")
     db.commit()
     return {"plate": w.plate_number, "phone": _mask_phone(w.phone),
             "balance": float(w.balance or 0), "wallet_token": w.public_token}
@@ -189,7 +209,10 @@ async def public_ev_start(key: str, body: dict, request: Request,
     _throttle_public(request, "start", limit=10)
     charger, connector_id = _charger_by_key(db, key)
     plate = str(body.get("plate") or "")
-    phone = str(body.get("phone") or "")
+    tenant_id = charger.site.tenant_id if charger.site else None
+    wallet = wallet_svc.find_wallet(db, tenant_id, normalize_plate(plate))
+    _verify_wallet_token(wallet, body.get("wallet_token"))
+    phone = wallet.phone or ""
     try:
         amount = float(body.get("amount") or 0)
     except (TypeError, ValueError):
@@ -259,7 +282,11 @@ async def public_ev_stop(token: str, request: Request, db: Session = Depends(get
 async def admin_chargers(db: Session = Depends(get_db),
                          user: User = Depends(require("settings", "devices"))):
     """Бүртгэл (core) + амьд төлөв (hub) нэгтгэсэн жагсаалт."""
-    rows = db.query(EvCharger).order_by(EvCharger.cp_id).all()
+    query = db.query(EvCharger)
+    allowed = operator_sites(user)
+    if allowed is not None:
+        query = query.filter(EvCharger.site_id.in_(allowed))
+    rows = query.order_by(EvCharger.cp_id).all()
     live: dict[str, dict] = {}
     hub_error = None
     try:
@@ -284,7 +311,7 @@ async def admin_chargers(db: Session = Depends(get_db),
         })
     # hub дээр байгаа ч core-д бүртгэгдээгүй (шинэ) цэнэглэгчид
     known = {c.cp_id for c in rows}
-    unregistered = [h for k, h in live.items() if k not in known]
+    unregistered = [h for k, h in live.items() if k not in known] if allowed is None else []
     return {"chargers": out, "unregistered": unregistered, "hub_error": hub_error}
 
 
@@ -295,8 +322,9 @@ async def admin_charger_create(body: dict, db: Session = Depends(get_db),
     site_id = body.get("site_id")
     if not cp_id or not site_id:
         raise HTTPException(422, "cp_id, site_id шаардлагатай")
-    if not db.get(ParkingSite, site_id):
-        raise HTTPException(404, "Зогсоол олдсонгүй")
+    site = enforce_site_resource(db, user, site_id)
+    if body.get("price_plan_id") and not plan_matches_site(db.get(EvPricePlan,body["price_plan_id"]), site):
+        raise HTTPException(422, "Тариф энэ зогсоолд хамаарахгүй")
     if db.query(EvCharger).filter(EvCharger.cp_id == cp_id).first():
         raise HTTPException(409, "Энэ cp_id бүртгэлтэй байна")
     # Таамаглагдашгүй богино QR түлхүүр (§7.1)
@@ -334,6 +362,12 @@ async def admin_charger_update(charger_id: str, body: dict,
     c = db.get(EvCharger, charger_id)
     if not c:
         raise HTTPException(404, "Цэнэглэгч олдсонгүй")
+    site = enforce_site_resource(db, user, c.site_id)
+    if "site_id" in body:
+        site = enforce_site_resource(db, user, body["site_id"])
+    plan_id = body.get("price_plan_id", c.price_plan_id)
+    if plan_id and not plan_matches_site(db.get(EvPricePlan, plan_id), site):
+        raise HTTPException(422, "Тариф энэ зогсоолд хамаарахгүй")
     for f in ("name", "connector_count", "price_plan_id", "is_active", "site_id"):
         if f in body:
             setattr(c, f, body[f])
@@ -359,6 +393,7 @@ async def admin_charger_command(charger_id: str, body: dict,
     if not c:
         raise HTTPException(404, "Цэнэглэгч олдсонгүй")
     kind = str(body.get("command") or "")
+    enforce_site_resource(db, user, c.site_id)
     try:
         if kind == "reset":
             cmd_id = await ev_hub.send_command(
@@ -389,7 +424,10 @@ async def admin_charger_command(charger_id: str, body: dict,
 def admin_ev_sessions(status: str | None = None, plate: str | None = None,
                       limit: int = 100, db: Session = Depends(get_db),
                       user: User = Depends(require("reports", "cashier"))):
-    q = db.query(ChargeSession).order_by(ChargeSession.created_at.desc())
+    q = db.query(ChargeSession).join(EvCharger).order_by(ChargeSession.created_at.desc())
+    allowed = operator_sites(user)
+    if allowed is not None:
+        q = q.filter(EvCharger.site_id.in_(allowed))
     if status:
         q = q.filter(ChargeSession.status == status)
     if plate:
@@ -405,8 +443,12 @@ def admin_ev_sessions(status: str | None = None, plate: str | None = None,
 @router.get("/api/admin/ev/price-plans")
 def list_price_plans(db: Session = Depends(get_db),
                      user: User = Depends(require("settings", "tariffs"))):
-    return [to_dict(p) for p in
-            db.query(EvPricePlan).order_by(EvPricePlan.created_at).all()]
+    from sqlalchemy import or_
+    q = db.query(EvPricePlan).filter(tenant_filter(db, user, EvPricePlan.tenant_id))
+    allowed = operator_sites(user)
+    if allowed is not None:
+        q = q.filter(or_(EvPricePlan.site_id.in_(allowed), EvPricePlan.site_id.is_(None)))
+    return [to_dict(p) for p in q.order_by(EvPricePlan.created_at).all()]
 
 
 @router.post("/api/admin/ev/price-plans", status_code=201)
@@ -424,6 +466,10 @@ def create_price_plan(body: dict, db: Session = Depends(get_db),
         parking_exempt_mode=body.get("parking_exempt_mode") or "NONE",
         parking_exempt_cap_min=body.get("parking_exempt_cap_min") or 120,
         tenant_id=body.get("tenant_id"), site_id=body.get("site_id"))
+    if p.site_id:
+        site = enforce_site_resource(db, user, p.site_id)
+        p.tenant_id = site.tenant_id
+    enforce_plan(db, user, p)
     db.add(p)
     _audit(db, user.username, "EV_PLAN_CREATE", p.name, body)
     db.commit()
@@ -436,6 +482,7 @@ def update_price_plan(plan_id: str, body: dict, db: Session = Depends(get_db),
     p = db.get(EvPricePlan, plan_id)
     if not p:
         raise HTTPException(404, "Тариф олдсонгүй")
+    enforce_plan(db, user, p)
     for f in ("name", "price_per_wh", "night_price_per_wh", "night_from",
               "night_to", "min_amount", "max_amount", "idle_grace_min",
               "idle_fee_per_min", "parking_exempt_mode",

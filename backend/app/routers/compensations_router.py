@@ -148,110 +148,82 @@ def list_compensations(status: str | None = None, plate: str | None = None,
 @router.post("/{comp_id}/pay")
 async def pay_compensation(comp_id: str, body: dict | None = None, db: Session = Depends(get_db),
                            user: User = Depends(require("compensations"))):
-    """Нөхөн төлбөрийг бэлэн/картаар төлүүлж хаах + e-Barimt үүсгэнэ.
-    body: {method: CASH|CARD, customer_tin?}."""
+    """Collect one receivable atomically, including debts without a stay."""
+    from decimal import Decimal
+    from uuid import uuid4
     from ..config import settings
-    from ..services import ebarimt
+    from ..services.payment_validation import money, transaction_reference, claim_reference
+    from ..services.financial_jobs import enqueue_receipt
     body = body or {}
     method = body.get("method", "CASH")
-    comp = db.get(Compensation, comp_id)
-    if not comp or comp.status != "PENDING":
-        raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
-    allowed = operator_sites(user)
-    if allowed and comp.site_id not in allowed:
-        raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
-    comp.status = "PAID"
-    comp.paid_at = datetime.utcnow()
-    comp.paid_by = user.username
-    amount = float(comp.amount)
-    vat = round(amount * settings.vat_rate / (1 + settings.vat_rate))
+    if method not in ("CASH", "CARD"):
+        raise HTTPException(422, "Төлбөрийн хэрэгсэл CASH эсвэл CARD байна")
+    # No HTTP below: concurrent cashiers/pay-vs-writeoff serialize on this row.
+    comp = (db.query(Compensation).enable_eagerloads(False)
+            .filter(Compensation.id == comp_id).populate_existing().with_for_update().first())
+    if not comp:
+        raise HTTPException(404, "Нэхэмжлэл олдсонгүй")
+    enforce_site(user, comp.site_id)
+    if comp.status == "PAID":
+        return {**to_dict(comp), "payment_id": comp.payment_id, "already_paid": True}
+    if comp.status != "PENDING":
+        raise HTTPException(409, "Энэ нэхэмжлэл төлөх боломжтой төлөвт биш")
+    terminal, reference = None, None
+    if method == "CARD":
+        from .payments_router import _find_terminal
+        reference = transaction_reference(body.get("transaction_id"))
+        terminal = transaction_reference(body.get("terminal_id"))
+        if len(terminal) > 60:
+            raise HTTPException(422, "Терминалын дугаар 60 хүртэл тэмдэгт байна")
+        device = _find_terminal(db, terminal)
+        if device is None or device.site_id != comp.site_id:
+            raise HTTPException(403, "Энэ зогсоолд бүртгэлтэй терминалын дугаар шаардлагатай")
+        legacy = db.query(Payment.id).filter(Payment.provider == "POS",
+            Payment.provider_tx_key.is_(None), Payment.provider_payment_id == reference).first()
+        if legacy:
+            raise HTTPException(409, "Энэ гүйлгээ өмнөх төлбөрт бүртгэгдсэн байна")
+    amount = money(comp.amount)
+    rate = Decimal(str(settings.vat_rate))
+    vat = ((amount * rate / (1 + rate)).quantize(Decimal("0.01"))
+           if settings.vat_inclusive and rate > 0 else Decimal("0"))
     tin = str(body.get("customer_tin") or "").strip()[:20] or None
-    pm = "CASH" if method == "CASH" else "CARD"
-    # ТӨЛБӨРИЙН БИЧИЛТ — өмнө нь энд Payment мөр үүсгэдэггүй байсан тул кассчны
-    # цуглуулсан өрийн БЭЛЭН МӨНГӨ орлогын тайлан, ээлжийн тооцоо, мөнгөн
-    # тооцоонд ОГТ харагддаггүй байв (2026-08-09-нд илрүүлэв). Одоо ердийн
-    # төлбөртэй адил бүртгэгдэж, ээлжид холбогдоно.
-    pay = None
-    if comp.session_id:
-        shift = (db.query(CashierShift)
-                 .filter(CashierShift.user_id == user.id,
-                         CashierShift.status == "OPEN").first())
-        pay = Payment(
-            session_id=comp.session_id,
-            provider="CASH" if method == "CASH" else "POS",
-            payment_method=pm,
-            source="POS",
-            sender_invoice_no=f"DEBT-{comp.id[:8].upper()}-{datetime.utcnow():%Y%m%d%H%M%S}",
-            amount=amount, vat_amount=vat, status="PAID", paid_at=comp.paid_at,
-            cashier_id=user.id, shift_id=shift.id if shift else None,
-            customer_tin=tin, ebarimt_receiver_type="COMPANY" if tin else "CITIZEN",
-        )
-        db.add(pay)
-        db.flush()
-        comp.payment_id = pay.id
+    shift = (db.query(CashierShift).filter(CashierShift.user_id == user.id,
+        CashierShift.status == "OPEN", CashierShift.site_id == comp.site_id).first())
+    now = datetime.utcnow()
+    pay = Payment(id=str(uuid4()), kind="DEBT", session_id=comp.session_id, site_id=comp.site_id,
+        provider="CASH" if method == "CASH" else "POS", payment_method=method, source="POS",
+        sender_invoice_no=f"DEBT-{comp.id}", amount=amount, vat_amount=vat,
+        status="PAID", paid_at=now, cashier_id=user.id, shift_id=shift.id if shift else None,
+        terminal_id=terminal, customer_tin=tin,
+        ebarimt_receiver_type="COMPANY" if tin else "CITIZEN",
+        raw_payload={"compensation_id": comp.id, "plate_number": comp.plate_number,
+                     "card_evidence": "operator_receipt_reference" if method == "CARD" else None})
+    db.add(pay)
+    if reference:
+        claim_reference(db, pay, f"terminal:{device.id}", reference)
     else:
-        log.warning(f"нөхөн төлбөр {comp_id} session-гүй — Payment бичилт үүсгэсэнгүй")
-
-    # e-Barimt (амжилтгүй байсан ч төлбөрийг хаана) — 2026-08-19: msgbill.mn
-    # (зогсоол/түрээслэгчийн түлхүүр) → локал PosAPI → суваг байхгүй бол FAILED
-    # (хуурамч MOCK баримт үүсгэхгүй). VatReceipt-д бүртгэж Ибаримт хуудсанд
-    # харагдуулна (өмнө нь огт бүртгэдэггүй байв).
-    from ..models import ParkingSite, VatReceipt
-    from ..services import msgbill
-    site = db.get(ParkingSite, comp.site_id) if comp.site_id else None
-    mb_acc = msgbill.account_enabled_for(site, pm)
-    receipt, rec_err, rec_provider = {}, None, "POSAPI"
-    try:
-        if mb_acc is not None:
-            rec_provider = "MSGBILL"
-            receipt = await msgbill.create_receipt(
-                mb_acc, amount, description=f"Зогсоолын өр · {comp.plate_number or ''} · "
-                                            f"{getattr(site, 'name', '') or ''}",
-                payment_method=pm, idempotency_key=f"comp-{comp.id}", customer_tin=tin)
-            if not receipt.get("billId"):
-                rec_err = receipt.get("error") or f"msgbill төлөв {receipt.get('state') or '?'}"
-        elif settings.ebarimt_mock and not settings.ebarimt_mock_receipts:
-            rec_err = ("Баримтын суваг байхгүй — PosAPI суугаагүй (MOCK), msgbill түлхүүр "
-                       "тохируулаагүй. Тохиргоо → Холболт → e-Barimt API")
-        else:
-            receipt = await ebarimt.create_receipt(
-                amount, vat, pm, customer_tin=tin,
-                merchant=ebarimt.merchant_for(site))   # түрээслэгчийн ТТД-ээр
-        ebarimt.cache_qr(comp.id, receipt.get("qrData"))
-        if pay is not None:
-            ebarimt.cache_qr(pay.id, receipt.get("qrData"))
-    except Exception as e:  # noqa: BLE001
-        rec_err = str(e)[:200]
-        log.error(f"нөхөн төлбөрийн e-Barimt амжилтгүй: {comp_id}: {e}")
-    if pay is not None:
-        db.add(VatReceipt(
-            payment_id=pay.id, session_id=comp.session_id,
-            ebarimt_id=receipt.get("billId"),
-            lottery_code=None if tin else receipt.get("lottery"),
-            amount=amount, vat_amount=vat, customer_tin=tin,
-            status="SENT" if receipt.get("billId") else "FAILED",
-            receipt_url=rec_err, provider=rec_provider, provider_ref=receipt.get("msgbillId")))
+        db.flush()
+    comp.status, comp.paid_at, comp.paid_by, comp.payment_id = "PAID", now, user.username, pay.id
+    receipt = enqueue_receipt(db, pay, description=f"Зогсоолын өр · {comp.plate_number or ''}", key=f"comp-{comp.id}")
     db.add(AuditLog(username=user.username, action="COMPENSATION_PAID", entity="compensation",
-                    entity_id=comp_id,
-                    detail={"plate": comp.plate_number, "amount": amount, "method": method}))
+        entity_id=comp_id, detail={"plate": comp.plate_number, "amount": str(amount),
+        "method": method, "payment_id": pay.id, "terminal_id": terminal,
+        "transaction_id": reference, "evidence": pay.raw_payload["card_evidence"]}))
     db.commit()
-    return {**to_dict(comp), "method": method, "ebarimt_id": receipt.get("billId"),
-            "lottery_code": receipt.get("lottery"),
-            "qr_data": ebarimt.get_cached_qr(comp.id)}
+    return {**to_dict(comp), "method": method, "payment_id": pay.id, "receipt_status": receipt.status}
 
 
 @router.post("/{comp_id}/cancel")
 def cancel_compensation(comp_id: str, body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("discounts", "settings"))):
     """Нэхэмжлэл цуцлах (зөвхөн админ) — шалтгаан заавал."""
-    comp = db.get(Compensation, comp_id)
+    comp = (db.query(Compensation).enable_eagerloads(False)
+            .filter(Compensation.id == comp_id).populate_existing().with_for_update().first())
     if not comp or comp.status != "PENDING":
         raise HTTPException(404, "Төлөгдөөгүй нэхэмжлэл олдсонгүй")
     # pay_compensation дээр байдаг шалгалт энд дутуу байсан — өөр түрээслэгчийн
     # авлагыг comp_id мэдэхэд л цуцлах боломжтой байв (санхүүгийн IDOR).
-    allowed = operator_sites(user)
-    if allowed and comp.site_id not in allowed:
-        raise HTTPException(403, "Энэ нэхэмжлэл таны хариуцах зогсоолынх биш")
+    enforce_site(user, comp.site_id)
     reason = _clean_reason(body.get("reason"))
     _mark_cancelled(comp, user.username, reason)
     db.add(AuditLog(username=user.username, action="COMPENSATION_CANCELLED", entity="compensation",
@@ -311,7 +283,9 @@ def write_off_debts(body: dict, db: Session = Depends(get_db),
     reason = _clean_reason(body.get("reason"))
     unblacklist = bool(body.get("unblacklist", True))
     allowed = operator_sites(user)
-    comps = db.query(Compensation).filter(Compensation.id.in_([str(i) for i in ids])).all()
+    comps = (db.query(Compensation).enable_eagerloads(False)
+             .filter(Compensation.id.in_([str(i) for i in ids]))
+             .order_by(Compensation.id).populate_existing().with_for_update().all())
     now = datetime.utcnow()
     batch_id = uuid4().hex[:12]
     done, skipped, total, plates = 0, [], 0.0, set()
@@ -415,11 +389,17 @@ async def night_close(body: dict, db: Session = Depends(get_db),
     now = datetime.utcnow()
     created = 0
     for s in sessions:
+        from ..services.checkout import lock_session
+        s = lock_session(db, s.id)
+        if s.status not in ("OPEN", "AWAITING_PAYMENT"):
+            continue
         fee = session_fee_info(db, s, at=now)
         s.exit_time = now
         s.duration_minutes = fee["duration_minutes"]
         s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
         s.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+        from ..services.hospital_benefits import finish_hospital_usage
+        finish_hospital_usage(s, fee)
         # Session тутмын бүртгэл — site-ийн түвшний NIGHT_CLOSE нь Түүхийн
         # мөр бүрийг тайлбарлаж чаддаггүй (2026-08-16).
         db.add(AuditLog(username=user.username, action="NIGHT_CLOSE_CAR",

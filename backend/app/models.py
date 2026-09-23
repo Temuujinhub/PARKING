@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
+    BigInteger, Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, JSON,
     UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -66,14 +66,14 @@ class Tenant(Base):
     # (зогсоол бүрт тохируулах шаардлагагүй; зогсоолын түвшний талбар нь
     # онцгой тохиолдлын override болж үлдсэн). password шифрлэгдэж хадгалагдана.
     qpay_username = Column(String(80), nullable=True)
-    qpay_password = Column(String(160), nullable=True)   # API-аар БУЦААХГҮЙ
+    qpay_password = Column(Text, nullable=True)   # Fernet ciphertext; API-аар БУЦААХГҮЙ
     qpay_invoice_code = Column(String(80), nullable=True)
     qpay_branch_code = Column(String(40), nullable=True)
     qpay_district_code = Column(String(10), nullable=True)
     # msgbill.mn Partner API түлхүүр (bsk_...) — дансаар/бэлэн/картын e-Barimt-ыг
     # msgbill-ээр үүсгэхэд. Шифрлэгдэж хадгалагдана (secretbox), UI-д зөвхөн *_set.
-    msgbill_api_key = Column(String(160), nullable=True)
-    msgbill_webhook_secret = Column(String(160), nullable=True)  # whsec_… (шифрлэгдсэн)
+    msgbill_api_key = Column(Text, nullable=True)
+    msgbill_webhook_secret = Column(Text, nullable=True)  # whsec_… (шифрлэгдсэн)
     # ─── Түрээслэгчийн e-Barimt (ТЕГ PosAPI) хувийн мэдээлэл ───────────────
     # Баримт ХЭНИЙ нэр дээр гарахыг тодорхойлно. Өмнө нь ЗӨВХӨН .env-ийн глобал
     # ТТД байсан тул Моннисын зогсоолын картын баримт EasyParking-ийн нэр дээр
@@ -137,7 +137,7 @@ class ParkingSite(Base):
     # тэдний данс руу орж, e-Barimt нь тэдний ТТД-ээр үүснэ. Хоосон талбарууд
     # нь .env-ийн глобал тохиргоо руу уналт хийнэ (config.qpay_*).
     qpay_username = Column(String(80), nullable=True)      # client_id
-    qpay_password = Column(String(160), nullable=True)     # client_secret — API-аар БУЦААХГҮЙ
+    qpay_password = Column(Text, nullable=True)     # encrypted client_secret — API-аар БУЦААХГҮЙ
     qpay_invoice_code = Column(String(80), nullable=True)
     qpay_branch_code = Column(String(40), nullable=True)
     # НӨАТ-ын дүүрэг+хороо (4 орон, ж: 2318 = Хан-Уул 18-р хороо)
@@ -180,7 +180,7 @@ class Device(Base):
     # глобал camera_username/password руу уналт хийнэ — зогсоол бүр өөр нууц
     # үгтэй камертай байж болох тул. password нь API-аар БУЦААГДАХГҮЙ.
     username = Column(String(60), nullable=True)
-    password = Column(String(160), nullable=True)
+    password = Column(Text, nullable=True)  # Fernet expansion must not truncate device credentials
     device_key = Column(String(80), unique=True, nullable=True)  # LPR callback-д төхөөрөмж таних түлхүүр
     extra = Column(JSON, nullable=False, default=dict)
     last_seen = Column(DateTime, nullable=True)
@@ -331,6 +331,14 @@ class ParkingSession(Base):
     total_fee = Column(Numeric(12, 2), nullable=True)
     paid_at = Column(DateTime, nullable=True)
     exit_deadline = Column(DateTime, nullable=True)  # paid_at + grace_minutes
+    payment_wait_started_at = Column(DateTime, nullable=True)
+    last_exit_seen_at = Column(DateTime, nullable=True)
+    payment_quote_until = Column(DateTime, nullable=True)
+    payment_quote = Column(JSON, nullable=True)
+    hospital_grant_id = Column(UUID(as_uuid=False), ForeignKey("hospital_daily_grants.id"), nullable=True, index=True)
+    hospital_allowance_minutes = Column(Integer, nullable=True)
+    hospital_used_minutes = Column(Integer, nullable=True)
+    hospital_fee_snapshot = Column(JSON, nullable=True)
     note = Column(Text, nullable=True)  # операторын нэмэлт тэмдэглэл (касс)
     # Дүн ЦАРЦСАН session: total_fee-г тарифаас ДАХИН бодохгүй, хадгалсан дүнг
     # хэрэглэнэ. Орох уншилтгүй машины суурь хураамж (exit_rules.no_session_fee)
@@ -350,6 +358,8 @@ class ParkingSession(Base):
     # Оператор/POS «онцгой гаргалт» (ХБИ, түргэн/цагдаа, бүртгэлгүй, төлөөд
     # нээгдээгүй) хийхийн ӨМНӨ гарах камераас гараар авсан баталгаажуулах зураг —
     # free_exit эрхгүй операторын гаргалтын нотолгоо (2026-09-14).
+    entry_snapshot_source = Column(String(30), nullable=True)
+    exit_snapshot_source = Column(String(30), nullable=True)
     verify_snapshot = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -367,12 +377,53 @@ class ParkingSession(Base):
     )
 
 
+class HospitalIntegration(Base):
+    """A credential may grant hospital benefits only at its explicitly selected site."""
+    __tablename__ = "hospital_integrations"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    name = Column(String(120), nullable=False)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True, index=True)
+    daily_minutes = Column(Integer, nullable=False, default=120)
+    is_active = Column(Boolean, nullable=False, default=False)
+    signing_secret = Column(Text, nullable=True)
+    key_version = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class HospitalDailyGrant(Base):
+    __tablename__ = "hospital_daily_grants"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    integration_id = Column(UUID(as_uuid=False), ForeignKey("hospital_integrations.id"), nullable=False)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False)
+    plate_number = Column(String(20), nullable=False)
+    benefit_date = Column(Date, nullable=False)
+    daily_minutes = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("site_id", "plate_number", "benefit_date", name="uq_hospital_daily_grant"),)
+
+
+class HospitalGrantRequest(Base):
+    """Signed visit identifiers are durable idempotency keys, without patient data."""
+    __tablename__ = "hospital_grant_requests"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    integration_id = Column(UUID(as_uuid=False), ForeignKey("hospital_integrations.id"), nullable=False)
+    visit_id = Column(String(100), nullable=False)
+    body_hash = Column(String(64), nullable=False)
+    grant_id = Column(UUID(as_uuid=False), ForeignKey("hospital_daily_grants.id"), nullable=False)
+    response = Column(JSON, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("integration_id", "visit_id", name="uq_hospital_visit_request"),)
+
+
 class Payment(Base):
     __tablename__ = "payments"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     # §5.1: данс цэнэглэх (WALLET_TOPUP) төлбөр зогсолтод харьяалагдахгүй тул nullable
     session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True, index=True)
-    # Төлбөрийн ТӨРӨЛ (§5.1): PARKING | WALLET_TOPUP | EV — тайлан, ээлж, e-Barimt-д ялгана
+    # Standalone debt collections retain their site even without a parking stay.
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True, index=True)
+    # Төлбөрийн ТӨРӨЛ: PARKING | DEBT | WALLET_TOPUP | EV
     kind = Column(String(20), nullable=False, default="PARKING", server_default=text("'PARKING'"), index=True)
     # WALLET_TOPUP болон данснаас төлсөн төлбөрийн данс
     wallet_id = Column(UUID(as_uuid=False), ForeignKey("wallets.id"), nullable=True, index=True)
@@ -383,6 +434,8 @@ class Payment(Base):
     provider_invoice_id = Column(String(120), nullable=True)
     # QPay-ийн g_payment_id (payment/check-ээс) — QPay ebarimt_v3 үүсгэхэд ашиглана
     provider_payment_id = Column(String(120), nullable=True)
+    provider_tx_key = Column(String(64), nullable=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=True)
     # e-Barimt хүлээн авагчийн төрөл: CITIZEN (иргэн) | COMPANY (ААН)
     ebarimt_receiver_type = Column(String(20), nullable=True)
     sender_invoice_no = Column(String(120), unique=True, nullable=False)
@@ -399,16 +452,43 @@ class Payment(Base):
     qr_text = Column(Text, nullable=True)
     deep_link = Column(Text, nullable=True)
     raw_payload = Column(JSON, nullable=False, default=dict)
+    fee_snapshot = Column(JSON, nullable=True)
+    qpay_last_check_at = Column(DateTime, nullable=True)
+    qpay_next_check_at = Column(DateTime, nullable=True)
+    qpay_check_requested_at = Column(DateTime, nullable=True)
+    qpay_check_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     session = relationship("ParkingSession", lazy="joined")
+    site = relationship("ParkingSite", lazy="joined")
 
     __table_args__ = (
         Index("ix_payments_status_paid_at", "status", "paid_at"),  # орлогын тайлангийн hot path
+        Index("uq_payments_provider_tx_key", "provider_tx_key", unique=True),
         Index("ix_payments_created_at", "created_at"),
         Index("ix_payments_shift_id", "shift_id"),
         Index("ix_payments_provider", "provider"),
+        Index("ix_payments_qpay_check_due", "provider", "status", "qpay_next_check_at", "created_at"),
     )
+
+
+class FinancialJob(Base):
+    __tablename__ = "financial_jobs"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    job_key = Column(String(160), nullable=False, unique=True)
+    kind = Column(String(30), nullable=False)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=False)
+    receipt_id = Column(UUID(as_uuid=False), ForeignKey("vat_receipts.id"), nullable=True)
+    status = Column(String(20), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    lease_until = Column(DateTime, nullable=True)
+    lease_token = Column(String(36), nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (Index("ix_financial_jobs_due", "status", "next_attempt_at"),)
 
 
 class VatReceipt(Base):
@@ -588,7 +668,9 @@ class CompanyContact(Base):
     (registered_drivers.company нь энгийн текст тул харилцахыг эндээс хөтөлнө.)"""
     __tablename__ = "company_contacts"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
-    company = Column(String(160), nullable=False, unique=True)
+    company = Column(String(160), nullable=False)
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
+    __table_args__ = (UniqueConstraint("owner_scope", "company", name="uq_contact_owner_company"),)
     email = Column(String(120), default="")
     register = Column(String(20), default="")   # ТТД (e-Barimt-д хэрэглэж болно)
     # Төлбөрийн горим: POSTPAID=сарын эцэст (өмнөх сарын нэхэмжлэл 1-нд),
@@ -606,6 +688,7 @@ class CompanyInvoice(Base):
     __tablename__ = "company_invoices"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
     invoice_no = Column(String(40), unique=True, nullable=False)   # INV-202608-003
+    owner_scope = Column(String(40), nullable=False, default="GLOBAL")
     period = Column(String(7), nullable=False, index=True)         # "2026-08"
     company = Column(String(160), nullable=False)
     car_count = Column(Integer, nullable=False, default=0)
@@ -620,7 +703,7 @@ class CompanyInvoice(Base):
     note = Column(Text, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    __table_args__ = (UniqueConstraint("period", "company", name="uq_invoice_period_company"),)
+    __table_args__ = (UniqueConstraint("period", "owner_scope", "company", name="uq_invoice_period_owner_company"),)
 
 
 class PartnerKey(Base):

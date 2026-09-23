@@ -15,6 +15,7 @@
 import logging
 import threading
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from ..database import SessionLocal
 from ..models import AuditLog, Compensation, ParkingSession, ParkingSite
@@ -51,54 +52,114 @@ def _sync_inner(db, site, cam: dict, watermark, horizon, rules: dict,
              if e.get("plate") and watermark < e["time"] <= horizon]
     if not inner:
         return 0, 0
-    from ..models import LprEvent
-    from ..session_logic import plates_ocr_similar
-    from .nested import _ACTIVE, pause_cap_minutes, pause_session, resume_session
+    from ..models import Device, LprEvent
+    from ..session_logic import find_inner_registered, plates_ocr_similar
+    from .nested import pause_cap_minutes, pause_session, resume_session
 
     inner.sort(key=lambda e: e["time"])
     cap = pause_cap_minutes(db, site.id)
     paused_n = resumed_n = 0
+    preview = {}
+    seen = set()
     for ev in inner:
         p = normalize_plate(ev["plate"])
         if rules["skip_invalid_plate"] and not is_valid_plate(p):
             continue
-        entering = (ev.get("lane_dir") or "entry") != "exit"
-        # Амьд урсгал үүнийг аль хэдийн үзсэн үү (±90с) — үзсэн бол алгасна
-        if db.query(LprEvent.id).filter(
-                LprEvent.site_id == site.id, LprEvent.plate_number == p,
-                LprEvent.accepted.is_(True),
-                LprEvent.created_at >= ev["time"] - timedelta(seconds=90),
-                LprEvent.created_at <= ev["time"] + timedelta(seconds=90)).first():
+        # Manual snapshots and cached/deleted/remapped cameras are not evidence
+        # of passage. Name/IP alone cannot identify a camera across sites.
+        device = db.get(Device, ev.get("device_id")) if ev.get("device_id") else None
+        if (not device or device.site_id != site.id or device.status != "active"
+                or device.device_type != "camera" or not device.nested_inner
+                or device.lane_dir not in ("entry", "exit")
+                or device.lane_dir != ev.get("lane_dir")
+                or ev.get("event") != "gate_pass"):
             continue
-        s = (db.query(ParkingSession)
-             .filter(ParkingSession.site_id == site.id,
-                     ParkingSession.plate_number == p,
-                     ParkingSession.status.in_(_ACTIVE))
-             .order_by(ParkingSession.entry_time.desc()).first())
-        if s is None:
-            # Шороон зогсоолын тоос/өнцгөөс болж дотоод камер ӨӨР уншсан байж
-            # магадгүй (9920ҮИН ↔ 9920УНН). ЯГ НЭГ нэр дэвшигч байвал зөвшөөрнө —
-            # олон бол буруу машины тоолуурыг зогсоох эрсдэлтэй тул хүрэхгүй.
-            cands = [x for x in db.query(ParkingSession)
-                     .filter(ParkingSession.site_id == site.id,
-                             ParkingSession.status.in_(_ACTIVE)).all()
-                     if plates_ocr_similar(p, x.plate_number)]
-            if len(cands) != 1:
-                continue
-            s = cands[0]
-        if dry_run:
-            paused_n, resumed_n = paused_n + entering, resumed_n + (not entering)
+        entering = device.lane_dir == "entry"
+        identity = (device.id, device.lane_dir, p, ev["time"])
+        if identity in seen:
             continue
         try:
+            # Only an unquoted OPEN stay can be repaired automatically. Never
+            # attach an old read to a later visit or rewrite an issued payment.
+            eligible = db.query(ParkingSession).filter(
+                ParkingSession.site_id == site.id,
+                ParkingSession.status == "OPEN",
+                ParkingSession.payment_wait_started_at.is_(None),
+                ParkingSession.fee_locked.is_(False),
+                ParkingSession.entry_time <= ev["time"],
+                ParkingSession.exit_time.is_(None))
+            s = eligible.filter(ParkingSession.plate_number == p).first()
+            if s is None:
+                cands = [x for x in eligible.all()
+                         if plates_ocr_similar(p, x.plate_number)]
+                if len(cands) != 1:
+                    continue
+                s = cands[0]
+            # The live inner handler takes this same row lock. Recheck status
+            # after waiting, before making any counter changes.
+            s = (eligible.filter(ParkingSession.id == s.id)
+                 .populate_existing().with_for_update(of=ParkingSession).first())
+            if s is None:
+                continue
+            # Include rejected reads: recovery must not override a deliberate
+            # live denial. Outer reads and the other direction are NOT duplicates.
+            if db.query(LprEvent.id).filter(
+                    LprEvent.site_id == site.id, LprEvent.device_id == device.id,
+                    LprEvent.lane_dir == device.lane_dir,
+                    LprEvent.plate_number == p,
+                    LprEvent.created_at >= ev["time"] - timedelta(seconds=90),
+                    LprEvent.created_at <= ev["time"] + timedelta(seconds=90)).first():
+                continue
+            # Replaying behind a later live transition could reopen a settled
+            # pause. Such a timeline requires review, not a guessed credit.
+            if db.query(LprEvent.id).join(Device, Device.id == LprEvent.device_id).filter(
+                    LprEvent.site_id == site.id, Device.nested_inner.is_(True),
+                    LprEvent.plate_number.in_((p, s.plate_number)),
+                    LprEvent.accepted.is_(True),
+                    LprEvent.created_at > ev["time"]).first():
+                continue
+            target = s
+            if dry_run:
+                target = preview.setdefault(s.id, SimpleNamespace(
+                    paused_since=s.paused_since, paused_minutes=int(s.paused_minutes or 0)))
+            if target.paused_since and target.paused_since > ev["time"]:
+                continue
+            if entering and site.inner_registered_only:
+                reg = find_inner_registered(db, p, site.id)
+                if reg is None and s.plate_number != p:
+                    reg = find_inner_registered(db, s.plate_number, site.id)
+                if reg is None or not (reg.valid_from <= ev["time"] <= reg.valid_to):
+                    continue
+            before = (target.paused_since, int(target.paused_minutes or 0))
             if entering:
-                if pause_session(s, ev["time"]):
-                    paused_n += 1
-            elif resume_session(s, ev["time"], cap):
-                resumed_n += 1
+                changed = pause_session(target, ev["time"])
+            else:
+                resume_session(target, ev["time"], cap)
+                changed = before != (target.paused_since, int(target.paused_minutes or 0))
+            if dry_run:
+                paused_n += int(changed and entering)
+                resumed_n += int(changed and not entering)
+                seen.add(identity)
+                continue
+            # Persist the recovery decision with the counter in one transaction.
+            # Repeated runs/cached records cannot credit the interval twice.
+            db.add(LprEvent(site_id=site.id, device_id=device.id, plate_number=p,
+                            lane_dir=device.lane_dir, accepted=True,
+                            created_at=ev["time"], raw={"source": "camera_sync"}))
+            db.add(AuditLog(username="system", action="CAMERA_SYNC_INNER",
+                            entity="session", entity_id=s.id,
+                            detail={"device_id": device.id, "lane_dir": device.lane_dir,
+                                    "event_time": ev["time"].isoformat(), "changed": changed}))
             db.commit()
-        except Exception as e:  # noqa: BLE001 — нэг уншилт бусдыг зогсоохгүй
+            paused_n += int(changed and entering)
+            resumed_n += int(changed and not entering)
+            seen.add(identity)
+        except Exception as e:  # noqa: BLE001
             db.rollback()
             log.warning("%s %s: дотоод уншилт нөхөж чадсангүй — %r", site.name, p, e)
+        finally:
+            # Release row locks on skipped/dry-run paths too.
+            db.rollback()
     if paused_n or resumed_n:
         log.info("%s: дотоод логоос тоолуур %d зогсоов, %d үргэлжлүүлэв "
                  "(session үүсгээгүй/хаагаагүй)", site.name, paused_n, resumed_n)
@@ -128,6 +189,8 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
     if all(c["error"] for c in cam["cameras"]) and cam["cameras"]:
         return {"site": site.name, "created": 0, "skipped": 0,
                 "note": "камерууд холбогдсонгүй"}
+
+    paused_n, resumed_n = _sync_inner(db, site, cam, watermark, horizon, rules, dry_run)
 
     entries = [e for e in cam["events"]
                if e["lane_dir"] == "entry" and e["plate"]
@@ -197,6 +260,8 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 s.status = "AWAITING_PAYMENT"
             db.add(s)
             db.flush()
+            from .hospital_benefits import attach_daily_grant
+            attach_daily_grant(db, s)
             due = 0.0
             if ex:
                 # `ex` байна = камерын логт ГАРСАН нь тогтоогдсон → баримттай
@@ -243,6 +308,9 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                  .order_by(ParkingSession.entry_time.desc()).first())
             if not s:
                 continue
+            if dry_run:
+                closed_by_log += 1
+                continue
             try:
                 # close_session_forced нь AWAITING_PAYMENT + exit_time үед
                 # төлбөрийг ТЭР ЦАГТ царцаадаг — логийн цагийг хүчинтэй болгоно
@@ -268,7 +336,6 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
         log.info("%s: логийн ГАРАХ уншилтаар %d бүртгэл хаагдлаа (%.0f₮)",
                  site.name, closed_by_log, log_fee)
 
-    paused_n, resumed_n = _sync_inner(db, site, cam, watermark, horizon, rules, dry_run)
 
     # Watermark-ыг УРАГШ нь л зөөнө (боловсруулсан хамгийн сүүлийн event хүртэл)
     if not dry_run:

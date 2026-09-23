@@ -31,11 +31,10 @@ from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     dr_router, ev_router, health_router, integration_router, legacy_router, lpr_router,
     payments_router, public_router, reports_router, sessions_router, billing_router,
-    wallet_router,
+    wallet_router, hospital_router,
 )
 from .ws import manager
 
-Base.metadata.create_all(bind=engine)
 
 from .migrations import run_migrations  # noqa: E402
 run_migrations()
@@ -73,13 +72,20 @@ app.add_middleware(
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
           health_router, integration_router, legacy_router, dr_router, billing_router,
-          ev_router, wallet_router):
+          ev_router, wallet_router, hospital_router):
     app.include_router(r.router)
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "app": settings.app_name}
+    from fastapi import HTTPException
+    from .migrations import check_ready
+    try:
+        ready = check_ready()
+    except Exception:
+        log.exception("readiness failed")
+        raise HTTPException(503, "Database/schema not ready")
+    return {"status": "ok", "app": settings.app_name, **ready}
 
 
 # Асаалттай background task-ууд — shutdown дээр ЦЭВЭР зогсоохын тулд хөтөлнө
@@ -258,9 +264,11 @@ async def start_vat_auto_send():
     from .services.camera_recovery import supervisor as camera_recovery_supervisor
     _bg_task(camera_recovery_supervisor(), "camera-recovery")
 
-    # Жолооч Pay хуудсаа хаасан/webhook алдагдсан PENDING QPay төлбөрийг сэргээх
+    # Хадгалсан QPay callback-ийн баталгаажуулалт тасарсан бол нөхөх.
     from .services.qpay_recheck import supervisor as qpay_recheck_supervisor
     _bg_task(qpay_recheck_supervisor(), "qpay-recheck")
+    from .services.financial_jobs import supervisor as financial_jobs_supervisor
+    _bg_task(financial_jobs_supervisor(), "financial-jobs")
 
     # EV: RemoteStart-аас хойш 90с-д эхлээгүй цэнэглэлтийн hold-ыг буцаана (§6.4)
     if settings.evhub_url:
@@ -307,10 +315,5 @@ async def stop_background_tasks():
 async def ws_site(websocket: WebSocket, site_id: str):
     """Real-time events: dashboard, касс, PAX терминал холбогдоно.
     site_id="all" бол бүх зогсоолын event сонсоно."""
-    key = "*" if site_id == "all" else site_id
-    await manager.connect(websocket, key)
-    try:
-        while True:
-            await websocket.receive_text()  # ping/pong
-    except WebSocketDisconnect:
-        await manager.disconnect(websocket, key)
+    from .ws import serve_site_socket
+    await serve_site_socket(websocket, site_id)

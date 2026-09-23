@@ -38,15 +38,20 @@ class EvError(Exception):
 
 
 def default_plan(db: Session, charger: EvCharger) -> EvPricePlan:
+    from .resource_scope import plan_matches_site
     plan = charger.price_plan
-    if plan and plan.is_active:
+    if plan and plan.is_active and plan_matches_site(plan, charger.site):
         return plan
     plan = (db.query(EvPricePlan)
-            .filter(EvPricePlan.is_active.is_(True))
+            .filter(EvPricePlan.is_active.is_(True),
+                    EvPricePlan.tenant_id == (charger.site.tenant_id if charger.site else None),
+                    EvPricePlan.site_id == charger.site_id)
             .order_by(EvPricePlan.created_at).first())
     if not plan:
         # Анхны суулгацад default тариф автоматаар (1 Wh = 1₮)
-        plan = EvPricePlan(name="Үндсэн (1 Wh = 1₮)", price_per_wh=1)
+        plan = EvPricePlan(name="Үндсэн (1 Wh = 1₮)", price_per_wh=1,
+                           site_id=charger.site_id,
+                           tenant_id=charger.site.tenant_id if charger.site else None)
         db.add(plan)
         db.flush()
     return plan
@@ -76,7 +81,10 @@ def wh_limit_for(amount, price_per_wh: Decimal) -> int:
 
 
 def energy_amount_for(energy_wh: int, price_per_wh: Decimal) -> Decimal:
-    return (D(int(energy_wh)) * price_per_wh).quantize(D("0.01"))
+    energy = D(str(energy_wh))
+    if not energy.is_finite() or energy < 0 or not price_per_wh.is_finite() or price_per_wh < 0:
+        raise EvError("Эрчим хүч эсвэл тарифын утга буруу")
+    return (D(int(energy)) * price_per_wh).quantize(D("0.01"))
 
 
 async def start_charge(db: Session, charger: EvCharger, connector_id: int,
@@ -85,6 +93,8 @@ async def start_charge(db: Session, charger: EvCharger, connector_id: int,
     RemoteStart команд. Аль нэг алхам унавал бүгд rollback."""
     plan = default_plan(db, charger)
     amt = D(str(amount)).quantize(D("0.01"))
+    if not amt.is_finite() or amt <= 0:
+        raise EvError("Дүн эерэг тоо байх ёстой")
     if amt < D(str(plan.min_amount or 0)):
         raise EvError(f"Доод дүн {plan.min_amount}₮")
     if plan.max_amount and amt > D(str(plan.max_amount)):
@@ -228,7 +238,11 @@ async def on_tx_stopped(db: Session, payload: dict):
     if energy is None and payload.get("meter_stop_wh") is not None \
             and session.meter_start_wh is not None:
         energy = max(0, int(payload["meter_stop_wh"]) - int(session.meter_start_wh))
-    energy = int(energy or 0)
+    # Reject invalid meter data; do not settle/refund an unverified reading.
+    checked_energy = D(str(energy or 0))
+    if not checked_energy.is_finite() or checked_energy < 0:
+        raise EvError("Эрчим хүчний заалт буруу — тооцоо баталгаажаагүй")
+    energy = int(checked_energy)
     price = D(str(session.price_per_wh))
     raw_amount = energy_amount_for(energy, price)
     authorized = D(str(session.authorized_amount))
@@ -258,7 +272,8 @@ async def on_tx_stopped(db: Session, payload: dict):
 
     # ── Орлогын бүртгэл: Payment(kind=EV, PAID) — тайлан/ээлжид харагдана ──
     if actual > 0:
-        payment = Payment(
+        charger = db.get(EvCharger, session.charger_id)
+        payment = Payment(site_id=charger.site_id if charger else None,
             session_id=None, kind="EV", wallet_id=session.wallet_id,
             provider="WALLET", payment_method="WALLET", source="EV",
             # QPay-ийн 45 байтын хязгаар (цэнэглэгчийн ocpp_tx_id урт байж болно)
@@ -272,16 +287,14 @@ async def on_tx_stopped(db: Session, payload: dict):
         db.add(payment)
         db.flush()
         session.payment_id = payment.id
+        from .financial_jobs import enqueue_receipt
+        receipt = enqueue_receipt(db, payment, session_id=session.parking_session_id,
+            description=f"Цахилгаан цэнэглэлт {energy} Wh", key=f"ev-{session.id}")
+        session.vat_receipt_id = receipt.id
     session.status = "SETTLED"
     db.commit()
     log.info("EV дуусав: session=%s %s Wh × %s = %s₮ (буцаалт %s₮), үлдэгдэл %s₮",
              session.id, energy, price, actual, release, w.balance)
-    # e-Barimt (§Шат 4): бодит дүнгээр, best-effort — унасан ч тооцоо алдагдахгүй.
-    if actual > 0 and session.payment_id:
-        try:
-            await _ebarimt_for_charge(db, session)
-        except Exception as e:  # noqa: BLE001
-            log.warning("EV e-Barimt үүсгэж чадсангүй (дараа retry болно): %s", e)
 
 
 def _vat_of(amount: Decimal) -> Decimal:
@@ -290,36 +303,6 @@ def _vat_of(amount: Decimal) -> Decimal:
     if not settings.vat_inclusive or r <= 0:
         return D(0)
     return (amount * r / (1 + r)).quantize(D("0.01"))
-
-
-async def _ebarimt_for_charge(db: Session, session: ChargeSession):
-    """e-Barimt: msgbill идэвхтэй бол «Үйлчилгээ» төрлөөр, Idempotency-Key =
-    session id (§Шат 4). Тохируулаагүй бол алгасна — vat_receipts-т PENDING
-    үлдэхгүй, учир нь Payment.kind=EV тайланд НӨАТ-аа тусад нь харуулна."""
-    from ..models import VatReceipt
-    from . import msgbill
-    charger = db.get(EvCharger, session.charger_id)
-    site = charger.site if charger else None
-    acc = msgbill.account_enabled_for(site, "WALLET") if site else None
-    if not acc:
-        return
-    payment = db.get(Payment, session.payment_id)
-    norm = await msgbill.create_receipt(
-        acc, float(session.total_amount),
-        description=f"Цахилгаан цэнэглэлт {session.energy_wh} Wh",
-        payment_method="QR",  # дансны мөнгө анх QPay QR-аар орж ирсэн
-        idempotency_key=f"ev-{session.id}")
-    ok = norm.get("status") == "SUCCESS"
-    receipt = VatReceipt(
-        payment_id=payment.id, session_id=session.parking_session_id,
-        ebarimt_id=norm.get("billId"), lottery_code=norm.get("lottery"),
-        amount=session.total_amount, vat_amount=payment.vat_amount,
-        receipt_url=norm.get("qrData"), status="SENT" if ok else "PENDING",
-        provider="MSGBILL", provider_ref=norm.get("msgbillId"))
-    db.add(receipt)
-    db.flush()
-    session.vat_receipt_id = receipt.id
-    db.commit()
 
 
 async def expire_stale_starts(db: Session):

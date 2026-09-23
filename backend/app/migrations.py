@@ -1,8 +1,8 @@
-"""Хөнгөн idempotent миграци — production DB-г кодтой тааруулна.
+"""Versioned PostgreSQL startup migrations, serialized in one transaction.
 
-SQLAlchemy create_all() нь шинэ ХҮСНЭГТ үүсгэдэг ч байгаа хүснэгтэд шинэ БАГАНА нэмдэггүй.
-Тиймээс шинэ багана нэмэх бүрд энд `ADD COLUMN IF NOT EXISTS` мөр нэмнэ.
-Startup бүрт ажиллах ба аль хэдийн байгаа бол алгасна (аюулгүй, давтагдах боломжтой).
+Append new SQL statements; do not edit statements already adopted in the ledger.
+Any migration or schema validation failure aborts startup. See
+docs/PAYMENT_WAIT_ROLLOUT.md for legacy adoption and rollout requirements.
 """
 import logging
 
@@ -49,8 +49,8 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_logs (action)",
 
     # v1.7 — Бүрэн бүтэн байдал: нэг зогсоолд нэг дугаараар нэгэн зэрэг ганц идэвхтэй session
-    # (LPR орох урсгалын race-ээс сэргийлнэ). Хэрэв одоо давхардсан идэвхтэй session байвал
-    # энэ index үүсэхгүй (алгасна) — тухайн үед л гараар цэвэрлэнэ.
+    # (LPR орох урсгалын race-ээс сэргийлнэ). Хуучин давхардал байвал migration
+    # бүхэлдээ зогсоно; санхүүгийн түүхийг шалгаж зассаны дараа дахин ажиллуулна.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_session ON parking_sessions (site_id, plate_number) "
     "WHERE status IN ('OPEN','AWAITING_PAYMENT','PAID')",
 
@@ -309,22 +309,162 @@ MIGRATIONS = [
 
     # 2026-09-14 — онцгой гаргалтын баталгаажуулах зураг (гарах камерын гар snapshot)
     "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS verify_snapshot VARCHAR(255)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_wait_started_at TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS last_exit_seen_at TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_quote_until TIMESTAMP",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS payment_quote JSON",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS fee_snapshot JSON",
+    # Legacy rows have no immutable first-exit timestamp. Freeze the best known
+    # timestamp ONCE; subsequent metadata writes must not postpone collection.
+    "UPDATE parking_sessions SET payment_wait_started_at = COALESCE(exit_time, updated_at), "
+    "last_exit_seen_at = COALESCE(exit_time, updated_at) "
+    "WHERE status = 'AWAITING_PAYMENT' AND payment_wait_started_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_sessions_payment_wait ON parking_sessions "
+    "(site_id, payment_wait_started_at) WHERE status = 'AWAITING_PAYMENT'",
+    # Existing company rows may mix tenants: retain them as LEGACY, never guess
+    # an owner or delete financial history. Review is required before promotion.
+    "ALTER TABLE company_contacts ADD COLUMN IF NOT EXISTS owner_scope VARCHAR(40) NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE company_invoices ADD COLUMN IF NOT EXISTS owner_scope VARCHAR(40) NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE company_contacts DROP CONSTRAINT IF EXISTS company_contacts_company_key",
+    "ALTER TABLE company_invoices DROP CONSTRAINT IF EXISTS uq_invoice_period_company",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_contact_owner_company ON company_contacts (owner_scope, company)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_period_owner_company ON company_invoices (period, owner_scope, company)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_tx_key VARCHAR(64)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS partner_key_id UUID REFERENCES partner_keys(id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_provider_tx_key ON payments (provider_tx_key)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS entry_snapshot_source VARCHAR(30)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS exit_snapshot_source VARCHAR(30)",
+
+    # Durable reconciliation schedule; old invoices remain eligible without rewriting money.
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_last_check_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_next_check_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_check_requested_at TIMESTAMP",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS qpay_check_attempts INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS ix_payments_qpay_check_due ON payments "
+    "(provider, status, qpay_next_check_at, created_at)",
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS site_id UUID REFERENCES parking_sites(id)",
+    "CREATE INDEX IF NOT EXISTS ix_payments_site_id ON payments (site_id)",
+    # Base.metadata creates this new table before replay; the ledger records
+    # this additive change for release/readiness verification.
+    "CREATE TABLE IF NOT EXISTS financial_jobs (id UUID PRIMARY KEY, "
+    "job_key VARCHAR(160) NOT NULL UNIQUE, kind VARCHAR(30) NOT NULL, "
+    "payment_id UUID NOT NULL REFERENCES payments(id), receipt_id UUID REFERENCES vat_receipts(id), "
+    "status VARCHAR(20) NOT NULL, attempts INTEGER NOT NULL, next_attempt_at TIMESTAMP NOT NULL, "
+    "lease_until TIMESTAMP, lease_token VARCHAR(36), payload JSON NOT NULL, last_error TEXT, "
+    "created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS ix_financial_jobs_due ON financial_jobs (status, next_attempt_at)",
+
+    # Hospital credentials and daily entitlements are additive; no historical fees are rewritten.
+    "CREATE TABLE IF NOT EXISTS hospital_integrations (id UUID PRIMARY KEY, "
+    "name VARCHAR(120) NOT NULL, site_id UUID REFERENCES parking_sites(id), "
+    "daily_minutes INTEGER NOT NULL, is_active BOOLEAN NOT NULL, signing_secret TEXT, "
+    "key_version INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS hospital_daily_grants (id UUID PRIMARY KEY, "
+    "integration_id UUID NOT NULL REFERENCES hospital_integrations(id), "
+    "site_id UUID NOT NULL REFERENCES parking_sites(id), plate_number VARCHAR(20) NOT NULL, "
+    "benefit_date DATE NOT NULL, daily_minutes INTEGER NOT NULL, created_at TIMESTAMP NOT NULL, "
+    "CONSTRAINT uq_hospital_daily_grant UNIQUE (site_id,plate_number,benefit_date))",
+    "CREATE TABLE IF NOT EXISTS hospital_grant_requests (id UUID PRIMARY KEY, "
+    "integration_id UUID NOT NULL REFERENCES hospital_integrations(id), visit_id VARCHAR(100) NOT NULL, "
+    "body_hash VARCHAR(64) NOT NULL, grant_id UUID NOT NULL REFERENCES hospital_daily_grants(id), "
+    "response JSON NOT NULL, created_at TIMESTAMP NOT NULL, "
+    "CONSTRAINT uq_hospital_visit_request UNIQUE (integration_id,visit_id))",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_grant_id UUID REFERENCES hospital_daily_grants(id)",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_allowance_minutes INTEGER",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_used_minutes INTEGER",
+    "ALTER TABLE parking_sessions ADD COLUMN IF NOT EXISTS hospital_fee_snapshot JSON",
+    "CREATE INDEX IF NOT EXISTS ix_parking_sessions_hospital_grant_id ON parking_sessions (hospital_grant_id)",
+    "CREATE INDEX IF NOT EXISTS ix_hospital_integrations_site_id ON hospital_integrations (site_id)",
+
+    # Enabling encryption also protects existing QPay/device credential writes.
+    # A 64-character secret expands to 188 characters with the enc: prefix.
+    # Widen storage only: never rewrite, truncate or re-encrypt existing values.
+    "ALTER TABLE tenants ALTER COLUMN qpay_password TYPE TEXT",
+    "ALTER TABLE tenants ALTER COLUMN msgbill_api_key TYPE TEXT",
+    "ALTER TABLE tenants ALTER COLUMN msgbill_webhook_secret TYPE TEXT",
+    "ALTER TABLE parking_sites ALTER COLUMN qpay_password TYPE TEXT",
+    "ALTER TABLE devices ALTER COLUMN password TYPE TEXT",
+
 ]
 
 
+def revision() -> str:
+    import hashlib
+    return hashlib.sha256("\n".join(MIGRATIONS).encode()).hexdigest()
+
+
+def validate_schema(conn):
+    """Reject a partially upgraded database before serving traffic."""
+    from sqlalchemy import inspect
+    from .database import Base
+    inspector = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        missing = set(table.columns.keys()) - present
+        if missing:
+            raise RuntimeError(f"Schema incomplete: {table.name}: {sorted(missing)}")
+
+
 def run_migrations():
-    # ЧУХАЛ: миграц бүр ӨӨРИЙН транзакцаар. Өмнө нь бүгд НЭГ `engine.begin()`
-    # дотор явдаг байсан тул эхний алдаа гарсны дараа Postgres транзакцыг
-    # «aborted» болгож, ҮЛДСЭН БҮХ миграц («current transaction is aborted»
-    # гэж) чимээгүй алгасагддаг байв — нэг эрхийн алдаанаас болж шинэ багана
-    # огт нэмэгдэхгүй, кодоо deploy хийсэн ч ажиллахгүй байх эрсдэлтэй.
-    failed = 0
-    for stmt in MIGRATIONS:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(stmt))
-        except Exception as e:  # нэг миграц алдвал бусдыг зогсоохгүй
-            failed += 1
-            log.warning(f"[migration skip] {stmt[:60]}... — {e}")
-    if failed:
-        log.warning("[migrations] %d миграц алдаатай — дээрх мөрүүдийг шалгана уу", failed)
+    """One serialized, versioned transaction. Any error aborts startup.
+
+    Each historical statement is adopted once into the version ledger. New
+    upgrades append statements; they never rewrite financial rows implicitly.
+    """
+    import hashlib
+    from . import models  # noqa: F401 — register all tables
+    from .database import Base
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(734902118)"))
+        Base.metadata.create_all(bind=conn)
+        conn.execute(text("CREATE TABLE IF NOT EXISTS parking_schema_migrations "
+                          "(version VARCHAR(64) PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT now())"))
+        applied = set(conn.execute(text("SELECT version FROM parking_schema_migrations")).scalars())
+        for stmt in MIGRATIONS:
+            version = hashlib.sha256(stmt.encode()).hexdigest()
+            if version in applied:
+                continue
+            conn.execute(text(stmt))
+            conn.execute(text("INSERT INTO parking_schema_migrations (version) VALUES (:version)"),
+                         {"version": version})
+            applied.add(version)
+        validate_schema(conn)
+        conn.execute(text("CREATE TABLE IF NOT EXISTS parking_schema_state "
+                          "(id INTEGER PRIMARY KEY CHECK (id=1), revision VARCHAR(64) NOT NULL)"))
+        conn.execute(text("INSERT INTO parking_schema_state (id, revision) VALUES (1, :revision) "
+                          "ON CONFLICT (id) DO UPDATE SET revision=excluded.revision"),
+                     {"revision": revision()})
+    log.info("Schema ready: %s", revision()[:12])
+
+
+def check_ready():
+    with engine.connect() as conn:
+        actual = conn.execute(text("SELECT revision FROM parking_schema_state WHERE id=1")).scalar()
+        if actual != revision():
+            raise RuntimeError("Schema revision differs from this release")
+        # Check the critical new columns too; a ledger alone is not readiness.
+        conn.execute(text("SELECT payment_wait_started_at, payment_quote_until, payment_quote "
+                          "FROM parking_sessions LIMIT 0"))
+        conn.execute(text("SELECT site_id, qpay_last_check_at, qpay_next_check_at, "
+                          "qpay_check_requested_at, qpay_check_attempts FROM payments LIMIT 0"))
+        conn.execute(text("SELECT job_key, kind, payment_id, receipt_id, status, attempts, "
+                          "next_attempt_at, lease_until, lease_token, payload, last_error, "
+                          "created_at, updated_at FROM financial_jobs LIMIT 0"))
+        conn.execute(text("SELECT hospital_grant_id, hospital_allowance_minutes, hospital_used_minutes, "
+                          "hospital_fee_snapshot FROM parking_sessions LIMIT 0"))
+        conn.execute(text("SELECT benefit_date, daily_minutes FROM hospital_daily_grants LIMIT 0"))
+        secret_columns = conn.execute(text("""
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema=current_schema() AND data_type='text'
+            AND (table_name,column_name) IN (
+                ('tenants','qpay_password'),('tenants','msgbill_api_key'),
+                ('tenants','msgbill_webhook_secret'),('parking_sites','qpay_password'),
+                ('devices','password'))
+        """)).scalar()
+        if secret_columns != 5:
+            raise RuntimeError("Encrypted credential storage has a length limit or is missing")
+    return {"database": "ok", "schema": revision()[:12]}
+
+
+if __name__ == "__main__":
+    run_migrations()

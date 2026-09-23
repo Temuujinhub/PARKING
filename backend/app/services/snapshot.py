@@ -136,11 +136,60 @@ _cgi_inflight: set[str] = set()
 _MIN_JPEG_BYTES = 1000
 
 
+def jpeg_score(data: bytes | None) -> tuple[int, float] | None:
+    """Decode completely and rank by usable resolution then edge detail, not bytes.
+
+    Bounded to 20 MB / 16 MP. Padding cannot improve the score. This is an
+    image-quality heuristic; it does not assert OCR correctness.
+    """
+    if not data or len(data) > 20_000_000 or data[:2] != b"\xff\xd8":
+        return None
+    from io import BytesIO
+    from PIL import Image, ImageFilter, ImageStat, UnidentifiedImageError
+    import warnings
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as im:
+                if im.format != "JPEG" or min(im.size) < 32 or im.width * im.height > 16_000_000:
+                    return None
+                im.load()  # Reject truncated/corrupt entropy data, not just the SOI marker.
+                area = im.width * im.height
+                gray = im.convert("L")
+                gray.thumbnail((256, 256))
+                detail = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).var[0]
+                return area, detail
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError,
+            Image.DecompressionBombWarning):
+        return None
+
+
 def valid_jpeg(data: bytes | None) -> bool:
-    """Бүрэн JPEG мөн эсэх: SOI эхлэл + доод хэмжээ. EOI төгсгөлийг ХАТУУ
-    шаардахгүй — зарим firmware EXIF-ийн ард padding нэмдэг ч зураг нь бүтэн."""
-    return (data is not None and len(data) >= _MIN_JPEG_BYTES
-            and data[:2] == b"\xff\xd8")
+    return jpeg_score(data) is not None
+
+
+def attach_saved(db, session, lane_dir: str, rel: str, source: str) -> bool:
+    """One atomic attachment shared by push, comet, WS and CGI adapters.
+
+    Event pictures may replace an unverified live CGI frame. Otherwise the first
+    selected event picture wins. A stale writer never overwrites a newer path.
+    """
+    from ..models import ParkingSession
+    field = "exit_snapshot" if lane_dir == "exit" else "entry_snapshot"
+    source_field = field + "_source"
+    old = getattr(session, field)
+    old_source = getattr(session, source_field)
+    if old and not (old_source == "snapshot.cgi" and source != "snapshot.cgi"):
+        return False
+    column = getattr(ParkingSession, field)
+    count = (db.query(ParkingSession).filter(ParkingSession.id == session.id,
+             column == old).update({field: rel, source_field: source}, synchronize_session=False))
+    if count != 1:
+        return False
+    db.commit()
+    if old and old != rel:
+        discard_saved(old)
+    return True
 
 
 def _save(data: bytes, plate: str, lane_dir: str) -> str | None:
@@ -198,7 +247,6 @@ def discard_saved(rel: str | None) -> None:
 #     машин байхгүй/сүүлээрээ харагддаг (2026-08-09).
 # Одоо cgi_poller стримээс JPEG-ийг таслан авч энд өгнө; capture нь эхлээд
 # үүнийг хүлээгээд, зөвхөн ирээгүй үед snapshot.cgi рүү унана.
-_stream_images: dict[str, tuple[float, bytes, str]] = {}  # ip → (monotonic, jpeg, суваг)
 _stream_seen: dict[str, float] = {}                   # ip → сүүлд зураг ирсэн үе
 
 # Эх сурвалж бүрээр session-д ХАДГАЛАГДСАН зургийн тоо. «Шинэ суваг ажиллаж
@@ -217,23 +265,18 @@ def source_counts() -> dict:
 # итгэнэ. Итгэхгүй бол хүлээхгүй → зан төлөв хуучнаараа (шууд snapshot.cgi).
 _STREAM_TRUST_SEC = 3600.0
 # Зураг нь JSON event-ээс ӨМНӨ ирж болно — event-ийн цагаас өмнөх энэ мужийг зөвшөөрнө
-_STREAM_PRE_SEC = 4.0
 
 
 def offer_stream_image(ip: str, data: bytes, src: str = "event-stream") -> None:
-    """Стримээс таслан авсан event зургийг санал болгоно.
-
-    `src` — аль суваг өгсөн бэ: `event-stream` (cgi_poller) эсвэл `comet`.
-    Зураг session-д хадгалагдахдаа энэ нэрээр логт бичигдэнэ — аль суваг
-    ХЭДЭН зураг бодитоор өгч байгааг тоолох цорын ганц арга."""
+    """Record image-channel health; unidentified JPEG bytes are never attached."""
     import time as _time
     if not ip or not data:
         return
     now = _time.monotonic()
-    _stream_images[ip] = (now, data, src)
+    # Record channel health only; do not cache an unidentified frame.
     if ip not in _stream_seen:
-        log.info("%s: %s сувгаас ЗУРАГ ирж эхэллээ (%dб) — snapshot.cgi-ийн "
-                 "оронд үүнийг ашиглана", ip, src, len(data))
+        log.info("%s: %s image channel observed (%d bytes); unidentified frame ignored",
+                 ip, src, len(data))
     _stream_seen[ip] = now
 
 
@@ -241,28 +284,6 @@ def stream_delivers(ip: str) -> bool:
     """Энэ камер event стримээрээ зураг өгдөг нь батлагдсан уу."""
     import time as _time
     return _time.monotonic() - _stream_seen.get(ip, -1e9) < _STREAM_TRUST_SEC
-
-
-async def _take_stream_image(ip: str, t0: float) -> tuple[bytes, str] | None:
-    """Event стримийн зургийг хүлээж авна. Байхгүй/хугацаа хэтэрвэл None.
-
-    `t0` — event боловсруулагдсан агшин. Түүнээс ӨМНӨХ (_STREAM_PRE_SEC хүртэл)
-    зургийг ч зөвшөөрнө: камер ихэвчлэн зургаа JSON-оос өмнө илгээдэг. Хуучин
-    машины зургийг санамсаргүй авахаас сэргийлж цагаар нь шүүж, авсан зургаа
-    санамжаас ХАСНА (нэг зураг хоёр машинд очихгүй).
-    """
-    import time as _time
-    if settings.snapshot_stream_wait_sec <= 0 or not stream_delivers(ip):
-        return None
-    deadline = _time.monotonic() + settings.snapshot_stream_wait_sec
-    while True:
-        item = _stream_images.get(ip)
-        if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
-            _stream_images.pop(ip, None)
-            return item[1], item[2]
-        if _time.monotonic() >= deadline:
-            return None
-        await asyncio.sleep(0.15)
 
 
 async def _snapshot_written(session_id: str, lane_dir: str) -> bool:
@@ -299,22 +320,13 @@ def image_channel_alive(ip: str) -> bool:
 
 
 async def _wait_camera_image(session_id: str, camera_ip: str, lane_dir: str,
-                             t0: float) -> tuple[bytes, str] | None | bool:
-    """Камерын ӨӨРИЙН event зургийг НЭГ цонхонд (snapshot_wait_event_sec) хүлээнэ:
-    стримийн санамж (offer_stream_image) ба session-д аль хэдийн холбогдсон
-    эсэх (comet/WS _attach_to_session) хоёуланг нь ээлжлэн шалгана.
-      • (bytes, src) — стримээс зураг ирлээ, дуудагч хадгална
-      • True         — өөр суваг session-д аль хэдийн холбочихсон, хийх зүйлгүй
-      • None         — цонх дуустал юу ч ирсэнгүй → snapshot.cgi fallback"""
+                             t0: float) -> bool | None:
+    """Wait once for a correlated comet/WS event image to be attached."""
     import time as _time
     deadline = _time.monotonic() + max(settings.snapshot_wait_event_sec,
                                        settings.snapshot_stream_wait_sec)
     tick = 0
     while True:
-        item = _stream_images.get(camera_ip)
-        if item is not None and item[0] >= t0 - _STREAM_PRE_SEC:
-            _stream_images.pop(camera_ip, None)
-            return item[1], item[2]
         if tick % 4 == 0 and await _snapshot_written(session_id, lane_dir):
             return True
         if _time.monotonic() >= deadline:
@@ -351,18 +363,7 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
             if got is True:
                 log.info(f"{plate} {lane_dir}: event зураг сувгаар ирлээ — snapshot.cgi алгасав")
                 return
-            if got is not None:
-                data, source = got
-            else:
-                log.info(f"{plate} {lane_dir}: суваг амьд ч зураг "
-                         f"{max(settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec):.0f}с-д "
-                         f"ирсэнгүй — snapshot.cgi fallback")
-        else:
-            # Суваггүй камер: хүлээх утгагүй (хойшлуулбал машин өнгөрнө) —
-            # хуучин зан төлөв, стримийн санамжид санамсаргүй зураг байвал авна
-            got = await _take_stream_image(camera_ip, t0)
-            if got is not None:
-                data, source = got
+            log.info("%s %s: event image deadline expired", plate, lane_dir)
     if data is None and camera_ip:
         # 2) Эцсийн арга — snapshot.cgi. Энэ нь камер дээр «Manual Snapshot»
         #    бичлэг үүсгэдэг БӨГӨӨД амьд кадр тул машин аль хэдийн өнгөрсөн байж
@@ -412,17 +413,10 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
             if s:
                 # snap_puller (жинхэнэ event зураг) түрүүлж бичсэн бол дарж бичихгүй —
                 # snapshot.cgi нь ердөө "одоогийн кадр" тул чанараар дутуу
-                existing = s.exit_snapshot if lane_dir == "exit" else s.entry_snapshot
-                if existing:
-                    log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — {source} алгасав")
-                    await asyncio.to_thread(discard_saved, rel)   # давхар файл үлдээхгүй
-                    return
-                if lane_dir == "exit":
-                    s.exit_snapshot = rel
-                else:
-                    s.entry_snapshot = rel
                 site_id = s.site_id
-                db.commit()
+                if not attach_saved(db, s, lane_dir, rel, source):
+                    await asyncio.to_thread(discard_saved, rel)
+                    return
                 note_source(source)
                 log.info(f"{plate} {lane_dir}: OK ({source}, {len(data)}b) → {rel}")
                 # UI-д зураг бэлэн болсныг мэдэгдэнэ (ANPR-Viewer-ийн imageUpdate
@@ -438,13 +432,15 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
             if attempt + 1 >= attempts:
                 log.warning("%s %s: session мөр %d удаа түгжээтэй байлаа — зам бичигдээгүй "
                             "(зураг диск дээр хадгалагдсан: %s)", plate, lane_dir, attempts, rel)
+                await asyncio.to_thread(discard_saved, rel)
                 return
             log.info("%s %s: session мөр түгжээтэй — %dс хүлээгээд дахин оролдоно (%d/%d)",
                      plate, lane_dir, attempt + 2, attempt + 1, attempts)
         finally:
             db.close()
         await asyncio.sleep(attempt + 1)   # 1, 2, 3, 4с — түгжээ ихэвчлэн 15с дотор тайлагдана
-    log.warning(f"{plate} {lane_dir}: session {session_id} DB-д олдсонгүй — зам бичигдээгүй")
+    await asyncio.to_thread(discard_saved, rel)
+    log.warning(f"{plate} {lane_dir}: matching session not found")
 
 
 def schedule_capture(session_id: str | None, camera_ip: str | None, plate: str,

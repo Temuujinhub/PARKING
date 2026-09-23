@@ -26,6 +26,16 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-09-23 — 🏥 Эмнэлгийн хөнгөлөлт: прод HTTPS_REQUIRED засвар · хөнгөлөлт авсан машины тайлан
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| ops | **Прод `POST /api/v1/hospital/visits` бүх хүсэлтэд 400 `HTTPS_REQUIRED` өгдөг байв** — nginx аль ч location `X-Forwarded-Proto` дамжуулдаггүй тул uvicorn схемийг http гэж хардаг байсан. nginx-д `proxy_set_header X-Forwarded-Proto $scheme;` нэмэв (гараар, sites-enabled/parking; нөөц /root/nginx-parking.bak-*). Гаднаас батлагдсан: 401 INVALID_HOSPITAL_SIGNATURE → идэвхжүүлсний дараа TEST_emleg (Номадс) түлхүүрээр 8 тохиолдол (GRANTED/replay/conflict/401/422/403/өчигдөр) бүгд зөв | — | ⏳ (тест дээр hospital код байхгүй) | ✅ 09-23 |
+| feat | **Эмнэлгийн хөнгөлөлт авсан машины тайлан** — `GET /api/hospital/grants?date_from&date_to&site_id&plate` (reports/discounts/settings эрх, operator_sites хүрээ, ≤92 хоног): зогсоол · өдрөөр нэгтгэл + машин бүрээр (эмнэлэг, эрх ирсэн цаг, visit_id-ууд, лимит/ашигласан/үлдэгдэл минут, хөнгөлсөн дүн, холбогдсон зогсолтууд). UI: Санхүү → «Эмнэлгийн хөнгөлөлт» (/hospital-grants) — огнооны муж, зогсоол, дугаар шүүлт. Тест: test_hospital_api 19 ✓ | (доор) | ⏳ | ⏳ |
+| docs | Эмнэлгийн хөгжүүлэгчид өгөх багц: README (талбар/гарын үсэг/хариу/алдааны код), Postman collection (5 хүсэлт, HMAC pre-request script) + environment, Python клиент — дев сервер /root/hospital-api-handover | — | — | — |
+
+---
+
 ## 2026-09-15 — 🔑 Энгийн админд партнерын түлхүүрүүд харагдахгүй байсан
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |

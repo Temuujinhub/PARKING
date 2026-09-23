@@ -1,7 +1,7 @@
 """Гацсан session-ийн авто цэвэрлэгээ.
 
 Ажилтангүй зогсоолд төлбөргүй гарсан/мартагдсан машины session OPEN/AWAITING_PAYMENT
-төлөвтэй хуримтлагддаг (шөнийн хаалт/ээлж хаах хийгддэггүй). Энэ даалгавар 30 минут
+төлөвтэй хуримтлагддаг (шөнийн хаалт/ээлж хаах хийгддэггүй). Энэ даалгавар 1 минут
 тутам босго цагаас (site.auto_close_hours, null бол глобал default) дээш идэвхтэй
 үлдсэн session-ийг хааж, төлөгдөөгүй дүнгээр өр (нөхөн төлбөр) үүсгэнэ.
 
@@ -34,9 +34,6 @@ def run_once() -> int:
         # Дүрмүүд Тохиргоо → Авто цэвэрлэгээ хэсгээс (app_settings). .env-ийн
         # утга нь зөвхөн ЭХНИЙ анхдагч — админ UI-аас deploy-гүйгээр өөрчилнө.
         from .app_settings import get_autoclose_rules
-        if not get_autoclose_rules(db)["enabled"]:
-            log.info("авто цэвэрлэгээ Тохиргооноос УНТРААЛТТАЙ — алгаслаа")
-            return 0
         now = datetime.utcnow()
         recent_guard = now - timedelta(hours=1)
         for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
@@ -144,39 +141,38 @@ def run_once() -> int:
                         db.rollback()
                         log.error(f"paid-exit close алдаа ({s.plate_number}): {e}")
 
-            if not hours or hours <= 0:
-                continue
-            # PAID-ийг ч хамруулна: төлсөн ч гарах камерт уншигдаагүй тул хаагдалгүй
-            # "зогсоолд байгаа"-д гацсан машинууд (close_session_forced нь PAID-ийг
-            # deadline дээр царцаадаг тул худал өр үүсгэхгүй).
-            # ЧУХАЛ: зөвхөн-орох OPEN session-ийг ӨРИЙН замд ОРУУЛАХГҮЙ (дээрх
-            # eo_hours дүрэм хариуцна) — eo дүрэм унтраалттай (0) үед л хуучин
-            # зан төлөвөөр өртэй хаана.
-            _q = (db.query(ParkingSession)
-                  .filter(ParkingSession.site_id == site.id,
-                          ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
-                          ParkingSession.entry_time < now - timedelta(hours=hours),
-                          ParkingSession.updated_at < recent_guard))
-            if eo_hours and eo_hours > 0:
+            # General idle cleanup and exit-payment timeout are independent.
+            stale = []
+            if hours and hours > 0:
                 from sqlalchemy import or_
-                _q = _q.filter(or_(ParkingSession.status != "OPEN",
-                                   ParkingSession.exit_device_id.isnot(None)))
-            stale = _q.limit(100).all()
-            # Дагаж гарсан (tailgating) машиныг ХУРДАН өр болгох: гарах хаалтанд
-            # уншигдсан (AWAITING_PAYMENT) ч төлөлгүй N цаг ямар ч хөдөлгөөнгүй бол
-            # явчихсан — төлбөр нь сүүлд харагдсан үед царцаж, өр бүртгэгдэнэ.
+                q = db.query(ParkingSession).filter(
+                    ParkingSession.site_id == site.id,
+                    ParkingSession.status.in_(["OPEN", "PAID"]),
+                    ParkingSession.entry_time < now - timedelta(hours=hours),
+                    ParkingSession.updated_at < recent_guard)
+                if eo_hours and eo_hours > 0:
+                    q = q.filter(or_(ParkingSession.status != "OPEN",
+                                     ParkingSession.exit_device_id.isnot(None)))
+                stale = q.order_by(ParkingSession.entry_time).limit(100).all()
             aw_hours = rules["awaiting_hours"]
             if aw_hours and aw_hours > 0:
                 awaiting = (db.query(ParkingSession)
                             .filter(ParkingSession.site_id == site.id,
                                     ParkingSession.status == "AWAITING_PAYMENT",
-                                    ParkingSession.updated_at < now - timedelta(hours=aw_hours))
-                            .limit(100).all())
-                # Хоёр query-д давхар таарсан session-ийг нэг л удаа хаана
-                seen_ids = {s.id for s in stale}
-                stale += [s for s in awaiting if s.id not in seen_ids]
+                                    ParkingSession.payment_wait_started_at <=
+                                    now - timedelta(hours=aw_hours))
+                            .order_by(ParkingSession.payment_wait_started_at)
+                            .limit(200).all())
+                stale += awaiting
             for s in stale:
                 try:
+                    expected_status = s.status
+                    s = (db.query(ParkingSession).enable_eagerloads(False)
+                         .filter(ParkingSession.id == s.id,
+                                 ParkingSession.status == expected_status)
+                         .populate_existing().with_for_update(skip_locked=True).first())
+                    if s is None:
+                        continue  # payment or another cleanup won the row
                     # Junk (буруу форматтай) дугаар нь камерын буруу уншилт — жинхэнэ
                     # машин биш тул өр үүсгэхгүйгээр чимээгүй хаана.
                     valid = is_valid_plate(s.plate_number)
@@ -315,15 +311,15 @@ def disk_free_percent(path: str = "/") -> float:
 
 
 async def supervisor():
-    """Startup-аас create_task-аар ажиллана: эхний удаа 5 минутын дараа, дараа нь 30 мин тутам.
+    """Startup-аас create_task-аар ажиллана: эхний удаа 1 минутын дараа, дараа нь 1 мин тутам.
     Хуучин датаны цэвэрлэгээ (retention) өдөрт нэг л удаа хийгдэнэ."""
-    await asyncio.sleep(300)
+    await asyncio.sleep(60)
     last_retention = 0.0
     import time as _t
 
     # ЧУХАЛ: camsync/camhealth-ийн сүүлийн ажилласан цагийг DB-ЭЭС сэргээнэ.
     # Өмнө нь 0.0-ээс эхэлдэг байсан тул backend дахин асах БҮРД (deploy,
-    # watchdog) 5 минутын дараа хоёулаа ШУУД ажилладаг — камерын эрүүл мэнд
+    # watchdog) 1 минутын дараа хоёулаа ШУУД ажилладаг — камерын эрүүл мэнд
     # гацсан БҮХ камерыг дахин reboot хийж, 60-120с тус бүрээр унтраадаг.
     # 2026-08-12: нэг цагт 4 удаа, тус бүр 10-13 камер reboot хийгдсэн.
     def _restore(getter) -> float:
@@ -357,11 +353,11 @@ async def supervisor():
     last_camhealth = _restore(_camhealth_last)
     while True:
         try:
-            n = run_once()
+            n = await asyncio.to_thread(run_once)
             if n:
                 log.info(f"нийт {n} гацсан session хаагдлаа")
             # Ердийн хуваарь: өдөрт нэг. ГЭХДЭЭ диск дүүрч эхэлбэл хүлээхгүй —
-            # 30 минут тутмын энэ давталтад шууд цэвэрлэнэ (диск дүүрвэл
+            # 1 минут тутмын энэ давталтад шууд цэвэрлэнэ (диск дүүрвэл
             # backend бичих боломжгүй болж бүхэлдээ зогсдог).
             # Камерын лог нөхөлт — өдөрт times_per_day удаа (watermark-тай тул
             # давхардахгүй). Тохиргооноос унтраалттай бол run_once өөрөө буцна.
@@ -407,7 +403,7 @@ async def supervisor():
                     log.warning("дискний сул зай %.1f%% — retention-ийг хуваариас "
                                 "өмнө ажиллуулж байна", free_pct)
                 last_retention = _t.monotonic()
-                retention_once()
+                await asyncio.to_thread(retention_once)
         except Exception as e:  # noqa: BLE001
             log.error(f"давталтын алдаа: {e}")
-        await asyncio.sleep(1800)
+        await asyncio.sleep(60)
