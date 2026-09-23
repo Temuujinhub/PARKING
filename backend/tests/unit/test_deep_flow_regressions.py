@@ -198,7 +198,11 @@ def test_wallet_reprice_preserves_attempt_and_credits_late_money(db):
     s=parking(db)
     first=IR.create_payment_intent({'session_id':s.id},db,partner())
     s.payment_quote_until=datetime.utcnow()-timedelta(seconds=1)
-    s.entry_time=datetime.utcnow()-timedelta(minutes=65);db.commit()
+    s.entry_time=datetime.utcnow()-timedelta(minutes=65)
+    # «Хоцорсон мөнгө» = нэхэмжлэлийн үнэ барих хугацаа (invoice_quote_minutes,
+    # анхдагч 10) хэтэрсэн intent — одоогийн дүнгээр, үлдэгдлийг нэхнэ.
+    db.get(M.Payment,first['payment_id']).created_at=datetime.utcnow()-timedelta(minutes=11)
+    db.commit()
     with pytest.raises(HTTPException) as error:
         IR.create_payment_intent({'session_id':s.id},db,partner())
     assert error.value.status_code==409
@@ -213,6 +217,22 @@ def test_wallet_reprice_preserves_attempt_and_credits_late_money(db):
         {'amount':1000,'transaction_id':'remainder-authorized'},db,partner()))
     assert paid['amount_due']==0 and s.status=='PAID'
     assert SL.paid_total(db,s)==2000
+
+
+def test_wallet_intent_paid_within_quote_window_settles_at_quote(db):
+    # 2026-09-23 гомдол: төлж байх зуур (17с–6мин) тарифын шатлал ахиад
+    # «2,000 төлчихлөө 5,000 болчлоо». Нэхэмжлэлийн дүн invoice_quote_minutes
+    # дотор төлөгдвөл хүндэтгэгдэнэ — үлдэгдэлгүй, хаалт нээгдэнэ.
+    s=parking(db)
+    first=IR.create_payment_intent({'session_id':s.id},db,partner())
+    s.payment_quote_until=datetime.utcnow()-timedelta(seconds=1)
+    s.entry_time=datetime.utcnow()-timedelta(minutes=65);db.commit()
+    paid=asyncio.run(IR.confirm_payment(first['payment_id'],
+        {'amount':1000,'transaction_id':'paid-at-quote'},db,partner()))
+    assert paid['status']=='PAID' and paid['amount_due']==0
+    assert s.status in ('PAID','CLOSED') and SL.paid_total(db,s)==1000
+    assert db.query(M.AuditLog).filter_by(action='PAYMENT_QUOTE_HONORED').count()==1
+    assert db.query(M.AuditLog).filter_by(action='PAYMENT_PARTIAL').count()==0
 
 
 def test_late_pos_confirmation_is_recorded_as_partial_payment(db):
@@ -344,7 +364,10 @@ def test_snapshot_compare_and_set_preserves_selected_event(db,monkeypatch):
     assert s.exit_snapshot=='event.jpg' and discarded==['live.jpg']
 
 
-def test_busy_camera_control_lock_never_sends_parallel_command(db,monkeypatch):
+def test_busy_camera_control_lock_still_sends_barrier_command(db,monkeypatch):
+    # 2026-09-23: 317df72 түгжээ завгүй үед хаалтын командыг ОГТ илгээхгүй
+    # (FAILED) болгосноор хаалтын алдаа 0.1% → 2–3% (өдөрт 173–284) болсон.
+    # Хаалт тэргүүлэх эрхтэй: түгжээг богино хүлээгээд авч чадаагүй ч явуулна.
     from app.services import barrier as B
     s=parking(db)
     d=M.Device(site_id=s.site_id,name='Gate',device_type='barrier',device_key='locked-gate',
@@ -352,15 +375,18 @@ def test_busy_camera_control_lock_never_sends_parallel_command(db,monkeypatch):
     db.add(d);db.commit()
     monkeypatch.setattr(settings,'barrier_mock',False)
     monkeypatch.setattr(settings,'barrier_lock_wait_sec',0.01)
+    monkeypatch.setattr(settings,'screen_enabled',False)
     login=AsyncMock(); monkeypatch.setattr(B.DahuaRpc,'login',login)
+    monkeypatch.setattr(B.DahuaRpc,'logout',AsyncMock())
+    monkeypatch.setattr(B.DahuaRpc,'strobe',AsyncMock(return_value={'result':True}))
     async def scenario():
         lock=B._rpc_lock(d.ip_address)
         await lock.acquire()
         try: return await B._execute(db,d,'open',s.id,'audit')
         finally: lock.release()
     cmd=asyncio.run(scenario())
-    assert cmd.status=='FAILED' and not B.barrier_is_waiting(d.ip_address)
-    login.assert_not_awaited()
+    assert cmd.status=='SUCCESS' and not B.barrier_is_waiting(d.ip_address)
+    login.assert_awaited()
 
 
 def test_partial_internal_wallet_uses_shared_receipt_and_ledger(db,monkeypatch):

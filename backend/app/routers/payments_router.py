@@ -176,6 +176,31 @@ def _invoice_no(session: ParkingSession) -> str:
     return f"{head}{tail}"
 
 
+def _settlement_fee(db: Session, session: ParkingSession, payment: Payment,
+                    now: datetime | None = None) -> tuple[dict, bool]:
+    """Төлбөр баталгаажих үеийн тооцооны дүн — (fee, нэхэмжлэлийн_үнэ_барьсан_эсэх).
+
+    Жолооч нэхэмжлэлд ҮЗҮҮЛСЭН дүнг төлдөг; банкны апп-аар төлж дуустал
+    (17с–6мин) тарифын шатлал ахивал callback-ийн цагаар дахин бодох нь
+    «2,000 төлчихлөө, 5,000 болчлоо» гомдол үүсгэдэг (2026-09-23, Эрэл-13
+    0605ГСО 1,500→2,000). Нэхэмжлэл `invoice_quote_minutes` дотор төлөгдвөл
+    түүний fee_snapshot-оор хаана; хэтэрсэн/snapshot-гүй бол одоогийн дүн."""
+    current = session_fee_info(db, session)
+    snap = payment.fee_snapshot or {}
+    if "total_fee" not in snap or not payment.created_at:
+        return current, False
+    from ..services.app_settings import get_exit_rules
+    minutes = int(get_exit_rules(db, session.site_id).get("invoice_quote_minutes") or 0)
+    now = now or datetime.utcnow()
+    if minutes <= 0 or now - payment.created_at > timedelta(minutes=minutes):
+        return current, False
+    if float(snap["total_fee"]) >= float(current["total_fee"]):
+        return current, False
+    held = {k: v for k, v in snap.items() if k not in ("parking_amount", "debts")}
+    held["price_held_by_invoice"] = payment.id
+    return held, True
+
+
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                          external_receipt: dict | None = None, partner_notification=None):
     """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
@@ -225,7 +250,17 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                .filter(ParkingSession.id == payment.session_id)
                .populate_existing().with_for_update(nowait=True).one())
     was_closed = session.status not in ("OPEN", "AWAITING_PAYMENT")
-    settlement_fee = session_fee_info(db, session)
+    # Хаагдсан сешнд (хожуу callback) нэхэмжлэлийн үнэ барихгүй — зөвхөн өр/илүү
+    # төлөлтийг тооцно.
+    settlement_fee, _quote_held = ((session_fee_info(db, session), False) if was_closed
+                                   else _settlement_fee(db, session, payment))
+    if _quote_held:
+        db.add(AuditLog(username="system", action="PAYMENT_QUOTE_HONORED", entity="payment",
+                        entity_id=payment.id,
+                        detail={"quote_total": float(settlement_fee["total_fee"]),
+                                "current_total": float(session_fee_info(db, session)["total_fee"]),
+                                "invoice_age_sec": round((datetime.utcnow()
+                                                          - payment.created_at).total_seconds())}))
     already_paid = paid_total(db, session)
     payment.status = "PAID"
     payment.paid_at = datetime.utcnow()
@@ -305,6 +340,14 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                             entity_id=payment.id, detail={"remaining_due": remaining_due}))
             db.commit()
         else:
+            if _quote_held:
+                # Барьсан үнийг сешний дүн болгоно — эс бол дараагийн гарах уншилт
+                # одоогийн (өндөр) дүнг бичиж тайлангийн «Үүссэн» хөөрөгдөнө.
+                session.base_fee, session.vat_amount, session.total_fee = (
+                    settlement_fee["base_fee"], settlement_fee["vat_amount"],
+                    settlement_fee["total_fee"])
+                session.duration_minutes = settlement_fee.get("duration_minutes",
+                                                              session.duration_minutes)
             await mark_paid_and_open(db, session, fee_snapshot=settlement_fee)
     overpaid = max(0.0, round(already_paid + sess_amount - settlement_fee["total_fee"], 2))
     if overpaid:

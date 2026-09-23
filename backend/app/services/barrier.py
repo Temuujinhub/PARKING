@@ -412,14 +412,52 @@ async def _execute(db: Session, device: Device, command: str, session_id: str | 
     except OperationalError as exc:
         db.rollback()
         raise HTTPException(409, "Хаалтны команд боловсруулагдаж байна") from exc
-    pending = (db.query(BarrierCommand).filter(BarrierCommand.device_id == device.id,
-               or_(BarrierCommand.status == "PENDING",
-                   and_(BarrierCommand.status == "UNKNOWN",
-                        BarrierCommand.session_id == session_id)))
-               .order_by(BarrierCommand.created_at.desc()).first())
+    # ГАЦСАН PENDING (2026-09-23 Андууд): гүйцэтгэгч нь дуусаагүй (процесс
+    # тасарсан/гацсан) PENDING мөр өмнө нь тухайн хаалтын БҮХ автомат командыг
+    # МӨНХӨД хаадаг байв — орох хаалт 09-22 14:32-оос 21 цаг нэг ч команд
+    # аваагүй (482 уншилт, сешн үүссэн ч хаалт нээгдээгүй); 09-19 Кэй Эйч ижил.
+    # Команд бүр barrier_total_budget_sec (15с)-ээр хатуу таслагддаг тул
+    # stale_after-аас хуучин PENDING-ийн гүйцэтгэгч амьд байх боломжгүй →
+    # UNKNOWN болгоно. ТЭР сешний давтан импульсийн хамгаалалт (UNKNOWN дүрэм)
+    # хэвээр, харин ӨӨР машин хэвийн нээгдэнэ.
+    _now = datetime.utcnow()
+    _stale_after = max(settings.barrier_total_budget_sec + 10, 60.0)
+    if session_id is not None:
+        _unknown = and_(BarrierCommand.status == "UNKNOWN",
+                        BarrierCommand.session_id == session_id)
+    else:
+        # Сешнгүй команд (гэрээт машины гарц, exit_retry г.м.): UNKNOWN нь зөвхөн
+        # богино хугацаанд, ИЖИЛ төрлийн командын давталтыг хорино — эс бол нэг
+        # тасалдал тухайн хаалтны бүх сешнгүй командыг мөнхөд хаана
+        # (`session_id IS NULL` бүгдэд таарна).
+        _unknown = and_(BarrierCommand.status == "UNKNOWN",
+                        BarrierCommand.session_id.is_(None),
+                        BarrierCommand.command == command,
+                        BarrierCommand.created_at >= _now - timedelta(seconds=_stale_after))
+    while True:
+        pending = (db.query(BarrierCommand).filter(BarrierCommand.device_id == device.id,
+                   or_(BarrierCommand.status == "PENDING", _unknown))
+                   .order_by(BarrierCommand.created_at.desc()).first())
+        _age = (_now - pending.created_at).total_seconds() if pending else 0.0
+        if not (pending and pending.status == "PENDING" and _age >= _stale_after):
+            break
+        from ..models import AuditLog
+        pending.status = "UNKNOWN"
+        pending.response_text = ((pending.response_text + " | ") if pending.response_text else "") + (
+            f"Гүйцэтгэгч {_age:.0f}с дуусаагүй (процесс тасарсан/гацсан) — физик үр дүн "
+            "тодорхойгүй; дахин илгээгээгүй")
+        db.add(AuditLog(username="system", action="BARRIER_STALE_PENDING",
+                        entity="barrier_command", entity_id=pending.id,
+                        detail={"device_id": device.id, "age_sec": round(_age),
+                                "stale_session_id": pending.session_id,
+                                "next_source": source, "next_session_id": session_id}))
+        log.warning("хаалт %s (%s): %.0fс гацсан PENDING командыг UNKNOWN болгов — "
+                    "дараагийн командыг хориглохгүй", device.name, device.id, _age)
+        db.flush()
+        # Дахин хайна: ИЖИЛ сешний UNKNOWN (энэ мөр эсвэл түүнээс хуучин) олдвол
+        # давхар импульсийн хамгаалалт хэвээр үйлчилнэ; өөр машин бол үргэлжилнэ.
     active_reservation = (pending and pending.status == "PENDING" and
-                          (datetime.utcnow() - pending.created_at).total_seconds()
-                          < settings.barrier_total_budget_sec + 10)
+                          _age < settings.barrier_total_budget_sec + 10)
     if pending and (active_reservation or not (issued_by and source == "manual")):
         db.commit()
         return pending
@@ -851,9 +889,18 @@ class _BarrierPriority:
                                    timeout=settings.barrier_lock_wait_sec)
             self.held = True
         except (asyncio.TimeoutError, TimeoutError):
-            # Түгжээг авч чадсангүй — ХҮЛЭЭХГҮЙ. Хаалт нээх нь бүхнээс чухал.
+            # Түгжээг авч чадсангүй — ХҮЛЭЭХГҮЙ, командыг ЯГ ОДОО явуулна. Хаалт
+            # нээх нь бүхнээс чухал. 317df72 (09-19) энд «команд илгээгээгүй»
+            # гэж FAILED болгодог болсноор хаалтны алдаа 0.1% → 2–3% (өдөрт
+            # 173–284 машин) болж, гацсан машин дахин уншигдан хий нэхэмжлэл/
+            # сэргээлт үүсгэдэг байв (2026-09-23 Хангарьд 2942УКН 11:02:14).
+            log.warning("%s: RPC түгжээг %.1fс дотор авч чадсангүй — команд ЯГ ОДОО явуулж байна",
+                        self.ip, settings.barrier_lock_wait_sec)
+        except BaseException:
+            # Хүлээх зуур дуудагч цуцлагдвал (__aexit__ дуудагдахгүй) тоолуур
+            # мөнхөд +1 үлдэж тухайн камерын зураг/LED бүрмөсөн алгасагдана.
             _barrier_waiting[self.ip] = max(0, _barrier_waiting.get(self.ip, 1) - 1)
-            raise TimeoutError("Camera RPC lock is busy; command was not sent")
+            raise
         return self
 
     async def __aexit__(self, *exc):

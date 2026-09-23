@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .billing import calculate_fee
@@ -230,14 +230,22 @@ def get_open_session(db: Session, plate: str, site_id: str) -> ParkingSession | 
 
 
 # OCR-т амархан андуурагддаг Кирилл/цифр хосууд — жигдэлмэгц ижил болгож харьцуулна
-_OCR_CANON = str.maketrans({
+_OCR_CANON_MAP = {
     "О": "0", "O": "0", "В": "Б", "Ь": "Б", "Ё": "Е", "Э": "З",
     "Ү": "У", "Ұ": "У", "Й": "И", "П": "Н", "Ц": "Ч", "І": "1", "l": "1",
-})
+}
+_OCR_CANON = str.maketrans(_OCR_CANON_MAP)
+_OCR_CANON_SRC, _OCR_CANON_DST = list(_OCR_CANON_MAP), list(_OCR_CANON_MAP.values())
 
 
 def _ocr_canon(p: str) -> str:
     return (p or "").translate(_OCR_CANON)
+
+
+def _ocr_canon_sql(col):
+    """`_ocr_canon`-ийн SQL хувилбар (Postgres translate) — ижил хүснэгтээс."""
+    from sqlalchemy import func
+    return func.translate(col, "".join(_OCR_CANON_SRC), "".join(_OCR_CANON_DST))
 
 
 def plates_ocr_similar(a: str, b: str) -> bool:
@@ -279,6 +287,24 @@ def plates_burst_similar(prev: str, new: str, max_diff: int = 2) -> bool:
         return True
     a, b = _ocr_canon(prev), _ocr_canon(new)
     return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) <= max_diff
+
+
+def plates_reread_similar(a: str, b: str) -> bool:
+    """Гарах камерын ДАВТАН уншилт нэг машиных уу — ЗӨВХӨН хамгаалалтын чиглэлд
+    («шинэ нэхэмжлэл / сэргээлт үүсгэхгүй») ашиглана, төлбөр тохооход БИШ.
+
+    `plates_ocr_similar` (1 тэмдэгт) нь сешн тохооход зориулсан тул хатуу.
+    Давтан уншилтад илүү өргөн: жигдэлсний дараа ≤2 тэмдэгтийн зөрүү
+    (2942УКН → 2942УНН). Энд буруу тохирвол хамгийн муудаа нэг машин суурь
+    хураамжгүй гарна; харин хэт хатуу бол гарсан машинд хий өр үүсдэг
+    (2026-09-23: 14 хоногт 439 «орох уншилтгүй» 2000₮ нь гарсан машины
+    ≤3 минутын дараах давтан уншилт байв)."""
+    if not a or not b:
+        return False
+    if a == b or plates_ocr_similar(a, b):
+        return True
+    x, y = _ocr_canon(a), _ocr_canon(b)
+    return len(x) == len(y) and sum(1 for p, q in zip(x, y) if p != q) <= 2
 
 
 def is_duplicate_read(plate: str, recent: str) -> bool:
@@ -403,6 +429,51 @@ def paid_wait_fallback(db: Session, plate: str, site_id: str, now: datetime,
     return s
 
 
+def recent_exit_reread(db: Session, plate: str, site_id: str, now: datetime,
+                       seconds: int) -> ParkingSession | None:
+    """Гарах уншилтад нээлттэй бүртгэл олдоогүй — энэ нь САЯХАН гарсан (эсвэл
+    гарцад төлбөр хүлээж буй) машины ДАВТАН уншилт уу?
+
+    2026-09-23 аудит (продын backup, 14 хоног):
+      • 488 «орох уншилтгүй» 2000₮-ийн сешн тэр машины ӨӨРИЙН сешн гарцад
+        хаагдсанаас хойш ≤10 мин дотор үүссэн — 442 нь ЯГ ИЖИЛ дугаар, 299 нь
+        дөнгөж ТӨЛСӨН машин (гарцад QR төлөөд хаалт нээгдэх зуур камер дахин
+        уншина; эхний гарах уншилт 30с-ийн dedup-аас аль эрт өнгөрсөн байдаг).
+        2 цагийн дараа тэд хий өр болдог (Соёлын төв 171 кейс).
+      • Хангарьд 2942УКН: 11:02:14 гарч FREE хаагдсаны 35с дараа «2942УНН» гэж
+        дахин уншигдаж, 08:54-ийн үнэхээр гарсан зогсолт «хуурамч гарц» гэж
+        сэргээгдэж 5,000₮ нэхэгдэв.
+
+    Дүрэм: энэ зогсоолд гарах камерт уншигдсан (exit_device_id) сешн сүүлийн
+    `seconds` дотор хаагдсан (CLOSED/FREE/MANUAL_CLOSED) эсвэл гарцад төлбөр
+    хүлээж буй (AWAITING_PAYMENT) бөгөөд дугаар нь
+      • ижил / OCR-ойролцоо (`plates_ocr_similar`) — бүтэн цонхонд;
+      • ≤2 тэмдэгтийн зөрүү (`plates_reread_similar`) — зөвхөн сүүлийн 60с-д
+        (санамсаргүй өөр машинтай давхцах нь 180с-д 0.5% байсан).
+    Гарах уншилтгүй авто цэвэрлэгээгээр хаагдсаныг (exit_device_id хоосон)
+    хамааруулахгүй — тэдгээрийг auto_reopen_for_exit шийднэ."""
+    if seconds <= 0 or not plate:
+        return None
+    since = now - timedelta(seconds=seconds)
+    near = now - timedelta(seconds=min(seconds, 60))
+    recent = (db.query(ParkingSession)
+              .filter(ParkingSession.site_id == site_id,
+                      ParkingSession.exit_device_id.isnot(None),
+                      or_(and_(ParkingSession.status.in_(["CLOSED", "FREE", "MANUAL_CLOSED"]),
+                               ParkingSession.exit_time >= since),
+                          and_(ParkingSession.status == "AWAITING_PAYMENT",
+                               ParkingSession.updated_at >= since)))
+              .all())
+    recent.sort(key=lambda x: x.exit_time or x.updated_at or now, reverse=True)
+    for s in recent:
+        if plates_ocr_similar(plate, s.plate_number):
+            return s
+    for s in recent:
+        if (s.exit_time or s.updated_at or now) >= near and plates_reread_similar(plate, s.plate_number):
+            return s
+    return None
+
+
 def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSession | None:
     """Гарах камерт уншигдсан ч ИДЭВХТЭЙ бүртгэл алга — САЯХАН АЛБАДАН хаагдсаныг
     сэргээнэ («Бүртгэлгүй гарах оролдлого»-ын 23%-ийн шалтгаан).
@@ -461,16 +532,56 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     # сешн — машин үнэхээр гарсан, exit_confirmed False байсан ч (дээрх
     # close_session_forced-ийн засвараас өмнөх өгөгдөл) сэргээхгүй.
     _skip_read = bool(_rules.get("reopen_skip_exit_read", True))
+    # «Орох уншилтгүй» суурь хураамжийн сешн (fee_locked) — entry_time нь гарах
+    # уншилтын цаг, «0 минутын хуурамч гарц» биш (2026-09-23: 28 сэргээлт,
+    # 142,000₮ хий өр).
     closed = [s for s in closed
-              if (not s.exit_confirmed and not (_skip_read and s.exit_device_id))
-              or _short_fake_exit(s)]
+              if ((not s.exit_confirmed and not (_skip_read and s.exit_device_id))
+                  or _short_fake_exit(s))
+              and not getattr(s, "fee_locked", False)]
     cands = [s for s in closed if s.plate_number == plate]
     if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
-        cands = [s for s in closed if plates_ocr_similar(plate, s.plate_number)]
+        # «Хуурамч гарц» (гарах уншилт БАТАЛГААТАЙ) нэр дэвшигчид 1 тэмдэгтийн
+        # fuzzy тохирол хэрэглэхгүй — зөвхөн OCR жигдэлсэн яг тохирол. Дараалсан
+        # дугаартай флот (Хангарьд 2942/2943/2944УКН) болон гарах камерын
+        # системтэй К→Н алдаа ӨӨР машины богино зогсолтыг сэргээдэг байв
+        # (7685УЕХ ← 7625УЕХ уншилт → 25,000₮).
+        _canon = _ocr_canon(plate)
+        cands = [s for s in closed
+                 if (plates_ocr_similar(plate, s.plate_number) if not s.exit_confirmed
+                     else _ocr_canon(s.plate_number) == _canon)]
     if len(cands) != 1:
         return None
     s = cands[0]
     if paid_total(db, s) > 0:
+        return None
+    # ДАРААГИЙН ЗОГСОЛТ БАЙВАЛ СЭРГЭЭХГҮЙ (2026-09-23 Хангарьд 2942УКН): тэр
+    # дугаар (эсвэл OCR-ойролцоо) энэ сешнээс ХОЙШ дахин ОРСОН бол машин
+    # хооронд нь үнэхээр гарсан — өмнөх богино гарц «хуурамч» биш, хаалт нь
+    # эрт биш. Зөвхөн тухайн машины ХАМГИЙН СҮҮЛИЙН зогсолтыг сэргээнэ.
+    # Нотолгоо нь ЯГ ИЖИЛ дугаар (OCR жигдэлсэн) — 12 цагийн цонхонд ≤1-2
+    # тэмдэгтээр ойролцоо ӨӨР машин санамсаргүй орох нь элбэг (3539УБХ ↔
+    # 3507УВХ) тул сул тохирол хуурамч гарцын хамгаалалтыг сулруулна.
+    _keys = list({_ocr_canon(s.plate_number), _ocr_canon(plate)})
+    later = (db.query(ParkingSession.id)
+             .filter(ParkingSession.site_id == site_id, ParkingSession.id != s.id,
+                     ParkingSession.entry_time > s.entry_time,
+                     _ocr_canon_sql(ParkingSession.plate_number).in_(_keys))
+             .first())
+    # Сешн үүсээгүй ч ОРОХ камер тэр машиныг гарцаас хойш дахин уншсан бол мөн
+    # нотолгоо (2026-09-23: 63 ийм сэргээлт) — дотоод (nested) эгнээг тооцохгүй.
+    _read = None
+    if s.exit_time is not None:
+        _read = (db.query(LprEvent.id)
+                 .filter(LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+                         LprEvent.accepted.is_(True),
+                         LprEvent.device_id.notin_(_inner_lane_devices(site_id)),
+                         LprEvent.created_at > s.exit_time + timedelta(seconds=60),
+                         _ocr_canon_sql(LprEvent.plate_number).in_(_keys))
+                 .first())
+    if later is not None or _read is not None:
+        log.info("[exit] сэргээлт алгасав: %s (session %s) — дараа нь дахин орсон "
+                 "(зогсолт/орох уншилт) бий, өмнөх гарц бодит", s.plate_number, s.id)
         return None
     fake = bool(s.exit_confirmed) and _short_fake_exit(s)
     fake_min = ((s.exit_time - s.entry_time).total_seconds() / 60
@@ -485,6 +596,15 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
     s.duration_minutes = None
     s.total_fee = s.base_fee = s.vat_amount = None
     s.exit_deadline = None
+    # Төлбөр хүлээлтийн ХУУЧИН төлөвийг цэвэрлэнэ: begin_wait нь зөвхөн хоосон
+    # үед тамга дардаг тул хуучин payment_wait_started_at үлдвэл 2 цагийн
+    # AWAITING цэвэрлэгээ сэргээсэн сешнийг хэдхэн секундэд `unpaid_exit` өр
+    # болгож хаадаг байв (2026-09-23: 173 кейс, 6.28 сая₮ өр; Андууд 6022УБП
+    # 16 секундэд 25,000₮). Одоогийн гарах уншилтаас шинээр тоологдоно.
+    s.payment_wait_started_at = None
+    s.payment_quote = None
+    s.payment_quote_until = None
+    s.last_exit_seen_at = None
     # Тэмдэглэл нь АЛЬ тохиолдол болохыг ялгана — оператор маргаан гарвал
     # юунд үндэслэн төлбөр нэмэгдсэнийг тайлбарлах ёстой
     if fake:
@@ -707,8 +827,20 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         s.note = f"{s.note + ' | ' if s.note else ''}{reason}: гарах уншилтгүй — өргүй, дүнгүй хаав"[:1000]
         return 0.0
 
+    was_paid = s.status == "PAID" and bool(s.paid_at)
     fee = session_fee_info(db, s, at=at)
-    due = amount_due(db, s, fee)
+    if was_paid:
+        # ТӨЛСӨН машин grace-ийн хугацаанд тарифын шатлал ахисан ч (ж 2,000 →
+        # 5,000) өр ҮҮСГЭХГҮЙ, дүнг төлсөн дүнгээр царцаана: жолооч үзүүлсэн дүнг
+        # төлсөн, гарах уншилт л алдагдсан (2026-09-23 шүүмж: урьдчилж төлсөн
+        # машинд 3,000₮ хий өр үүсч байв).
+        _paid = paid_total(db, s)
+        if _paid > 0 and fee["total_fee"] > _paid:
+            _r = settings.vat_rate
+            _vat = round(_paid * _r / (1 + _r))
+            fee = {**fee, "total_fee": _paid, "vat_amount": _vat,
+                   "base_fee": _paid - _vat, "is_free": False}
+    due = 0.0 if was_paid else amount_due(db, s, fee)
     # Доторх (nested) зогсоолд байхад нь хаагдаж байгаа бол явж буй зогсолтыг
     # ЭНД барагдуулна. Төлбөр нь `fee` дотор аль хэдийн зөв хасагдсан (ижил
     # хязгаараар) — гэхдээ барагдуулахгүй бол хаагдсан мөрөнд paused_minutes=0
@@ -1545,6 +1677,45 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                      int(_xr.get("paid_wait_fallback_minutes") or 0))
         if session is not None:
             plate = session.plate_number   # цаашдын урсгал (LED, аудит) сешний дугаараар
+    if session is None:
+        # САЯХАН ГАРСАН машины давтан уншилт — шинэ суурь хураамж/сэргээлт
+        # үүсгэхгүй (recent_exit_reread-ийн тайлбар). Эрхтэй бол хаалтыг дахин
+        # нээнэ (машин хаалтны өмнө хэвээр байж болно).
+        _rr = None
+        if find_registered(db, plate, site_id) is None:   # гэрээт → доорх ердийн зам
+            _rr = recent_exit_reread(db, plate, site_id, now,
+                                     int(_xr.get("exit_reread_seconds") or 0))
+        if _rr is not None:
+            from .models import AuditLog
+            _ago = (now - (_rr.exit_time or _rr.updated_at or now)).total_seconds()
+            db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
+                            lane_dir="exit", confidence=confidence, accepted=True,
+                            raw=strip_images(raw)))
+            db.add(AuditLog(username="system", action="EXIT_REREAD", entity="session",
+                            entity_id=_rr.id,
+                            detail={"read_plate": plate, "session_plate": _rr.plate_number,
+                                    "session_status": _rr.status,
+                                    "seconds_since_exit": round(max(_ago, 0.0), 1)}))
+            db.commit()
+            opened = False
+            # Хаалтыг зөвхөн ЯГ ТЭР машинд (OCR жигдэлсэн ижил дугаар эсвэл формат
+            # буруу/тайрагдсан уншилт) бөгөөд ижил эгнээ эсвэл 60с дотор дахин
+            # нээнэ — 1–2 тэмдэгтээр өөр зөв дугаар нь ӨӨР машин байж болзошгүй
+            # (нэхэмжлэл үүсгэхгүй ч үнэгүй гаргахгүй, оператор шийднэ).
+            _same_car = (_ocr_canon(plate) == _ocr_canon(_rr.plate_number)
+                         or not is_valid_plate(plate))
+            if (allow_open and _rr.status in ("CLOSED", "FREE") and _same_car
+                    and (_rr.exit_device_id == device.id or _ago <= 60)):
+                opened = await ensure_exit_barrier_if_cleared(db, device, _rr.plate_number)
+            if not opened:
+                notify(site_id, "EXIT_NO_SESSION", {
+                    "plate": plate, "reread_of": _rr.plate_number,
+                    "reread_status": _rr.status, "barrier_opened": False})
+            log.info("[exit] давтан уншилт: «%s» → %s (%s, %.0fс өмнө) — шинэ нэхэмжлэл "
+                     "үүсгэсэнгүй, хаалт %s", plate, _rr.plate_number, _rr.status, _ago,
+                     "нээв" if opened else "нээгээгүй")
+            return {"action": "reread", "plate": plate, "session_id": _rr.id,
+                    "barrier_opened": opened}
     if session is None:
         # Идэвхтэй бүртгэл алга — саяхан АЛБАДАН хаагдсаныг сэргээж үзнэ.
         # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт

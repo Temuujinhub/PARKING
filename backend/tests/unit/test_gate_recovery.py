@@ -38,21 +38,24 @@ def case(monkeypatch):
     engine.dispose();B._open_inflight.clear()
 
 
-def test_only_new_stay_is_released_old_stay_still_cannot_repeat(case):
+def test_stale_reservation_expires_new_stay_released_old_stay_cannot_repeat(case):
     db,device,old,new,cmd,boot,now=case
-    # Reproduce the real reboot lock: an unrelated new stay receives the old row.
-    assert asyncio.run(B._execute(db,device,'open',new.id,'auto_entry')).id==cmd.id
-    original=[]
-    result=recover_preboot_command(db,cmd.id,boot,original.append,now=now);db.commit()
-    assert result['changed'] and original[0]['status']=='PENDING'
+    # 2026-09-23 Андууд: гацсан PENDING нь ӨӨР машиныг мөнхөд хорьдог байв
+    # (21 цагт 482 уншилт, 0 команд). Одоо хуучирсан PENDING автоматаар UNKNOWN
+    # болж шинэ машин нээгдэнэ; хуучин машинд импульс ДАВТАХГҮЙ хэвээр.
+    first=asyncio.run(B._execute(db,device,'open',new.id,'auto_entry'))
+    assert first.id!=cmd.id and first.status=='SUCCESS'
+    db.refresh(cmd)
     assert cmd.status=='UNKNOWN' and cmd.executed_at is None
     assert asyncio.run(B._execute(db,device,'open',old.id,'auto_entry')).id==cmd.id
-    second=asyncio.run(B._execute(db,device,'open',new.id,'auto_entry'))
-    assert second.id!=cmd.id and second.status=='SUCCESS'
     assert db.query(M.BarrierCommand).count()==2
     assert db.query(M.Payment).count()==db.query(M.Compensation).count()==0
     db.refresh(old);assert old.status=='OPEN' and old.total_fee is None
-    assert db.query(M.AuditLog).filter_by(action='BARRIER_PREBOOT_RECOVERY').count()==1
+    assert db.query(M.AuditLog).filter_by(action='BARRIER_STALE_PENDING').count()==1
+    # Гар сэргээлтийн хэрэгсэл аль хэдийн ангилагдсан мөрийг дахин өөрчлөхгүй
+    original=[]
+    assert recover_preboot_command(db,cmd.id,boot,original.append,now=now)=={'changed':False,'status':'UNKNOWN'}
+    assert original==[]
 
 
 @pytest.mark.parametrize('status',['UNKNOWN','REVIEWED','SUCCESS','FAILED'])
