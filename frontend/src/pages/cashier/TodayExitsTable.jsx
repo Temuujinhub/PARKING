@@ -18,7 +18,14 @@ export default function TodayExitsTable({ overview }) {
               {r.note && <span className="ml-1 cursor-help" title={r.note}>📝</span>}
             </td>
             <td className="td font-mono text-xs">{fmtShort(r.entry_time)}</td>
-            <td className="td font-mono text-xs">{r.exit_time ? fmtShort(r.exit_time) : '—'}</td>
+            <td className="td font-mono text-xs">
+              {!r.exit_time ? '—' : r.exit_inferred
+                ? <span className="text-slate-500 cursor-help"
+                    title="Гарах камерт уншигдаагүй — систем авто хаасан цаг (жинхэнэ гарсан цаг биш)">
+                    {fmtShort(r.exit_time)} <span className="text-[10px] uppercase">авто</span>
+                  </span>
+                : fmtShort(r.exit_time)}
+            </td>
             <td className="td font-mono text-xs">{fmtDur(r.duration_minutes)}</td>
             <td className={`td text-xs font-medium ${r.car_type === 'Гэрээт' ? 'text-cyan-400' : r.car_type === 'Хөнгөлөлттэй' ? 'text-amber-400' : ''}`}>
               {r.car_type}{r.discount_name ? ` (${r.discount_name})` : ''}
@@ -26,8 +33,13 @@ export default function TodayExitsTable({ overview }) {
             <td className="td font-mono">{r.total_fee > 0 ? `${fmt(r.total_fee)}₮` : <span className="text-slate-500">Үнэгүй</span>}</td>
             <td className="td text-xs">{r.provider || <span className="text-slate-500">—</span>}</td>
             <td className="td">
-              {r.paid ? <span className="text-accent text-xs">Төлсөн</span>
+              {r.partial
+                ? <span className="text-amber-400 text-xs" title={`Төлсөн ${fmt(r.paid_amount)}₮`}>
+                    Дутуу төлсөн · үлдэгдэл {fmt(r.amount_due)}₮
+                  </span>
+                : r.paid ? <span className="text-accent text-xs">Төлсөн</span>
                 : r.status === 'AWAITING_PAYMENT' ? <span className="text-amber-400 text-xs">Хүлээж буй</span>
+                : r.exit_inferred ? <span className="text-slate-500 text-xs">Авто хаасан</span>
                 : <span className="text-slate-500 text-xs">Төлбөргүй</span>}
             </td>
             <td className="td text-xs">{r.ebarimt ? <span className="text-accent">✓</span> : <span className="text-slate-600">—</span>}</td>
@@ -35,7 +47,8 @@ export default function TodayExitsTable({ overview }) {
         ))}
       </Table>
       <div className="text-xs text-slate-500 mt-2">
-        Гарах камерт дугаар нь уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч оруулав).
+        Өнөөдөр гарсан/хаагдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч). «авто» — гарах камерт
+        уншигдаагүй, систем авто хаасан. «Дутуу төлсөн» — төлбөр орсон ч үлдэгдэлтэй, хаалт нээгдээгүй.
       </div>
     </div>
   )

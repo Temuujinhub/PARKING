@@ -554,6 +554,30 @@ def update_note(session_id: str, body: dict, db: Session = Depends(get_db),
     return {"ok": True, "note": s.note}
 
 
+def _paid_by_session(db: Session, pay_rows) -> dict:
+    """session_id → тухайн сешнд ногдох төлсөн дүн (session_logic.paid_total-тэй
+    ижил дүрэм: fee_snapshot.parking_amount, эсвэл нэг QR-т нийлсэн ӨӨР сешний
+    өрийг хасна) — мөр бүрд тусдаа query хийхгүйгээр бөөнөөр."""
+    other = {}
+    no_snap = {p.id: p.session_id for p in pay_rows
+               if "parking_amount" not in (p.fee_snapshot or {})}
+    if no_snap:
+        for pid, sid, amt in (db.query(Compensation.payment_id, Compensation.session_id,
+                                       Compensation.amount)
+                              .filter(Compensation.payment_id.in_(list(no_snap))).all()):
+            if sid != no_snap[pid]:
+                other[pid] = other.get(pid, 0.0) + float(amt or 0)
+    out: dict = {}
+    for p in pay_rows:
+        snap = p.fee_snapshot or {}
+        if "parking_amount" in snap:
+            part = min(float(p.amount), float(snap["parking_amount"]))
+        else:
+            part = max(0.0, float(p.amount) - other.get(p.id, 0.0))
+        out[p.session_id] = round(out.get(p.session_id, 0.0) + part, 2)
+    return out
+
+
 @router.get("/today-exits")
 def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depends(require("cashier"))):
     """Касс: ӨНӨӨДӨР гарах камерт уншигдсан бүх машин (төлбөр аваагүй/үнэгүй гарсныг ч).
@@ -576,9 +600,11 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
                 .order_by(ParkingSession.updated_at.desc()).limit(200).all())
     ids = [s.id for s in sessions]
     pays = {}
-    if ids:
-        for p in db.query(Payment).filter(Payment.session_id.in_(ids), Payment.status == "PAID").all():
-            pays.setdefault(p.session_id, p)
+    pay_rows = (db.query(Payment).filter(Payment.session_id.in_(ids), Payment.status == "PAID").all()
+                if ids else [])
+    for p in pay_rows:
+        pays.setdefault(p.session_id, p)
+    paid_amounts = _paid_by_session(db, pay_rows)
     recs = {r.session_id for r in db.query(VatReceipt.session_id)
             .filter(VatReceipt.session_id.in_(ids), VatReceipt.status == "SENT").all()} if ids else set()
     prov_mn = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт"}
@@ -586,15 +612,32 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
     for s in sessions:
         p = pays.get(s.id)
         car_type = "Гэрээт" if s.is_registered else ("Хөнгөлөлттэй" if s.discount_id else "Энгийн")
+        paid_amount = paid_amounts.get(s.id, 0.0)
+        # ҮЛДЭГДЭЛ: «Төлсөн» гэж зөвхөн бүрэн барагдсан үед харуулна. Өмнө нь ганц
+        # PAID төлбөр байхад л «Төлсөн» гэдэг байсан тул шатлал ахиад 500₮ дутуу
+        # үлдэж хаалт нээгдээгүй машиныг ч «Төлсөн» гэж харуулж операторыг
+        # төөрөгдүүлдэг байв (2026-09-23 Эрэл-13 0605ГСО).
+        if s.status in ("OPEN", "AWAITING_PAYMENT"):
+            due = amount_due(db, s, session_fee_info(db, s)) if (p or s.status == "AWAITING_PAYMENT") else 0.0
+        elif s.status == "MANUAL_CLOSED":
+            due = max(0.0, round(float(s.total_fee or 0) - paid_amount, 2))
+        else:
+            due = 0.0
         rows.append({
             "session_id": s.id, "plate_number": s.plate_number,
             "entry_time": s.entry_time.isoformat() if s.entry_time else None,
             "exit_time": s.exit_time.isoformat() if s.exit_time else None,
+            # Гарах камерт УНШИГДААГҮЙ, авто цэвэрлэгээгээр хаагдсан (ж 72ц «зөвхөн
+            # орох уншилттай») — «Гарсан» цаг нь хаасан цаг, жинхэнэ гарц биш.
+            "exit_inferred": bool(s.exit_time) and not s.exit_device_id and not s.exit_confirmed,
             "duration_minutes": s.duration_minutes,
             "car_type": car_type, "discount_name": s.discount.name if s.discount else None,
             "total_fee": float(s.total_fee or 0),
             "provider": prov_mn.get(p.provider, p.provider) if p else None,
-            "paid": s.status == "PAID" or bool(p),
+            "paid_amount": paid_amount,
+            "amount_due": due,
+            "partial": paid_amount > 0 and due > 0,
+            "paid": s.status == "PAID" or (paid_amount > 0 and due <= 0),
             "status": s.status,
             "ebarimt": s.id in recs,
             "note": s.note,
