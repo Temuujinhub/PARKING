@@ -2447,14 +2447,17 @@ def run_autoclose_now(db: Session = Depends(get_db),
 @router.get("/camsync/rules")
 def get_camsync_rules_api(db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
-    """Камерын лог нөхөлтийн дүрэм + зогсоол бүрийн watermark."""
-    enforce_global_settings(user)
+    """Камерын лог нөхөлтийн дүрэм + зогсоол бүрийн watermark.
+    Бүх админ харна (2026-09-28); ерөнхий эрхгүй (түрээслэгчийн) админд зөвхөн
+    өөрийн зогсоолын watermark буцна — засах/ажиллуулах нь ерөнхий эрхтэнд л."""
     from ..services.app_settings import CAMSYNC_STATE, get_camsync_rules, get_state
     rules = get_camsync_rules(db)
     state = get_state(db, CAMSYNC_STATE)
+    allowed = None if can_manage_global_settings(user) else set(operator_sites(user) or [])
     sites = {s.id: s.name for s in db.query(ParkingSite).all()}
     return {**rules,
-            "watermarks": [{"site": sites.get(k, k), "at": v} for k, v in state.items()]}
+            "watermarks": [{"site": sites.get(k, k), "at": v} for k, v in state.items()
+                           if allowed is None or k in allowed]}
 
 
 @router.put("/camsync/rules")
@@ -2486,11 +2489,19 @@ def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
 @router.get("/camhealth/rules")
 def get_camhealth_rules_api(db: Session = Depends(get_db),
                            user: User = Depends(require("settings"))):
-    """Камерын эрүүл мэндийн дүрэм + сүүлийн шалгалтын дүн."""
-    enforce_global_settings(user)
+    """Камерын эрүүл мэндийн дүрэм + сүүлийн шалгалтын дүн.
+    Ерөнхий эрхгүй (түрээслэгчийн) админд зөвхөн өөрийн зогсоолын камер харагдана."""
     from ..services.app_settings import CAMHEALTH_KEY, get_rules
     from ..services.camera_health import last_state
-    return {**get_rules(db, CAMHEALTH_KEY), "last": last_state()}
+    last = last_state() or {}
+    if not can_manage_global_settings(user):
+        ips = {r[0] for r in db.query(Device.ip_address)
+               .filter(Device.site_id.in_(operator_sites(user) or [])).all() if r[0]}
+        last = {"checked_at": last.get("checked_at"),
+                "hung": [ip for ip in last.get("hung") or [] if ip in ips],
+                **{k: [r for r in last.get(k) or [] if r.get("ip") in ips]
+                   for k in ("problems", "rebooted", "skipped")}}
+    return {**get_rules(db, CAMHEALTH_KEY), "last": last}
 
 
 @router.put("/camhealth/rules")

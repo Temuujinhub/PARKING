@@ -142,8 +142,9 @@ export default function PaymentRulesSection({ onGotoDevices }) {
   useEffect(() => {
     api('/api/admin/payment-rules').then((d) => {
       setIndex(d)
-      // Эхлээд ЕРӨНХИЙ горим (бүх зогсоолын анхдагч), эрхгүй бол эхний зогсоол
-      setSiteId((cur) => cur || (d.can_edit_global ? GLOBAL : (d.sites?.[0]?.id || '')))
+      // Эхлээд ЕРӨНХИЙ горим (бүх зогсоолын анхдагч) — бүх админд ижил харагдана;
+      // түрээслэгчийн админд зөвхөн харах горимоор (2026-09-28)
+      setSiteId((cur) => cur || GLOBAL)
     }).catch((e) => { setError(e.message); toast(e.message, 'error') })
   }, [])
 
@@ -172,6 +173,8 @@ export default function PaymentRulesSection({ onGotoDevices }) {
   const dirty = Object.values(draft).some((g) => Object.keys(g).length > 0)
 
   const isGlobal = siteId === GLOBAL
+  // Ерөнхий утга бүх түрээслэгчид нөлөөлдөг тул түрээслэгчийн админ зөвхөн харна
+  const readOnly = isGlobal && !canGlobal
 
   const save = async () => {
     setBusy(true)
@@ -190,7 +193,6 @@ export default function PaymentRulesSection({ onGotoDevices }) {
   if (!index) return error
     ? <p role="alert" className="text-sm text-slate-100">{error}</p>
     : <div role="status" className="text-sm text-slate-500">Ачаалж байна…</div>
-  if (!index.sites.length && !canGlobal) return <div className="text-sm text-slate-500">Зогсоол алга.</div>
 
   const groups = report
     ? Object.entries(index.groups).map(([g, name]) => ([
@@ -200,7 +202,12 @@ export default function PaymentRulesSection({ onGotoDevices }) {
   return (
     <div className="space-y-5">
       {error && <p role="alert" className="text-sm text-slate-100 border border-brand-red rounded-lg p-3">{error}</p>}
-      {!canGlobal && <p className="text-sm text-slate-300">Та өөрийн зогсоолын дүрмийг хадгалж болно. Системийн ерөнхий дүрмийг бүх зогсоолын эрхтэй админ удирдана.</p>}
+      {readOnly && (
+        <p className="text-sm text-slate-300 border border-surface-border rounded-lg p-3">
+          Ерөнхий дүрэм бүх түрээслэгчийн зогсоолд үйлчилдэг тул <b>зөвхөн харах</b> горимд
+          байна. Өөрийн зогсоолд өөрөөр тохируулах бол доорх жагсаалтаас зогсоолоо сонгоно уу.
+        </p>
+      )}
       <div className="card space-y-3">
         <div>
           <h2 className="font-semibold flex items-center gap-2">
@@ -217,7 +224,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
         <div className="flex flex-wrap items-center gap-2">
           <select className="input w-auto min-w-[16rem]" value={siteId} disabled={busy}
             onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
-            {canGlobal && <option value={GLOBAL}>Ерөнхий — бүх зогсоолын анхдагч</option>}
+            <option value={GLOBAL}>Ерөнхий — бүх зогсоолын анхдагч{canGlobal ? '' : ' (зөвхөн харах)'}</option>
             {index.sites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}{s.override_count ? ` — ${s.override_count} тусгай дүрэм` : ''}
@@ -275,7 +282,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
 
       {/* ── Дүрмүүд бүлгээр ── */}
       {groups.map(([g, name, rows]) => rows.length > 0 && (
-        <fieldset key={g} disabled={busy} className="card disabled:opacity-70">
+        <fieldset key={g} disabled={busy || readOnly} className="card disabled:opacity-70">
           <h3 className="font-semibold text-sm mb-1">{name}</h3>
           {rows.map((r) => (
             <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal}
@@ -288,7 +295,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
       ))}
 
       {/* Нээх шалтгаан — оператор төлбөргүй гаргах шалтгааны жагсаалт (систем даяар) */}
-      {report && isGlobal && <OpenReasonsCard toast={toast} />}
+      {report && isGlobal && <OpenReasonsCard toast={toast} readOnly={!canGlobal} />}
 
       {/* ── Энд БИШ тохируулагддаг дүрмүүд — хаанаас засахыг заана ── */}
       {report && !isGlobal && (
@@ -341,11 +348,11 @@ export default function PaymentRulesSection({ onGotoDevices }) {
         </div>
       )}
 
-      <div className="sticky bottom-4 flex justify-end">
+      {!readOnly && <div className="sticky bottom-4 flex justify-end">
         <button className="btn-primary shadow-lg" onClick={save} disabled={busy || !dirty}>
           <Save size={15} /> {busy ? 'Хадгалж байна…' : dirty ? 'Хадгалах' : 'Өөрчлөлт алга'}
         </button>
-      </div>
+      </div>}
     </div>
   )
 }

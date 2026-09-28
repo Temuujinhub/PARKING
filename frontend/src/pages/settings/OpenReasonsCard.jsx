@@ -5,7 +5,7 @@ import { ListChecks, Save } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 
-export default function OpenReasonsCard({ toast }) {
+export default function OpenReasonsCard({ toast, readOnly = false }) {
   const [items, setItems] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -38,7 +38,7 @@ export default function OpenReasonsCard({ toast }) {
         </p>
       </div>
 
-      <div className="space-y-2">
+      <fieldset disabled={readOnly} className="space-y-2 disabled:opacity-70">
         {items.map((r, i) => (
           <div key={i} className="flex flex-wrap items-center gap-2">
             <input className="input font-mono w-36" value={r.code} maxLength={30}
@@ -54,14 +54,19 @@ export default function OpenReasonsCard({ toast }) {
             </label>
           </div>
         ))}
-      </div>
+      </fieldset>
 
-      <div className="flex flex-wrap gap-2">
+      {!readOnly && <div className="flex flex-wrap gap-2">
         <button className="btn-primary" onClick={save} disabled={busy}>
           <Save size={15} /> {busy ? 'Хадгалж байна…' : 'Хадгалах'}
         </button>
         <button className="btn-secondary" onClick={add}>+ Мөр нэмэх</button>
-      </div>
+      </div>}
+      {readOnly && (
+        <p className="text-xs text-slate-400">
+          Жагсаалт бүх түрээслэгчид нийтлэг тул зөвхөн харах горимд байна.
+        </p>
+      )}
       <p className="text-[11px] text-slate-500">
         Хэрэглэгдэж байсан шалтгааныг устгахын оронд «идэвхтэй»-г нь авбал хуучин
         тайлан бүтэн хэвээр үлдэнэ.

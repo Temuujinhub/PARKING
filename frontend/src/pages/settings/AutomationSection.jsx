@@ -380,17 +380,26 @@ export default function AutomationSection({ onGotoRules }) {
   }, [])
   if (error) return <p role="alert" className="text-sm text-slate-100">{error}</p>
   if (!capabilities) return <p role="status" className="text-sm text-slate-300">Эрх шалгаж байна…</p>
-  if (!capabilities.can_edit_global) return (
-    <div className="card space-y-3">
-      <p className="text-sm text-slate-300">Эдгээр автомат ажил бүх зогсоолд үйлчилдэг тул бүх зогсоолын эрхтэй админ удирдана. Та өөрийн зогсоолын дүрмийг Төлбөрийн дүрэм хэсэгт тохируулна.</p>
-      <button type="button" className="btn-secondary" onClick={onGotoRules}>Өөрийн зогсоолын дүрэм →</button>
-    </div>
-  )
+  // Бүх админд ижил харагдана (2026-09-28). Автомат ажил бүх түрээслэгчийн
+  // зогсоолд үйлчилдэг тул түрээслэгчийн админд зөвхөн харах горим — backend
+  // тэдэнд зөвхөн өөрийн зогсоол/камерын төлөвийг буцаана.
+  const readOnly = !capabilities.can_edit_global
   return (
     <div className="space-y-4">
-      <AutoCloseRunCard toast={toast} onGotoRules={onGotoRules} />
-      <CamHealthCard toast={toast} />
-      <CamSyncCard toast={toast} />
+      {readOnly && (
+        <div className="card flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-slate-300">
+            Эдгээр автомат ажил бүх түрээслэгчийн зогсоолд үйлчилдэг тул <b>зөвхөн харах</b> горимд
+            байна. Өөрийн зогсоолын дүрмийг Төлбөрийн дүрэм хэсэгт тохируулна.
+          </p>
+          <button type="button" className="btn-secondary" onClick={onGotoRules}>Өөрийн зогсоолын дүрэм →</button>
+        </div>
+      )}
+      <fieldset disabled={readOnly} className="space-y-4 disabled:opacity-80">
+        <AutoCloseRunCard toast={toast} onGotoRules={readOnly ? null : onGotoRules} />
+        <CamHealthCard toast={toast} />
+        <CamSyncCard toast={toast} />
+      </fieldset>
     </div>
   )
 }
