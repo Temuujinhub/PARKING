@@ -1,5 +1,6 @@
 """Session удирдлага: жагсаалт, хайлт, шалгах, түүх, гараар хаах."""
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 import logging
 
@@ -45,6 +46,11 @@ def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict
     extra["entry_lane_no"] = ent["lane_no"] if ent else None
     extra["exit_device_name"] = ext["name"] if ext else None
     extra["exit_lane_no"] = ext["lane_no"] if ext else None
+    # SPECIAL_EXIT can assign a camera without recognizing a plate. The LPR path
+    # additionally records recognition confidence; missing legacy evidence stays uncertain.
+    extra["exit_read_status"] = ("CAMERA_READ" if s.exit_device_id and s.confidence_exit is not None else
+                                 "CAMERA_LINKED" if s.exit_device_id else
+                                 "RECORDED_EXIT" if s.exit_confirmed else "NO_CAMERA_READ")
     # PAID (төлсөн ч ГАРААГҮЙ) session-д мөн төлбөрийг бодно: grace дууссаны
     # дараа зогссоор байгаа машины нэмэлт төлбөр Касс/Шалгах дээр огт
     # харагддаггүй байв — гарах камерт дахин уншигдтал «0₮» гэж зогсдог
@@ -123,47 +129,46 @@ def _close_map(db: Session, ids: list[str]) -> dict[str, dict]:
                     AuditLog.action.in_(_CLOSE_ACTIONS))
             .order_by(AuditLog.created_at).all()):
         det = detail if isinstance(detail, dict) else {}
+        reason = str(det.get("reason") or "").strip()[:300] or None
+        reason_label = ({"unpaid_exit": "Төлбөргүй хаасан", "auto_close": "Идэвхгүй зогсолт",
+                         "invalid_plate": "Буруу дугаар", "night_close": "Шөнийн хаалт",
+                         "shift_close": "Ээлжийн хаалт"}.get(reason, reason))
+        if action == "AUTO_CLOSE" and reason == "unpaid_exit":
+            reason_label = "Төлбөр хүлээх хугацаа дууссан"
         closed[eid] = {"by": username, "action": action,
                        "label": _CLOSE_LABEL.get(action, action),
                        "auto": username == "system",
                        "at": at.isoformat() if at else None,
-                       "reason": (str(det.get("reason") or "").strip()[:300] or None),
-                       "reason_code": det.get("reason_code") or None}
+                       "reason": reason, "reason_label": reason_label,
+                       "reason_code": det.get("reason_code") or None,
+                       "trigger": det.get("trigger"),
+                       # Legacy hours may be the unrelated 72h setting. Do not infer a threshold.
+                       "threshold_hours": det.get("threshold_hours"),
+                       "wait_started_at": det.get("wait_started_at"),
+                       "closed_at": det.get("closed_at") or (at.isoformat() if at else None)}
     return closed
 
 
-def _attach_close_info(db: Session, dicts: list[dict]) -> list[dict]:
+def _attach_close_info(db: Session, dicts: list[dict], user: User) -> list[dict]:
     """Түүхэнд ХЭРХЭН хаагдсаныг хавсаргана — «Гарсан» төлөв хэт ерөнхий байсныг задлана.
 
       • `payments` — ямар хэрэгслээр төлөгдсөн (QPay QR / карт / бэлэн / данс),
         кассаар төлсөн бол хүлээж авсан операторын нэртэй.
       • `closed_by` — гараар/автоматаар хаасан бол хэн, ямар үйлдлээр.
 
-    Бүх мэдээллийг ХОЁР багц query-ээр авна (мөр бүрд query хийхгүй) — Түүх нэг
+    Бүх мэдээллийг багц query-ээр авна (мөр бүрд query хийхгүй) — Түүх нэг
     хуудсанд 50-500 мөр харуулдаг тул N+1 болбол хуудас нээгдэхээ болино.
     """
     ids = [d["id"] for d in dicts if d.get("id")]
     if not ids:
         return dicts
 
-    pays: dict[str, list] = {}
-    rows = (db.query(Payment.session_id, Payment.provider, Payment.payment_method,
-                     Payment.source, Payment.amount, Payment.paid_at, User.username)
-            .outerjoin(User, User.id == Payment.cashier_id)
-            .filter(Payment.session_id.in_(ids), Payment.status == "PAID")
-            .order_by(Payment.paid_at).all())
-    for sid, provider, method, source, amount, paid_at, cashier in rows:
-        pays.setdefault(sid, []).append({
-            "provider": provider, "method": method, "source": source,
-            "amount": float(amount or 0),
-            "paid_at": paid_at.isoformat() if paid_at else None,
-            "cashier": cashier,
-        })
+    from ..services.history_financials import attach_history_financials
+    attach_history_financials(db, dicts, user)
 
     closed = _close_map(db, ids)
 
     for d in dicts:
-        d["payments"] = pays.get(d["id"], [])
         c = closed.get(d["id"])
         if c and c["action"] == "MANUAL_EXIT":
             c = {**c, "label": _MANUAL_PAID if d["payments"] else _MANUAL_FREE}
@@ -213,13 +218,16 @@ def list_sessions(
     date_from: str | None = None, date_to: str | None = None,
     limit: int = 100, offset: int = 0, with_fee: bool = False, inner: str | None = None,
     debt: int = 0,
+    session_id: UUID | None = None,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
     q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
+    if session_id is not None:
+        q = q.filter(ParkingSession.id == str(session_id))
     total = q.count()
     rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
     out = _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])
-    return {"total": total, "rows": _attach_close_info(db, out)}
+    return {"total": total, "rows": _attach_close_info(db, out, user)}
 
 
 # Түүх хуудасны шүүсэн үр дүнг Excel болгож татна. /{session_id} route-аас
@@ -228,12 +236,14 @@ def list_sessions(
 def sessions_excel(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
     date_from: str | None = None, date_to: str | None = None,
-    inner: str | None = None, debt: int = 0,
+    inner: str | None = None, debt: int = 0, session_id: UUID | None = None,
     db: Session = Depends(get_db), user: User = Depends(require("history")),
 ):
     """Түүхийн шүүлтүүрийн үр дүнг бүхэлд нь (дээд тал нь 20000 мөр) Excel-ээр."""
     from .reports_excel import TZ, _xlsx
     q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
+    if session_id is not None:
+        q = q.filter(ParkingSession.id == str(session_id))
     rows = q.order_by(ParkingSession.entry_time.desc()).limit(20000).all()
 
     # Төлбөрийн хэрэгслүүд — нэг query-гээр бүх session-ий PAID төлбөрийг авна
@@ -248,7 +258,7 @@ def sessions_excel(
 
     status_label = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
                     "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй",
-                    "MANUAL_CLOSED": "Гарах уншилтгүй"}
+                    "MANUAL_CLOSED": "Хаасан"}
 
     def _loc(dt):
         return (dt + TZ).strftime("%Y-%m-%d %H:%M") if dt else ""
@@ -263,7 +273,7 @@ def sessions_excel(
         if c["action"] == "MANUAL_EXIT":
             label = _MANUAL_PAID if pays.get(s.id) else _MANUAL_FREE
         who = "Систем" if c["auto"] else c["by"]
-        return f"{label} — {who}", (c.get("reason") or "")
+        return f"{label} — {who}", (c.get("reason_label") or c.get("reason") or "")
 
     data = []
     for s in rows:

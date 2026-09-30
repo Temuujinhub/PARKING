@@ -67,3 +67,21 @@ def test_token_carries_iat():
     payload = _jwt.decode(A.create_access_token(_user()), _s.secret_key,
                           algorithms=[_s.jwt_algorithm])
     assert "iat" in payload and "exp" in payload
+
+
+@pytest.mark.parametrize('mode', ['expired', 'wrong_key', 'unsigned'])
+def test_invalid_tokens_still_fail_closed_after_dependency_update(mode, monkeypatch):
+    import jwt
+    from app.config import settings
+    key = 'disposable-auth-regression-key-at-least-32-bytes'
+    monkeypatch.setattr(settings, 'secret_key', key)
+    monkeypatch.setattr(settings, 'jwt_algorithm', 'HS256')
+    payload = {'sub': _user().id, 'exp': datetime.utcnow() + timedelta(minutes=5)}
+    if mode == 'expired':
+        payload['exp'] = datetime.utcnow() - timedelta(seconds=1)
+    token = jwt.encode(payload, '' if mode == 'unsigned' else
+                       'different-disposable-key-at-least-32-bytes' if mode == 'wrong_key' else key,
+                       algorithm='none' if mode == 'unsigned' else 'HS256')
+    with pytest.raises(HTTPException) as error:
+        A.decode_token(token)
+    assert error.value.status_code == 401
