@@ -108,7 +108,11 @@ def run_once() -> int:
                         db.add(AuditLog(username="system", action="AUTO_FREE_CLOSE",
                                         entity="session", entity_id=s.id,
                                         detail={"plate": s.plate_number, "site": site.name,
-                                                "hours": eo_hours}))
+                                                "hours": eo_hours,
+                                                "trigger": "entry_only_timeout",
+                                                "threshold_hours": eo_hours,
+                                                "wait_started_at": None,
+                                                "closed_at": now.isoformat() + "Z"}))
                         db.commit()
                         closed += 1
                         log.info(f"{site.name}: {s.plate_number} зөвхөн орох уншилттай — "
@@ -188,15 +192,24 @@ def run_once() -> int:
                         make_debt = rules["create_debt_unpaid_exit"]
                     else:
                         reason, make_debt = "auto_close", (rules["create_debt"] and valid)
+                    awaiting_timeout = expected_status == "AWAITING_PAYMENT"
+                    threshold = aw_hours if awaiting_timeout else hours
+                    wait_started_at = s.payment_wait_started_at
+                    closed_at = datetime.utcnow()
                     debt = close_session_forced(db, s, reason, "system", make_debt)
                     db.add(AuditLog(username="system", action="AUTO_CLOSE", entity="session",
                                     entity_id=s.id,
                                     detail={"plate": s.plate_number, "site": site.name,
-                                            "hours": hours, "reason": reason, "debt": debt}))
+                                            "hours": threshold, "reason": reason, "debt": debt,
+                                            "trigger": "awaiting_timeout" if awaiting_timeout else "stale_session",
+                                            "threshold_hours": threshold,
+                                            "wait_started_at": (wait_started_at.isoformat() + "Z")
+                                                if awaiting_timeout and wait_started_at else None,
+                                            "closed_at": closed_at.isoformat() + "Z"}))
                     db.commit()
                     closed += 1
                     log.info(f"{site.name}: {s.plate_number} хаагдлаа "
-                             f"({hours}ц+, өр {debt:.0f}₮)")
+                             f"({threshold}ц+, өр {debt:.0f}₮)")
                 except Exception as e:  # noqa: BLE001 — нэг session бусдыг зогсоохгүй
                     db.rollback()
                     log.error(f"{s.plate_number} хааж чадсангүй: {e}")
