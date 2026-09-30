@@ -29,8 +29,14 @@ commonly 72 hours. Legacy `hours` in AUTO_CLOSE logs is not reinterpreted or
 rewritten because older versions could record the unrelated stale threshold.
 
 No tariff, debt collection/expiry rule, bank settlement, barrier command,
-historical financial row, schema or runtime dependency changes are included.
+historical financial row or schema changes are included.
 Existing debts are not cancelled by this display change.
+
+Release validation also requires PyJWT 2.14.0: CI found ten advisories in the
+existing 2.13.0 pin. This dependency-only security update is a separate commit;
+see the upstream [release](https://github.com/jpadilla/pyjwt/releases/tag/2.14.0).
+Build and test a separate runtime before switching the service; retain the old
+runtime for rollback rather than upgrading the running environment in place.
 
 ## Release checks
 
