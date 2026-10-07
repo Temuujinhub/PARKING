@@ -157,6 +157,39 @@ def parse_workbook(data: bytes) -> tuple[list[dict], list[str]]:
     return out, warnings
 
 
+def import_existing(db, site_id, tenant_id):
+    from ..models import RegisteredDriver
+    query = db.query(RegisteredDriver).filter(RegisteredDriver.site_id == site_id)
+    if site_id is None:
+        query = query.filter(RegisteredDriver.tenant_id == tenant_id)
+    return query.all()
+
+
+def replacement_plan(db, rows, site_id, tenant_id, contract_type, access_scope):
+    """Preview binds replacement to its file/options and current scoped records."""
+    import hashlib
+    import json
+    existing = import_existing(db, site_id, tenant_id)
+    keep = {r['plate'] for r in rows}
+    missing = [d for d in existing if d.plate_number not in keep and d.is_active
+               and d.contract_type == contract_type and d.access_scope == access_scope]
+    state = sorted((str(d.id), d.plate_number, d.is_active, d.contract_type,
+                    d.access_scope, str(d.valid_to)) for d in existing)
+    token = hashlib.sha256(json.dumps([rows, site_id, tenant_id, contract_type,
+                                      access_scope, state], sort_keys=True).encode()).hexdigest()
+    return {'deactivate_count': len(missing), 'replacement_token': token}
+
+
+def check_import_entitlements(existing, rows, contract_type, access_scope):
+    from fastapi import HTTPException
+    plates = {r['plate'] for r in rows}
+    conflicts = {d.plate_number for d in existing if d.plate_number in plates
+                 and (d.contract_type != contract_type or d.access_scope != access_scope)}
+    if conflicts:
+        raise HTTPException(409, f"Файлын {len(conflicts)} дугаар өөр төрөл/хамрах хүрээний бүртгэлтэй. "
+                            "Импортоор эрхийг нь солихгүй. Эдгээр дугаарыг тусад нь шалгаж, файлаас хасна уу.")
+
+
 def import_rows(db, rows: list[dict], site_id: str | None, *,
                 contract_type: str = "CONTRACT", valid_days: int = 365,
                 monthly_fee: float = 0, deactivate_missing: bool = False,
@@ -167,13 +200,16 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
     Түлхүүр = (plate_number, site_id). Байвал шинэчилнэ, байхгүй бол үүсгэнэ —
     файлыг олон удаа импортлож болно (давхардал үүсэхгүй).
 
-    deactivate_missing=True бол тухайн зогсоолын жагсаалтад ОРООГҮЙ хуучин
-    бүртгэлүүдийг идэвхгүй болгоно (жагсаалтыг файлаар бүрэн солих горим).
+    deactivate_missing=True бол тухайн зогсоол/түрээслэгчийн ижил төрөл,
+    ижил access_scope-ийн жагсаалтад ОРООГҮЙ хуучин бүртгэлийг идэвхгүй болгоно.
     Устгадаггүй — түүх, буруу импортоос сэргээх боломж хадгалагдана.
     """
     from datetime import datetime, timedelta
 
     from ..models import RegisteredDriver
+    from .driver_status import lock_driver_writes
+
+    lock_driver_writes(db)
 
     now = datetime.utcnow()
     valid_to = now + timedelta(days=valid_days)
@@ -183,13 +219,18 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
     # dict-д сүүлийнх нь л үлдэж, нөгөө хоёр нь хөндөгдөлгүй давхардсаар байв.
     existing: dict[str, RegisteredDriver] = {}
     deduped = 0
-    for d in sorted(db.query(RegisteredDriver).filter(RegisteredDriver.site_id == site_id).all(),
+    deduped_ids = []
+    imported_plates = {r['plate'] for r in rows}
+    scoped_rows = import_existing(db, site_id, default_tenant_id)
+    check_import_entitlements(scoped_rows, rows, contract_type, access_scope)
+    for d in sorted(scoped_rows,
                     key=lambda x: (x.is_active, x.valid_to or datetime.min), reverse=True):
         if d.plate_number in existing:
-            if d.is_active:
+            if d.is_active and d.plate_number in imported_plates:
                 d.is_active = False
                 d.note = f"{d.note + ' | ' if d.note else ''}импорт: давхардал — {existing[d.plate_number].id} үлдээв"[:1000]
                 deduped += 1
+                deduped_ids.append(str(d.id))
             continue
         existing[d.plate_number] = d
     created = updated = 0
@@ -216,16 +257,21 @@ def import_rows(db, rows: list[dict], site_id: str | None, *,
             created += 1
 
     deactivated = 0
+    deactivated_ids = []
     if deactivate_missing:
         keep = {r["plate"] for r in rows}
-        for plate, d in existing.items():
-            if plate not in keep and d.is_active:
+        for d in scoped_rows:
+            if (d.plate_number not in keep and d.is_active
+                    and d.contract_type == contract_type and d.access_scope == access_scope):
                 d.is_active = False
                 deactivated += 1
+                deactivated_ids.append(str(d.id))
 
-    db.commit()
+    # The caller commits registration changes together with its audit record.
+    db.flush()
     return {"created": created, "updated": updated, "deactivated": deactivated,
-            "deduped": deduped, "total": len(rows)}
+            "deduped": deduped, "total": len(rows),
+            "deactivated_ids": deactivated_ids, "deduped_ids": deduped_ids}
 
 
 def build_template() -> bytes:
