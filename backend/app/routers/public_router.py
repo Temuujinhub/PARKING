@@ -136,7 +136,12 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
     # is_active шүүлтгүй — идэвхгүй зогсоолын QR-ийг ч админ урьдчилан хэвлэж болно
     site = find_site(db, site_code)
     # Хэвлэгдсэн самбартай зогсоолд ЯГ тэр линкээр үүснэ (QR зураг ижил гарна)
-    url = site_pay_url(site)
+    from ..services.site_qr import validate_printed_qr_url
+    try:
+        url = validate_printed_qr_url(site_pay_url(site))
+    except ValueError as exc:
+        # Legacy bad values remain editable in Settings, but cannot be printed.
+        raise HTTPException(422, str(exc)) from None
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=max(4, min(40, size // 33)), border=3)
     qr.add_data(url)
     qr.make(fit=True)
@@ -146,7 +151,7 @@ def site_qr(site_code: str, size: int = 1200, db: Session = Depends(get_db)):
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png", headers={
         "Content-Disposition": f'inline; filename="{site.site_code}-pay-qr.png"',
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "no-store",
     })
 
 

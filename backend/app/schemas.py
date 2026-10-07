@@ -9,7 +9,7 @@
 """
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _In(BaseModel):
@@ -52,6 +52,12 @@ class SiteCreate(_In):
     # Wizard: {"exit_rules": {...}, "barrier_rules": {...}, ...} — зогсоолын
     # давхаргад (Тохиргоо → Төлбөрийн дүрэм) шууд бичигдэнэ
     payment_rules: dict | None = None
+
+    @field_validator("qr_url")
+    @classmethod
+    def valid_printed_qr_url(cls, value):
+        from .services.site_qr import validate_printed_qr_url
+        return validate_printed_qr_url(value)
 
 
 class SiteUpdate(SiteCreate):

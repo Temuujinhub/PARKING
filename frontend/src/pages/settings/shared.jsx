@@ -1,6 +1,7 @@
 // Тохиргооны хэсгүүдийн дундын туслах функцууд
 import { Camera, DoorOpen } from 'lucide-react'
 import { useState } from 'react'
+import { qrImageUrl } from '../../siteQr'
 
 // Enter дархад дараагийн талбар руу шилжих (сүүлийнх дээр submit)
 export function enterToNext(e) {
@@ -13,7 +14,7 @@ export function enterToNext(e) {
 }
 
 // QR зураг — ачаалж чадаагүй бол алдаа + "Дахин үүсгэх" товч харуулна
-export function QrImage({ code, alt }) {
+export function QrImage({ code, link = '', alt }) {
   const [key, setKey] = useState(0)
   const [err, setErr] = useState(false)
   const retry = () => { setErr(false); setKey((k) => k + 1) }
@@ -28,7 +29,7 @@ export function QrImage({ code, alt }) {
   return (
     <div>
       <img key={key} className="mx-auto rounded-xl bg-white p-3 w-52 h-52"
-        src={`/api/public/qr/${code}.png?v=${key}`} alt={alt} onError={() => setErr(true)} />
+        src={qrImageUrl(code, link, key)} alt={alt} onError={() => setErr(true)} />
       <button type="button" className="text-xs text-slate-500 hover:text-slate-300 mt-1.5 cursor-pointer underline"
         onClick={retry}>QR дахин үүсгэх</button>
     </div>
@@ -58,4 +59,4 @@ export function genDevices(entryLanes, exitLanes) {
 
 // QR-т кодлогдсонтой ижил линк — backend public_base_url (домэйн) ашиглана
 export const payUrl = (s) => s?.pay_url || `${location.origin}/pay?site=${s?.site_code}`
-export const qrUrl = (code) => `/api/public/qr/${code}.png`
+export const qrUrl = qrImageUrl

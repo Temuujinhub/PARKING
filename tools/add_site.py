@@ -117,6 +117,14 @@ def main() -> int:
     p.add_argument("--inactive", action="store_true", help="Идэвхгүй болгож бүртгэх")
     args = p.parse_args()
 
+    if args.qr_url is not None:
+        from app.services.site_qr import validate_printed_qr_url
+        try:
+            # Keep an explicit blank distinct from an omitted --qr-url.
+            args.qr_url = validate_printed_qr_url(args.qr_url) or ""
+        except ValueError as exc:
+            p.error(str(exc))
+
     db = SessionLocal()
     try:
         if args.list:

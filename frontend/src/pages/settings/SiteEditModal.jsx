@@ -4,6 +4,7 @@
 // хэт урт байсан).
 import { Field, Modal } from '../../components/ui'
 import { normalizeCode } from '../../validation'
+import { printedQrError } from '../../siteQr'
 
 // Эвхэгддэг бүлэг — summary дээр товч төлөв харагдана
 function Section({ title, status, statusClass = 'text-slate-500', open, children }) {
@@ -27,6 +28,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
     (s) => s.id !== editing?.id && !s.parent_site_id)
   const parentName = sites.find((s) => s.id === editing?.parent_site_id)?.name
   const hasInnerTime = !!(editing?.parent_site_id || editing?.has_inner_lanes)
+  const qrError = printedQrError(editing?.qr_url)
 
   // Зогсолтын дүрмийн хэдэн тохиргоо default-аас өөр байгааг summary-д харуулна
   const ruleOverrides = editing ? [
@@ -48,7 +50,10 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
   return (
     <Modal open={!!editing} onClose={() => setEditing(null)} title="Зогсоол засах">
       {editing && (
-        <form onSubmit={onSubmit} className="space-y-3">
+        <form onSubmit={(e) => {
+          if (qrError) { e.preventDefault(); return }
+          onSubmit(e)
+        }} className="space-y-3">
           {/* ── Үндсэн ── */}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Нэр" required>
@@ -272,13 +277,18 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
 
           {/* ── Нэмэлт ── */}
           <Section title="Нэмэлт тохиргоо"
+            open={qrError ? true : undefined}
             status={editing.qr_url ? 'тусгай QR линктэй' : null}
             statusClass="text-accent">
             <Field label="Хэвлэгдсэн самбарын QR линк">
-              <input className="input font-mono text-xs" value={editing.qr_url || ''}
+              <input className="input font-mono text-xs" type="url" maxLength={2048}
+                aria-label="Хэвлэгдсэн самбарын QR линк" aria-invalid={!!qrError}
+                aria-describedby={qrError ? 'printed-qr-error' : 'printed-qr-hint'}
+                value={editing.qr_url || ''}
                 placeholder="Хоосон бол автоматаар /pay?site=КОД"
                 onChange={(e) => setEditing({ ...editing, qr_url: e.target.value })} />
-              <div className="text-xs text-slate-400 mt-1.5">
+              {qrError && <p id="printed-qr-error" role="alert" className="text-sm text-red-400 mt-1.5">{qrError}</p>}
+              <div id="printed-qr-hint" className="text-xs text-slate-400 mt-1.5">
                 Талбайд хэвлэгдчихсэн самбар өөр линктэй бол ЯГ тэр линкийг энд бичнэ —
                 систем үүсгэх QR тэр самбартай ижил болно. Самбарыг солихгүйгээр
                 үргэлжлүүлэн ашиглана.
@@ -286,7 +296,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
             </Field>
           </Section>
 
-          <button className="btn-primary w-full justify-center">Хадгалах</button>
+          <button disabled={!!qrError} className="btn-primary w-full justify-center disabled:opacity-50 disabled:cursor-not-allowed">Хадгалах</button>
         </form>
       )}
     </Modal>
