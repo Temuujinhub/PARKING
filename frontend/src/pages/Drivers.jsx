@@ -1,9 +1,10 @@
 // Бүртгэлтэй машин — гэрээт/сарын эрхтэй машинууд
 import { AlertTriangle, Download, Plus, Search, Trash2, Upload } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useAuth } from '../auth'
-import { Badge, Field, Modal, Table, useToast } from '../components/ui'
+import { Field, Modal, Table, useToast } from '../components/ui'
+import { registrationStatus, registrationValidity, selectDisplayed, statusReasons, toggleDriver } from '../driverSelection'
 import {
   PHONE_HINT, PLATE_HINT, clampNum, dateRangeError, isPhone, isPlate,
   normalizePhone, normalizePlate, timeWindowError,
@@ -69,6 +70,7 @@ function ImportModal({ open, onClose, sites, onDone }) {
     : sites.some((s) => s.has_inner_lanes)
 
   useEffect(() => { setFile(null); setPreview(null); setReplace(false); setContractType('CONTRACT'); setScope('site') }, [open])
+  useEffect(() => { setPreview(null) }, [file, siteId, contractType, scope, replace])
 
   const send = async (dryRun) => {
     if (!file) { toast('Excel файлаа сонгоно уу', 'error'); return }
@@ -81,18 +83,19 @@ function ImportModal({ open, onClose, sites, onDone }) {
       fd.append('access_scope', nestedPick ? scope : 'site')
       fd.append('replace', replace ? 'true' : 'false')
       fd.append('dry_run', dryRun ? 'true' : 'false')
+      if (!dryRun && preview?.replacement_token) fd.append('replacement_token', preview.replacement_token)
       const data = await api('/api/admin/drivers/import', { method: 'POST', formData: fd })
       if (dryRun) setPreview(data)
       else {
         toast(`${data.created} шинэ, ${data.updated} шинэчлэв`)
         onDone(); onClose()
       }
-    } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
+    } catch (e) { setPreview(null); toast(e.message, 'error') } finally { setBusy(false) }
   }
 
   return (
     <Modal open={open} onClose={onClose} title="Гэрээт машины жагсаалт — Excel импорт">
-      <div className="space-y-3 text-sm">
+      <fieldset disabled={busy} className="space-y-3 text-sm">
         <div className="rounded-lg border border-accent/40 bg-accent/5 p-3 space-y-2">
           <div className="text-xs text-slate-300">
             Файлыг <b className="text-slate-100">яг загварын форматаар</b> бөглөнө: хуудас
@@ -138,8 +141,8 @@ function ImportModal({ open, onClose, sites, onDone }) {
           <input type="checkbox" className="mt-0.5 cursor-pointer" checked={replace}
             onChange={(e) => setReplace(e.target.checked)} />
           <span>
-            Жагсаалтыг бүрэн солих — файлд БАЙХГҮЙ хуучин бүртгэлийг идэвхгүй болгоно
-            <span className="block text-slate-500">Устгахгүй, зөвхөн идэвхгүй болгоно.</span>
+            Сонгосон төрөл, хамрах хүрээний жагсаалтыг солих
+            <span className="block text-slate-400">Сонгосон зогсоол/түрээслэгчийн ижил төрөл, хүрээнд файлд байхгүй бүртгэлийг идэвхгүй болгоно. Бусад төрөл, түрээслэгчийг хөндөхгүй.</span>
           </span>
         </label>
 
@@ -148,6 +151,7 @@ function ImportModal({ open, onClose, sites, onDone }) {
             <div className="text-accent font-medium">
               Уншсан: {preview.total} машин · {Object.keys(preview.companies).length} байгууллага
             </div>
+            {replace && <p className="text-slate-200">Идэвхгүй болох: <b>{preview.deactivate_count}</b> бүртгэл. Энэ тоог шалгаад бүртгэнэ үү.</p>}
             <div className="max-h-40 overflow-y-auto space-y-0.5">
               {Object.entries(preview.companies).map(([c, n]) => (
                 <div key={c} className="flex justify-between gap-3">
@@ -175,7 +179,7 @@ function ImportModal({ open, onClose, sites, onDone }) {
           : <button className="btn-primary w-full justify-center" disabled={busy} onClick={() => send(false)}>
               {busy ? 'Оруулж байна…' : `${preview.total} машиныг бүртгэх`}
             </button>}
-      </div>
+      </fieldset>
     </Modal>
   )
 }
@@ -191,6 +195,23 @@ export default function Drivers() {
   const [siteFilter, setSiteFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
   const [scopeFilter, setScopeFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [selection, setSelection] = useState({ key: '', ids: [] })
+  const [bulkPreview, setBulkPreview] = useState(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [loadedKey, setLoadedKey] = useState(null)
+  const requestSequence = useRef(0)
+  const filterKey = JSON.stringify([q, company, siteFilter, typeFilter, scopeFilter, statusFilter])
+  const selected = selection.key === filterKey ? selection.ids : []
+  const rowsCurrent = loadedKey === filterKey && !loading
+  const allSelected = rows.length > 0 && selected.length === rows.length
+  const selectionBox = useRef(null)
+  useEffect(() => {
+    if (selectionBox.current) selectionBox.current.indeterminate = selected.length > 0 && !allSelected
+  }, [selected.length, allSelected])
+  useEffect(() => { setBulkPreview(null); setSelection({ key: filterKey, ids: [] }) }, [filterKey])
+  const choose = (ids) => { setSelection({ key: filterKey, ids }); setBulkPreview(null) }
   const [companies, setCompanies] = useState([])
   // Давхар (дотоод камертай) зогсоол байгаа эсэх — хамрах хүрээний UI-г л нөхцөлт харуулна
   const hasNested = sites.some((s) => s.has_inner_lanes)
@@ -226,18 +247,43 @@ export default function Drivers() {
     } catch (e) { toast(e.message, 'error') }
   }
 
-  const load = () => {
+  const load = async () => {
+    const sequence = ++requestSequence.current
+    setLoading(true); choose([])
     const p = new URLSearchParams()
     if (q) p.set('q', q)
     if (company) p.set('company', company)
     if (siteFilter) p.set('site_id', siteFilter)
     if (typeFilter) p.set('contract_type', typeFilter)
     if (scopeFilter) p.set('access_scope', scopeFilter)
-    api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`).then(setRows)
+    if (statusFilter) p.set('is_active', statusFilter)
+    try {
+      const data = await api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`)
+      if (sequence === requestSequence.current) { setRows(data); setLoadedKey(filterKey) }
+    } catch (e) {
+      if (sequence === requestSequence.current) { setRows([]); setLoadedKey(null); toast(e.message, 'error') }
+    } finally { if (sequence === requestSequence.current) setLoading(false) }
     api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
-  useEffect(() => { load(); loadNight(); loadDups(); api('/api/admin/sites').then(setSites) }, [])
-  useEffect(() => { load() }, [company, siteFilter, typeFilter, scopeFilter])
+  useEffect(() => { loadNight(); loadDups(); api('/api/admin/sites').then(setSites) }, [])
+  useEffect(() => { load() }, [company, siteFilter, typeFilter, scopeFilter, statusFilter])
+
+  const bulkStatus = async (active, apply = false) => {
+    if (!rowsCurrent || !selected.length || bulkBusy) return
+    setBulkBusy(true)
+    try {
+      const result = await api('/api/admin/drivers/bulk-status', {
+        method: 'POST', body: { ids: selected, is_active: active, dry_run: !apply,
+          ...(apply ? { preview_token: bulkPreview.preview_token } : {}) },
+      })
+      if (!apply) setBulkPreview(result)
+      else {
+        toast(`${result.changed} бүртгэл ${active ? 'идэвхжүүллээ' : 'идэвхгүй болголоо'} · ${result.blocked_count} зөрчилтэй мөр хэвээр үлдлээ`)
+        setBulkPreview(null); await load(); loadDups()
+      }
+    } catch (e) { setBulkPreview(null); toast(e.message, 'error') }
+    finally { setBulkBusy(false) }
+  }
 
   const remove = async (d) => {
     if (!window.confirm(`${d.plate_number} (${d.full_name || d.company || '-'}) бүртгэлийг БҮРМӨСӨН устгах уу?`)) return
@@ -284,7 +330,7 @@ export default function Drivers() {
   }
 
   return (
-    <div className="space-y-5">
+    <fieldset disabled={bulkBusy} className="space-y-5 min-w-0">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Бүртгэлтэй машин</h1>
         <div className="flex gap-2">
@@ -319,13 +365,19 @@ export default function Drivers() {
       <div className="card flex flex-wrap gap-2 py-3 items-center">
         <input className="input font-mono flex-1 min-w-48" placeholder="Дугаар, нэр, байгууллагаар хайх…"
           value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
-        <button className="btn-secondary" onClick={load}><Search size={15} /></button>
+        <button className="btn-secondary" onClick={load} aria-label="Хайх"><Search size={15} /></button>
         <select className="input w-auto min-w-44" value={siteFilter}
           aria-label="Зогсоолоор шүүх"
           onChange={(e) => setSiteFilter(e.target.value)}>
           <option value="">Бүх зогсоол (шүүлтгүй)</option>
           <option value="global">Бүх зогсоолын эрхтэй (ажилтан/албаны)</option>
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <select className="input w-auto" value={statusFilter} aria-label="Идэвхтэй төлөвөөр шүүх"
+          onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">Бүх төлөв</option>
+          <option value="true">Идэвхтэй</option>
+          <option value="false">Идэвхгүй</option>
         </select>
         <select className="input w-auto min-w-40" value={typeFilter} aria-label="Төрлөөр шүүх"
           onChange={(e) => setTypeFilter(e.target.value)}>
@@ -393,10 +445,38 @@ export default function Drivers() {
           </div>
         )}
       </Modal>
-      <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Төлөв', '']}
+      {isAdmin && <div className="card space-y-3 py-3">
+        <p className="text-sm text-slate-300">ХБИ бүртгэлийг нэрээр нь хайж, «Тусгай хэрэгцээт» төрөл ба «Идэвхгүй» төлөвөөр шүүнэ. «Тусгай хэрэгцээт» төрөлд бусад тусгай машин ч багтдаг.</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <span role="status" className="text-sm text-slate-200">{loading ? 'Уншиж байна…' : `Харагдаж буй ${rows.length} мөрөөс ${selected.length} сонгосон`}</span>
+          <button type="button" className="btn-primary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(true)}>Идэвхжүүлэх</button>
+          <button type="button" className="btn-secondary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(false)}>Идэвхгүй болгох</button>
+          <button type="button" className="btn-secondary" disabled={!selected.length} onClick={() => choose([])}>Сонголт арилгах</button>
+        </div>
+        <p className="text-xs text-slate-300">Зөвхөн сонгосон мөрийн төлөв өөрчлөгдөнө. Хугацаа, зогсоол, төрөл өөрчлөгдөхгүй. Хугацаа дууссан эсвэл давхардсан мөрийг идэвхжүүлэхгүй.</p>
+        <p className="text-xs text-slate-300">«Идэвхгүй» нь бүртгэлийн эрхийг унтраасан гэсэн утгатай. Хугацаа нь хүчинтэй байсан ч идэвхгүй бүртгэлээр үнэгүй эрх үйлчлэхгүй.</p>
+        {rows.length === 2000 && <p role="status" className="text-sm text-slate-200">Жагсаалтын эхний 2,000 мөр харагдаж байна. Бүх бүртгэл гэсэн үг биш — шүүлтүүрээ нарийсгана уу.</p>}
+      </div>}
+      <Modal open={!!bulkPreview} onClose={() => !bulkBusy && setBulkPreview(null)} title="Сонгосон бүртгэлийн төлөв өөрчлөх">
+        {bulkPreview && <div className="space-y-4 text-sm">
+          <p>{bulkPreview.change_count} бүртгэл {bulkPreview.is_active ? 'идэвхжүүлнэ' : 'идэвхгүй болгоно'}. Төлөв хэвээр: {bulkPreview.unchanged_count}. Зөрчилтэй: {bulkPreview.blocked_count}.</p>
+          {bulkPreview.blocked_count > 0 && <div className="max-h-60 overflow-auto rounded border border-surface-border p-3">
+            {bulkPreview.items.filter((r) => !['change', 'unchanged'].includes(r.reason)).map((r) => <p key={r.id} className="py-1">{r.plate_number} — {statusReasons[r.reason] || r.reason}</p>)}
+          </div>}
+          <p className="text-slate-300">Зөрчилтэй мөрүүдийг хэвээр үлдээнэ. Давхардсан бүртгэл байвал аль нь хүчинтэйг шалгаад нэгийг сонгоно уу.</p>
+          <button type="button" className="btn-primary" disabled={bulkBusy || !bulkPreview.change_count}
+            onClick={() => bulkStatus(bulkPreview.is_active, true)}>{bulkBusy ? 'Хадгалж байна…' : `${bulkPreview.change_count} өөрчлөлтийг батлах`}</button>
+        </div>}
+      </Modal>
+      <Table headers={[...(isAdmin ? [<input ref={selectionBox} type="checkbox" aria-label="Харагдаж буй бүх мөрийг сонгох" checked={allSelected}
+        disabled={!rowsCurrent || !rows.length} className="size-4 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+        onChange={(e) => choose(selectDisplayed(rows, e.target.checked))} />] : []), '№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Бүртгэлийн төлөв', '']}
         empty={rows.length === 0} maxH="68vh">
         {rows.map((d, i) => (
           <tr key={d.id}>
+            {isAdmin && <td className="td"><input type="checkbox" aria-label={`${d.plate_number} сонгох`} checked={selected.includes(d.id)} disabled={!rowsCurrent}
+              className="size-4 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+              onChange={(e) => choose(toggleDriver(selected, d.id, e.target.checked))} /></td>}
             <td className="td text-xs text-slate-500 font-mono">{i + 1}</td>
             <td className="td font-mono font-bold">{d.plate_number}</td>
             <td className="td">{d.full_name}</td>
@@ -426,8 +506,11 @@ export default function Drivers() {
               )}
             </td>
             <td className="td">{d.site_name}{scopeBadge(d)}</td>
-            <td className="td font-mono text-xs">{fmtDate(d.valid_to).split(' ')[0]} хүртэл</td>
-            <td className="td"><Badge value={d.is_active ? 'active' : 'FAILED'} /></td>
+            <td className="td text-xs">
+              <div className="font-mono">{fmtDate(d.valid_from).split(' ')[0]} – {fmtDate(d.valid_to).split(' ')[0]}</div>
+              <div className="mt-1 text-slate-200">{registrationValidity(d)}</div>
+            </td>
+            <td className="td"><span className={`inline-block px-2 py-1 rounded-md text-xs font-medium ${d.is_active ? 'bg-accent/15 text-slate-100' : 'bg-surface-muted text-slate-300'}`}>{registrationStatus(d)}</span></td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs"
                 onClick={() => setEditing({
@@ -549,6 +632,6 @@ export default function Drivers() {
           </form>
         )}
       </Modal>
-    </div>
+    </fieldset>
   )
 }
