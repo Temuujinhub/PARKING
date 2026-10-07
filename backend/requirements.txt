@@ -14,7 +14,8 @@ uvicorn[standard]==0.50.1
 sqlalchemy==2.0.51
 psycopg2-binary==2.9.12
 pydantic-settings==2.14.2
-pyjwt==2.13.0
+# Includes the 2.15.0 security fixes and 2.15.1 JWS padding compatibility fix.
+pyjwt==2.15.1
 bcrypt==4.0.1
 httpx==0.28.1
 alembic==1.18.5
