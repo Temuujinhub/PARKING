@@ -1781,10 +1781,13 @@ def update_discount(discount_id: str, payload: schemas.DiscountUpdate, db: Sessi
 def list_drivers(q: str | None = None, company: str | None = None,
                  site_id: str | None = None, contract_type: str | None = None,
                  access_scope: str | None = None,
+                 is_active: bool | None = None,
                  db: Session = Depends(get_db),
                  user: User = Depends(require("drivers"))):
     query = db.query(RegisteredDriver).order_by(RegisteredDriver.company,
                                                 RegisteredDriver.plate_number)
+    if is_active is not None:
+        query = query.filter(RegisteredDriver.is_active == is_active)
     if contract_type:
         # Төрлөөр шүүх — «Тусгай хэрэгцээт» (SPECIAL) г.м. тусдаа жагсаалт харах
         query = query.filter(RegisteredDriver.contract_type == contract_type)
@@ -1872,6 +1875,8 @@ def driver_dedupe(body: dict | None = None, db: Session = Depends(get_db),
     dry = bool((body or {}).get("dry_run"))
     if user.role not in ("ADMIN", "SUPER_ADMIN"):
         raise HTTPException(403, "Давхардал цэвэрлэх эрх зөвхөн админд бий.")
+    from ..services.driver_status import lock_driver_writes
+    lock_driver_writes(db)
     groups = driver_duplicates(db, user)
     deactivated, kept = [], []
     for g in groups:
@@ -2005,6 +2010,8 @@ def _driver_in_scope(user: User, allowed: list[str] | None, d: RegisteredDriver)
 
 @router.post("/drivers")
 def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), user: User = Depends(require("drivers"))):
+    from ..services.driver_status import lock_driver_writes
+    lock_driver_writes(db)
     body = payload.dump()
     # Tenant хэрэглэгч зөвхөн өөрийн зогсоолд бүртгэнэ. site_id=null («Бүх зогсоол»)
     # нь одоо ТҮРЭЭСЛЭГЧИЙН бүх зогсоол гэсэн утгатай тул tenant хэрэглэгчид аюулгүй;
@@ -2049,9 +2056,47 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
     return to_dict(d)
 
 
+@router.post("/drivers/bulk-status")
+def bulk_driver_status(payload: schemas.DriverBulkStatus, db: Session = Depends(get_db),
+                       user: User = Depends(require("drivers"))):
+    """Preview exact selected IDs, then atomically change only eligible statuses."""
+    from ..services.driver_status import lock_driver_writes, plan_status
+    if user.role not in ("ADMIN", "SUPER_ADMIN"):
+        raise HTTPException(403, "Бөөнөөр төлөв өөрчлөх эрх зөвхөн админд бий.")
+    lock_driver_writes(db)
+    ids = sorted({str(value) for value in payload.ids})
+    rows = db.query(RegisteredDriver).filter(RegisteredDriver.id.in_(ids)).all()
+    allowed = operator_sites(user)
+    if len(rows) != len(ids) or any(not _driver_in_scope(user, allowed, r) for r in rows):
+        # No partial changes or disclosure of foreign tenant records.
+        raise HTTPException(403, "Зарим бүртгэл олдсонгүй эсвэл таны эрхийн хүрээнд биш байна.")
+    peers = db.query(RegisteredDriver).filter(
+        RegisteredDriver.plate_number.in_({r.plate_number for r in rows}),
+        RegisteredDriver.is_active.is_(True)).all() if payload.is_active else []
+    plan = plan_status(rows, peers, payload.is_active)
+    if payload.dry_run:
+        return {"dry_run": True, "is_active": payload.is_active, **plan}
+    if payload.preview_token != plan["preview_token"]:
+        raise HTTPException(409, "Бүртгэл өөрчлөгдсөн эсвэл урьдчилан шалгаагүй байна. Дахин шалгана уу.")
+    changes = {r["id"] for r in plan["items"] if r["reason"] == "change"}
+    for row in rows:
+        if str(row.id) in changes:
+            _audit(db, user, "UPDATE", "driver", row.id,
+                   {"source": "bulk_status", "is_active_before": row.is_active,
+                    "is_active": payload.is_active})
+            row.is_active = payload.is_active
+    _audit(db, user, "BULK_STATUS", "driver", "-",
+           {"is_active": payload.is_active, "selected": len(ids),
+            "changed": len(changes), "blocked": plan["blocked_count"]})
+    db.commit()
+    return {"dry_run": False, "is_active": payload.is_active, "changed": len(changes), **plan}
+
+
 @router.put("/drivers/{driver_id}")
 def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = Depends(get_db),
                   user: User = Depends(require("drivers"))):
+    from ..services.driver_status import lock_driver_writes
+    lock_driver_writes(db)
     body = payload.dump()
     d = db.get(RegisteredDriver, driver_id)
     if not d:
@@ -2118,6 +2163,8 @@ def delete_driver(driver_id: str, db: Session = Depends(get_db),
     буруу оруулсан бүртгэлд зориулагдсан.)"""
     if user.role not in ("ADMIN", "SUPER_ADMIN"):
         raise HTTPException(403, "Бүртгэл устгах эрх зөвхөн админд бий.")
+    from ..services.driver_status import lock_driver_writes
+    lock_driver_writes(db)
     d = db.get(RegisteredDriver, driver_id)
     if not d:
         raise HTTPException(404, "Бүртгэл олдсонгүй")
@@ -2156,6 +2203,7 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
                          valid_days: int = Form(365),
                          replace: bool = Form(False),
                          dry_run: bool = Form(False),
+                         replacement_token: str = Form(""),
                          db: Session = Depends(get_db),
                          user: User = Depends(require("drivers"))):
     """Гэрээт машины жагсаалтыг Excel-ээс импортлох (олон хуудас = олон байгууллага).
@@ -2163,7 +2211,9 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
     dry_run=true үед DB хөндөхгүй, зөвхөн юу орохыг буцаана — админ урьдчилан
     хараад баталгаажуулна. replace=true бол файлд байхгүй хуучин бүртгэлийг
     ИДЭВХГҮЙ болгоно (устгахгүй — буруу импортоос сэргээх боломж үлдэнэ)."""
-    from ..services.driver_import import import_rows, parse_workbook
+    from ..services.driver_import import (check_import_entitlements, import_existing,
+                                        import_rows, parse_workbook, replacement_plan)
+    from ..services.driver_status import lock_driver_writes
 
     allowed = operator_sites(user)
     if allowed is not None:
@@ -2202,6 +2252,15 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
     preview = {"total": len(rows), "companies": by_company, "warnings": warnings[:50],
                "sample": rows[:10]}
 
+    if not dry_run:
+        lock_driver_writes(db)
+    check_import_entitlements(import_existing(db, site_id or None, user.tenant_id),
+                              rows, contract_type, access_scope)
+    if replace:
+        plan = replacement_plan(db, rows, site_id or None, user.tenant_id, contract_type, access_scope)
+        preview.update(plan)
+        if not dry_run and replacement_token != plan['replacement_token']:
+            raise HTTPException(409, "Солих жагсаалт өөрчлөгдсөн эсвэл урьдчилан шалгаагүй. Дахин урьдчилан харна уу.")
     if dry_run:
         return {"dry_run": True, **preview}
 
@@ -2212,7 +2271,9 @@ async def import_drivers(file: UploadFile = File(...), site_id: str = Form(""),
                       # холбоно — эс бол tenant_id NULL болж хэнд ч харагдахгүй
                       default_tenant_id=user.tenant_id)
     _audit(db, user, "IMPORT", "driver", site_id or "-",
-           {"file": file.filename, **{k: v for k, v in res.items()}})
+           {"file": file.filename, "replace": replace, "tenant_id": user.tenant_id,
+            "contract_type": contract_type, "access_scope": access_scope,
+            **{k: v for k, v in res.items()}})
     db.commit()
     return {"dry_run": False, **preview, **res}
 

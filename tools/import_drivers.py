@@ -90,6 +90,7 @@ def main() -> int:
         res = import_rows(db, rows, site_id, contract_type=args.contract_type,
                           valid_days=args.valid_days, monthly_fee=args.monthly_fee,
                           deactivate_missing=args.replace)
+        db.commit()
         print(f"\nДууслаа: {res['created']} шинэ, {res['updated']} шинэчлэв"
               + (f", {res['deactivated']} идэвхгүй болгов" if res["deactivated"] else ""))
         print("Шалгах: UI → Бүртгэлтэй жолооч")

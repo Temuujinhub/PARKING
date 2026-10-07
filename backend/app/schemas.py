@@ -8,8 +8,9 @@
 явуулбал эвдрэхгүй).
 """
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 
 class _In(BaseModel):
@@ -107,6 +108,13 @@ class TariffTemplateUpdate(_In):
 
 
 # ── Гэрээт жолооч ──
+class DriverBulkStatus(_In):
+    ids: list[UUID] = Field(min_length=1, max_length=2000)
+    is_active: StrictBool
+    dry_run: StrictBool = True
+    preview_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
 class DriverCreate(_In):
     plate_number: str = Field(min_length=4, max_length=20)
     full_name: str = ""
