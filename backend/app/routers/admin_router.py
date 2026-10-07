@@ -452,6 +452,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
             raise HTTPException(400, f"«{body['site_code']}» код өөр зогсоолд бүртгэлтэй байна")
     if "parent_site_id" in body:
         _assert_parent_ok(db, body["parent_site_id"], self_id=site_id)
+    if "qr_url" in body and body["qr_url"] != site.qr_url:
+        body["qr_url_change"] = {"before": site.qr_url, "after": body["qr_url"]}
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
               "auto_close_hours", "entry_only_free_hours", "registered_only",
               "inner_registered_only", "is_active",

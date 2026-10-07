@@ -240,9 +240,9 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
           {wizard.step === 3 && wizard.created && (
             <div className="space-y-4">
               <div className="text-center">
-                <QrImage code={wizard.created.site_code}
+                <QrImage code={wizard.created.site_code} link={payUrl(wizard.created)}
                   alt={`${wizard.created.name} зогсоолын төлбөрийн QR код`} />
-                <a href={qrUrl(wizard.created.site_code)} download={`${wizard.created.site_code}-pay-qr.png`}
+                <a href={qrUrl(wizard.created.site_code, payUrl(wizard.created))} download={`${wizard.created.site_code}-pay-qr.png`}
                   className="btn-primary justify-center mt-3 w-full">
                   <Download size={16} /> QR зураг татах (хэвлэхэд бэлэн)
                 </a>
