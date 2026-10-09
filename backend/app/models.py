@@ -93,6 +93,9 @@ class ParkingSite(Base):
     site_code = Column(String(30), unique=True, nullable=False, index=True)  # QR URL-д ашиглана
     zone_code = Column(String(10), nullable=False, default="A")
     address = Column(Text, default="")
+    google_maps_url = Column(Text, nullable=True)
+    latitude = Column(Numeric(10, 7), nullable=True)
+    longitude = Column(Numeric(10, 7), nullable=True)
     capacity = Column(Integer, nullable=False, default=0)
     # Авто цэвэрлэгээний босго (цаг): null = глобал default (72), 0 = энэ зогсоолд унтраах
     auto_close_hours = Column(Integer, nullable=True)

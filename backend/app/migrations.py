@@ -388,6 +388,13 @@ MIGRATIONS = [
     # Эмнэлгийн холболт устгах: түүхтэйг архивлана (мөр хадгалагдана).
     "ALTER TABLE hospital_integrations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
 
+    # v2026-10-09: additive location metadata; no historical registration/payment edits.
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS google_maps_url TEXT",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS latitude NUMERIC(10,7)",
+    "ALTER TABLE parking_sites ADD COLUMN IF NOT EXISTS longitude NUMERIC(10,7)",
+    "CREATE INDEX IF NOT EXISTS ix_driver_directory_cursor ON registered_drivers ((coalesce(company, '')), plate_number, id)",
+    "CREATE INDEX IF NOT EXISTS ix_driver_directory_site ON registered_drivers (site_id, (coalesce(company, '')), plate_number, id)",
+
 ]
 
 

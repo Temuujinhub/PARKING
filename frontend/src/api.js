@@ -17,7 +17,7 @@ export const preferredSite = (sites) => {
   return sites[0]?.id || ''
 }
 
-export async function api(path, { method = 'GET', body, form, formData, blob } = {}) {
+export async function api(path, { method = 'GET', body, form, formData, blob, signal } = {}) {
   const headers = {}
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
@@ -34,7 +34,7 @@ export async function api(path, { method = 'GET', body, form, formData, blob } =
     headers['Content-Type'] = 'application/json'
   }
 
-  const res = await fetch(path, { method, headers, body: payload })
+  const res = await fetch(path, { method, headers, body: payload, signal })
   if (res.status === 401) {
     clearToken()
     if (!location.pathname.startsWith('/pay')) location.href = '/login'

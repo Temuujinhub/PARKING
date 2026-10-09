@@ -1,4 +1,6 @@
 // Зогсоол үүсгэх 3 алхамт wizard — мэдээлэл → төхөөрөмж → QR ба тохиргоо
+import SiteLocationFields from './SiteLocationFields'
+import { locationPayload, locationError } from '../../siteLocation'
 import { Check, Copy, Download } from 'lucide-react'
 import { api } from '../../api'
 import { Field, Modal, useToast } from '../../components/ui'
@@ -23,6 +25,7 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
     e.preventDefault()
     try {
       const s = wizard.site
+      if (locationError(s)) { toast(locationError(s), 'error'); return }
       const r = wizard.rules || {}
       // Хоосон үлдээсэн дүрэм = ерөнхий утга (давхаргад бичигдэхгүй)
       const num = (v, max) => (v === '' || v === null || v === undefined ? undefined : clampNum(v, { min: 0, max, fallback: 0 }))
@@ -35,6 +38,7 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
         method: 'POST',
         body: {
           ...s,
+          ...locationPayload(s),
           capacity: wizard.unlimited ? 0 : clampNum(s.capacity, { min: 0, max: 100000, fallback: 0 }),
           tariff_template_id: s.tariff_template_id || null,
           payment_rules,
@@ -127,6 +131,7 @@ export default function SiteWizardModal({ wizard, setWizard, templates, reload }
                 <input className="input" value={wizard.site.address} onKeyDown={enterToNext}
                   onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, address: e.target.value } })} />
               </Field>
+              <SiteLocationFields value={wizard.site} onChange={site => setWizard({ ...wizard, site })} />
               <Field label="Тарифын загвар">
                 <select className="input" value={wizard.site.tariff_template_id} onKeyDown={enterToNext}
                   onChange={(e) => setWizard({ ...wizard, site: { ...wizard.site, tariff_template_id: e.target.value } })}>

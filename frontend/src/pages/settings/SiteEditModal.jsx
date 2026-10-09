@@ -5,6 +5,8 @@
 import { Field, Modal } from '../../components/ui'
 import { normalizeCode } from '../../validation'
 import { printedQrError } from '../../siteQr'
+import SiteLocationFields from './SiteLocationFields'
+import { locationError } from '../../siteLocation'
 
 // Эвхэгддэг бүлэг — summary дээр товч төлөв харагдана
 function Section({ title, status, statusClass = 'text-slate-500', open, children }) {
@@ -51,7 +53,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
     <Modal open={!!editing} onClose={() => setEditing(null)} title="Зогсоол засах">
       {editing && (
         <form onSubmit={(e) => {
-          if (qrError) { e.preventDefault(); return }
+          if (qrError || locationError(editing)) { e.preventDefault(); return }
           onSubmit(e)
         }} className="space-y-3">
           {/* ── Үндсэн ── */}
@@ -106,6 +108,7 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
             <input className="input" value={editing.address || ''}
               onChange={(e) => setEditing({ ...editing, address: e.target.value })} />
           </Field>
+          <SiteLocationFields value={editing} onChange={setEditing} />
           {/* Зогсоолыг түрээслэгчид оноох — зөвхөн SUPER_ADMIN (tenants prop ирсэн үед).
               Оноогоогүй зогсоол tenant-аар хамардаг хэрэглэгчдийн жагсаалтад харагдахгүй
               тул "өнчин" үлдэхээс сэргийлж эндээс засна. */}

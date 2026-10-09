@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/payment-flow.test.mjs tests/site-qr.test.mjs tests/driver-selection.test.mjs",
+    "test": "node --test tests/payment-flow.test.mjs tests/site-qr.test.mjs tests/driver-selection.test.mjs tests/site-location.test.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

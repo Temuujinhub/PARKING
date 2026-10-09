@@ -7,6 +7,7 @@ import { useAuth } from '../../auth'
 import { Table, useToast } from '../../components/ui'
 import { genDevices } from './shared'
 import { clampNum, clampOrNull } from '../../validation'
+import { locationPayload } from '../../siteLocation'
 import SiteEditModal from './SiteEditModal'
 import SiteQrModal from './SiteQrModal'
 import SiteWizardModal from './SiteWizardModal'
@@ -33,6 +34,7 @@ export default function SitesSection({ onGotoIntegrations }) {
     try {
       const body = {
         ...editing,
+        ...locationPayload(editing),
         // Багтаамж 0 = хязгааргүй; сөрөг/утгагүй тоо ороход «сул зай» тооцоо эвдэрдэг
         capacity: editing.unlimited ? 0 : clampNum(editing.capacity, { min: 0, max: 100000, fallback: 0 }),
         tariff_template_id: editing.tariff_template_id || null,
@@ -85,7 +87,7 @@ export default function SitesSection({ onGotoIntegrations }) {
           <Plus size={16} /> Зогсоол нэмэх
         </button>
       </div>
-      <Table headers={['Нэр', 'Код', 'Бүс', ...(isSuper ? ['Түрээслэгч'] : []), 'Багтаамж', 'Зогсож буй', 'Сул', 'Тариф', 'QR', '']} empty={rows.length === 0}>
+      <Table headers={['Нэр', 'Код', 'Бүс', ...(isSuper ? ['Түрээслэгч'] : []), 'Багтаамж', 'Зогсож буй', 'Сул', 'Байршил', 'Тариф', 'QR', '']} empty={rows.length === 0}>
         {rows.map((s) => (
           <tr key={s.id}>
             <td className="td font-medium">
@@ -147,6 +149,7 @@ export default function SitesSection({ onGotoIntegrations }) {
               )}
             </td>
             <td className="td font-mono text-accent">{s.free_spaces ?? '—'}</td>
+            <td className="td text-xs">{s.latitude != null && s.longitude != null ? 'Координаттай' : s.google_maps_url ? 'Координат дутуу' : 'Оруулаагүй'}</td>
             <td className="td text-xs">{s.tariff_template_name || '-'}</td>
             <td className="td">
               <button className="btn-secondary py-1 text-xs" onClick={() => setQrSite(s)} aria-label="QR код харах">

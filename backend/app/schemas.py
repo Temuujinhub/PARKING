@@ -27,6 +27,16 @@ class SiteCreate(_In):
     site_code: str = Field(min_length=1, max_length=30)
     zone_code: str | None = None
     address: str | None = None
+    google_maps_url: str | None = Field(default=None, max_length=2048)
+    latitude: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+
+    @field_validator('google_maps_url')
+    @classmethod
+    def valid_google_maps_url(cls, value):
+        from .services.site_location import maps_url
+        return maps_url(value)
+
     capacity: int | None = Field(default=None, ge=0, le=100_000)
     tariff_template_id: str | None = None
     auto_close_hours: int | None = Field(default=None, ge=0, le=720)
