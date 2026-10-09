@@ -192,25 +192,33 @@ def _session_payload(db: Session, s: ParkingSession) -> dict:
 
 @router.get("/sites")
 def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
-    """Идэвхтэй зогсоолууд + багтаамж, эзэлсэн, сул байрны тоо."""
-    occupied_by_site = dict(
-        db.query(ParkingSession.site_id, func.count())
-        .filter(ParkingSession.status.in_(OPEN_STATUSES))
-        .group_by(ParkingSession.site_id).all())
-    out = []
+    """Authenticated map catalogue. Occupancy is a session estimate, not a sensor reading."""
+    from ..services.site_location import occupancy_counts, occupied_count
     q = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
-    if partner.site_id:   # зогсоолоор хязгаарлагдсан түлхүүр зөвхөн өөрийнхөө зогсоолыг харна
+    if partner.site_id:
         q = q.filter(ParkingSite.id == partner.site_id)
-    for site in q.all():
-        occupied = occupied_by_site.get(site.id, 0)
+    sites = q.order_by(ParkingSite.site_code).all()
+    counts = occupancy_counts(db, [s.id for s in sites])
+    sampled_at = datetime.utcnow().isoformat() + 'Z'
+    out = []
+    for site in sites:
+        occupied = occupied_count(site.id, *counts)
+        located = site.latitude is not None and site.longitude is not None
         out.append({
             "site_code": site.site_code, "name": site.name,
             "zone_code": site.zone_code, "address": site.address or "",
+            "latitude": float(site.latitude) if located else None,
+            "longitude": float(site.longitude) if located else None,
+            "google_maps_url": site.google_maps_url,
+            "location_available": located,
             "capacity": site.capacity, "occupied": occupied,
-            # capacity=0 → дүүргэлт хянадаггүй зогсоол (сул тоо null)
             "free": max(0, site.capacity - occupied) if site.capacity else None,
+            "occupancy_percent": round(occupied * 100 / site.capacity, 1) if site.capacity else None,
+            "over_capacity": occupied > site.capacity if site.capacity else False,
+            "occupancy_source": "open_sessions", "occupancy_is_estimate": True,
+            "sampled_at": sampled_at,
         })
-    return {"sites": out}
+    return {"sites": out, "sampled_at": sampled_at}
 
 
 @router.get("/sessions")

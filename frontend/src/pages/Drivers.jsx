@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, fmtDate } from '../api'
 import { useAuth } from '../auth'
 import { Field, Modal, Table, useToast } from '../components/ui'
-import { registrationStatus, registrationValidity, selectDisplayed, statusReasons, toggleDriver } from '../driverSelection'
+import { registrationStatus, registrationValidity, statusReasons, toggleDriver } from '../driverSelection'
 import {
   PHONE_HINT, PLATE_HINT, clampNum, dateRangeError, isPhone, isPlate,
   normalizePhone, normalizePlate, timeWindowError,
@@ -191,6 +191,15 @@ export default function Drivers() {
   const [rows, setRows] = useState([])
   const [sites, setSites] = useState([])
   const [q, setQ] = useState('')
+  const [search, setSearch] = useState('')
+  const [companyQuery, setCompanyQuery] = useState('')
+  const [pageState, setPageState] = useState({ key: '', cursors: [''] })
+  const [total, setTotal] = useState(0)
+  const [nextCursor, setNextCursor] = useState(null)
+  const [deletePreview, setDeletePreview] = useState(null)
+  const [deleteConfirm, setDeleteConfirm] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const abortLoad = useRef(null)
   const [company, setCompany] = useState('')
   const [siteFilter, setSiteFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
@@ -202,16 +211,19 @@ export default function Drivers() {
   const [loading, setLoading] = useState(false)
   const [loadedKey, setLoadedKey] = useState(null)
   const requestSequence = useRef(0)
-  const filterKey = JSON.stringify([q, company, siteFilter, typeFilter, scopeFilter, statusFilter])
+  const filterKey = JSON.stringify([search, company, siteFilter, typeFilter, scopeFilter, statusFilter])
+  const cursors = pageState.key === filterKey ? pageState.cursors : ['']
+  const cursor = cursors[cursors.length - 1]
+  const pageKey = `${filterKey}:${cursor}`
   const selected = selection.key === filterKey ? selection.ids : []
-  const rowsCurrent = loadedKey === filterKey && !loading
-  const allSelected = rows.length > 0 && selected.length === rows.length
+  const rowsCurrent = loadedKey === pageKey && !loading
+  const allSelected = rows.length > 0 && rows.every(r => selected.includes(r.id))
   const selectionBox = useRef(null)
   useEffect(() => {
-    if (selectionBox.current) selectionBox.current.indeterminate = selected.length > 0 && !allSelected
-  }, [selected.length, allSelected])
-  useEffect(() => { setBulkPreview(null); setSelection({ key: filterKey, ids: [] }) }, [filterKey])
-  const choose = (ids) => { setSelection({ key: filterKey, ids }); setBulkPreview(null) }
+    if (selectionBox.current) selectionBox.current.indeterminate = rows.some(r => selected.includes(r.id)) && !allSelected
+  }, [rows, selected, allSelected])
+  useEffect(() => { setBulkPreview(null); setDeletePreview(null); setSelection({ key: filterKey, ids: [] }) }, [filterKey])
+  const choose = (ids) => { setSelection({ key: filterKey, ids }); setBulkPreview(null); setDeletePreview(null) }
   const [companies, setCompanies] = useState([])
   // Давхар (дотоод камертай) зогсоол байгаа эсэх — хамрах хүрээний UI-г л нөхцөлт харуулна
   const hasNested = sites.some((s) => s.has_inner_lanes)
@@ -247,26 +259,74 @@ export default function Drivers() {
     } catch (e) { toast(e.message, 'error') }
   }
 
+  const filters = () => ({ q: search, company, site_id: siteFilter, contract_type: typeFilter,
+    access_scope: scopeFilter, is_active: statusFilter ? statusFilter === 'true' : null })
   const load = async () => {
     const sequence = ++requestSequence.current
-    setLoading(true); choose([])
+    abortLoad.current?.abort()
+    const controller = new AbortController(); abortLoad.current = controller
+    setLoading(true)
     const p = new URLSearchParams()
-    if (q) p.set('q', q)
-    if (company) p.set('company', company)
-    if (siteFilter) p.set('site_id', siteFilter)
-    if (typeFilter) p.set('contract_type', typeFilter)
-    if (scopeFilter) p.set('access_scope', scopeFilter)
-    if (statusFilter) p.set('is_active', statusFilter)
+    Object.entries(filters()).forEach(([key, value]) => { if (value != null && value !== '') p.set(key, String(value)) })
+    if (cursor) p.set('cursor', cursor)
     try {
-      const data = await api(`/api/admin/drivers${p.toString() ? `?${p}` : ''}`)
-      if (sequence === requestSequence.current) { setRows(data); setLoadedKey(filterKey) }
+      const data = await api(`/api/admin/drivers/page?${p}`, { signal: controller.signal })
+      if (sequence === requestSequence.current) {
+        setRows(data.items); setTotal(data.total); setNextCursor(data.next_cursor); setLoadedKey(pageKey)
+      }
     } catch (e) {
-      if (sequence === requestSequence.current) { setRows([]); setLoadedKey(null); toast(e.message, 'error') }
+      if (sequence === requestSequence.current && e.name !== 'AbortError') {
+        setRows([]); setLoadedKey(null); toast(e.message, 'error')
+      }
     } finally { if (sequence === requestSequence.current) setLoading(false) }
-    api('/api/admin/drivers/companies').then(setCompanies).catch(() => {})
   }
-  useEffect(() => { loadNight(); loadDups(); api('/api/admin/sites').then(setSites) }, [])
-  useEffect(() => { load() }, [company, siteFilter, typeFilter, scopeFilter, statusFilter])
+  const refresh = () => { choose([]); load() }
+  const submitSearch = () => {
+    if (search !== q.trim()) setSearch(q.trim())
+    else { setPageState({ key: filterKey, cursors: [''] }); load() }
+  }
+  useEffect(() => { loadNight(); api('/api/admin/drivers/options').then(setSites).catch(e => toast(e.message, 'error')) }, [])
+  useEffect(() => { load(); return () => abortLoad.current?.abort() }, [filterKey, cursor])
+  useEffect(() => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      if (!companyQuery.trim()) { setCompanies([]); return }
+      api(`/api/admin/drivers/company-search?q=${encodeURIComponent(companyQuery.trim())}`, { signal: controller.signal })
+        .then(setCompanies).catch(() => {})
+    }, 250)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [companyQuery])
+
+  const exportRows = async (selectedOnly) => {
+    if (exporting || !rowsCurrent) return
+    setExporting(true)
+    try {
+      const blob = await api('/api/admin/drivers/export', { method: 'POST', blob: true,
+        body: selectedOnly ? { ids: selected } : filters() })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a'); anchor.href = url
+      anchor.download = `parking-${selectedOnly ? 'selected' : (sites.find(s => s.id === siteFilter)?.site_code || 'filtered')}.xlsx`
+      anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e) { toast(e.message, 'error') } finally { setExporting(false) }
+  }
+  const selectFiltered = async () => {
+    setBulkBusy(true)
+    try {
+      const result = await api('/api/admin/drivers/select-filtered', { method: 'POST', body: filters() })
+      choose(result.ids)
+    } catch (e) { toast(e.message, 'error') } finally { setBulkBusy(false) }
+  }
+  const bulkDelete = async (apply = false) => {
+    if (!rowsCurrent || !selected.length || bulkBusy) return
+    setBulkBusy(true)
+    try {
+      const result = await api('/api/admin/drivers/bulk-delete', { method: 'POST', body: {
+        ids: selected, dry_run: !apply, ...(apply ? { preview_token: deletePreview.preview_token } : {}) } })
+      if (!apply) { setDeletePreview(result); setDeleteConfirm('') }
+      else { toast(`${result.deleted} бүртгэл устгагдлаа`); setDeletePreview(null); refresh() }
+    } catch (e) { setDeletePreview(null); toast(e.message, 'error') }
+    finally { setBulkBusy(false) }
+  }
 
   const bulkStatus = async (active, apply = false) => {
     if (!rowsCurrent || !selected.length || bulkBusy) return
@@ -279,7 +339,7 @@ export default function Drivers() {
       if (!apply) setBulkPreview(result)
       else {
         toast(`${result.changed} бүртгэл ${active ? 'идэвхжүүллээ' : 'идэвхгүй болголоо'} · ${result.blocked_count} зөрчилтэй мөр хэвээр үлдлээ`)
-        setBulkPreview(null); await load(); loadDups()
+        setBulkPreview(null); refresh()
       }
     } catch (e) { setBulkPreview(null); toast(e.message, 'error') }
     finally { setBulkBusy(false) }
@@ -290,7 +350,7 @@ export default function Drivers() {
     try {
       await api(`/api/admin/drivers/${d.id}`, { method: 'DELETE' })
       toast(`${d.plate_number} устгагдлаа`)
-      load()
+      refresh()
     } catch (err) { toast(err.message, 'error') }
   }
 
@@ -325,15 +385,15 @@ export default function Drivers() {
       }
       if (editing.id) await api(`/api/admin/drivers/${editing.id}`, { method: 'PUT', body })
       else await api('/api/admin/drivers', { method: 'POST', body })
-      toast('Хадгалагдлаа'); setEditing(null); load()
+      toast('Хадгалагдлаа'); setEditing(null); refresh()
     } catch (err) { toast(err.message, 'error') }
   }
 
   return (
     <fieldset disabled={bulkBusy} className="space-y-5 min-w-0">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap gap-3 items-center justify-between">
         <h1 className="text-2xl font-bold">Бүртгэлтэй машин</h1>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button className="btn-secondary" title="Импортын жишээ формат — хуудас бүр нэг байгууллага, тогтсон гарчигтай"
             onClick={() => downloadTemplate(toast)}>
             <Download size={16} /> Excel загвар татах
@@ -364,8 +424,9 @@ export default function Drivers() {
       )}
       <div className="card flex flex-wrap gap-2 py-3 items-center">
         <input className="input font-mono flex-1 min-w-48" placeholder="Дугаар, нэр, байгууллагаар хайх…"
-          value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && load()} />
-        <button className="btn-secondary" onClick={load} aria-label="Хайх"><Search size={15} /></button>
+          aria-label="Дугаар, нэр, байгууллагаар хайх"
+          value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submitSearch()} />
+        <button className="btn-secondary" onClick={submitSearch} aria-label="Хайх"><Search size={15} /></button>
         <select className="input w-auto min-w-44" value={siteFilter}
           aria-label="Зогсоолоор шүүх"
           onChange={(e) => setSiteFilter(e.target.value)}>
@@ -396,13 +457,14 @@ export default function Drivers() {
             <option value="site">Зөвхөн гадна</option>
           </select>
         )}
-        <select className="input w-auto min-w-56" value={company} onChange={(e) => setCompany(e.target.value)}>
-          <option value="">Бүх байгууллага ({companies.reduce((a, c) => a + c.count, 0)})</option>
-          {companies.map((c) => (
-            <option key={c.company} value={c.company}>{c.company} ({c.count})</option>
-          ))}
+        <input className="input w-auto" aria-label="Байгууллагын нэр хайх" placeholder="Байгууллагын нэр хайх…"
+          value={companyQuery} onChange={e => setCompanyQuery(e.target.value)} />
+        <select className="input w-auto min-w-48" aria-label="Байгууллага сонгох" value={company} onChange={e => setCompany(e.target.value)}>
+          <option value="">Бүх байгууллага</option>
+          {company && !companies.some(c => c.company === company) && <option value={company}>{company}</option>}
+          {companies.map(c => <option key={c.company} value={c.company}>{c.company} ({c.count})</option>)}
         </select>
-        <span className="text-xs text-slate-400">{rows.length} машин</span>
+        <span className="text-xs text-slate-300">Нийт {total.toLocaleString()} бүртгэл · энэ хуудсанд {rows.length}</span>
         {/* «Шөнө үнэгүй» төрлийн глобал цонх — импортоор орсон NIGHT машинд
             ЯГ ЭНЭ цаг үйлчилж байгааг ил харуулна */}
         <button type="button"
@@ -445,17 +507,22 @@ export default function Drivers() {
           </div>
         )}
       </Modal>
-      {isAdmin && <div className="card space-y-3 py-3">
+      {<div className="card space-y-3 py-3">
         <p className="text-sm text-slate-300">ХБИ бүртгэлийг нэрээр нь хайж, «Тусгай хэрэгцээт» төрөл ба «Идэвхгүй» төлөвөөр шүүнэ. «Тусгай хэрэгцээт» төрөлд бусад тусгай машин ч багтдаг.</p>
         <div className="flex flex-wrap items-center gap-3">
-          <span role="status" className="text-sm text-slate-200">{loading ? 'Уншиж байна…' : `Харагдаж буй ${rows.length} мөрөөс ${selected.length} сонгосон`}</span>
-          <button type="button" className="btn-primary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(true)}>Идэвхжүүлэх</button>
-          <button type="button" className="btn-secondary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(false)}>Идэвхгүй болгох</button>
+          <span role="status" className="text-sm text-slate-200">{loading ? 'Уншиж байна…' : `Энэ хуудсанд ${rows.length} мөр · нийт ${selected.length} сонгосон`}</span>
+          {isAdmin && <button type="button" className="btn-primary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(true)}>Идэвхжүүлэх</button>}
+          {isAdmin && <button type="button" className="btn-secondary" disabled={!rowsCurrent || !selected.length} onClick={() => bulkStatus(false)}>Идэвхгүй болгох</button>}
+          {isAdmin && <button type="button" className="btn-secondary text-red-400 hover:text-red-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-400" disabled={!rowsCurrent || !selected.length} onClick={() => bulkDelete()}><Trash2 size={16} aria-hidden="true" />Устгах</button>}
+          <button type="button" className="btn-secondary" disabled={!rowsCurrent || !selected.length || exporting} onClick={() => exportRows(true)}><Download size={16} aria-hidden="true" />Сонгосныг экспортлох</button>
+          <button type="button" className="btn-secondary" disabled={!rowsCurrent || !total || exporting} onClick={() => exportRows(false)}>{exporting ? 'Экспорт бэлдэж байна…' : 'Шүүлтүүрийн бүх мөрийг экспортлох'}</button>
           <button type="button" className="btn-secondary" disabled={!selected.length} onClick={() => choose([])}>Сонголт арилгах</button>
         </div>
         <p className="text-xs text-slate-300">Зөвхөн сонгосон мөрийн төлөв өөрчлөгдөнө. Хугацаа, зогсоол, төрөл өөрчлөгдөхгүй. Хугацаа дууссан эсвэл давхардсан мөрийг идэвхжүүлэхгүй.</p>
         <p className="text-xs text-slate-300">«Идэвхгүй» нь бүртгэлийн эрхийг унтраасан гэсэн утгатай. Хугацаа нь хүчинтэй байсан ч идэвхгүй бүртгэлээр үнэгүй эрх үйлчлэхгүй.</p>
-        {rows.length === 2000 && <p role="status" className="text-sm text-slate-200">Жагсаалтын эхний 2,000 мөр харагдаж байна. Бүх бүртгэл гэсэн үг биш — шүүлтүүрээ нарийсгана уу.</p>}
+        <p className="text-xs text-slate-300">Checkbox нь энэ хуудасны мөрүүдийг сонгоно. Сонголт хуудсуудын хооронд хадгалагдана; шүүлтүүр өөрчлөхөд цэвэрлэгдэнэ. Нэг үйлдэлд 2,000 хүртэл мөр сонгоно. Экспорт .xlsx файлд бүх шүүгдсэн мөр эсвэл зөвхөн сонгосон мөрийг гаргана.</p>
+        <button type="button" className="btn-secondary" disabled={!rowsCurrent || !total || total > 2000} onClick={selectFiltered}>Шүүлтүүрийн бүх {total.toLocaleString()} мөрийг сонгох</button>
+        <button type="button" className="btn-secondary" onClick={loadDups}>Давхардлыг шалгах</button>
       </div>}
       <Modal open={!!bulkPreview} onClose={() => !bulkBusy && setBulkPreview(null)} title="Сонгосон бүртгэлийн төлөв өөрчлөх">
         {bulkPreview && <div className="space-y-4 text-sm">
@@ -468,16 +535,30 @@ export default function Drivers() {
             onClick={() => bulkStatus(bulkPreview.is_active, true)}>{bulkBusy ? 'Хадгалж байна…' : `${bulkPreview.change_count} өөрчлөлтийг батлах`}</button>
         </div>}
       </Modal>
-      <Table headers={[...(isAdmin ? [<input ref={selectionBox} type="checkbox" aria-label="Харагдаж буй бүх мөрийг сонгох" checked={allSelected}
-        disabled={!rowsCurrent || !rows.length} className="size-4 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
-        onChange={(e) => choose(selectDisplayed(rows, e.target.checked))} />] : []), '№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Бүртгэлийн төлөв', '']}
+      <Modal focusTrap open={!!deletePreview} onClose={() => !bulkBusy && setDeletePreview(null)} title="Сонгосон бүртгэлүүдийг устгах">
+        {deletePreview && <div className="space-y-4 text-sm">
+          <p><b>{deletePreview.selected} бүртгэлийг бүрмөсөн устгана.</b> Буцаах товч байхгүй. Эдгээр бүртгэлийн үнэгүй нэвтрэх эрх дуусна. Өмнөх зогсолт, төлбөрийн түүх хадгалагдана.</p>
+          <div className="max-h-48 overflow-auto border border-surface-border rounded p-3">{deletePreview.items.map(r => <p key={r.id}>{r.plate_number} — {r.full_name} · {registrationStatus(r)}</p>)}</div>
+          <label className="block">Баталгаажуулахын тулд УСТГАХ гэж бичнэ үү
+            <input className="input mt-1" value={deleteConfirm} onChange={e => setDeleteConfirm(e.target.value)} /></label>
+          <button type="button" className="btn-secondary text-red-400 hover:text-red-300" disabled={bulkBusy || deleteConfirm !== 'УСТГАХ'} onClick={() => bulkDelete(true)}> {deletePreview.selected} бүртгэлийг устгахыг батлах</button>
+        </div>}
+      </Modal>
+      <div className="flex flex-wrap gap-3 items-center" aria-label="Жагсаалтын хуудас">
+        <button className="btn-secondary" disabled={loading || cursors.length === 1} onClick={() => setPageState({ key: filterKey, cursors: cursors.slice(0, -1) })}>Өмнөх</button>
+        <span className="text-sm">Хуудас {cursors.length} · Нийт {total.toLocaleString()}</span>
+        <button className="btn-secondary" disabled={!rowsCurrent || !nextCursor} onClick={() => setPageState({ key: filterKey, cursors: [...cursors, nextCursor] })}>Дараах</button>
+      </div>
+      <Table headers={[<input ref={selectionBox} type="checkbox" aria-label="Харагдаж буй бүх мөрийг сонгох" checked={allSelected}
+        disabled={!rowsCurrent || !rows.length || (!allSelected && new Set([...selected, ...rows.map(r => r.id)]).size > 2000)} className="size-6 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+        onChange={(e) => choose(e.target.checked ? [...new Set([...selected, ...rows.map(r => r.id)])].slice(0, 2000) : selected.filter(id => !rows.some(r => r.id === id)))} />, '№', 'Дугаар', 'Эзэмшигч', 'Байгууллага', 'Албан тушаал', 'Төрөл', 'Зогсоол', 'Хүчинтэй хугацаа', 'Бүртгэлийн төлөв', '']}
         empty={rows.length === 0} maxH="68vh">
         {rows.map((d, i) => (
           <tr key={d.id}>
-            {isAdmin && <td className="td"><input type="checkbox" aria-label={`${d.plate_number} сонгох`} checked={selected.includes(d.id)} disabled={!rowsCurrent}
-              className="size-4 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
-              onChange={(e) => choose(toggleDriver(selected, d.id, e.target.checked))} /></td>}
-            <td className="td text-xs text-slate-500 font-mono">{i + 1}</td>
+            {<td className="td"><input type="checkbox" aria-label={`${d.plate_number} сонгох`} checked={selected.includes(d.id)} disabled={!rowsCurrent || (!selected.includes(d.id) && selected.length >= 2000)}
+              className="size-6 accent-accent cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+              onChange={(e) => choose(toggleDriver(selected, d.id, e.target.checked).slice(0, 2000))} /></td>}
+            <td className="td text-xs text-slate-500 font-mono">{(cursors.length - 1) * 100 + i + 1}</td>
             <td className="td font-mono font-bold">{d.plate_number}</td>
             <td className="td">{d.full_name}</td>
             <td className="td text-xs">{d.company}</td>
@@ -530,7 +611,7 @@ export default function Drivers() {
         ))}
       </Table>
 
-      <ImportModal open={importing} onClose={() => setImporting(false)} sites={sites} onDone={load} />
+      <ImportModal open={importing} onClose={() => setImporting(false)} sites={sites} onDone={refresh} />
 
       <Modal open={!!editing} onClose={() => setEditing(null)} title={editing?.id ? 'Жолооч засах' : 'Жолооч бүртгэх'}>
         {editing && (

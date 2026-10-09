@@ -169,27 +169,12 @@ def _clean_site_ids(site_ids, primary_site_id) -> list | None:
 def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     q = db.query(ParkingSite)
     allowed = operator_sites(user)  # оператор зөвхөн өөрийн зогсоолуудыг л харна
-    if allowed:
+    if allowed is not None:
         q = q.filter(ParkingSite.id.in_(allowed))
     sites = q.order_by(ParkingSite.created_at).all()
-    # Зогсоол бүрийн эзэлсэн тоог НЭГ query-ээр (site тус бүрт COUNT хийхгүй)
     from sqlalchemy import func
-    occupied_by_site = dict(
-        db.query(ParkingSession.site_id, func.count())
-        .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
-        .group_by(ParkingSession.site_id).all())
-    # Доторх (nested) зогсоолд ОДОО байгаа машинууд — гадна зогсоолын талбайг
-    # ФИЗИКЭЭР эзлээгүй тул «эзэлсэн»-ээс хасна (эс бол нэг машин хоёр удаа
-    # тоологдож сул зай худал багасна). Тоог нуухгүй, тусад нь харуулна.
-    inside_by_site = dict(
-        db.query(ParkingSession.site_id, func.count())
-        .filter(ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]),
-                ParkingSession.paused_since.isnot(None))
-        .group_by(ParkingSession.site_id).all())
-    child_counts = dict(
-        db.query(ParkingSite.parent_site_id, func.count())
-        .filter(ParkingSite.parent_site_id.isnot(None))
-        .group_by(ParkingSite.parent_site_id).all())
+    from ..services.site_location import occupancy_counts
+    occupied_by_site, inside_by_site, child_counts = occupancy_counts(db, [s.id for s in sites])
     # НЭГ site доторх давхар зогсоол (`nested_inner` камертай) — UI энэ тугаар
     # «дотоод зогсоол хаалттай» унтраалга, бүртгэлийн «дотоод» хүрээг харуулна
     inner_lane_counts = dict(
@@ -392,11 +377,14 @@ def _assert_parent_ok(db: Session, parent_id: str | None, self_id: str | None = 
 @router.post("/sites")
 def create_site(payload: schemas.SiteCreate, db: Session = Depends(get_db), user: User = Depends(require("settings"))):
     body = payload.dump()
+    from ..services.site_location import validate_coordinates
+    validate_coordinates(body)
     if db.query(ParkingSite).filter(ParkingSite.site_code == body["site_code"]).first():
         raise HTTPException(400, "site_code давхардаж байна")
     _assert_parent_ok(db, body.get("parent_site_id"))
     site = ParkingSite(**{k: body[k] for k in
                           ("name", "site_code", "zone_code", "address", "capacity",
+                           "google_maps_url", "latitude", "longitude",
                            "tariff_template_id", "auto_close_hours", "entry_only_free_hours",
                            "registered_only", "inner_registered_only",
                            "parent_site_id", "transit_max_hours",
@@ -443,6 +431,8 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     site = db.get(ParkingSite, site_id)
     if not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
+    from ..services.site_location import validate_coordinates
+    validate_coordinates(body, site)
     # site_code нь QR URL-д ордог тул давхардвал төлбөр өөр зогсоол руу очно.
     # DB-д unique боловч энд шалгахгүй бол IntegrityError 500 болж хэрэглэгчид
     # ойлгомжгүй алдаа гарна (create_site дээр аль хэдийн ийм шалгуур бий).
@@ -455,6 +445,7 @@ def update_site(site_id: str, payload: schemas.SiteUpdate, db: Session = Depends
     if "qr_url" in body and body["qr_url"] != site.qr_url:
         body["qr_url_change"] = {"before": site.qr_url, "after": body["qr_url"]}
     for k in ("name", "site_code", "zone_code", "address", "capacity", "tariff_template_id",
+              "google_maps_url", "latitude", "longitude",
               "auto_close_hours", "entry_only_free_hours", "registered_only",
               "inner_registered_only", "is_active",
               "parent_site_id", "transit_max_hours", "barrier_close_sweep_min",
@@ -1784,48 +1775,14 @@ def list_drivers(q: str | None = None, company: str | None = None,
                  is_active: bool | None = None,
                  db: Session = Depends(get_db),
                  user: User = Depends(require("drivers"))):
-    query = db.query(RegisteredDriver).order_by(RegisteredDriver.company,
-                                                RegisteredDriver.plate_number)
-    if is_active is not None:
-        query = query.filter(RegisteredDriver.is_active == is_active)
-    if contract_type:
-        # Төрлөөр шүүх — «Тусгай хэрэгцээт» (SPECIAL) г.м. тусдаа жагсаалт харах
-        query = query.filter(RegisteredDriver.contract_type == contract_type)
-    if access_scope:
-        # Хамрах хүрээгээр: «дотоод» = доторх зогсоолд нэвтрэх эрхтэй (inner+both)
-        if access_scope == "inner_any":
-            query = query.filter(RegisteredDriver.access_scope.in_(("inner", "both")))
-        else:
-            query = query.filter(RegisteredDriver.access_scope == access_scope)
-    if q:
-        # Дугаар, эзэмшигч, байгууллагын аль нэгээр нь хайна (олон зуун мөртэй
-        # жагсаалтад зөвхөн дугаараар хайх нь хангалтгүй)
-        like = f"%{q.strip()}%"
-        query = query.filter(
-            RegisteredDriver.plate_number.ilike(f"%{q.strip().upper()}%")
-            | RegisteredDriver.full_name.ilike(like)
-            | RegisteredDriver.company.ilike(like))
-    if company:
-        query = query.filter(RegisteredDriver.company == company)
-    allowed = operator_sites(user)  # tenant хэрэглэгч зөвхөн өөрийн зогсоолын машинууд
-    if site_id == "global":
-        # Зөвхөн «Бүх зогсоол»-ын эрхтэй (site_id NULL) машинууд — түрээслэгчийн
-        # хэрэглэгчид зөвхөн өөрийн түрээслэгчийнхийг харна
-        query = query.filter(RegisteredDriver.site_id.is_(None))
-        if allowed is not None:
-            query = query.filter(RegisteredDriver.tenant_id == user.tenant_id)
-    elif site_id:
-        enforce_site(user, site_id)
-        query = query.filter(RegisteredDriver.site_id == site_id)
-    elif allowed:
-        cond = RegisteredDriver.site_id.in_(allowed)
-        if user.tenant_id:
-            # Түрээслэгчийн «бүх зогсоолын» машид мөн харагдана
-            cond = cond | ((RegisteredDriver.site_id.is_(None))
-                           & (RegisteredDriver.tenant_id == user.tenant_id))
-        query = query.filter(cond)
+    from ..services.driver_directory import filtered
+    from sqlalchemy.orm import joinedload
+    query = filtered(db, user, dict(q=q, company=company, site_id=site_id,
+                     contract_type=contract_type, access_scope=access_scope, is_active=is_active))
     return [to_dict(d, extra={"site_name": d.site.name if d.site else "Бүх зогсоол"})
-            for d in query.limit(2000).all()]
+            for d in query.options(joinedload(RegisteredDriver.site)).order_by(
+                RegisteredDriver.company, RegisteredDriver.plate_number, RegisteredDriver.id).limit(2000).all()]
+
 
 
 @router.get("/drivers/duplicates")
@@ -1840,7 +1797,7 @@ def driver_duplicates(db: Session = Depends(get_db), user: User = Depends(requir
     from sqlalchemy import func as _f
     allowed = operator_sites(user)
     q = db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True))
-    if allowed:
+    if allowed is not None:
         q = q.filter(RegisteredDriver.site_id.in_(allowed)
                      | (RegisteredDriver.site_id.is_(None)
                         & (RegisteredDriver.tenant_id == user.tenant_id)))
@@ -1910,7 +1867,7 @@ def list_driver_companies(db: Session = Depends(get_db), user: User = Depends(re
     q = (db.query(RegisteredDriver.company, _f.count(RegisteredDriver.id))
          .filter(RegisteredDriver.company.isnot(None), RegisteredDriver.company != ""))
     allowed = operator_sites(user)
-    if allowed:
+    if allowed is not None:
         cond = RegisteredDriver.site_id.in_(allowed)
         if user.tenant_id:   # жагсаалттай ижил дүрэм — «бүх зогсоолын» машин ч орно
             cond = cond | (RegisteredDriver.site_id.is_(None)
@@ -2819,3 +2776,8 @@ def update_user(user_id: str, payload: schemas.UserUpdate, db: Session = Depends
     _audit(db, user, "UPDATE", "user", user_id, {k: v for k, v in body.items() if k != "password"})
     db.commit()
     return to_dict(u)
+
+
+# Separate bounded directory endpoints; existing routes remain compatible.
+from .driver_directory_router import router as directory_router
+router.include_router(directory_router)

@@ -1,9 +1,29 @@
 // Дундын UI компонентууд
 import { Eye, EyeOff, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { dateRangeError, toDateInput } from '../validation'
 
-export function Modal({ open, onClose, title, children, wide }) {
+export function Modal({ open, onClose, title, children, wide, focusTrap = false }) {
+  const panel = useRef(null)
+  useEffect(() => {
+    if (!open || !focusTrap) return
+    const previous = document.activeElement
+    const node = panel.current
+    const controls = () => [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]')]
+    controls()[0]?.focus()
+    const trap = e => {
+      if (e.key !== 'Tab') return
+      const items = controls()
+      if (!items.length) { e.preventDefault(); node.focus(); return }
+      if (e.shiftKey && (document.activeElement === items[0] || document.activeElement === node)) {
+        e.preventDefault(); items.at(-1).focus()
+      } else if (!e.shiftKey && document.activeElement === items.at(-1)) {
+        e.preventDefault(); items[0].focus()
+      }
+    }
+    node.addEventListener('keydown', trap)
+    return () => { node.removeEventListener('keydown', trap); previous?.focus() }
+  }, [open, focusTrap])
   useEffect(() => {
     const h = (e) => e.key === 'Escape' && onClose()
     if (open) window.addEventListener('keydown', h)
@@ -12,7 +32,9 @@ export function Modal({ open, onClose, title, children, wide }) {
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={onClose}>
-      <div className={`card w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} max-h-[90vh] overflow-y-auto`}
+      <div ref={panel} role={focusTrap ? 'dialog' : undefined} aria-modal={focusTrap || undefined}
+        aria-label={focusTrap ? title : undefined} tabIndex={focusTrap ? -1 : undefined}
+        className={`card w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} max-h-[90vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold">{title}</h3>
