@@ -9,6 +9,7 @@ import { useToast } from '../components/ui'
 import { paymentOutcome } from '../paymentOutcome'
 import CashierStats from './cashier/CashierStats'
 import ExitQueue from './cashier/ExitQueue'
+import ExitReview from './cashier/ExitReview'
 import FreeExitModal from './cashier/FreeExitModal'
 import ManualEntryModal, { minutesAgo } from './cashier/ManualEntryModal'
 import PaymentPanel from './cashier/PaymentPanel'
@@ -323,6 +324,8 @@ export default function Cashier() {
       )}
 
       <CashierStats overview={overview} shift={shift} />
+
+      {canAct && <ExitReview siteId={siteId} onResolved={sid => { setSelected(old => old?.id === sid ? null : old); loadExits(siteId) }} />}
 
       <div className="grid lg:grid-cols-2 gap-5">
         {/* Гарах гэж буй машинууд */}

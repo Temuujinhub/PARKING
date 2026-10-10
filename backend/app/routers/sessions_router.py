@@ -1261,6 +1261,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     cam = _exit_camera_for(db, s, body.get("device_id"))
 
     if kind == "paid_no_open":
+        if not s.exit_device_id:
+            raise HTTPException(409, 'Гарах камер холбогдоогүй. Касс → Гарах уншилтыг шалгах хэсэгт шинэ зураг, эгнээг баталгаажуулна уу')
         if not s.paid_at:
             raise HTTPException(400, "Энэ машины төлбөр төлөгдөөгүй байна")
         if s.status in ("OPEN", "AWAITING_PAYMENT", "PAID"):

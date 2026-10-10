@@ -474,7 +474,7 @@ def recent_exit_reread(db: Session, plate: str, site_id: str, now: datetime,
     return None
 
 
-def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSession | None:
+def auto_reopen_for_exit(db: Session, plate: str, site_id: str, *, exact_only: bool = False) -> ParkingSession | None:
     """Гарах камерт уншигдсан ч ИДЭВХТЭЙ бүртгэл алга — САЯХАН АЛБАДАН хаагдсаныг
     сэргээнэ («Бүртгэлгүй гарах оролдлого»-ын 23%-ийн шалтгаан).
 
@@ -540,7 +540,7 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str) -> ParkingSessio
                   or _short_fake_exit(s))
               and not getattr(s, "fee_locked", False)]
     cands = [s for s in closed if s.plate_number == plate]
-    if not cands:   # OCR зөрүүтэй уншсан байж болно — ЯГ НЭГ таарвал зөвшөөрнө
+    if not cands and not exact_only:   # Legacy helper callers; live exits require exact text.
         # «Хуурамч гарц» (гарах уншилт БАТАЛГААТАЙ) нэр дэвшигчид 1 тэмдэгтийн
         # fuzzy тохирол хэрэглэхгүй — зөвхөн OCR жигдэлсэн яг тохирол. Дараалсан
         # дугаартай флот (Хангарьд 2942/2943/2944УКН) болон гарах камерын
@@ -996,7 +996,7 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
             Compensation.status == "PENDING").count():
         return False  # өртэй (гэрээт биш) - оператор шийднэ
 
-    session, _fuzzy = match_open_session(db, plate, device.site_id)
+    session = get_open_session(db, plate, device.site_id)
     entitled = False
     # Бүрэн үнэгүй гэрээт — ямагт гарна. Харин НӨХЦӨЛТЭЙ гэрээт («эхний N
     # минут үнэгүй», цагийн цонхтой, «Шөнө үнэгүй») төлбөртэй байж болох тул
@@ -1598,6 +1598,16 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
             "counter_changed": changed, "barrier_opened": barrier_opened, "denied": False}
 
 
+def reject_exit_for_review(db, device, plate, confidence, raw, reason):
+    db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate or '?',
+                    lane_dir='exit', confidence=confidence, accepted=False,
+                    reject_reason=reason, raw=raw))
+    db.commit()
+    notify(device.site_id, 'EXIT_REVIEW_REQUIRED', {'plate': plate, 'reason': reason,
+                                                  'device_id': device.id})
+    return {'action': 'review_required', 'plate': plate, 'barrier_opened': False, 'reason': reason}
+
+
 async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict,
                       allow_open: bool = True) -> dict:
     """Гарах камерын event:
@@ -1609,6 +1619,13 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     """
     site_id = device.site_id
     now = datetime.utcnow()
+    # Never borrow a paid/free entitlement from a guessed plate. Even a single
+    # fuzzy candidate needs the operator's current-lane image review.
+    if not is_valid_plate(plate):
+        return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
+    _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
+    if fuzzy_candidate:
+        return reject_exit_for_review(db, device, plate, confidence, raw, 'plate_mismatch_review')
     _br = _barrier_rules(db, site_id)
     _xr = _exit_rules(db, site_id)
 
@@ -1646,7 +1663,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
-    session, fuzzy = match_open_session(db, plate, site_id)
+    session, fuzzy = get_open_session(db, plate, site_id), False
     if session is not None:
         from sqlalchemy.exc import OperationalError
         try:
@@ -1669,14 +1686,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         close_paid_as_inferred_exit(db, session, "exit")
         db.flush()
         session, fuzzy = None, False
-    if session is None:
-        # Утаснаасаа төлөөд гарцад хүлээж буй машиныг камер буруу/junk уншсан
-        # байж болно — ЯГ НЭГ нэр дэвшигч байвал түүнийг гаргана (Тохиргоо →
-        # Төлбөрийн дүрэм → paid_wait_fallback_minutes, 0 = унтраах).
-        session = paid_wait_fallback(db, plate, site_id, now,
-                                     int(_xr.get("paid_wait_fallback_minutes") or 0))
-        if session is not None:
-            plate = session.plate_number   # цаашдын урсгал (LED, аудит) сешний дугаараар
+    # paid_wait_fallback is deliberately not used: payment alone cannot
+    # identify the vehicle currently occupying an exit lane.
     if session is None:
         # САЯХАН ГАРСАН машины давтан уншилт — шинэ суурь хураамж/сэргээлт
         # үүсгэхгүй (recent_exit_reread-ийн тайлбар). Эрхтэй бол хаалтыг дахин
@@ -1686,6 +1697,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             _rr = recent_exit_reread(db, plate, site_id, now,
                                      int(_xr.get("exit_reread_seconds") or 0))
         if _rr is not None:
+            if _rr.plate_number != plate:
+                return reject_exit_for_review(db, device, plate, confidence, raw, 'reread_mismatch_review')
             from .models import AuditLog
             _ago = (now - (_rr.exit_time or _rr.updated_at or now)).total_seconds()
             db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
@@ -1720,7 +1733,12 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # Идэвхтэй бүртгэл алга — саяхан АЛБАДАН хаагдсаныг сэргээж үзнэ.
         # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт
         # «бүртгэлгүй гарах»-ын 23%). Олдвол ердийн гарах урсгал үргэлжилнэ.
-        session = auto_reopen_for_exit(db, plate, site_id)
+        session = auto_reopen_for_exit(db, plate, site_id, exact_only=True)
+    if session is None and find_registered(db, plate, site_id) is None:
+        # Unknown text is not evidence for a zero-fee/no-entry gate opening.
+        # Operators must identify the actual stay or use the explicit manual
+        # no-entry workflow; do not create an invoice for a guessed plate.
+        return reject_exit_for_review(db, device, plate, confidence, raw, 'no_matching_stay_review')
     # Гарах камерын өнгө/төрлөөр session-ий мэдээллийг нөхнө (орох дээр алга байсан
     # эсвэл орох дутуу уншсан бол) — оператор дугаар зөрүүтэй үед машиныг таних тусламж
     if session:
@@ -2099,7 +2117,7 @@ def _bye_screen_text(db: Session, session: ParkingSession, fee: dict) -> str:
 
 async def _close_and_open(db: Session, exit_device: Device, session: ParkingSession,
                           now: datetime, fee: dict, source: str,
-                          allow_open: bool = True) -> dict:
+                          allow_open: bool = True, exit_confirmed: bool = True) -> dict:
     # ─── Nested (дамжин) зогсоол ───────────────────────────────────────────
     from .services.nested import close_open_pause, on_inner_exit
     _site = session.site
@@ -2113,7 +2131,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
         # тул дүн өөрчлөгдөхгүй — энд зөвхөн session дээр БАРИМТЖУУЛНА.
         close_open_pause(db, session, now)
     session.exit_time = now
-    session.exit_confirmed = True   # камерын гарах уншилт — бодит
+    session.exit_confirmed = exit_confirmed  # operator review is not a camera-confirmed exit
     session.duration_minutes = fee["duration_minutes"]
     if session.total_fee is None:
         session.base_fee = fee["base_fee"]
@@ -2211,6 +2229,8 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     notify(session.site_id, "PAYMENT_COMPLETED", {
         "session_id": session.id, "plate": session.plate_number,
         "exit_deadline": session.exit_deadline.isoformat(),
+        "gate_attention": "exit_camera_not_linked",
+        "barrier_opened": False,
     })
 
 
