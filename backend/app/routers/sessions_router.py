@@ -55,6 +55,7 @@ def _session_out(db: Session, s: ParkingSession, with_fee: bool = False) -> dict
     if with_fee and (s.status in ("OPEN", "AWAITING_PAYMENT") or paid_overstay):
         fee = session_fee_info(db, s)
         extra["fee"] = fee
+        extra['amount_due'] = amount_due(db, s, fee)
         paid = paid_total(db, s)
         if paid > 0:
             extra["paid_total"] = paid
@@ -499,27 +500,22 @@ def recent_exits(site_id: str, minutes: int | None = None,
     `device_id` = хаалт ЭСВЭЛ камерын id (хаалт өгвөл ижил эгнээний камераар
     таарна). Мөр бүрд `exit_lane_no`, `exit_lane_dir`, `exit_device_name` ирнэ."""
     from ..config import settings as _cfg
-    allowed = operator_sites(user)
-    if allowed and site_id not in allowed:
-        site_id = allowed[0]  # оператор зөвхөн өөрийн зогсоолууд
+    enforce_site(user, site_id)
     win = minutes if minutes is not None else getattr(_cfg, "exit_queue_show_min", 3)
+    if not 1 <= win <= 10:
+        raise HTTPException(400, 'Гарах дарааллын хугацаа 1–10 минут байна')
     since = datetime.utcnow() - timedelta(minutes=win)
-    if device_id and lane_no is None:
-        dev = db.get(Device, device_id)
-        if dev and dev.site_id == site_id:
-            lane_no = dev.lane_no
+    from ..services.exit_presence import lane_cameras
+    cameras = lane_cameras(db, site_id, device_id, lane_no)
     q = (
         db.query(ParkingSession)
         .filter(ParkingSession.site_id == site_id,
                 ParkingSession.status == "AWAITING_PAYMENT",
-                # Гарах уншилтын цаг (exit_time); хуучин бичлэгт updated_at уналт
-                func.coalesce(ParkingSession.exit_time,
-                              ParkingSession.updated_at) >= since)
+                # Only a real exit-read time; unrelated row edits cannot refresh the queue.
+                ParkingSession.exit_device_id.in_([c.id for c in cameras]),
+                ParkingSession.last_exit_seen_at >= since)
     )
-    if lane_no is not None:
-        q = (q.join(Device, Device.id == ParkingSession.exit_device_id)
-             .filter(Device.lane_no == lane_no))
-    sessions = q.order_by(ParkingSession.updated_at.desc()).limit(20).all()
+    sessions = q.order_by(ParkingSession.last_exit_seen_at.desc(), ParkingSession.id.desc()).limit(20).all()
     # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
     from ..models import Compensation
     debt_plates = {p for (p,) in db.query(Compensation.plate_number)
@@ -531,6 +527,8 @@ def recent_exits(site_id: str, minutes: int | None = None,
         d = devs.get(s.exit_device_id)
         out.append(_session_out(db, s, with_fee=True) | {
             "has_debt": s.plate_number in debt_plates,
+            "exit_camera_id": d.id if d else None,
+            "last_exit_seen_at": s.last_exit_seen_at,
             "exit_lane_no": d.lane_no if d else None,
             "exit_lane_dir": d.lane_dir if d else None,
             "exit_device_name": d.name if d else None})

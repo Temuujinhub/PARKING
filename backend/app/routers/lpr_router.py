@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..models import Device, LprEvent, ParkingSite
-from ..session_logic import (extract_confidence, handle_entry, handle_exit, handle_inner_pass,
+from ..session_logic import (handle_entry, handle_exit, handle_inner_pass,
                              normalize_plate, strip_images)
 
 log = logging.getLogger("parking.lpr")
@@ -83,25 +83,8 @@ def _extract_events(payload: dict) -> list[dict]:
 
 
 def _extract_plate(event: dict) -> tuple[str, float]:
-    """Event-ийн олон боломжит байршлаас дугаар + итгэлцүүрийг гаргана."""
-    # Боломжит байрлалууд: Plate.PlateNumber (ITSAPI), TrafficCar.PlateNumber (CGI),
-    # Picture.Plate.PlateNumber, дээд түвшний PlateNumber
-    candidates = [
-        event.get("Plate"),
-        event.get("TrafficCar"),
-        (event.get("Picture") or {}).get("Plate"),
-        event,  # дээд түвшинд шууд байвал
-    ]
-    for c in candidates:
-        if not isinstance(c, dict):
-            continue
-        num = c.get("PlateNumber") or c.get("PlateNo") or c.get("plateNumber")
-        if num:
-            # БОДИТ итгэлцүүр: TrafficCar-т Confidence байдаггүй — жинхэнэ утга
-            # Object.Confidence-д (аудит 2026-08-29: олдохгүй болохоор нь 100
-            # тавьдаг байсан тул шүүлтүүр огт ажилладаггүй байв)
-            return str(num), extract_confidence(event, c)
-    return "", 0.0
+    from ..services.camera_evidence import legacy_plate_read
+    return legacy_plate_read(event)
 
 
 @router.post("/callback")
@@ -170,6 +153,14 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
     for event in events:
         raw_plate, conf = _extract_plate(event)
         plate = normalize_plate(raw_plate)
+        if device.lane_dir == 'exit' and not device.nested_inner:
+            from ..services.camera_evidence import exit_evidence_rejection
+            from ..session_logic import reject_exit_for_review
+            reason, conf = exit_evidence_rejection(event, settings.lpr_min_confidence)
+            if not plate or reason:
+                results.append(reject_exit_for_review(db, device, plate, conf, event,
+                               reason if plate else 'plate not parsed'))
+                continue
         if not plate:
             # Дугаар танигдаагүй/формат таарахгүй бол raw-ийг логд хадгална (камер тохируулахад тусална)
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number="?",

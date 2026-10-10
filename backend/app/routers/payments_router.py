@@ -1028,7 +1028,8 @@ def payment_print(payment_id: str, db: Session = Depends(get_db),
 
 @router.get("/pos/terminal/{terminal_id}")
 def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
-                      user: User = Depends(require("cashier"))):
+                      user: User = Depends(require("cashier")),
+                      device_id: str | None = None, lane_no: int | None = None):
     """POS апп асахдаа өөрийн terminal_id-ээр дуудаж АЛЬ ЗОГСООЛД харьяалагдахаа
     танина + тухайн зогсоолын төлбөр хүлээж буй машинуудыг авна.
     Терминалыг Тохиргоо→Төхөөрөмжид device_type=pax_terminal, device_key=terminal_id-ээр бүртгэнэ."""
@@ -1036,19 +1037,17 @@ def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
     if not terminal:
         raise HTTPException(404, "Терминал бүртгэлгүй — Тохиргоо→Төхөөрөмжид "
                                  "pax_terminal төрлөөр device_key-тэй бүртгэнэ үү")
+    enforce_site(user, terminal.site_id)
+    from .sessions_router import recent_exits
+    awaiting = recent_exits(terminal.site_id, device_id=device_id, lane_no=lane_no, db=db, user=user)
     terminal.last_seen = datetime.utcnow()
-    awaiting = (db.query(ParkingSession)
-                .filter(ParkingSession.site_id == terminal.site_id,
-                        ParkingSession.status == "AWAITING_PAYMENT")
-                .order_by(ParkingSession.updated_at.desc()).limit(20).all())
-    from ..session_logic import session_fee_info as _fee
     db.commit()
     return {
         "terminal_id": terminal_id, "site_id": terminal.site_id,
         "site_code": terminal.site.site_code if terminal.site else None,
         "site_name": terminal.site.name if terminal.site else None,
-        "awaiting": [{"session_id": s.id, "plate_number": s.plate_number,
-                      "amount_due": amount_due(db, s, _fee(db, s))} for s in awaiting],
+        "awaiting": [{**s, "session_id": s['id']} for s in awaiting],
+        "queue_scope": 'selected_lane' if device_id or lane_no is not None else 'site_legacy',
     }
 
 
@@ -1059,9 +1058,10 @@ def pos_lanes(barriers: list[dict], cameras: list[dict]) -> list[dict]:
     lanes: dict[tuple[str, int], dict] = {}
 
     def _lane(d: dict) -> dict:
-        key = (d.get("lane_dir") or "entry", int(d.get("lane_no") or 1))
+        key = (d.get("lane_dir") or "entry", int(d.get("lane_no") or 1), bool(d.get('nested_inner')))
         if key not in lanes:
             lanes[key] = {"lane_dir": key[0], "lane_no": key[1],
+                          "nested_inner": key[2],
                           "barrier_id": None, "barrier_name": None, "can_open": False,
                           "camera_id": None, "camera_name": None}
         return lanes[key]
@@ -1161,12 +1161,16 @@ async def pos_prepare(body: dict, db: Session = Depends(get_db),
     terminal = _find_terminal(db, body.get("terminal_id", ""))
     if terminal is None or terminal.site_id != session.site_id:
         raise HTTPException(403, "Энэ зогсоолын бүртгэлтэй терминал шаардлагатай")
+    from ..services.exit_presence import validate_pos_context, record_pos_context
+    context = validate_pos_context(db, session, body)
     payment = _create_payment(db, session, "POS", "CARD", cashier=user, allow_qpay=True)
     _assert_expected_amount(payment, body)
     await _retire_qpay(db, session)
     payment.terminal_id = body["terminal_id"]
+    record_pos_context(db, payment, session, payment.terminal_id, user.username, 'prepare', context)
     db.commit()
-    return {"payment_id": payment.id, "amount": float(payment.amount), "status": payment.status}
+    return {"payment_id": payment.id, "amount": float(payment.amount), "status": payment.status,
+            "exit_context": context['status'], "exit_lane_context": context}
 
 
 @router.post("/pos/{payment_id}/cancel")
@@ -1258,6 +1262,11 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     payment.card_brand = body.get("card_brand")
     payment.terminal_id = body.get("terminal_id")
     claim_reference(db, payment, account, txn_id)
+    # The bank has already collected money. Preserve that fact even if the car
+    # moved or the read expired; infer again from server evidence, not body fields.
+    from ..services.exit_presence import record_pos_context
+    exit_context = record_pos_context(db, payment, session, payment.terminal_id,
+                                     user.username, 'confirm')
     # Худалдан авагчийн дугаар: `payer_reg_no` (шинэ — 3 форматыг таньдаг) эсвэл
     # хуучин `customer_tin`. Иргэний регистр (АА00112233) өгвөл баримт ИРГЭНИЙ
     # нэр дээр гарч сугалаанд оролцоно; ААН регистр (7 орон)/ТТД (11–14) өгвөл
@@ -1279,7 +1288,8 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body))
     db.commit()
     out = {"status": "PAID", "payment_id": payment.id, **gate_result(db, payment),
-           **_print_payload(db, payment), **settlement_info(db, payment)}
+           **_print_payload(db, payment), **settlement_info(db, payment),
+           "exit_lane_context": exit_context}
     _ms = int((_t.monotonic() - _c0) * 1000)
     (log.warning if _ms >= settings.payment_slow_warn_ms else log.info)(
         "POS confirm: %dмс (session=%s)", _ms, session.plate_number)

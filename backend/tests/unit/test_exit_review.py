@@ -79,7 +79,7 @@ def test_queue_is_scoped_does_not_fuzzy_match_or_expose_raw_secrets(ctx):
     db.add(similar);db.commit()
     r=c.get('/api/exit-review',params={'site_id':site.id}).json()
     assert r['events'][0]['candidates']==[{'id':s.id,'plate':s.plate_number,'entry_time':s.entry_time.isoformat()}]
-    assert r['paid_unbound'][0]['id']==s.id
+    assert r['paid_waiting'][0]['id']==s.id
     assert 'must-not-leak' not in str(r) and not calls
     assert db.query(M.BarrierCommand).count()==0
     user.role='OPERATOR';user.permissions=['cashier'];user.site_id=other.id;db.commit()
@@ -135,10 +135,13 @@ def test_stale_or_unconfirmed_proof_cannot_open(ctx,fault):
 
 def test_outstanding_amount_and_debt_do_not_open(ctx,monkeypatch):
     db,user,site,other,cam,bar,s,e,c,calls=ctx
+    s.exit_deadline=datetime.utcnow()-timedelta(minutes=1);db.commit()
     pid=proof(ctx)
     monkeypatch.setattr(R,'amount_due',lambda *args:1000)
     assert resolve(ctx,pid).status_code==409 and not calls
     monkeypatch.setattr(R,'amount_due',lambda *args:0)
+    from app.services import app_settings as A
+    A.set_site_rules(db,A.BLACKLIST_KEY,site.id,{'block_exit_debt_count':1},'test');db.commit()
     db.add(M.Compensation(site_id=site.id,session_id=s.id,plate_number=s.plate_number,amount=1000,reason='unpaid_exit',status='PENDING'));db.commit()
     assert resolve(ctx,pid).status_code==409 and not calls
 
@@ -196,7 +199,8 @@ def test_unbound_payment_is_saved_without_gate_command(ctx,monkeypatch):
     events=[];monkeypatch.setattr(session_logic,'notify',lambda *args:events.append(args))
     asyncio.run(session_logic.mark_paid_and_open(db,s))
     assert s.status=='PAID' and s.paid_at and not calls
-    assert events[-1][2]['gate_attention']=='exit_camera_not_linked'
+    assert events[-1][2]['gate_attention'] is None
+    assert events[-1][2]['exit_wait_reason']=='waiting_for_exit_read'
 
 
 def test_legacy_paid_shortcut_cannot_pick_first_exit_for_unbound_payment(ctx):
@@ -244,3 +248,49 @@ def test_active_stay_includes_rejections_after_provisional_exit_time(ctx):
     s.exit_time=e.created_at-timedelta(minutes=1);db.commit()
     f=c.get(f'/api/exit-review/sessions/{s.id}').json()
     assert f['read_state']=='rejected' and f['read']['raw_plate']==s.plate_number
+
+
+def test_paid_grace_is_honored_in_facts_and_review(ctx,monkeypatch):
+    db,user,site,other,cam,bar,s,e,c,calls=ctx
+    s.exit_deadline=datetime.utcnow()+timedelta(minutes=15);db.commit()
+    monkeypatch.setattr(R,'amount_due',lambda *a:1000)
+    assert c.get(f'/api/exit-review/sessions/{s.id}').json()['amount_due']==0
+    assert resolve(ctx,proof(ctx)).status_code==200 and len(calls)==1
+
+
+def test_new_rejected_unknown_frame_invalidates_operator_proof(ctx):
+    db,user,site,other,cam,bar,s,e,c,calls=ctx
+    pid=proof(ctx)
+    db.add(M.LprEvent(site_id=site.id,device_id=cam.id,plate_number='?',lane_dir='exit',
+                     accepted=False,created_at=datetime.utcnow()+timedelta(seconds=1)));db.commit()
+    assert resolve(ctx,pid).status_code==409 and not calls
+
+
+def test_metadata_distinguishes_confidences_and_duplicate_ids_without_leaking_raw(ctx):
+    db,user,site,other,cam,bar,s,e,c,calls=ctx
+    e.raw={'TrafficCar':{'PlateNumber':s.plate_number,'Confidence':14},'Vehicle':{'Confidence':92},
+           'RealUTC':1234,'FrameSequence':7,'password':'hidden'}
+    db.add(M.LprEvent(site_id=site.id,device_id=cam.id,plate_number=s.plate_number,lane_dir='exit',
+        accepted=False,created_at=e.created_at-timedelta(seconds=1),raw=e.raw));db.commit()
+    r=c.get(f'/api/exit-review/events/{e.id}/evidence').json()
+    assert r['plate_confidence']==14 and r['vehicle_confidence']==92
+    assert r['distinct_observation_ids']==1 and 'hidden' not in str(r) and not calls
+
+
+def test_attention_is_cleared_by_exit_ack_not_entry_ack(ctx):
+    db,user,site,other,cam,bar,s,e,c,calls=ctx
+    failed=M.BarrierCommand(device_id=bar.id,session_id=s.id,command='open',command_source='payment',
+                            status='UNKNOWN',created_at=datetime.utcnow()-timedelta(minutes=1))
+    entry=M.Device(site_id=site.id,name='Entry',device_type='barrier',lane_dir='entry',nested_inner=False)
+    db.add_all([failed,entry]);db.flush()
+    db.add(M.BarrierCommand(device_id=entry.id,session_id=s.id,command='open',command_source='auto_entry',status='SUCCESS'));db.commit()
+    assert len(c.get('/api/exit-review',params={'site_id':site.id}).json()['command_attention'])==1
+    db.add(M.BarrierCommand(device_id=bar.id,session_id=s.id,command='open',command_source='manual',status='SUCCESS'));db.commit()
+    assert c.get('/api/exit-review',params={'site_id':site.id}).json()['command_attention']==[]
+
+
+def test_advance_payment_and_broken_bound_gate_have_different_attention(ctx):
+    db,user,site,other,cam,bar,s,e,c,calls=ctx
+    assert c.get('/api/exit-review',params={'site_id':site.id}).json()['paid_waiting'][0]['attention_reason'] is None
+    s.exit_device_id=cam.id;bar.status='inactive';db.commit()
+    assert c.get('/api/exit-review',params={'site_id':site.id}).json()['paid_waiting'][0]['attention_reason']=='exit_mapping_invalid'

@@ -30,6 +30,14 @@ test('missing status from an older backend does not invent success', () => {
   assert.equal(paymentOutcome({ status: 'PAID' }).kind, 'unknown')
 })
 
+test('advance payment shows the configured exit deadline without promising opening', () => {
+  const result = paymentOutcome({session_status:'PAID', amount_due:0, exit_deadline:'2026-10-10T12:30:00'})
+  assert.equal(result.kind, 'ready')
+  assert.match(result.message, /Төлсөн хүлээлтэд бүртгэлтэй/)
+  assert.match(result.message, /хүртэл гарах камерт/)
+  assert.match(result.message, /дахин төлөхгүйгээр/)
+})
+
 // Exercise the real React component in both supported parking layouts.
 const bundle = await build({ stdin: {
   contents: `import React from 'react'; import {renderToStaticMarkup} from 'react-dom/server';

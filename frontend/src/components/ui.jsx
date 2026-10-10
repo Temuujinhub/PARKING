@@ -9,20 +9,22 @@ export function Modal({ open, onClose, title, children, wide, focusTrap = false 
     if (!open || !focusTrap) return
     const previous = document.activeElement
     const node = panel.current
-    const controls = () => [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]')]
+    const controls = () => [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')].filter(el => el.getClientRects().length)
     controls()[0]?.focus()
     const trap = e => {
       if (e.key !== 'Tab') return
       const items = controls()
       if (!items.length) { e.preventDefault(); node.focus(); return }
-      if (e.shiftKey && (document.activeElement === items[0] || document.activeElement === node)) {
+      if (!items.includes(document.activeElement)) {
+        e.preventDefault(); (e.shiftKey ? items.at(-1) : items[0]).focus()
+      } else if (e.shiftKey && document.activeElement === items[0]) {
         e.preventDefault(); items.at(-1).focus()
       } else if (!e.shiftKey && document.activeElement === items.at(-1)) {
         e.preventDefault(); items[0].focus()
       }
     }
-    node.addEventListener('keydown', trap)
-    return () => { node.removeEventListener('keydown', trap); previous?.focus() }
+    document.addEventListener('keydown', trap)
+    return () => { document.removeEventListener('keydown', trap); previous?.focus() }
   }, [open, focusTrap])
   useEffect(() => {
     const h = (e) => e.key === 'Escape' && onClose()
@@ -38,7 +40,7 @@ export function Modal({ open, onClose, title, children, wide, focusTrap = false 
         onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold">{title}</h3>
-          <button onClick={onClose} className="p-1 rounded hover:bg-surface-muted cursor-pointer" aria-label="Хаах">
+          <button onClick={onClose} className="p-1 min-w-11 min-h-11 flex items-center justify-center rounded hover:bg-surface-muted focus-visible:ring-2 focus-visible:ring-accent cursor-pointer" aria-label="Хаах">
             <X size={18} />
           </button>
         </div>

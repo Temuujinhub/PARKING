@@ -974,8 +974,10 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     # (SUCCESS алга) гацсан машинд доорх retry хэвээр үйлчилнэ.
     window = max(float(_br["reopen_cooldown_sec"]), float(_br["dedup_seconds"]))
     cooldown = now - timedelta(seconds=window)
-    recent_ok = (db.query(BarrierCommand)
+    recent_ok = (db.query(BarrierCommand).join(ParkingSession, ParkingSession.id == BarrierCommand.session_id)
                  .filter(BarrierCommand.device_id == barrier.id,
+                         ParkingSession.site_id == device.site_id,
+                         ParkingSession.plate_number == plate,
                          BarrierCommand.command == "open",
                          BarrierCommand.status == "SUCCESS",
                          BarrierCommand.created_at >= cooldown)
@@ -991,12 +993,16 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     # Monnis: өглөө гараар оруулсан гэрээт машин гарахдаа гацсан).
     registered = find_registered(db, plate, device.site_id)
     from .models import Compensation
-    if not registered and db.query(Compensation).filter(
+    from .services.app_settings import get_blacklist_rules
+    threshold = get_blacklist_rules(db, device.site_id)['block_exit_debt_count']
+    if threshold and not registered and db.query(Compensation).filter(
             Compensation.plate_number == plate,
-            Compensation.status == "PENDING").count():
+            Compensation.status == "PENDING").count() >= threshold:
         return False  # өртэй (гэрээт биш) - оператор шийднэ
 
     session = get_open_session(db, plate, device.site_id)
+    if session and exit_policy_block(db, session, now):
+        return False
     entitled = False
     # Бүрэн үнэгүй гэрээт — ямагт гарна. Харин НӨХЦӨЛТЭЙ гэрээт («эхний N
     # минут үнэгүй», цагийн цонхтой, «Шөнө үнэгүй») төлбөртэй байж болох тул
@@ -1032,7 +1038,7 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     if open_in_flight(barrier.id):
         _skip_command(db, barrier, session.id if session else None, "exit_retry",
                       plate, "яг одоо нээх команд явагдаж байна — давхардуулсангүй")
-        return True
+        return False  # An in-flight RPC is not a device acknowledgement.
     cmd = await open_barrier(db, barrier, session.id if session else None,
                              "exit_retry", plate=plate)
     if cmd.status != "SUCCESS":
@@ -1599,12 +1605,15 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
 
 
 def reject_exit_for_review(db, device, plate, confidence, raw, reason):
-    db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate or '?',
+    event = LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate or '?',
                     lane_dir='exit', confidence=confidence, accepted=False,
-                    reject_reason=reason, raw=raw))
+                    reject_reason=reason, raw=raw)
+    db.add(event)
     db.commit()
     notify(device.site_id, 'EXIT_REVIEW_REQUIRED', {'plate': plate, 'reason': reason,
-                                                  'device_id': device.id})
+                                                  'device_id': device.id, 'event_id': event.id,
+                                                  'lane_no': device.lane_no, 'lane_dir': 'exit',
+                                                  'created_at': event.created_at.isoformat()})
     return {'action': 'review_required', 'plate': plate, 'barrier_opened': False, 'reason': reason}
 
 
@@ -1619,6 +1628,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     """
     site_id = device.site_id
     now = datetime.utcnow()
+    raw = {**(raw if isinstance(raw, dict) else {}), '_server_open_eligible': bool(allow_open)}
     # Never borrow a paid/free entitlement from a guessed plate. Even a single
     # fuzzy candidate needs the operator's current-lane image review.
     if not is_valid_plate(plate):
@@ -1629,10 +1639,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     _br = _barrier_rules(db, site_id)
     _xr = _exit_rules(db, site_id)
 
-    # Давхар event хамгаалалт — OCR зөрүүтэй уншилтыг ч барина. Камер гарах дугаарыг
-    # хэдэн секундын зайтай 2 дахь удаа арай ӨӨР уншихад (жишээ 2 дахь уншилт session-
-    # тэй таарахгүй) LED-д "бүртгэлгүй" текст илгээж, төлбөрийн текстийг дардаг байсныг
-    # зогсооно (орох талтай ижил OCR-тэсвэртэй дүрэм).
+    # Only an exact repeat on the same lane can use the closed-stay retry path.
     recent_plates = [
         (rp, did) for rp, did in db.query(LprEvent.plate_number, LprEvent.device_id).filter(
             LprEvent.site_id == site_id, LprEvent.lane_dir == "exit",
@@ -1641,8 +1648,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             LprEvent.created_at >= now - timedelta(seconds=int(_br["dedup_seconds"])),
         ).all()
     ]
-    if any(rp == plate or (did == device.id and is_duplicate_read(plate, rp))
-           for rp, did in recent_plates):
+    # A different exit lane must execute the normal fresh-read path. A PAID
+    # arrival must also close through that path rather than disappear in dedup.
+    current = get_open_session(db, plate, site_id)
+    if (not current and any(rp == plate and did == device.id for rp, did in recent_plates)):
         # Давхар уншилт — session/төлбөрийг ДАХИН боловсруулахгүй. ГЭХДЭЭ өмнөх
         # уншилтын хаалтны команд амжилтгүй болсон бол машин хаалганы өмнө
         # lpr_dedup_seconds (20с) турш ГАЦНА: жолооч ухраад дахин ойртох бүрд
@@ -1650,16 +1659,6 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # энэ алдаа аль хэдийн зассан, гарах талд үлдсэн байсан).
         # Тиймээс ГАРАХ ЭРХТЭЙ (гэрээт/төлсөн/үнэгүй) машинд хаалтыг дахин нээнэ.
         opened = await ensure_exit_barrier_if_cleared(db, device, plate) if allow_open else False
-        # ЭГНЭЭ СОЛИЛТ: dedup нь зогсоол даяар тул машин гарах-1-д уншигдаад
-        # 30с дотор гарах-2 руу шилжвэл exit_device_id хуучин эгнээгээ зааж,
-        # төлбөр төлөгдмөгц БУРУУ ТАЛЫН хаалт онгойдог байв (2026-09-01
-        # Маршилын 2 гарцын туршилтаар батлагдсан). Яг таарсан (fuzzy биш)
-        # нээлттэй session-ий гарах төхөөрөмжийг ОДОО уншсан камераар шинэчилнэ.
-        _s = get_open_session(db, plate, site_id)
-        if _s is not None and _s.exit_device_id and _s.exit_device_id != device.id:
-            log.info("[exit] %s эгнээ солив: exit_device %s → %s (dedup дотор)",
-                     plate, _s.exit_device_id, device.id)
-            _s.exit_device_id = device.id
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
@@ -1846,6 +1845,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             schedule_capture(session.id, device.ip_address, plate, "exit", raw,
                              camera_credentials(device))
             notify(site_id, "EXIT_LPR_EVENT", {
+                "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
+                "last_exit_seen_at": now.isoformat(),
                 "session_id": session.id, "plate": plate,
                 "entry_time": now.isoformat(), "duration_minutes": 0,
                 "total_fee": float(_flat), "amount_due": float(_flat),
@@ -1895,6 +1896,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     session.exit_device_id = device.id
     session.confidence_exit = confidence
+    session.last_exit_seen_at = now
     # Гарах зургийг ард нь татаж хадгална (маргаан/нотолгоонд — ялангуяа төлбөргүй гарсан үед)
     schedule_capture(session.id, device.ip_address, plate, "exit", raw,
                              camera_credentials(device))
@@ -1918,6 +1920,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         db.commit()
         due_now = amount_due(db, session, fee)
         notify(site_id, "EXIT_LPR_EVENT", {
+            "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
+            "last_exit_seen_at": now.isoformat(),
             "session_id": session.id, "plate": plate,
             "entry_time": session.entry_time.isoformat(),
             "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
@@ -1982,6 +1986,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     db.commit()
 
     notify(site_id, "EXIT_LPR_EVENT", {
+        "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
+        "last_exit_seen_at": now.isoformat(),
         "session_id": session.id, "plate": plate,
         "entry_time": session.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
@@ -2218,20 +2224,46 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     session.exit_deadline = now + timedelta(minutes=g)
     session.status = "PAID"
 
-    # Гарах гэж зогсож байгаа бол (exit камерт аль хэдийн уншигдсан) шууд нээнэ
-    if session.exit_device_id:
-        exit_device = db.get(Device, session.exit_device_id)
-        if exit_device:
-            fee = fee_snapshot or session_fee_info(db, session, at=now)
+    from .services.exit_presence import fresh_presence
+    # Flush the read created by an in-process wallet checkout before querying it.
+    db.flush()
+    exit_device, event, waiting_reason = fresh_presence(db, session, now)
+    if exit_device:
+        fee = fee_snapshot or session_fee_info(db, session, at=now)
+        waiting_reason = exit_policy_block(db, session, now)
+        if not waiting_reason and _find_barrier(db, session.site_id, exit_device):
             await _close_and_open(db, exit_device, session, now, fee, source="payment")
             return
+        waiting_reason = waiting_reason or 'exit_mapping_invalid'
+    from .models import AuditLog
+    db.add(AuditLog(username='system', action='PAYMENT_EXIT_WAIT', entity='session', entity_id=session.id,
+        detail={'reason': waiting_reason, 'event_id': event.id if event else None,
+                'exit_deadline': session.exit_deadline.isoformat(), 'physical_exit': 'unverified'}))
     db.commit()
     notify(session.site_id, "PAYMENT_COMPLETED", {
         "session_id": session.id, "plate": session.plate_number,
         "exit_deadline": session.exit_deadline.isoformat(),
-        "gate_attention": "exit_camera_not_linked",
+        "exit_wait_reason": waiting_reason,
+        "gate_attention": waiting_reason if waiting_reason == 'exit_mapping_invalid' else None,
         "barrier_opened": False,
     })
+
+
+def exit_policy_block(db, session, now):
+    """Apply the existing minimum-stay and debt-threshold rules to recovery/payment."""
+    from .models import Compensation
+    from .services.app_settings import get_blacklist_rules
+    registered = session.is_registered or find_registered(db, session.plate_number, session.site_id) is not None
+    minimum = int(_exit_rules(db, session.site_id).get('min_stay_seconds') or 0)
+    if minimum and not registered and (now - session.entry_time).total_seconds() < minimum:
+        return 'minimum_stay'
+    threshold = get_blacklist_rules(db, session.site_id)['block_exit_debt_count']
+    if threshold and not registered:
+        count = db.query(Compensation.id).filter(Compensation.plate_number == session.plate_number,
+                                                Compensation.status == 'PENDING').count()
+        if count >= threshold:
+            return 'debt_rule'
+    return None
 
 
 async def _wallet_auto_deduct(db: Session, session: ParkingSession,

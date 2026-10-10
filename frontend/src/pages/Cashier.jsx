@@ -24,6 +24,8 @@ export default function Cashier() {
   const [sites, setSites] = useState([])
   const [siteId, setSiteId] = useState('')
   const [exits, setExits] = useState([])
+  const [laneId, setLaneId] = useState(''), [laneSites, setLaneSites] = useState([])
+  const laneRef = useRef('')
   const [overview, setOverview] = useState(null) // {capacity, occupied, free, rows: өнөөдөр гарсан}
   const [shift, setShift] = useState(null)
   const [selected, setSelected] = useState(null)
@@ -44,11 +46,11 @@ export default function Cashier() {
     if (!sid || sid !== currentSite.current) return
     const generation = ++loadGeneration.current
     const current = () => generation === loadGeneration.current && sid === currentSite.current
-    api(`/api/sessions/recent-exits?site_id=${sid}`).then((rows) => {
+    api(`/api/sessions/recent-exits?site_id=${sid}${laneRef.current ? `&device_id=${encodeURIComponent(laneRef.current)}` : ''}`).then((rows) => {
       if (!current()) return
       setExits(rows)
       setSelected((old) => old ? rows.find((r) => r.id === old.id) || old : null)
-    }).catch(() => {})
+    }).catch(() => { if (current()) setExits([]) })
     api(`/api/sessions/today-exits?site_id=${sid}`).then((data) => {
       if (current()) setOverview(data)
     }).catch(() => {})
@@ -65,11 +67,13 @@ export default function Cashier() {
       if (scoped.length) setSiteId(preferredSite(scoped))
     })
     api('/api/admin/discounts').then((d) => setDiscounts(d.filter((x) => x.is_active))).catch(() => {})
+    api('/api/payments/pos/bootstrap').then(data => setLaneSites(data.sites || [])).catch(() => {})
     loadShift()
   }, [user])
 
   useEffect(() => {
     setSelected(null); setQpayInfo(null); setSearchPlate(''); setSearchResults(null)
+    laneRef.current = ''; setLaneId('')
     setExits([]); setOverview(null); setBlAlert(null); setManualEntry(null)
     setFreeExit(false); setSpecialKind(null)
     clearTimeout(searchDebounce.current)
@@ -324,6 +328,15 @@ export default function Cashier() {
       )}
 
       <CashierStats overview={overview} shift={shift} />
+
+      <label className="card flex flex-wrap items-center gap-3">Төлбөр хүлээж буй гарах эгнээ
+        <select className="input min-h-11 max-w-md" value={laneId} disabled={busy || !!qpayInfo} onChange={event => {
+          laneRef.current = event.target.value; setLaneId(event.target.value); setSelected(null); setExits([]); loadExits(siteId)
+        }}>
+          <option value="">Бүх гадна гарах эгнээ</option>
+          {(laneSites.find(s => s.id === siteId)?.cameras || []).filter(c => c.status === 'active' && !c.nested_inner && ['exit','both'].includes(c.lane_dir)).map(c => <option key={c.id} value={c.id}>{c.name} · эгнээ {c.lane_no}</option>)}
+        </select>
+      </label>
 
       {canAct && <ExitReview siteId={siteId} onResolved={sid => { setSelected(old => old?.id === sid ? null : old); loadExits(siteId) }} />}
 

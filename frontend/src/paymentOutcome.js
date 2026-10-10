@@ -19,8 +19,10 @@ export function paymentOutcome(result = {}) {
       message: 'Зогсолт хаагдсан байна. Энэ төлөлтөөр хаалт шинээр нээхгүй; шаардлагатай бол операторт хандана уу.' }
   }
   if (result.session_status === 'PAID') {
+    const deadline = result.exit_deadline ? new Date(/Z$|[+-]\d\d:\d\d$/.test(result.exit_deadline) ? result.exit_deadline : result.exit_deadline + 'Z') : null
+    const until = deadline && !Number.isNaN(deadline.getTime()) ? ` ${deadline.toLocaleTimeString('mn-MN', {hour:'2-digit',minute:'2-digit'})} хүртэл гарах камерт очно уу.` : ''
     return { kind: 'ready', title: 'Төлбөр бүрэн төлөгдлөө',
-      message: 'Гарах камерт дугаараа уншуулна уу. Хаалт нээгдэхгүй бол дахин төлөхгүйгээр операторт хандана уу.' }
+      message: `Төлсөн хүлээлтэд бүртгэлтэй.${until} Гарах камерт дугаараа уншуулна уу. Хаалт нээгдэхгүй бол дахин төлөхгүйгээр операторт хандана уу.` }
   }
   return { kind: 'unknown', title: 'Төлбөр бүртгэгдлээ',
     message: 'Гарцын төлөвийг шалгана уу. Хаалт нээгдэхгүй бол дахин төлөхгүйгээр операторт хандана уу.' }

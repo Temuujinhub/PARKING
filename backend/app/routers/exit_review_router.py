@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import func
-from sqlalchemy.orm import Session, defer
+from sqlalchemy.orm import Session, defer, aliased
 
 from ..auth import enforce_site, require
 from ..config import settings
@@ -101,11 +101,39 @@ def queue(site_id: str, limit: int = Query(50, ge=1, le=100),
         events.append(out)
     paid = (db.query(ParkingSession).enable_eagerloads(False)
             .filter(ParkingSession.site_id == site_id, ParkingSession.status == 'PAID',
-                    ParkingSession.paid_at.isnot(None), ParkingSession.exit_device_id.is_(None))
+                    ParkingSession.paid_at.isnot(None))
             .order_by(ParkingSession.paid_at.desc(), ParkingSession.id.desc()).limit(limit+1).all())
+    def paid_attention(s):
+        if not s.exit_device_id:
+            return None  # Advance QR payment before reaching any gate is normal.
+        cam = cams.get(s.exit_device_id)
+        if (not cam or cam.device_type != 'camera' or cam.status != 'active' or not cam.ip_address
+                or cam.nested_inner or cam.lane_dir not in ('exit','both')):
+            return 'exit_mapping_invalid'
+        bars = [b for b in cams.values() if b.device_type == 'barrier' and b.status == 'active'
+                and barrier_matches_camera(cam,b)]
+        exact = [b for b in bars if b.lane_dir == cam.lane_dir]
+        return None if len(exact or bars) == 1 else 'exit_mapping_invalid'
+    later = aliased(BarrierCommand)
+    later_device = aliased(Device)
+    resolved = db.query(later.id).join(later_device, later_device.id == later.device_id).filter(
+        later_device.site_id == site_id, later_device.lane_dir.in_(('exit','both')),
+        later_device.nested_inner.is_(False), later.session_id == BarrierCommand.session_id,
+        later.status == 'SUCCESS', later.command == 'open', later.created_at > BarrierCommand.created_at).exists()
+    problems = (db.query(BarrierCommand, ParkingSession, Device).join(
+        ParkingSession, ParkingSession.id == BarrierCommand.session_id).join(Device, Device.id == BarrierCommand.device_id)
+        .filter(ParkingSession.site_id == site_id, Device.lane_dir.in_(('exit','both')),
+                Device.nested_inner.is_(False), BarrierCommand.created_at >= since,
+                BarrierCommand.command == 'open', BarrierCommand.status.in_(('FAILED','UNKNOWN','PENDING')),
+                ~resolved).order_by(BarrierCommand.created_at.desc()).limit(limit+1).all())
     return {'events': events, 'events_more': len(rejected)>limit, 'window_hours': 24,
-            'paid_unbound': [{'id': s.id, 'plate': s.plate_number, 'paid_at': s.paid_at,
-                              'entry_time': s.entry_time} for s in paid[:limit]],
+            'command_attention': [{'id': cmd.id, 'session_id': s.id, 'plate': s.plate_number,
+                'status': cmd.status, 'camera': d.name, 'lane': d.lane_no, 'created_at': cmd.created_at}
+                for cmd,s,d in problems[:limit]], 'commands_more': len(problems)>limit,
+            'paid_waiting': [{'id': s.id, 'plate': s.plate_number, 'paid_at': s.paid_at,
+                              'entry_time': s.entry_time, 'exit_deadline': s.exit_deadline,
+                              'grace_expired': bool(s.exit_deadline and s.exit_deadline < datetime.utcnow()),
+                              'camera_id': s.exit_device_id, 'attention_reason': paid_attention(s)} for s in paid[:limit]],
             'paid_more': len(paid)>limit,
             'cameras': [{'id': c.id, 'name': c.name, 'lane': c.lane_no} for c in cams.values()
                         if c.device_type == 'camera' and c.status == 'active' and c.ip_address
@@ -122,6 +150,7 @@ def facts(session_id: str, db: Session = Depends(get_db), user: User = Depends(r
     e, raw_plate = row if row else (None, '')
     cmd = exit_commands(db, s).first()
     fee = session_fee_info(db, s)
+    in_grace = s.status == 'PAID' and s.paid_at and (not s.exit_deadline or datetime.utcnow() <= s.exit_deadline)
     return {'session_id': s.id, 'paid': bool(s.paid_at), 'paid_at': s.paid_at,
             'closed': s.status not in ACTIVE, 'status': s.status,
             'read_state': ('accepted' if e.accepted else 'rejected') if e else 'not_linked',
@@ -132,8 +161,33 @@ def facts(session_id: str, db: Session = Depends(get_db), user: User = Depends(r
             'acknowledged': cmd.status == 'SUCCESS' if cmd else False,
             # exit_confirmed historically also means inferred/manual closure.
             # Neither that field nor a camera ACK is a gate-position sensor.
-            'physical_exit': 'unverified', 'amount_due': amount_due(db, s, fee),
+            'physical_exit': 'unverified', 'amount_due': 0 if in_grace else amount_due(db, s, fee),
+            'exit_deadline': s.exit_deadline, 'vehicle_color': s.vehicle_color, 'vehicle_type': s.vehicle_type,
             'is_free': bool(fee['is_free'])}
+
+
+@router.get('/events/{event_id}/evidence')
+def evidence(event_id: str, db: Session = Depends(get_db), user: User = Depends(require('cashier'))):
+    from ..services.camera_evidence import camera_evidence
+    e = db.get(LprEvent, event_id)
+    if not e or e.lane_dir != 'exit':
+        raise HTTPException(404, 'Гарах уншилт олдсонгүй')
+    enforce_site(user, e.site_id)
+    info = camera_evidence(e.raw)
+    # Project scalar identifiers only, never twenty base64 image payloads.
+    # Distinct IDs help an operator; they do not prove independent frames.
+    fields = [LprEvent.raw[k].as_string() for k in ('RealUTC','UTC','FrameSequence','Sequence')]
+    rows = db.query(*fields).filter(LprEvent.site_id == e.site_id, LprEvent.device_id == e.device_id,
+        LprEvent.lane_dir == 'exit', LprEvent.plate_number == e.plate_number,
+        LprEvent.created_at >= e.created_at - timedelta(seconds=30),
+        LprEvent.created_at <= e.created_at).order_by(LprEvent.created_at.desc()).limit(20).all()
+    observations = set()
+    for row in rows:
+        item = camera_evidence(dict(zip(('RealUTC','UTC','FrameSequence','Sequence'), row)))
+        if item['camera_time'] or item['frame_id']:
+            observations.add((item['camera_time'], item['frame_id']))
+    return {**info, 'distinct_observation_ids': len(observations), 'observation_limit': 20,
+            'event_id': e.id, 'server_received_at': e.created_at}
 
 
 @router.get('/events/{event_id}/image')
@@ -162,6 +216,16 @@ async def retry_ocr(event_id: str, db: Session = Depends(get_db), user: User = D
     from ..services.exit_review_ocr import recognize
     import asyncio
     result = await asyncio.to_thread(recognize, e.raw)
+    for suggestion in result.get('suggestions', []):
+        plate = suggestion.get('normalized_plate')
+        matches = (db.query(ParkingSession).enable_eagerloads(False).filter(
+            ParkingSession.site_id == e.site_id, ParkingSession.plate_number == plate,
+            ParkingSession.status.in_(ACTIVE), ParkingSession.entry_time <= e.created_at).limit(2).all()
+            if suggestion.get('valid_format') else [])
+        suggestion['exact_candidates'] = [{'id': s.id, 'plate': s.plate_number,
+            'vehicle_color': s.vehicle_color, 'vehicle_type': s.vehicle_type,
+            'has_entry_image': bool(s.entry_snapshot)} for s in matches]
+        suggestion['unique_match'] = len(matches) == 1
     db.add(AuditLog(username=user.username, action='EXIT_REVIEW_OCR', entity='lpr_event', entity_id=e.id,
                     detail=result))
     db.commit()
@@ -239,19 +303,20 @@ async def resolve(session_id: str, body: Resolve, db: Session = Depends(get_db),
     if not saved_image(detail['path']):
         raise HTTPException(409, 'Баталгаажуулах зураг олдсонгүй; дахин авна уу')
     newer = (db.query(LprEvent.id).filter(LprEvent.device_id == cam.id, LprEvent.lane_dir == 'exit',
-             LprEvent.created_at > proof.created_at, LprEvent.accepted.is_(True),
-             LprEvent.plate_number != s.plate_number).first())
+             LprEvent.created_at > proof.created_at,
+             ((LprEvent.plate_number != s.plate_number) | LprEvent.accepted.is_(False))).first())
     if newer:
         raise HTTPException(409, 'Энэ эгнээнд өөр дугаар уншигдсан; шинэ кадр авна уу')
     if exit_commands(db, s).filter(BarrierCommand.status.in_(('PENDING', 'UNKNOWN'))).first():
         raise HTTPException(409, 'Өмнөх командын үр дүн тодорхойгүй; давтаж нээхгүй')
     fee = session_fee_info(db, s, at=now)
-    due = amount_due(db, s, fee)
+    in_grace = s.status == 'PAID' and s.paid_at and (not s.exit_deadline or now <= s.exit_deadline)
+    due = 0 if in_grace else amount_due(db, s, fee)
     if due > 0 or (not s.paid_at and not fee['is_free']):
         raise HTTPException(409, 'Үлдэгдэл төлбөртэй; эхлээд төлбөрийн хэсгээс шийдвэрлэнэ үү')
-    if db.query(Compensation.id).filter(Compensation.plate_number == s.plate_number,
-                                      Compensation.status == 'PENDING').first():
-        raise HTTPException(409, 'Өмнөх өртэй; өрийн асуудлыг оператор тусад нь шийдвэрлэнэ үү')
+    from ..session_logic import exit_policy_block
+    if exit_policy_block(db, s, now):
+        raise HTTPException(409, 'Гарах доод хугацаа эсвэл өрийн хоригийн дүрэм үйлчилж байна')
     proof.detail = {**detail, 'consumed_at': now.isoformat()}
     s.exit_device_id = cam.id
     db.add(AuditLog(username=user.username, action='EXIT_REVIEW_RESOLVE', entity='session', entity_id=s.id,
