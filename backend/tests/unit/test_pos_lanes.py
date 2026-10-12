@@ -36,4 +36,4 @@ def test_can_open_propagates_and_defaults_false():
 def test_missing_lane_fields_default_entry_1():
     lanes = pos_lanes([{"id": "b", "name": "x", "lane_no": None, "lane_dir": None}], [])
     assert lanes == [{"lane_dir": "entry", "lane_no": 1, "barrier_id": "b", "barrier_name": "x",
-                      "can_open": False, "camera_id": None, "camera_name": None}]
+                      "can_open": False, "camera_id": None, "camera_name": None, "nested_inner": False}]

@@ -8,6 +8,8 @@ DEFAULT_SECRET_KEY = "change-me-in-production-9f8a7b6c5d4e"
 class Settings(BaseSettings):
     # Ерөнхий
     app_name: str = "Easy Parking"
+    # Optional local experiment; no cloud uploads or automatic gate decisions.
+    exit_review_ocr_enabled: bool = False
     debug: bool = False
     # ⚠️ Production-д ЗААВАЛ .env-д PARKING_SECRET_KEY-г CSPRNG-ээр тавина
     # (`python3 -c "import secrets;print(secrets.token_urlsafe(48))"`).

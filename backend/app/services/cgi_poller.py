@@ -21,7 +21,7 @@ from .device_auth import camera_credentials
 from .snapshot import offer_stream_image
 from ..database import SessionLocal
 from ..models import Device, LprEvent, ParkingSite
-from ..session_logic import (extract_confidence, handle_entry, handle_exit,
+from ..session_logic import (handle_entry, handle_exit,
                              handle_inner_pass, normalize_plate)
 
 log = logging.getLogger("parking.cgi_poller")
@@ -138,16 +138,8 @@ def _live_camera(device_id: str):
 
 
 def _plate_from(data: dict) -> tuple[str, float]:
-    """Dahua event data-аас дугаар + итгэлцүүр (олон боломжит байрлал)."""
-    for c in (data.get("Plate"), data.get("TrafficCar"),
-              (data.get("Picture") or {}).get("Plate"), data):
-        if isinstance(c, dict):
-            num = c.get("PlateNumber") or c.get("PlateNo") or c.get("plateNumber")
-            if num:
-                # БОДИТ итгэлцүүр: жинхэнэ утга Object.Confidence-д байдаг
-                # (аудит 2026-08-29 — өмнө нь олдохгүй тул үргэлж 100 болдог байв)
-                return str(num), extract_confidence(data, c)
-    return "", 0.0
+    from .camera_evidence import legacy_plate_read
+    return legacy_plate_read(data)
 
 
 _SOI = b"\xff\xd8\xff"   # JPEG эхлэл
@@ -213,9 +205,19 @@ def _extract_json_blocks(buffer: bytes):
             return blocks, buffer
         start = i + len("data=")
         depth, j, end = 0, start, -1
+        quoted, escaped = False, False
         while j < len(buffer):
             ch = buffer[j]
-            if ch == 0x7B:      # {
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif ch == 0x5C:
+                    escaped = True
+                elif ch == 0x22:
+                    quoted = False
+            elif ch == 0x22:
+                quoted = True
+            elif ch == 0x7B:      # {
                 depth += 1
             elif ch == 0x7D:    # }
                 depth -= 1
@@ -224,12 +226,15 @@ def _extract_json_blocks(buffer: bytes):
                     break
             j += 1
         if end < 0:
+            if len(buffer) - i > 2 * 1024 * 1024:
+                log.warning('ANPR JSON exceeded buffer limit; discarding incomplete event')
+                return blocks, b''
             return blocks, buffer[i:]  # бүрэн бус — цааш хүлээнэ
         raw = buffer[start:end]
         try:
             blocks.append(json.loads(raw.decode("utf-8", "replace")))
-        except Exception:
-            pass
+        except (ValueError, UnicodeError):
+            log.warning('ANPR JSON rejected: invalid complete event')
         buffer = buffer[end:]
 
 
@@ -373,6 +378,18 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True,
             note_car(device.ip_address)   # зургийн суваг үүгээр өөрийгөө шүүнэ
             _dump_event(device, data)
         plate = normalize_plate(raw_plate)
+        if device.lane_dir == 'exit' and not device.nested_inner:
+            # Heartbeats/device notifications are not rejected vehicle reads.
+            traffic = any(k in data for k in ('Plate', 'TrafficCar', 'Vehicle', 'PlateNumber'))
+            traffic = traffic or data.get('Code') in ('TrafficJunction', 'TrafficManualSnap', 'ANPR')
+            if not plate and not traffic:
+                return
+            from .camera_evidence import exit_evidence_rejection
+            from ..session_logic import reject_exit_for_review
+            reason, conf = exit_evidence_rejection(data, settings.lpr_min_confidence)
+            if not plate or reason:
+                reject_exit_for_review(db, device, plate, conf, data, reason if plate else 'CGI: plate not parsed')
+                return
         if not plate:
             # Traffic/ANPR event боловч дугаар олдоогүй бол л логлоно (heartbeat г.м-ийг алгасна)
             is_traffic = any(k in data for k in ("Plate", "TrafficCar", "Vehicle", "PlateNumber"))

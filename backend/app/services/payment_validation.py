@@ -54,15 +54,21 @@ def claim_reference(db, payment, account: str, reference: str):
 
 
 def gate_result(db, payment) -> dict:
-    from ..models import BarrierCommand
-    q = db.query(BarrierCommand).filter(
+    from ..models import BarrierCommand, Device, ParkingSession
+    stay = db.get(ParkingSession, payment.session_id) if payment.session_id else None
+    q = db.query(BarrierCommand).join(Device, Device.id == BarrierCommand.device_id).filter(
         BarrierCommand.session_id == payment.session_id,
-        BarrierCommand.command_source == "payment",
+        Device.lane_dir.in_(('exit', 'both')), Device.nested_inner.is_(False),
+        BarrierCommand.status != 'SKIPPED',
         BarrierCommand.command.in_(["open", "force_open"]))
+    q = q.filter(Device.site_id == stay.site_id) if stay else q.filter(False)
     if payment.paid_at:
         q = q.filter(BarrierCommand.created_at >= payment.paid_at)
     command = q.order_by(BarrierCommand.created_at.desc()).first()
     status = command.status if command else "NOT_REQUESTED"
     return {"barrier_opened": status == "SUCCESS", "barrier_command_status": status,
             "barrier_command_id": command.id if command else None,
+            "exit_deadline": stay.exit_deadline.isoformat() if stay and stay.exit_deadline else None,
+            "exit_waiting": bool(stay and stay.status == 'PAID'),
+            "gate_acknowledged": status == 'SUCCESS',
             "physical_gate_state": "UNKNOWN"}  # An ACK is not a physical sensor reading.
