@@ -202,7 +202,8 @@ def _settlement_fee(db: Session, session: ParkingSession, payment: Payment,
 
 
 async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
-                         external_receipt: dict | None = None, partner_notification=None):
+                         external_receipt: dict | None = None, partner_notification=None,
+                         pos_lane: dict | None = None):
     """Төлбөр PAID болмогц: session PAID + barrier + e-Barimt.
 
     Нэгдсэн (өр багтсан) төлбөрт: session-ий хэсэгт нэг баримт, холбогдсон ӨР ТУС
@@ -348,7 +349,7 @@ async def _finalize_paid(db: Session, payment: Payment, raw: dict | None = None,
                     settlement_fee["total_fee"])
                 session.duration_minutes = settlement_fee.get("duration_minutes",
                                                               session.duration_minutes)
-            await mark_paid_and_open(db, session, fee_snapshot=settlement_fee)
+            await mark_paid_and_open(db, session, fee_snapshot=settlement_fee, pos_lane=pos_lane)
     overpaid = max(0.0, round(already_paid + sess_amount - settlement_fee["total_fee"], 2))
     if overpaid:
         # Preserve the received money and flag a refund/reconciliation; never silently drop it.
@@ -1264,9 +1265,18 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     claim_reference(db, payment, account, txn_id)
     # The bank has already collected money. Preserve that fact even if the car
     # moved or the read expired; infer again from server evidence, not body fields.
-    from ..services.exit_presence import record_pos_context
-    exit_context = record_pos_context(db, payment, session, payment.terminal_id,
-                                     user.username, 'confirm')
+    from ..services.exit_presence import record_pos_context, infer_pos_context, pos_lane
+    exit_context = infer_pos_context(db, session)
+    # Кассчин биечлэн байгаа эгнээ (хүсэлтийн эгнээ эсвэл ганц гарах эгнээ) —
+    # шинэ гарах уншилт байхгүй үед mark_paid_and_open үүнийг нээнэ.
+    lane = pos_lane(db, session, body) if exit_context['camera_id'] is None else None
+    if lane:
+        lane = {**lane, 'terminal_id': payment.terminal_id, 'cashier': user.username,
+                'payment_id': payment.id}
+        exit_context = {**exit_context, 'pos_lane_source': lane['source'],
+                        'pos_lane_no': lane['camera'].lane_no, 'pos_gate_id': lane['gate_id']}
+    record_pos_context(db, payment, session, payment.terminal_id, user.username, 'confirm',
+                       exit_context)
     # Худалдан авагчийн дугаар: `payer_reg_no` (шинэ — 3 форматыг таньдаг) эсвэл
     # хуучин `customer_tin`. Иргэний регистр (АА00112233) өгвөл баримт ИРГЭНИЙ
     # нэр дээр гарч сугалаанд оролцоно; ААН регистр (7 орон)/ТТД (11–14) өгвөл
@@ -1285,7 +1295,8 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
         # Card was already charged. Keep that fact even when old QR cancellation is uncertain.
         db.add(AuditLog(username=user.username, action="PAYMENT_PROVIDER_CONFLICT", entity="payment",
                         entity_id=payment.id, detail={"reason": "QPay cancellation unconfirmed"}))
-    await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body))
+    await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body),
+                         pos_lane=lane)
     db.commit()
     out = {"status": "PAID", "payment_id": payment.id, **gate_result(db, payment),
            **_print_payload(db, payment), **settlement_info(db, payment),

@@ -202,14 +202,18 @@ def test_old_pos_confirm_infers_transaction_lane_and_preserves_bank_fact(ctx,mon
     audit=c.db.query(M.AuditLog).filter_by(action='POS_EXIT_CONTEXT').one()
     assert audit.detail['phase']=='confirm'
     if stale:
-        assert not c.commands and s.status=='PAID'
+        # 2026-10-12 rule 1: the read is 20 min old, but the POS request names
+        # lane 1 — the cashier standing there is the evidence; open that lane.
+        assert c.commands==[(c.bars[0].id,s.id,'payment')] and s.status=='CLOSED'
         assert out['exit_lane_context']['reason']=='exit_read_stale'
+        assert out['exit_lane_context']['pos_lane_source']=='pos_request'
+        assert s.exit_confirmed is False and s.exit_device_id==c.cams[0].id
     else:
         assert c.commands==[(c.bars[1].id,s.id,'payment')]
         assert audit.detail['event_id']==e.id and audit.detail['gate_id']==c.bars[1].id
     again=asyncio.run(PR.pos_confirm(body,req,c.db,c.user))
     assert again['payment_id']==out['payment_id'] and c.db.query(M.Payment).count()==1
-    assert len(c.commands)==(0 if stale else 1)
+    assert len(c.commands)==1
 
 
 def test_legacy_pos_prepare_without_read_keeps_prepayment_possible(ctx):

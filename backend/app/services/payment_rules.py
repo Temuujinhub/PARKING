@@ -85,6 +85,14 @@ CATALOG: list[dict] = [
              "зөвхөн эхний 60с-д тооцно. 0 = унтраах.",
      "applies": "Гарах уншилт · нээлттэй бүртгэл олдоогүй үед",
      "not_applied": "Нээлттэй бүртгэлтэй таарсан уншилт (ердийн урсгал)"},
+    {"group": A.EXITRULES_KEY, "key": "exit_read_valid_minutes", "unit": "min",
+     "name": "Гарах уншилтын хүчинтэй хугацаа (мин)",
+     "desc": "Гарах камерт уншигдсанаас хойш энэ хугацаанд төлбөр (QR/POS/касс) "
+             "төлөгдвөл тэр эгнээний хаалтыг автоматаар нээнэ — тэр камерт энэ "
+             "машинаас хойш ӨӨР дугаар уншигдаагүй бол. Өөр машин уншигдсан бол "
+             "нээхгүй, оператор шалгана. 0 = 3 минут.",
+     "applies": "Гарах уншилтын дараах төлбөр",
+     "not_applied": "Тэр эгнээнд өөр машин уншигдсан · гарцад хараахан уншигдаагүй (урьдчилж төлсөн)"},
     {"group": A.EXITRULES_KEY, "key": "invoice_quote_minutes", "unit": "min",
      "name": "Нэхэмжлэлийн үнэ барих (мин)",
      "desc": "QR/нэхэмжлэл үүссэнээс хойш энэ хугацаанд төлөгдвөл жолоочид "
@@ -290,6 +298,7 @@ MAX: dict[tuple[str, str], int] = {
     (A.EXITRULES_KEY, "reopen_max_hours"): 720,
     (A.EXITRULES_KEY, "paid_wait_fallback_minutes"): 120,
     (A.EXITRULES_KEY, "exit_reread_seconds"): 900,
+    (A.EXITRULES_KEY, "exit_read_valid_minutes"): 60,
     (A.EXITRULES_KEY, "invoice_quote_minutes"): 60,
     (A.BARRIER_KEY, "entry_burst_max_diff"): 7,
     (A.BARRIER_KEY, "dedup_seconds"): 300,

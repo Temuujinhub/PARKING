@@ -162,6 +162,13 @@ DEFAULTS: dict[str, dict] = {
         # 5,000₮. 300с = ensure_exit_barrier_if_cleared-ийн «5 мин дотор
         # хаагдсан» эрхтэй ижил. 0 = унтраах.
         "exit_reread_seconds": 300,
+        # ГАРАХ УНШИЛТЫН ХҮЧИНТЭЙ ХУГАЦАА (2026-10-12): гарах камерт уншигдсанаас
+        # хойш N минутын дотор төлбөр төлөгдвөл тэр эгнээний хаалтыг нээнэ —
+        # тэр камерт энэ машинаас хойш ӨӨР дугаар (хүлээн авсан/татгалзсан/«?»)
+        # уншигдаагүй бол. 10-11-ний хувилбар POS дарааллын 3 минутыг хэрэглэж
+        # 3–15 мин хоцорч төлсөн машин нээгдэхээ больсон (585/585 → 2/46).
+        # 0 = 3 минут (exit_queue_show_min).
+        "exit_read_valid_minutes": 15,
         # НЭХЭМЖЛЭЛИЙН ҮНЭ БАРИХ (2026-09-23): QR нэхэмжлэл үүссэнээс хойш N
         # минутын дотор төлөгдвөл жолоочид ҮЗҮҮЛСЭН дүнгээр төлбөрийг хаана.
         # 317df72 (09-19) callback ирсэн цагаар дахин боддог болсноор төлж
@@ -270,6 +277,7 @@ PER_SITE: dict[str, set[str]] = {
     EXITRULES_KEY: {"payment_hold_minutes", "no_session_fee", "min_stay_seconds", "fake_exit_minutes",
                     "reopen_max_hours", "reopen_skip_exit_read",
                     "paid_wait_fallback_minutes", "exit_reread_seconds",
+                    "exit_read_valid_minutes",
                     "invoice_quote_minutes", "wallet_auto_deduct"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
                   "reopen_cooldown_sec", "exit_dedup_reopen"},

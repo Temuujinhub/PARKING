@@ -36,10 +36,30 @@ def lane_cameras(db, site_id, device_id=None, lane_no=None):
     return cameras
 
 
-def fresh_presence(db, stay, now=None):
-    """Latest exact accepted read on a uniquely bound live outer exit camera.
+def payment_presence_seconds(db, site_id):
+    """How long an exit read still proves the car is at that lane for a payment.
 
-    Every newer different/unknown read invalidates presence, even if rejected.
+    10-11 release used the 3-minute POS queue window: payments 3–15 minutes after
+    the exit read stopped opening (before: 585/585 opened, after: 2/46). The
+    window is now the site's `exit_read_valid_minutes` (default 15); the real
+    protection is that no OTHER plate was read on that lane since (below)."""
+    from .app_settings import get_exit_rules
+    minutes = int(get_exit_rules(db, site_id).get('exit_read_valid_minutes') or 0)
+    return minutes * 60 if minutes > 0 else presence_seconds()
+
+
+def same_vehicle_read(read_plate, stay_plate):
+    """A read of this stay's car: exact text or a measured OCR confusion (the
+    read that was matched by `ocr_confusion_match` carries the camera text)."""
+    from ..session_logic import plates_ocr_confusable
+    return bool(read_plate) and (read_plate == stay_plate or plates_ocr_confusable(read_plate, stay_plate))
+
+
+def fresh_presence(db, stay, now=None):
+    """This car's latest accepted read on a uniquely bound live outer exit camera,
+    within `payment_presence_seconds`, with NO other plate read on that camera
+    since. A newer different/unknown read ('?') invalidates presence even if it
+    was rejected; a newer rejected read of the same plate does not.
     Never infer a camera from payment, vehicle colour, or a nearby plate.
     """
     now = now or datetime.utcnow()
@@ -51,18 +71,25 @@ def fresh_presence(db, stay, now=None):
             or cam.device_type != 'camera' or cam.lane_dir not in ('exit', 'both')
             or cam.nested_inner or not cam.ip_address):
         return None, None, 'exit_mapping_invalid'
-    since = max(stay.entry_time, now - timedelta(seconds=presence_seconds()))
-    event = (db.query(LprEvent).options(defer(LprEvent.raw)).filter(
+    since = max(stay.entry_time, now - timedelta(seconds=payment_presence_seconds(db, stay.site_id)))
+    events = (db.query(LprEvent).options(defer(LprEvent.raw)).filter(
         LprEvent.site_id == stay.site_id, LprEvent.device_id == cam.id,
-        LprEvent.lane_dir == 'exit', LprEvent.created_at >= since)
-        .order_by(LprEvent.created_at.desc(), LprEvent.id.desc()).first())
-    if not event:
-        return None, None, 'exit_read_stale'
-    if event.created_at > now or not event.accepted or event.plate_number != stay.plate_number:
-        return None, event, 'exit_presence_unconfirmed'
-    if isinstance(event.raw, dict) and event.raw.get('_server_open_eligible') is False:
-        return None, event, 'exit_read_stale'
-    return cam, event, None
+        LprEvent.lane_dir == 'exit', LprEvent.created_at >= since, LprEvent.created_at <= now)
+        .order_by(LprEvent.created_at.desc(), LprEvent.id.desc()).limit(500).all())
+    anchor, newer = None, []
+    for event in events:
+        if event.accepted and same_vehicle_read(event.plate_number, stay.plate_number):
+            anchor = event
+            break
+        newer.append(event)
+    others = [e for e in newer if not same_vehicle_read(e.plate_number, stay.plate_number)]
+    if anchor is None:
+        return None, (newer[0] if newer else None), ('exit_presence_unconfirmed' if newer else 'exit_read_stale')
+    if others:
+        return None, others[0], 'exit_presence_unconfirmed'
+    if isinstance(anchor.raw, dict) and anchor.raw.get('_server_open_eligible') is False:
+        return None, anchor, 'exit_read_stale'
+    return cam, anchor, None
 
 
 def infer_pos_context(db, stay):
@@ -88,22 +115,74 @@ def record_pos_context(db, payment, stay, terminal_id, username, phase, context=
     return context
 
 
-def validate_pos_context(db, stay, body):
-    """Additive protocol: old POS requests remain valid; new context is enforced."""
+def _requested_lane(body):
     if body.get('device_id') and body.get('exit_device_id') and body['device_id'] != body['exit_device_id']:
         raise HTTPException(400, 'Гарах төхөөрөмжийн хоёр утга зөрж байна')
-    device_id = body.get('device_id') or body.get('exit_device_id')
     lane_no = body.get('lane_no')
+    if lane_no is not None and (isinstance(lane_no, bool) or not isinstance(lane_no, int)):
+        raise HTTPException(400, 'Эгнээний дугаар бүхэл тоо байна')
+    return body.get('device_id') or body.get('exit_device_id'), lane_no
+
+
+def validate_pos_context(db, stay, body):
+    """Additive protocol: old POS requests remain valid; new context is enforced.
+
+    An explicit lane without a fresh read is accepted (`pos_lane_selected`): the
+    cashier at that lane is the exit evidence (2026-10-12). A conflicting fresh
+    read on another lane, or a stale `exit_event_id`, still asks for a refresh."""
+    device_id, lane_no = _requested_lane(body)
     event_id = body.get('exit_event_id')
     if device_id is None and lane_no is None and event_id is None:
         return infer_pos_context(db, stay)
-    if lane_no is not None and (isinstance(lane_no, bool) or not isinstance(lane_no, int)):
-        raise HTTPException(400, 'Эгнээний дугаар бүхэл тоо байна')
     cams = lane_cameras(db, stay.site_id, device_id, lane_no)
     cam, event, reason = fresh_presence(db, stay)
-    if reason or not cam or cam.id not in {c.id for c in cams} or (event_id and event.id != event_id):
+    if event_id and (reason or not event or event.id != event_id):
         raise HTTPException(409, 'Гарах уншилт шинэчлэгдсэн; жагсаалтаа шинэчлээд машинаа дахин сонгоно уу')
+    if cam and cam.id not in {c.id for c in cams}:
+        raise HTTPException(409, 'Гарах уншилт шинэчлэгдсэн; жагсаалтаа шинэчлээд машинаа дахин сонгоно уу')
+    if cam is None:
+        lane = pos_lane(db, stay, body)
+        if lane is None:
+            raise HTTPException(409, 'Гарах хаалтын холбоос тодорхойгүй; оператор шалгана уу')
+        return {**infer_pos_context(db, stay), 'status': 'pos_lane_selected',
+                'camera_id': lane['camera'].id, 'lane_no': lane['camera'].lane_no,
+                'gate_id': lane['gate_id'], 'pos_lane_source': lane['source']}
     context = infer_pos_context(db, stay)
     if context['reason']:
         raise HTTPException(409, 'Гарах хаалтын холбоос тодорхойгүй; оператор шалгана уу')
     return {**context, 'status': 'lane_verified'}
+
+
+def outer_exit_cameras(db, site_id):
+    return db.query(Device).filter(Device.site_id == site_id, Device.device_type == 'camera',
+        Device.status == 'active', Device.lane_dir.in_(('exit', 'both')),
+        Device.nested_inner.is_(False)).all()
+
+
+def pos_lane(db, stay, body):
+    """POS card payment: the exit lane where the cashier physically stands.
+
+    Sources, in order: the lane the POS request names (`device_id` /
+    `exit_device_id` / `lane_no`, bootstrap `lanes[]`); otherwise the site's only
+    outer exit lane. Several lanes and no lane in the request -> None (wait for
+    the exit read as before). Never guesses from the cashier account or terminal
+    id: the legacy app sends the same terminal id at five sites (2026-10-12).
+    Returns {'camera', 'gate_id', 'source'} or None; never raises."""
+    from ..session_logic import _find_barrier
+    try:
+        device_id, lane_no = _requested_lane(body or {})
+        if device_id is not None or lane_no is not None:
+            cams, source = lane_cameras(db, stay.site_id, device_id, lane_no), 'pos_request'
+        else:
+            cams, source = outer_exit_cameras(db, stay.site_id), 'single_exit_lane'
+    except HTTPException:
+        return None
+    if len(cams) != 1:
+        return None
+    site = db.get(ParkingSite, stay.site_id)
+    if not site or not site.is_active or not cams[0].ip_address:
+        return None
+    gate = _find_barrier(db, stay.site_id, cams[0])
+    if gate is None:
+        return None
+    return {'camera': cams[0], 'gate_id': gate.id, 'source': source}

@@ -268,6 +268,40 @@ def plates_ocr_similar(a: str, b: str) -> bool:
     return sum(1 for x, y in zip(a, b) if x != y) == 1
 
 
+# ГАРАХ КАМЕРЫН OCR АНДУУРЛЫН ХОСУУД (2026-10-12) — `plates_ocr_confusable`-д.
+# 10-11-ний хувилбар 1 тэмдэгтийн зөрүүтэй БҮХ гарах уншилтыг review руу илгээж
+# EXIT_OCR_MATCH өдөрт ~300-аас 0 болсон (10-12 өглөө 56-аас 0). Дурын 1 тэмдэгт
+# биш, зөвхөн хэмжигдсэн андуурлыг автоматаар тааруулна:
+#   • харааны хосууд (0/О/O/Ө, 8/В/B, 1/I, 5/S, 2/Z, Ү/У) + `_OCR_CANON_MAP`;
+#   • продын 30 хоногийн (09-11…10-11) 7,234 EXIT_OCR_MATCH-аас n≥20, «буруу
+#     машин» ≤4% хосууд (буруу = тааруулснаас хойш 12ц дотор, шинэ орох
+#     бүртгэлгүйгээр орох дугаар нь гарах камерт дахин ЯГ уншигдсан). К↔Н 1,674
+#     (1.8%), А↔Д 505, 1↔7 481, Д↔Ц 342 … Хасагдсан нь: 2↔3 36%, М↔Я 25%,
+#     Г↔Т 12.5%, 4↔9 10%, О↔С 5.4%, К↔М 5.3%, П↔Т 5.6% г.м.
+_OCR_CONFUSABLE_PAIRS = frozenset(frozenset(p) for p in (
+    # харааны (handoff)
+    "0О", "0O", "OО", "0Ө", "ОӨ", "8В", "8B", "BВ", "1I", "5S", "2Z", "ҮУ",
+    # хэмжигдсэн
+    "КН", "АД", "17", "ДЦ", "БЕ", "МН", "ЗЭ", "ИМ", "КЛ", "БК", "68", "КХ",
+    "АН", "38", "ДП", "56", "ЕК", "МЦ", "ВЕ", "27", "АЛ", "ЭӨ", "ИК", "06",
+    "ВӨ", "01", "08", "БН", "БУ", "ГП", "ЕР",
+))
+
+
+def plates_ocr_confusable(a: str, b: str, max_diff: int = 2) -> bool:
+    """Хоёр дугаар ЗӨВХӨН OCR андуурлаар (1–`max_diff` байрлал) ялгаатай эсэх.
+
+    Ижил урт, зөрүүтэй байрлал бүрийн хос `_OCR_CONFUSABLE_PAIRS`-д эсвэл
+    `_ocr_canon`-оор тэнцүү. «Жинхэнэ» 1–2 тэмдэгтийн зөрүү (1↔6, Г↔Т),
+    тайрагдсан уншилт, урт зөрүү — False (review хэвээр)."""
+    if not a or not b or a == b or len(a) != len(b):
+        return False
+    d = [(x, y) for x, y in zip(a, b) if x != y]
+    return len(d) <= max_diff and all(
+        _ocr_canon(x) == _ocr_canon(y) or frozenset((x, y)) in _OCR_CONFUSABLE_PAIRS
+        for x, y in d)
+
+
 def plates_burst_similar(prev: str, new: str, max_diff: int = 2) -> bool:
     """Орох камерын burst цонхонд (6с) дараалан ирсэн хоёр уншилт НЭГ МАШИН уу.
 
@@ -367,6 +401,31 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
         if len(partial) == 1:
             return partial[0], True
     return None, False
+
+
+def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession | None:
+    """Гарах уншилт ЯГ таарах идэвхтэй бүртгэлгүй — OCR андуурлаар зөрсөн ГАНЦ
+    бүртгэл байвал түүнийг буцаана (EXIT_OCR_MATCH), эс бол None (review).
+
+    Нөхцөл: (1) уншсан дугаар өөрөө энэ зогсоолд гэрээт биш — гэрээт бол тэр
+    өөрийн эрхээр гарна, өөр машины бүртгэлийг хаахгүй; (2) зогсоолын идэвхтэй
+    бүртгэлүүдээс ОЙРОЛЦОО (≤2 тэмдэгт, тайралт, дутуу орох уншилт) нь ЯГ НЭГ;
+    (3) тэр нэг нь `plates_ocr_confusable`. Ойролцоо 2+ бол хоёрдмол — review."""
+    if not plate or find_registered(db, plate, site_id) is not None:
+        return None
+    opens = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site_id,
+                     ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+             .all())
+    valid = is_valid_plate(plate)
+    near = [s for s in opens if s.plate_number != plate and (
+        plates_reread_similar(plate, s.plate_number)
+        or plates_ocr_confusable(plate, s.plate_number)
+        or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
+            and s.plate_number in plate))]
+    if len(near) == 1 and plates_ocr_confusable(plate, near[0].plate_number):
+        return near[0]
+    return None
 
 
 # Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
@@ -1629,13 +1688,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     site_id = device.site_id
     now = datetime.utcnow()
     raw = {**(raw if isinstance(raw, dict) else {}), '_server_open_eligible': bool(allow_open)}
-    # Never borrow a paid/free entitlement from a guessed plate. Even a single
-    # fuzzy candidate needs the operator's current-lane image review.
-    if not is_valid_plate(plate):
-        return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
-    _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
-    if fuzzy_candidate:
-        return reject_exit_for_review(db, device, plate, confidence, raw, 'plate_mismatch_review')
+    # Never borrow a paid/free entitlement from a guessed plate. A fuzzy
+    # candidate needs the operator's current-lane image review — EXCEPT a
+    # measured OCR confusion with exactly one nearby active stay (2026-10-12:
+    # the blanket review stopped ~80% of former EXIT_OCR_MATCH openings).
+    ocr_session = (None if get_open_session(db, plate, site_id)
+                   else ocr_confusion_match(db, plate, site_id))
+    if ocr_session is None:
+        if not is_valid_plate(plate):
+            return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
+        _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
+        if fuzzy_candidate:
+            return reject_exit_for_review(db, device, plate, confidence, raw, 'plate_mismatch_review')
     _br = _barrier_rules(db, site_id)
     _xr = _exit_rules(db, site_id)
 
@@ -1650,7 +1714,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     ]
     # A different exit lane must execute the normal fresh-read path. A PAID
     # arrival must also close through that path rather than disappear in dedup.
-    current = get_open_session(db, plate, site_id)
+    current = get_open_session(db, plate, site_id) or ocr_session
     if (not current and any(rp == plate and did == device.id for rp, did in recent_plates)):
         # Давхар уншилт — session/төлбөрийг ДАХИН боловсруулахгүй. ГЭХДЭЭ өмнөх
         # уншилтын хаалтны команд амжилтгүй болсон бол машин хаалганы өмнө
@@ -1662,7 +1726,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         db.commit()
         return {"action": "dedup", "plate": plate, "barrier_opened": opened}
 
-    session, fuzzy = get_open_session(db, plate, site_id), False
+    session = get_open_session(db, plate, site_id) or ocr_session
+    fuzzy = session is not None and session is ocr_session
     if session is not None:
         from sqlalchemy.exc import OperationalError
         try:
@@ -1768,9 +1833,13 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                         action="EXIT_PLATE_CORRECT" if corrected else "EXIT_OCR_MATCH",
                         entity="session", entity_id=session.id,
                         detail={"read_plate": plate, "entry_plate": old_plate,
-                                "corrected": corrected}))
+                                "corrected": corrected, "rule": "ocr_confusion",
+                                "device_id": device.id}))
         log.info(f"[exit] {'дугаар засав' if corrected else 'OCR зөрүү тохов'}: "
                  f"{old_plate} → {plate} (session {session.id})")
+        # Цаашдын өр/LED/гэрээт шалгалт тухайн бүртгэлийн машины дугаараар —
+        # LprEvent-д камерын уншсан текст хэвээр үлдэнэ.
+        plate = session.plate_number
 
     # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
     from .models import Compensation
@@ -2214,8 +2283,13 @@ def _find_barrier(db: Session, site_id: str, near_device: Device) -> Device | No
 
 
 async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes: int | None = None,
-                             fee_snapshot: dict | None = None) -> None:
-    """Төлбөр амжилттай болмогц дуудагдана: session-ийг PAID болгож, exit lane-ийн barrier нээнэ."""
+                             fee_snapshot: dict | None = None, pos_lane: dict | None = None) -> None:
+    """Төлбөр амжилттай болмогц дуудагдана: session-ийг PAID болгож, exit lane-ийн barrier нээнэ.
+
+    pos_lane: POS картын төлбөрт кассчин БИЕЧЛЭН байгаа гарах эгнээ
+    (`exit_presence.pos_lane`; + terminal_id, cashier, payment_id). Шинэ гарах
+    уншилт байхгүй үед тэр эгнээг нээнэ — оператор машиныг харж төлбөр авсан нь
+    нотолгоо (10-12 өглөө: уншилтгүй POS төлбөр 16, тэдгээрийн 5 нь гарах уншилтгүй PAID хэвээр үлдсэн)."""
     now = datetime.utcnow()
     session.paid_at = now
     site: ParkingSite = session.site
@@ -2235,6 +2309,25 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
             await _close_and_open(db, exit_device, session, now, fee, source="payment")
             return
         waiting_reason = waiting_reason or 'exit_mapping_invalid'
+    elif pos_lane is not None:
+        from .models import AuditLog
+        lane_cam = pos_lane['camera']
+        fee = fee_snapshot or session_fee_info(db, session, at=now)
+        blocked = exit_policy_block(db, session, now)
+        if not blocked and _find_barrier(db, session.site_id, lane_cam):
+            session.exit_device_id = lane_cam.id
+            db.add(AuditLog(username=pos_lane.get('cashier') or 'system', action='POS_LANE_OPEN',
+                entity='session', entity_id=session.id,
+                detail={'session_id': session.id, 'payment_id': pos_lane.get('payment_id'),
+                        'terminal_id': pos_lane.get('terminal_id'), 'cashier': pos_lane.get('cashier'),
+                        'lane_no': lane_cam.lane_no, 'camera_id': lane_cam.id,
+                        'gate_id': pos_lane.get('gate_id'), 'lane_source': pos_lane.get('source'),
+                        'presence_reason': waiting_reason, 'physical_exit': 'cashier_present'}))
+            # Камерын гарах уншилт БИШ — exit_confirmed=False (тайлан/сэргээлтэд ялгагдана).
+            await _close_and_open(db, lane_cam, session, now, fee, source="payment",
+                                  exit_confirmed=False)
+            return
+        waiting_reason = blocked or 'exit_mapping_invalid'
     from .models import AuditLog
     db.add(AuditLog(username='system', action='PAYMENT_EXIT_WAIT', entity='session', entity_id=session.id,
         detail={'reason': waiting_reason, 'event_id': event.id if event else None,
