@@ -403,6 +403,21 @@ def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSe
     return None, False
 
 
+def near_active_stays(db: Session, plate: str, site_id: str) -> list[ParkingSession]:
+    """Зогсоолын идэвхтэй бүртгэлүүдээс уншсан дугаартай ОЙРОЛЦОО нь (≤2
+    тэмдэгт, тайралт, OCR андуурал, дутуу орох уншилт) — яг таарсныг оруулахгүй."""
+    opens = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site_id,
+                     ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+             .all())
+    valid = is_valid_plate(plate)
+    return [s for s in opens if s.plate_number != plate and (
+        plates_reread_similar(plate, s.plate_number)
+        or plates_ocr_confusable(plate, s.plate_number)
+        or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
+            and s.plate_number in plate))]
+
+
 def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession | None:
     """Гарах уншилт ЯГ таарах идэвхтэй бүртгэлгүй — OCR андуурлаар зөрсөн ГАНЦ
     бүртгэл байвал түүнийг буцаана (EXIT_OCR_MATCH), эс бол None (review).
@@ -414,16 +429,7 @@ def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession
     10-12 #7: 11 машин, 330,000₮ хий өр) тааруулж, дугаарыг нь засна."""
     if not plate:
         return None
-    opens = (db.query(ParkingSession)
-             .filter(ParkingSession.site_id == site_id,
-                     ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
-             .all())
-    valid = is_valid_plate(plate)
-    near = [s for s in opens if s.plate_number != plate and (
-        plates_reread_similar(plate, s.plate_number)
-        or plates_ocr_confusable(plate, s.plate_number)
-        or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
-            and s.plate_number in plate))]
+    near = near_active_stays(db, plate, site_id)
     if len(near) == 1 and plates_ocr_confusable(plate, near[0].plate_number):
         s = near[0]
         if (find_registered(db, plate, site_id) is not None
@@ -1824,9 +1830,21 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         session = auto_reopen_for_exit(db, plate, site_id, exact_only=True)
     if session is None and find_registered(db, plate, site_id) is None:
         # Unknown text is not evidence for a zero-fee/no-entry gate opening.
-        # Operators must identify the actual stay or use the explicit manual
-        # no-entry workflow; do not create an invoice for a guessed plate.
-        return reject_exit_for_review(db, device, plate, confidence, raw, 'no_matching_stay_review')
+        # The site's «Орох цаг олдоогүй машины суурь хураамж» (no_session_fee,
+        # Тохиргоо → Төлбөрийн дүрэм) decides: > 0 → the flat-fee invoice below
+        # (driver pays, gate opens on that payment); 0 / registered-only /
+        # no-charge site → operator review. The 10-11 release reviewed every
+        # case and silently ignored the admin setting (2026-10-12).
+        from .services.app_settings import no_session_exit_fee
+        if near_active_stays(db, plate, site_id):
+            # Ойролцоо дугаартай бүртгэл(үүд) байна — машин тэдний нэг байж
+            # болзошгүй тул суурь хураамж (хий өр) үүсгэхгүй, оператор шийднэ.
+            return reject_exit_for_review(db, device, plate, confidence, raw, 'plate_mismatch_review')
+        _nf_site = db.get(ParkingSite, site_id)
+        if not (no_session_exit_fee(db, site_id) > 0 and is_valid_plate(plate)
+                and not (_nf_site and (_nf_site.registered_only
+                                       or getattr(_nf_site, "no_charge", False)))):
+            return reject_exit_for_review(db, device, plate, confidence, raw, 'no_matching_stay_review')
     # Гарах камерын өнгө/төрлөөр session-ий мэдээллийг нөхнө (орох дээр алга байсан
     # эсвэл орох дутуу уншсан бол) — оператор дугаар зөрүүтэй үед машиныг таних тусламж
     if session:

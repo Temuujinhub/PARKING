@@ -235,6 +235,9 @@ def test_unknown_valid_plate_does_not_open_on_zero_no_session_fee(ctx,monkeypatc
     db,user,site,other,cam,bar,s,e,c,calls=ctx
     monkeypatch.setattr(session_logic,'notify',lambda *args:None)
     monkeypatch.setattr(session_logic,'_exit_rules',lambda *args:{'fake_exit_minutes':5,'reopen_max_hours':12,'exit_reread_seconds':300,'no_session_fee':0})
+    # The flat fee is read from the admin setting (no_session_exit_fee), not _exit_rules.
+    from app.services import app_settings as A
+    A.set_site_rules(db,A.EXITRULES_KEY,site.id,{'no_session_fee':0},'test');db.commit()
     before=db.query(M.ParkingSession).count()
     r=asyncio.run(session_logic.handle_exit(db,cam,'9999УБА',90,{'PlateNumber':'9999УБА'}))
     assert r['action']=='review_required' and r['reason']=='no_matching_stay_review'

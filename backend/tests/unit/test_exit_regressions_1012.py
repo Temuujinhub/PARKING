@@ -370,3 +370,37 @@ def test_pos_terminal_queue_survives_large_default_window(ctx, monkeypatch):
     monkeypatch.setattr(settings, 'exit_queue_show_min', 30)
     c = ctx; s = stay(c, status='AWAITING_PAYMENT'); read(c, s, c.cams[1], age=600)
     assert SR.recent_exits(site_id=c.site.id, db=c.db, user=c.user)[0]['id'] == s.id
+
+
+# ── Аудит #4: «Орох цаг олдоогүй машины суурь хураамж» тохиргоо дахин хүчинтэй ──
+
+def test_no_session_fee_setting_creates_flat_invoice_and_payment_opens(ctx):
+    c = ctx
+    A.set_site_rules(c.db, A.EXITRULES_KEY, c.site.id, {'no_session_fee': 2000}, 'test'); c.db.commit()
+    r = exit_read(c, '9999УБА')
+    assert r['action'] == 'no_session_fee' and r['amount_due'] == 2000
+    s = c.db.get(M.ParkingSession, r['session_id'])
+    assert s.status == 'AWAITING_PAYMENT' and s.fee_locked and s.exit_device_id == c.cams[0].id
+    pay(c, s)
+    assert c.commands == [(c.bars[0].id, s.id, 'payment')] and s.status == 'CLOSED'
+
+
+@pytest.mark.parametrize('setup', ['fee_zero', 'registered_only'])
+def test_no_session_fee_zero_or_closed_site_goes_to_operator(ctx, setup):
+    c = ctx
+    if setup == 'fee_zero':
+        A.set_site_rules(c.db, A.EXITRULES_KEY, c.site.id, {'no_session_fee': 0}, 'test')
+    else:
+        c.site.registered_only = True
+    c.db.commit()
+    r = exit_read(c, '9999УБА')
+    assert r['action'] == 'review_required' and r['reason'] == 'no_matching_stay_review'
+    assert c.db.query(M.ParkingSession).count() == 0 and not c.commands
+
+
+def test_ambiguous_near_stays_never_get_flat_fee(ctx):
+    c = ctx; stay(c, plate='1041УКС'); stay(c, plate='1041УЛС')
+    A.set_site_rules(c.db, A.EXITRULES_KEY, c.site.id, {'no_session_fee': 2000}, 'test'); c.db.commit()
+    r = exit_read(c, '1041УНС')
+    assert r['action'] == 'review_required' and r['reason'] == 'plate_mismatch_review'
+    assert c.db.query(M.ParkingSession).count() == 2
