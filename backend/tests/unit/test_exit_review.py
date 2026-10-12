@@ -208,6 +208,12 @@ def test_legacy_paid_shortcut_cannot_pick_first_exit_for_unbound_payment(ctx):
     from fastapi import HTTPException
     from app.routers import sessions_router
     db,user,site,other,cam,bar,s,e,c,calls=ctx
+    # 2026-10-12: a single outer exit lane is unambiguous and may be used; with
+    # two exit lanes and no operator lane choice the shortcut must still refuse.
+    db.add_all([M.Device(site_id=site.id, name='Exit camera 4', device_type='camera', lane_dir='exit', lane_no=4,
+                         ip_address='192.0.2.4', status='active', nested_inner=False),
+                M.Device(site_id=site.id, name='Exit barrier 4', device_type='barrier', lane_dir='exit', lane_no=4,
+                         status='active', nested_inner=False)]); db.commit()
     with pytest.raises(HTTPException) as error:
         asyncio.run(sessions_router.special_exit(s.id,{'kind':'paid_no_open'},db,user))
     assert error.value.status_code==409 and not calls

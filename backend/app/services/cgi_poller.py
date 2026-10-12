@@ -387,6 +387,10 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True,
             from .camera_evidence import exit_evidence_rejection
             from ..session_logic import reject_exit_for_review
             reason, conf = exit_evidence_rejection(data, settings.lpr_min_confidence)
+            from ..session_logic import exit_low_confidence_override
+            if exit_low_confidence_override(db, device, plate, reason):
+                data['_low_confidence_exact_match'] = reason
+                reason = None
             if not plate or reason:
                 reject_exit_for_review(db, device, plate, conf, data, reason if plate else 'CGI: plate not parsed')
                 return
@@ -399,7 +403,7 @@ async def _process_event(device_id: str, data: dict, allow_open: bool = True,
                                 reject_reason="CGI: plate not parsed", raw=data))
                 db.commit()
             return
-        if conf < settings.lpr_min_confidence:
+        if conf < settings.lpr_min_confidence and not (isinstance(data, dict) and data.get('_low_confidence_exact_match')):
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
                             lane_dir=device.lane_dir, confidence=conf, accepted=False,
                             reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=data))

@@ -1261,8 +1261,17 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     cam = _exit_camera_for(db, s, body.get("device_id"))
 
     if kind == "paid_no_open":
-        if not s.exit_device_id:
-            raise HTTPException(409, 'Гарах камер холбогдоогүй. Касс → Гарах уншилтыг шалгах хэсэгт шинэ зураг, эгнээг баталгаажуулна уу')
+        camera_read = bool(s.exit_device_id)
+        if not camera_read:
+            # Гарах камер энэ машиныг уншаагүй: оператор сонгосон эгнээ (device_id)
+            # эсвэл зогсоолын ГАНЦ гарах эгнээ. Олон эгнээ + сонголтгүй бол эхний
+            # камерыг тааж нээхгүй (10-11-ний хамгаалалт хэвээр). 10-11-нд 13 сешн
+            # «Төлөөд нээгдээгүй» гаргалтыг дуусгаж чадалгүй гацсан (аудит 10-12).
+            from ..services.exit_presence import pos_lane
+            lane = pos_lane(db, s, {"device_id": body["device_id"]} if body.get("device_id") else {})
+            if lane is None:
+                raise HTTPException(409, 'Гарах камер энэ машиныг уншаагүй — гарах эгнээг (хаалт/камер) сонгоно уу')
+            cam = lane["camera"]
         if not s.paid_at:
             raise HTTPException(400, "Энэ машины төлбөр төлөгдөөгүй байна")
         if s.status in ("OPEN", "AWAITING_PAYMENT", "PAID"):
@@ -1281,7 +1290,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
                             detail={"kind": kind, "label": spec["label"], "reason": note,
                                     "plate": s.plate_number, "site_id": s.site_id,
                                     "snapshot": s.verify_snapshot, "device_id": exit_dev.id}))
-            res = await _close_and_open(db, exit_dev, s, now, fee, source="manual")
+            res = await _close_and_open(db, exit_dev, s, now, fee, source="manual",
+                                        exit_confirmed=camera_read)
             return _session_out(db, s) | {"barrier_opened": bool(res.get("barrier_opened")),
                                           "special": kind}
         # Аль хэдийн хаагдсан (төлбөрийн дараа хаалт нээгдээгүй ч session хаагдсан):

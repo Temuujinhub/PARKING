@@ -237,7 +237,9 @@ def test_cgi_low_confidence_retains_metadata_but_heartbeat_is_not_a_rejection(ct
     monkeypatch.setattr(CP,'SessionLocal',lambda:c.db)
     monkeypatch.setattr(c.db,'close',lambda:None)
     monkeypatch.setattr(CP,'_dump_event',lambda *a:None)
-    raw={'Code':'TrafficJunction','TrafficCar':{'PlateNumber':s.plate_number,'Confidence':14},
+    # 2026-10-12: a low-confidence read EXACTLY matching an active stay is now
+    # accepted (test_exit_regressions_1012); keep this test on an unknown plate.
+    raw={'Code':'TrafficJunction','TrafficCar':{'PlateNumber':'9999УБА','Confidence':14},
          'Vehicle':{'Confidence':92,'Color':'White'},'RealUTC':1234567890}
     asyncio.run(CP._process_event(c.cams[0].id,raw))
     asyncio.run(CP._process_event(c.cams[0].id,{'Code':'KeepAlive'}))

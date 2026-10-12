@@ -157,6 +157,10 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
             from ..services.camera_evidence import exit_evidence_rejection
             from ..session_logic import reject_exit_for_review
             reason, conf = exit_evidence_rejection(event, settings.lpr_min_confidence)
+            from ..session_logic import exit_low_confidence_override
+            if exit_low_confidence_override(db, device, plate, reason):
+                event['_low_confidence_exact_match'] = reason
+                reason = None
             if not plate or reason:
                 results.append(reject_exit_for_review(db, device, plate, conf, event,
                                reason if plate else 'plate not parsed'))
@@ -168,7 +172,7 @@ async def lpr_callback(request: Request, device_key: str = "", db: Session = Dep
                             reject_reason="plate not parsed", raw=strip_images(event)))
             db.commit()
             continue
-        if conf < settings.lpr_min_confidence:
+        if conf < settings.lpr_min_confidence and not (isinstance(event, dict) and event.get('_low_confidence_exact_match')):
             db.add(LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate,
                             lane_dir=device.lane_dir, confidence=conf, accepted=False,
                             reject_reason=f"confidence<{settings.lpr_min_confidence}", raw=strip_images(event)))

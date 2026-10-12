@@ -237,14 +237,121 @@ def test_two_nearby_stays_are_ambiguous(ctx):
     assert r['action'] == 'review_required' and not audits(c, 'EXIT_OCR_MATCH')
 
 
-def test_registered_read_plate_never_takes_another_cars_stay(ctx):
-    c = ctx; s = stay(c, plate='1041УКС')
-    c.db.add(M.RegisteredDriver(plate_number='1041УНС', site_id=c.site.id,
+def registered(c, plate):
+    c.db.add(M.RegisteredDriver(plate_number=plate, site_id=c.site.id,
                                 valid_from=datetime.utcnow() - timedelta(days=1),
                                 valid_to=datetime.utcnow() + timedelta(days=1), is_active=True))
     c.db.commit()
+
+
+def test_registered_read_claims_its_misread_entry_stay(ctx):
+    # Audit #7: entry camera misread a registered car (1041УНС → 1041УКС); the
+    # exit read of the registered plate corrects the stay instead of billing it.
+    c = ctx; s = stay(c, plate='1041УКС'); registered(c, '1041УНС')
     exit_read(c, '1041УНС')
-    assert s.status == 'OPEN' and not audits(c, 'EXIT_OCR_MATCH')
+    assert s.plate_number == '1041УНС'
+    (a,) = audits(c, 'EXIT_PLATE_CORRECT')
+    assert a.detail['corrected'] is True and a.detail['entry_plate'] == '1041УКС'
+
+
+def test_registered_correction_makes_exit_free(ctx, monkeypatch):
+    c = ctx; s = stay(c, plate='1041УКС'); registered(c, '1041УНС')
+    free = dict(FEE, is_free=True, total_fee=0, base_fee=0, vat_amount=0)
+    monkeypatch.setattr(SL, 'session_fee_info',
+                        lambda db, ss, **kw: free if SL.find_registered(db, ss.plate_number, ss.site_id) else dict(FEE))
+    r = exit_read(c, '1041УНС')
+    assert r['barrier_opened'] and s.status == 'FREE' and s.plate_number == '1041УНС'
+
+
+def test_two_registered_plates_are_not_guessed(ctx):
+    c = ctx; s = stay(c, plate='1041УКС'); registered(c, '1041УНС'); registered(c, '1041УКС')
+    exit_read(c, '1041УНС')
+    assert s.plate_number == '1041УКС' and s.status == 'OPEN'
+    assert not audits(c, 'EXIT_PLATE_CORRECT') and not audits(c, 'EXIT_OCR_MATCH')
+
+
+def test_registered_read_with_unrelated_near_stay_exits_on_its_own_right(ctx):
+    c = ctx; other = stay(c, plate='6234УБА'); registered(c, '1234УБА')
+    r = exit_read(c, '1234УБА')
+    assert r['action'] == 'registered_exit' and r['barrier_opened']
+    assert other.status == 'OPEN' and other.plate_number == '6234УБА'
+
+
+# ── Audit #3: low-confidence exit read that exactly matches an active stay ──
+
+def cgi(c, monkeypatch, plate, confidence=14, extra=None):
+    from app.services import cgi_poller as CP
+    monkeypatch.setattr(CP, 'SessionLocal', lambda: c.db)
+    monkeypatch.setattr(c.db, 'close', lambda: None)
+    monkeypatch.setattr(CP, '_dump_event', lambda *a: None)
+    raw = {'Code': 'TrafficJunction', 'TrafficCar': {'PlateNumber': plate, 'Confidence': confidence}}
+    raw.update(extra or {})
+    asyncio.run(CP._process_event(c.cams[0].id, raw))
+
+
+def test_low_confidence_exact_active_stay_is_accepted(ctx, monkeypatch):
+    c = ctx; s = stay(c)
+    cgi(c, monkeypatch, s.plate_number, 14)
+    e = c.db.query(M.LprEvent).one()
+    assert e.accepted and e.confidence == 14
+    assert s.status == 'AWAITING_PAYMENT' and s.exit_device_id == c.cams[0].id
+    (a,) = audits(c, 'EXIT_LOWCONF_MATCH')
+    assert a.entity_id == s.id and a.detail['reason'].startswith('confidence<')
+
+
+def test_low_confidence_exact_paid_stay_opens(ctx, monkeypatch):
+    c = ctx; s = stay(c, status='PAID')
+    s.paid_at = datetime.utcnow(); s.exit_deadline = s.paid_at + timedelta(minutes=15); c.db.commit()
+    cgi(c, monkeypatch, s.plate_number, 9)
+    assert s.status == 'CLOSED' and c.commands == [(c.bars[0].id, s.id, 'auto_exit')]
+
+
+@pytest.mark.parametrize('plate', ['9999УБА', '1234УКА', '1234УБ'])
+def test_low_confidence_without_exact_active_stay_stays_rejected(ctx, monkeypatch, plate):
+    c = ctx; s = stay(c, plate='1234УБА')
+    cgi(c, monkeypatch, plate, 14)
+    e = c.db.query(M.LprEvent).one()
+    assert not e.accepted and e.reject_reason.startswith('confidence<')
+    assert s.status == 'OPEN' and not c.commands and not audits(c, 'EXIT_LOWCONF_MATCH')
+
+
+def test_conflicting_plate_texts_are_not_overridden(ctx, monkeypatch):
+    c = ctx; s = stay(c)
+    cgi(c, monkeypatch, s.plate_number, 14, {'Plate': {'PlateNumber': '9999УБА'}})
+    assert not c.db.query(M.LprEvent).one().accepted and s.status == 'OPEN'
+
+
+# ── Audit #2: «Төлөөд нээгдээгүй» special exit for a stay never read at exit ──
+
+def paid_stay(c):
+    s = stay(c, status='PAID'); s.paid_at = datetime.utcnow()
+    s.exit_deadline = s.paid_at + timedelta(minutes=15)
+    c.db.add(M.Payment(session_id=s.id, provider='POS', payment_method='CARD', sender_invoice_no=f'p-{s.id}',
+                       status='PAID', amount=1000, vat_amount=91, paid_at=s.paid_at, raw_payload={}))
+    c.db.commit()
+    return s
+
+
+def special(c, s, **body):
+    from app.routers import sessions_router as SR
+    return asyncio.run(SR.special_exit(s.id, {'kind': 'paid_no_open', **body}, c.db, c.user))
+
+
+def test_paid_no_open_without_exit_read_on_single_lane_site(ctx):
+    c = ctx; single_lane(c); s = paid_stay(c)
+    out = special(c, s)
+    assert out['barrier_opened'] and s.status == 'CLOSED' and s.exit_confirmed is False
+    assert c.commands == [(c.bars[0].id, s.id, 'manual')]
+
+
+def test_paid_no_open_without_exit_read_needs_lane_on_multi_lane_site(ctx):
+    from fastapi import HTTPException
+    c = ctx; s = paid_stay(c)
+    with pytest.raises(HTTPException) as err:
+        special(c, s)
+    assert err.value.status_code == 409 and not c.commands and s.status == 'PAID'
+    out = special(c, s, device_id=c.bars[1].id)
+    assert out['barrier_opened'] and c.commands == [(c.bars[1].id, s.id, 'manual')]
 
 
 # ── POS «Гарах машинууд» жагсаалт: minutes=30 (POS апп) 400 өгдөг байсан ──

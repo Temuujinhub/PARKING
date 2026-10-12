@@ -407,11 +407,12 @@ def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession
     """Гарах уншилт ЯГ таарах идэвхтэй бүртгэлгүй — OCR андуурлаар зөрсөн ГАНЦ
     бүртгэл байвал түүнийг буцаана (EXIT_OCR_MATCH), эс бол None (review).
 
-    Нөхцөл: (1) уншсан дугаар өөрөө энэ зогсоолд гэрээт биш — гэрээт бол тэр
-    өөрийн эрхээр гарна, өөр машины бүртгэлийг хаахгүй; (2) зогсоолын идэвхтэй
-    бүртгэлүүдээс ОЙРОЛЦОО (≤2 тэмдэгт, тайралт, дутуу орох уншилт) нь ЯГ НЭГ;
-    (3) тэр нэг нь `plates_ocr_confusable`. Ойролцоо 2+ бол хоёрдмол — review."""
-    if not plate or find_registered(db, plate, site_id) is not None:
+    Нөхцөл: (1) зогсоолын идэвхтэй бүртгэлүүдээс ОЙРОЛЦОО (≤2 тэмдэгт, тайралт,
+    дутуу орох уншилт) нь ЯГ НЭГ; (2) тэр нэг нь `plates_ocr_confusable`.
+    Ойролцоо 2+ бол хоёрдмол — review. Уншсан дугаар ГЭРЭЭТ бол зөвхөн тэр
+    бүртгэл гэрээт БИШ үед (орох камер гэрээт машиныг буруу уншсан — аудит
+    10-12 #7: 11 машин, 330,000₮ хий өр) тааруулж, дугаарыг нь засна."""
+    if not plate:
         return None
     opens = (db.query(ParkingSession)
              .filter(ParkingSession.site_id == site_id,
@@ -424,7 +425,11 @@ def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession
         or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
             and s.plate_number in plate))]
     if len(near) == 1 and plates_ocr_confusable(plate, near[0].plate_number):
-        return near[0]
+        s = near[0]
+        if (find_registered(db, plate, site_id) is not None
+                and (s.is_registered or find_registered(db, s.plate_number, site_id) is not None)):
+            return None   # хоёул гэрээт — хэнийх нь болохыг тааж болохгүй
+        return s
     return None
 
 
@@ -1663,6 +1668,23 @@ async def handle_inner_pass(db: Session, device: Device, plate: str, confidence:
             "counter_changed": changed, "barrier_opened": barrier_opened, "denied": False}
 
 
+def exit_low_confidence_override(db, device, plate, reason) -> bool:
+    """Гарах камерын БАГА/тодорхойгүй итгэлтэй уншилт (`confidence<N`,
+    `plate_confidence_unknown`) — текст нь зөв форматтай бөгөөд энэ зогсоолын
+    идэвхтэй бүртгэлтэй ЯГ таарвал хаяхгүй, ердийн гарах урсгалаар явуулна.
+
+    Аудит 10-12 #3: 10-04…10-11-нд 80 машин гарах камерт ЗӨВХӨН ийм уншилтаар
+    харагдсан (EREL 39) — бүгд хаягдаж «төлсөн ч нээгдээгүй»/гараар гаргалт
+    болсон. Санамсаргүй буруу уншилт яг өөр машины ИДЭВХТЭЙ бүртгэлийн 7
+    тэмдэгттэй давхцах магадлал маш бага. Текстийн зөрчил, формат буруу,
+    ойролцоо (fuzzy) тохирол — хэвээр review."""
+    if not plate or not reason:
+        return False
+    if not (reason.startswith('confidence<') or reason == 'plate_confidence_unknown'):
+        return False
+    return is_valid_plate(plate) and get_open_session(db, plate, device.site_id) is not None
+
+
 def reject_exit_for_review(db, device, plate, confidence, raw, reason):
     event = LprEvent(site_id=device.site_id, device_id=device.id, plate_number=plate or '?',
                     lane_dir='exit', confidence=confidence, accepted=False,
@@ -1698,7 +1720,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         if not is_valid_plate(plate):
             return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
         _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
-        if fuzzy_candidate:
+        # A registered plate exits on its own registration (free) — another car's
+        # nearby stay is left untouched instead of stopping the registered car.
+        if fuzzy_candidate and find_registered(db, plate, site_id) is None:
             return reject_exit_for_review(db, device, plate, confidence, raw, 'plate_mismatch_review')
     _br = _barrier_rules(db, site_id)
     _xr = _exit_rules(db, site_id)
@@ -1813,6 +1837,12 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             session.vehicle_type = _xt
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="exit", confidence=confidence, accepted=True, raw=strip_images(raw)))
+    if raw.get('_low_confidence_exact_match'):
+        from .models import AuditLog
+        db.add(AuditLog(username="system", action="EXIT_LOWCONF_MATCH", entity="session",
+                        entity_id=session.id if session else None,
+                        detail={"plate": plate, "confidence": confidence, "device_id": device.id,
+                                "reason": raw.get('_low_confidence_exact_match')}))
     if session and fuzzy:
         # Гарах камер орох дугаараас өөр уншсан (OCR зөрүү) — ойролцоо session-д
         # тохоов. Ил тод байдлын үүднээс тэмдэглэж, аудитад бичнэ.
@@ -1821,7 +1851,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # ОРОХ ДУТУУ уншсан байсан бол гарах ЗӨВ дугаараар ЗАСНА — цэвэр дата
         # үлдээж, дараагийн тайлан/хайлт зөв дугаараар ажиллана. Төлбөр нь
         # session-ий entry_time-аар бодогдох тул орсон цаг зөв хэвээр.
-        corrected = (not is_valid_plate(old_plate) and is_valid_plate(plate)
+        corrected = ((not is_valid_plate(old_plate) and is_valid_plate(plate)
+                      or (find_registered(db, plate, site_id) is not None
+                          and find_registered(db, old_plate, site_id) is None))
                      and not getattr(session, "hospital_grant_id", None))
         if corrected:
             session.plate_number = plate
