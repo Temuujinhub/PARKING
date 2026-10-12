@@ -502,8 +502,10 @@ def recent_exits(site_id: str, minutes: int | None = None,
     from ..config import settings as _cfg
     enforce_site(user, site_id)
     win = minutes if minutes is not None else getattr(_cfg, "exit_queue_show_min", 3)
-    if not 1 <= win <= 10:
-        raise HTTPException(400, 'Гарах дарааллын хугацаа 1–10 минут байна')
+    # Display window only — gate decisions use exit_presence. The POS app sends
+    # minutes=30 (Postman/guide); the 10-11 release rejected >10 with HTTP 400 and
+    # every POS «Гарах машинууд» list went empty (2026-10-12). Clamp, never fail.
+    win = max(1, min(60, int(win)))
     since = datetime.utcnow() - timedelta(minutes=win)
     from ..services.exit_presence import lane_cameras
     cameras = lane_cameras(db, site_id, device_id, lane_no)

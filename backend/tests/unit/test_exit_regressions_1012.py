@@ -245,3 +245,21 @@ def test_registered_read_plate_never_takes_another_cars_stay(ctx):
     c.db.commit()
     exit_read(c, '1041УНС')
     assert s.status == 'OPEN' and not audits(c, 'EXIT_OCR_MATCH')
+
+
+# ── POS «Гарах машинууд» жагсаалт: minutes=30 (POS апп) 400 өгдөг байсан ──
+
+@pytest.mark.parametrize('minutes,visible', [(30, True), (60, True), (0, False), (500, True)])
+def test_recent_exits_minutes_is_clamped_not_rejected(ctx, minutes, visible):
+    from app.routers import sessions_router as SR
+    c = ctx; s = stay(c, status='AWAITING_PAYMENT'); read(c, s, c.cams[0], age=20 * 60)
+    rows = SR.recent_exits(site_id=c.site.id, minutes=minutes, db=c.db, user=c.user)
+    assert [r['id'] for r in rows] == ([s.id] if visible else [])
+
+
+def test_pos_terminal_queue_survives_large_default_window(ctx, monkeypatch):
+    from app.routers import sessions_router as SR
+    from app.config import settings
+    monkeypatch.setattr(settings, 'exit_queue_show_min', 30)
+    c = ctx; s = stay(c, status='AWAITING_PAYMENT'); read(c, s, c.cams[1], age=600)
+    assert SR.recent_exits(site_id=c.site.id, db=c.db, user=c.user)[0]['id'] == s.id
