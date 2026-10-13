@@ -29,7 +29,7 @@ from app.database import Base
 from app.routers import compensations_router as C, payments_router as PR, reports_router as R
 from app.routers import reports_excel as X, vat_recon as V
 from app.services import app_settings as A, financial_jobs as J, payment_rules as PRULES
-from app.services import payment_wait
+from app.services import payment_wait, vat_duplicates as VD
 from app.services.msgbill import MsgbillAccount
 from app.services.receipts import choose_primary
 
@@ -563,10 +563,13 @@ def historical_msgbill(db, s, u, *, method='CASH', seq=1, cancelled=False, mark=
     return p, r
 
 
-def cancel_dups(db, u, ids, teg=None, dry=False):
-    return asyncio.run(R.cancel_duplicate_receipts(
-        {'payment_ids': ids, 'dry_run': dry, 'note': 'ТЕГ тулгалт: Ontime давхардал',
-         'teg_ddtd': teg or {}}, db, u))
+def cancel_dups(db, u, ids, teg=None):
+    """API-ийн арын job ба CLI-ийн НЭГ зам (vat_duplicates.cancel_one) — нэгтгэлийн дараа
+    давхардлын цуцлалт зөвхөн үүгээр явна."""
+    return [asyncio.run(VD.cancel_one(db, pid, note='ТЕГ тулгалт: Ontime давхардал',
+                                      username=u.username,
+                                      teg={'teg_ddtd': (teg or {}).get(pid)}))
+            for pid in ids]
 
 
 def test_duplicate_cancel_records_terminal_receipt_and_retry_is_noop(db, monkeypatch):
@@ -576,9 +579,9 @@ def test_duplicate_cancel_records_terminal_receipt_and_retry_is_noop(db, monkeyp
     monkeypatch.setattr(PR.msgbill, 'cancel_receipt', cancel)
     teg = _ddtd(77, ONTIME_POS)
     res = cancel_dups(db, u, [p.id], {p.id: teg})
-    assert res['ok'] == 1 and cancel.await_count == 1
-    assert res['items'][0]['terminal_receipt'] == {'status': 'SENT', 'ebarimt_id': teg,
-                                                   'provider': 'ONTIME'}
+    assert res[0]['ok'] is True and cancel.await_count == 1
+    tr = res[0]['terminal_receipt']
+    assert (tr['status'], tr['ebarimt_id'], tr['provider']) == ('SENT', teg, 'ONTIME')
     db.expire_all()
     rows = {x.provider: x for x in receipts(db, p.id)}
     assert rows['MSGBILL'].status == 'CANCELLED'
@@ -594,7 +597,7 @@ def test_duplicate_cancel_records_terminal_receipt_and_retry_is_noop(db, monkeyp
     assert f'ДДТД: {teg}' in PR.payment_print(p.id, db, u)['print_data']['lines']
     # Дахин ажиллуулбал (ижил ТЕГ файл) — терминалын мөрийг ХӨНДӨХГҮЙ
     again = cancel_dups(db, u, [p.id], {p.id: teg})
-    assert again['ok'] == 0 and again['items'][0]['external'] is True
+    assert again[0]['skipped'] == 'already_cancelled' and 'terminal_receipt' not in again[0]
     assert cancel.await_count == 1
     db.expire_all()
     assert {x.provider: x.status for x in receipts(db, p.id)} == {'MSGBILL': 'CANCELLED', 'ONTIME': 'SENT'}
@@ -607,7 +610,7 @@ def test_duplicate_cancel_with_untrusted_ddtd_records_external(db, monkeypatch):
     p, r = historical_msgbill(db, s, u, method='CARD')
     monkeypatch.setattr(PR.msgbill, 'cancel_receipt', AsyncMock(return_value={'state': 'CANCELLED'}))
     res = cancel_dups(db, u, [p.id], {p.id: _ddtd(78, MSGBILL_POS)})
-    assert res['items'][0]['terminal_receipt']['status'] == 'EXTERNAL'
+    assert res[0]['terminal_receipt']['status'] == 'EXTERNAL'
     db.expire_all()
     ext = [x for x in receipts(db, p.id) if x.status == 'EXTERNAL']
     assert len(ext) == 1 and ext[0].ebarimt_id is None and ext[0].raw['teg']['untrusted'] is True
@@ -679,8 +682,12 @@ def _paid(db, s, u, at, amount, *, external, seq):
     return p
 
 
-def test_vat_reconcile_confirms_and_lists_missing_terminal_receipts(db):
+def test_vat_reconcile_confirms_and_lists_missing_terminal_receipts(db, monkeypatch):
     from starlette.datastructures import UploadFile
+    from sqlalchemy.orm import sessionmaker
+    import app.database as D
+    # API тулгалтыг thread дээр ӨӨРИЙН session-ээр хийдэг (vat_duplicates.reconcile_db)
+    monkeypatch.setattr(D, 'SessionLocal', sessionmaker(bind=db.get_bind(), autoflush=False))
     s, u = parking(db), user(db)
     base = datetime(2026, 10, 12, 4, 0, 0)
     ours = [_paid(db, s, u, base + timedelta(minutes=10 * i), 1000 + 100 * i, external=False, seq=i)
@@ -710,6 +717,7 @@ def test_vat_reconcile_confirms_and_lists_missing_terminal_receipts(db):
     assert res['terminal_missing'][0]['payment_id'] == missing.id
     assert res['terminal_missing'][0]['status'] == 'EXTERNAL'
     assert res['unmatched_tax_total'] == 0                          # Ontime мөр бүр тайлагдсан
+    assert res['tax_verdicts'] == {'TERMINAL': 4}
     from openpyxl import load_workbook
     wb = load_workbook(BytesIO(asyncio.run(_collect(run(excel=True)))))
     rows = [[c.value for c in r] for r in wb['Манайд бий - ТЕГ-д алга'].iter_rows()]

@@ -13,6 +13,7 @@ from ..models import (
     AuditLog, Compensation, LprEvent, ParkingSession, ParkingSite, Payment, User, VatReceipt,
 )
 from ..serializers import to_dict
+from .vat_recon import DEFAULT_TOL as VR_DEFAULT_TOL
 from . import reports_excel as _excel
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -1251,7 +1252,7 @@ def _vat_tenants(db, user) -> list[dict]:
 
 
 @router.post("/vat-reconcile")
-async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = None, tol: int = 3,
+async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = None, tol: int = 60,
                         excel: bool = False, tenant_id: str | None = None,
                         col_ddtd: str | None = None, col_dt: str | None = None,
                         col_amount: str | None = None, db: Session = Depends(get_db),
@@ -1260,7 +1261,10 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
 
     ДДТД-ээр тулгаж БОЛОХГҮЙ: суваг бүр (QPay, msgbill/Онлайм) операторын кодтой
     билл буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог
-    (2026-08-19 нотлогдсон). Тиймээс (цаг ± tol сек, дүн)-ээр тулгана.
+    (2026-08-19 нотлогдсон). Тиймээс (цаг ± tol сек, дүн)-ээр, касс бүрийн өөрийн
+    цагийн бүсээр, НЭГ-НЭГЭЭР тулгана (services/vat_duplicates — CLI-тэй нэг логик).
+    tol анхдагч 60с (2026-10-13): msgbill баримт төлбөрөөс p95 4.8с, Ontime 27с
+    хүртэл зөрдөг тул хуучин 3с олон зөв хосыг «зөрүү» болгож байв.
 
     tenant_id: ТЕГ портал нь ТТД тус бүрээр экспорт өгдөг тул тулгалтыг ЗӨВХӨН
     тухайн түрээслэгчийн зогсоолуудын баримттай хийнэ (эс бөгөөс бусад ТТД-ийн
@@ -1268,7 +1272,7 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
     tz_shift: ТЕГ файлын цагт нэмэх цаг. Хоосон = 0 ба −TZ хоёрыг туршиж
     ИЛҮҮ ТААРСАНЫГ нь автоматаар сонгоно (файл UTC/локал аль нь ч байж болно).
     col_*: багана автоматаар танигдаагүй үед хэрэглэгчийн гараар заасан үсэг."""
-    from ..models import Tenant, VatReceipt
+    from ..models import Tenant
     from . import vat_recon as _vr
     raw = await file.read()
     # nginx нь 10MB-аас том биеийг backend хүртэл НЭВТРҮҮЛДЭГГҮЙ (413, HTML хариу)
@@ -1309,91 +1313,74 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
             scope_ids = [s for s in scope_ids if s in set(allowed)]
             if not scope_ids:
                 raise HTTPException(403, "Энэ түрээслэгчийн мэдээлэл харах эрхгүй.")
-    # Аль ч цагийн шилжилтэд баримт багтахаар цонхыг өргөсгөж татна
+    from ..services import vat_duplicates as VD
+    tol = max(1, min(int(tol or VR_DEFAULT_TOL), 600))
     shifts = [0.0, -float(_cfg.tz_offset_hours)] if tz_shift is None else [float(tz_shift)]
-    pad = timedelta(hours=max(abs(s) for s in shifts) + 1)
-    lo, hi = min(t["dt"] for t in tax) - pad, max(t["dt"] for t in tax) + pad
-    q = (db.query(VatReceipt, Payment, PAY_PLATE, ParkingSite.name)
-         .join(Payment, VatReceipt.payment_id == Payment.id)
-         .outerjoin(ParkingSession, VatReceipt.session_id == ParkingSession.id)
-         .outerjoin(ParkingSite, PAY_SITE == ParkingSite.id)
-         .filter(Payment.paid_at >= lo, Payment.paid_at < hi))
-    q = (q.filter(PAY_SITE.in_(scope_ids)) if scope_ids is not None
-         else _flt(q, PAY_SITE, _scope(user)))
+    user_scope = _scope(user)
+
+    def _work():
+        # Thread дээр ӨӨРИЙН session-тэй: олон мянган төлбөр/баримт татах нь event
+        # loop-ыг блоклож хаалт/LPR царцаадаг (хүсэлтийн session thread-safe биш)
+        from ..database import SessionLocal
+        s = SessionLocal()
+        try:
+            return VD.reconcile_db(
+                s, tax, shifts=shifts, tol=tol,
+                ours_sites=scope_ids if scope_ids is not None else user_scope,
+                # Төлбөрийн тайлбарт зөвхөн хэрэглэгчийн ЭРХИЙН хүрээ — түрээслэгчийн
+                # шүүлтээс гадуурх төлбөрийг «ӨӨР ЗОГСООЛ» гэж ялгаж харуулахын тулд
+                probe_sites=user_scope,
+                scope_ids=set(scope_ids) if scope_ids is not None else None)
+        finally:
+            # rollback() БИШ — тэр нь объектуудыг expire хийж, доорх Excel/ДДТД
+            # тоолол DetachedInstanceError өгнө. close() нь транзакцыг хааж, ачаалсан
+            # утгатай нь салгана (зөвхөн уншсан тул бичих юм алга).
+            s.close()
     try:
-        # EXTERNAL (POS терминал/Ontime гаргасан, манайд ДДТД-гүй) нь МАНАЙ баримт
-        # биш — «манайд бий, ТЕГ-д алга» болж хуурамч зөрүү, эсвэл Ontime-ийн мөрийг
-        # «таарсан» гэж залгихгүйн тулд тулгалтаас хасна; тоог нь тусад нь буцаана.
-        rows_all = q.all()
-        ours = [o for o in rows_all if o[0].status != "EXTERNAL"]
-        external_rows = [o for o in rows_all if o[0].status == "EXTERNAL"]
-        r = await _aio.to_thread(_vr.best_shift, tax, ours, shifts, tol)
-        # EXTERNAL-ийг ҮЛДСЭН ТЕГ мөрүүдтэй тулгана: таарсан = терминал баримтаа
-        # гаргасан нь батлагдсан; таараагүй = ТЕГ-т баримтгүй борлуулалт (хяналт #3)
-        term = _vr.match_terminal(tax, [t for t in tax if not t["used"]], external_rows,
-                                  shifts, tol)
+        a = await _aio.to_thread(_work)
+        ours = a["ours"]
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
                                  f"{type(e).__name__}: {str(e)[:200]}")
+    r, left, tax_explained, dups = a["r"], a["left"], a["explained"], a["duplicates"]
     shift, matched, un_ours = r["shift"], r["matched"], r["unmatched_ours"]
+    _tail = r.get("tail")
+    verdicts = dict(Counter(x["verdict"] for x in tax_explained))
+    # POS терминал (Ontime) гаргасан гэж бүртгэсэн төлбөр (EXTERNAL) — манай баримт биш
+    # тул тулгалтын «манайх»-т ороогүй; ТЕГ-ийн мөр ТӨЛБӨРтэй нь таарсан эсэхээр
+    # (vat_recon.terminal_check, хяналт #3): таараагүй = ТЕГ-т баримтгүй борлуулалт
+    term = a["terminal"]
     terminal_missing = term["missing"]
-    _tail = _vr.pos_tail_len([t["ddtd"] for t in tax])
-    left = [t for t in tax if not t["used"]]
-    # «ТЕГ-д бий, манайд алга» мөрүүдийг манай ТӨЛБӨРийн бүртгэлээр тайлна:
-    # баримтын бүртгэл байхгүй ч төлбөр нь байвал → баримт үүссэн боловч манайд
-    # хадгалагдаагүй, эсвэл давхар үүссэн. Энэ ялгааг гараар хөөх нь урт ажил байв.
-    tax_explained, verdicts = [], {}
-    if left:
-        off = timedelta(hours=shift)
-        lo_c = min(t["dt"] for t in tax) + off - timedelta(seconds=tol + 5)
-        hi_c = max(t["dt"] for t in tax) + off + timedelta(seconds=tol + 5)
-        pq = (db.query(Payment, PAY_PLATE, ParkingSite.name,
-                       PAY_SITE)
-              .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
-              .outerjoin(ParkingSite, PAY_SITE == ParkingSite.id)
-              .filter(Payment.paid_at >= lo_c, Payment.paid_at <= hi_c,
-                      Payment.status == "PAID"))
-        pq = _flt(pq, PAY_SITE, _scope(user))   # эрхийн хүрээ л барина
-        pay_rows = pq.all()
-        rec_by_pay: dict[str, list] = {}
-        terminal_pay: set = set()
-        if pay_rows:
-            ids = [p.id for p, *_ in pay_rows]
-            for pid, eid, st in db.query(VatReceipt.payment_id, VatReceipt.ebarimt_id,
-                                         VatReceipt.status).filter(
-                    VatReceipt.payment_id.in_(ids)).all():
-                if st == "EXTERNAL":
-                    terminal_pay.add(pid)
-                    continue
-                rec_by_pay.setdefault(pid, []).append(eid)
-        probe = [{"id": p.id, "paid_at": p.paid_at, "amount": float(p.amount),
-                  "site_id": site_id, "plate": plate, "site_name": site_name,
-                  "provider": p.provider, "method": p.payment_method,
-                  "receipts": rec_by_pay.get(p.id, []),
-                  "terminal": p.id in terminal_pay}
-                 for p, plate, site_name, site_id in pay_rows]
-        matched_pay_ids = {t["ours"][1].id for t in tax if t.get("ours")}
-        tax_explained = _vr.explain_unmatched_tax(
-            left, probe, shift, tol, matched_pay_ids,
-            set(scope_ids) if scope_ids is not None else None)
-        verdicts = dict(Counter(r["verdict"] for r in tax_explained))
+    shown_left = [x for x in tax_explained if x["verdict"] != "TERMINAL"]
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
         # «Манайд бий, ТЕГ-д алга» хуудсанд терминалын баримт ОЛДООГҮЙ төлбөрүүд ч орно
         # (status EXTERNAL) — санхүүд баримтгүй борлуулалт гэж харагдах ёстой
         return await _aio.to_thread(
-            _vr.reconcile_excel, tax, ours, un_ours + terminal_missing, tol, _cfg.tz_offset_hours,
+            _vr.reconcile_excel, tax, ours, un_ours, tol, _cfg.tz_offset_hours,
             tenant.name if tenant else "Бүх зогсоол", shift,
-            {r["ddtd"]: r for r in tax_explained})
+            {x["ddtd"]: x for x in tax_explained}, dups, term)
+    loc = timedelta(hours=_cfg.tz_offset_hours)
+    for x in tax_explained:
+        x["dt_ub"] = (datetime.fromisoformat(x["dt_utc"]) + loc).strftime("%Y-%m-%d %H:%M:%S")
+    # MOCK (40 оронтой, ТЕГ-т очоогүй) баримтыг «касс» гэж тоолохгүй — нэг бүлэг болгоно
+    live = [rec for rec, *_ in r["inside"] if rec.status != "CANCELLED"]
+    ours_pos = _vr.pos_groups([rec.ebarimt_id for rec in live if not _vr.is_mock_receipt(rec)], _tail)
+    n_mock = sum(1 for rec in live if _vr.is_mock_receipt(rec))
+    if n_mock:
+        ours_pos["MOCK (ТЕГ-т очоогүй)"] = n_mock
     return {
         "tax_total": len(tax), "ours_total": r["ours_in_window"], "matched": matched,
         "ddtd_equal": r["ddtd_equal"], "tz_shift": shift, "tol": tol,
         # Тулгалтын хүрээнээс ГАДУУР үлдсэн манай баримтууд — «зөрүү» БИШ:
         # файл тэр хугацааг хамраагүй, эсвэл баримт нь цуцлагдсан
         "outside_window": r["outside_window"], "cancelled": r["cancelled"],
+        # Манай ЦУЦЛАГДСАН баримтын мөр файлд байгаа (файлыг цуцлалтаас өмнө татсан) —
+        # тэдгээр нь цуцлагдсан баримттайгаа холбогдоно, «зөрүү» биш
+        "cancelled_in_file": r.get("cancelled_in_file", 0),
         # POS терминал (Ontime) гаргасан гэж бүртгэсэн төлбөр (файлын хугацаанд) — манай
         # баримт биш тул «манайх»-т ороогүй; ТЕГ-ийн терминалын мөртэй ТУСАД НЬ тулгана:
         #   terminal_confirmed — ТЕГ-т терминалын баримт олдсон (хэвийн)
@@ -1411,20 +1398,35 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # хэдэн өөр касс байна, тэдгээрийн аль нь манайх вэ гэдгийг харуулна —
         # «энэ 82 мөр манай аль gateway-ээр гарсан бэ» гэдгийн шууд хариу.
         "tax_pos": _vr.pos_groups([t["ddtd"] for t in tax], _tail),
-        "unmatched_tax_pos": _vr.pos_groups([t["ddtd"] for t in left], _tail),
-        "ours_pos": _vr.pos_groups([rec.ebarimt_id for rec, *_ in r["inside"]
-                                    if rec.status != "CANCELLED"], _tail),
+        "unmatched_tax_pos": _vr.pos_groups([x["ddtd"] for x in shown_left], _tail),
+        "ours_pos": ours_pos,
         # Касс бүрийн ЦАГИЙН ШИЛЖИЛТ — ТЕГ-ийн нэг экспорт дотор цагийн бүс
         # холилдож ирдэг (QPay UTC, msgbill УБ локал). Хэрэглэгчид ХАРАГДАХ ёстой.
         "group_shifts": r.get("group_shifts", {}),
+        # Манай баримтын ДДТД-д гардаг касс = манайх; бусад нь өөр систем (Ontime POS)
+        "own_registers": r.get("own_registers", []),
+        "foreign_registers": r.get("foreign_registers", []),
+        # Касс бүрд: мөр, таарсан (манайх — баримттай; өөр систем — төлбөртэй), шилжилт
+        "group_stats": r.get("group_stats", {}),
+        # Өөр системийн касс бүрийн зогсоол (QR биш тааралтын олонх) — өөр зогсоолын
+        # төлбөр тэр кассын давхардал гэж ЦУЦЛАГДАХГҮЙ
+        "register_sites": a.get("register_sites", {}),
         "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
         "unmatched_ours_total": len(un_ours),
-        "unmatched_tax": sorted(tax_explained, key=lambda x: x["dt"])[:200],
-        "unmatched_tax_total": len(left),
+        # Дэлгэцэнд 200 мөр л — цуцлах жагсаалтыг ҮҮНЭЭС БҮҮ бүтээ (доорх duplicates)
+        # TERMINAL (терминал баримтаа гаргасан — хэвийн) мөрийг «ТЕГ-д бий, манайд алга»-д
+        # тоолохгүй — terminal_confirmed-д; tax_verdicts-д тоо нь харагдана
+        "unmatched_tax": sorted(shown_left, key=lambda x: x["dt_utc"])[:200],
+        "unmatched_tax_total": len(shown_left),
         "tax_verdicts": verdicts, "verdict_labels": _vr.VERDICTS,
-        "note": ("Тулгалт (цаг ±%dс, дүн)-ээр%s. ДДТД ижил байх шаардлагагүй — "
+        # 2026-10-13: ЦУЦЛАХ жагсаалт БҮТНЭЭРЭЭ (өмнө нь UI эхний 200 мөрөөс бүтээдэг
+        # байсан тул 200-гаас хойших давхардал цуцлагдахгүй үлддэг байв)
+        "duplicates": dups,
+        "duplicate_summary": _vr.duplicate_summary(dups),
+        "note": ("Тулгалт (цаг ±%dс, дүн, нэг-нэгээр)-ээр%s. ДДТД ижил байх шаардлагагүй — "
                  "суваг ба ТЕГ өөр дугаарладаг."
-                 % (tol, "" if shift == 0 else f", файлын цагт {shift:+g}ц нэмсэн")),
+                 % (tol, "" if not any(r.get("group_shifts", {}).values())
+                    else ", касс бүрийн цагийн бүсийг тусад нь тааруулав")),
     }
 
 
@@ -1442,151 +1444,176 @@ async def vat_send(db: Session = Depends(get_db), user: User = Depends(require("
     return result
 
 
-def _cancel_blocker(rec, payment, site) -> str | None:
-    """Энэ баримтыг цуцлах боломжгүй БОЛ шалтгааныг буцаана (урьдчилсан шалгалт)."""
-    from ..services import msgbill as _mb
-    prov = rec.provider or ("QPAY" if payment.provider == "QPAY" and payment.provider_payment_id
-                            else "POSAPI")
-    if prov == "MSGBILL":
-        if not rec.provider_ref:
-            return "msgbill баримтын ID (provider_ref) алга — цуцалж чадахгүй"
-        try:
-            if not _mb.api_key_for(site).enabled:
-                return "msgbill түлхүүр тохируулаагүй"
-        except Exception:  # noqa: BLE001
-            return "msgbill тохиргоог уншиж чадсангүй"
-    elif prov == "QPAY" and not payment.provider_payment_id:
-        return "QPay-ийн payment_id алга — цуцалж чадахгүй"
-    return None
-
-
 @router.post("/vat-reconcile/cancel-duplicates")
 async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
                                     user: User = Depends(require("vat", "reports"))):
     """Тулгалтаар илэрсэн ДАВХАР баримтуудыг БӨӨНӨӨР цуцлах.
 
     body: {payment_ids: [...], note: str, dry_run: bool = true,
-           teg_ddtd?: {payment_id: ТЕГ-ийн давхар (терминалын) мөрийн ДДТД}}
+           teg: {payment_id: {teg_ddtd, teg_register}}?}
 
-    2026-10-13: зөвхөн МАНАЙ системийн (msgbill/QPay/PosAPI) баримтыг цуцална —
-    терминалын (ONTIME/EXTERNAL) мөрийг хэзээ ч хөндөхгүй. Цуцалсан мөрийг
-    DUPLICATE_OF_POS гэж тэмдэглэж («Дахин үүсгэх» 409), терминалын баримтыг
-    (teg_ddtd) ONTIME/SENT мөрөөр бүртгэнэ — эс бөгөөс «Дахин үүсгэх» msgbill-ээр
+    2026-10-13: зөвхөн МАНАЙ системийн (msgbill) баримтыг цуцална — терминалын
+    (ONTIME/EXTERNAL) мөрийг хэзээ ч хөндөхгүй. Цуцалсан мөрийг DUPLICATE_OF_POS
+    гэж тэмдэглэж («Дахин үүсгэх» 409), терминалын баримтыг (teg_ddtd) ONTIME/SENT
+    мөрөөр (эсвэл итгэх ДДТД-гүй бол EXTERNAL) бүртгэнэ (vat_duplicates.cancel_one →
+    financial_jobs.record_terminal_receipt) — эс бөгөөс «Дахин үүсгэх» msgbill-ээр
     давхардлыг сэргээдэг байв.
 
-    ⚠ ЧУХАЛ — АЛЬ баримт цуцлагдахыг ойлгох: манай систем зөвхөн ӨӨРИЙН
-    үүсгэсэн (VatReceipt хүснэгтэд байгаа) баримтыг цуцалж чадна. Тулгалтад
-    «ДАВХАР» гэж тэмдэглэгдсэн ТЕГ-ийн мөр нь ӨӨР кассын дугаартай (манайд
-    бүртгэлгүй) байвал ТҮҮНИЙГ цуцлах боломжгүй — энэ endpoint нь тухайн
-    төлбөрийн МАНАЙ баримтыг цуцална. Тиймээс dry_run=true үед юу цуцлагдахыг
-    (ДДТД, суваг) бүтнээр нь буцаадаг ба UI үүнийг заавал харуулна.
+    ⚠ ЧУХАЛ — манай систем зөвхөн ӨӨРИЙН (msgbill) баримтыг цуцална. POS
+    терминалын (Ontime) баримт манайд бүртгэлгүй тул түүнийг цуцлах боломжгүй
+    ба цуцлах ч ёсгүй (жолоочид хэвлэгдэж өгсөн нь тэр). Дүрэм нь CLI-тэй НЭГ
+    (vat_recon.cancel_block_reason): QR/QPay биш төлбөр, идэвхтэй баримт бүгд
+    msgbill + provider_ref-тэй. UI-аас ирсэн ID-д итгэхгүй — төлбөр бүрийг
+    дахин шалгана.
+
+    dry_run=true — синхрон, юу ч бичихгүй: ЯГ ямар ДДТД цуцлагдах/яагаад үгүйг буцаана.
+    dry_run=false — АРЫН АЖИЛ (2026-10-13): өмнө нь 60+ HTTP дуудлагыг нэг хүсэлтэд
+      дараалан хийж nginx-ийн 60с-т 504 өгдөг байв. Одоо job эхлүүлээд шууд
+      буцаана; явцыг GET …/cancel-duplicates/status. Нэг зэрэг НЭГ л job (409).
+      Төлбөр бүрд commit + AuditLog EBARIMT_CANCEL_BULK, аль хэдийн цуцлагдсаныг
+      алгасна (дахин ажиллуулж болно), ТЕГ/msgbill-ийг цохихгүй завсарлагатай,
+      эрх/квотын алдаа давтагдвал зогсоно.
 
     Мөнгө буцаахгүй — зөвхөн татварын баримт."""
-    from ..services.financial_jobs import is_system_receipt, record_terminal_receipt
-    from ..services.receipts import DUPLICATE_OF_POS
-    from .payments_router import _lock_payment, _site_of, cancel_ebarimt
-    ids = [str(x) for x in (body.get("payment_ids") or []) if x]
+    from ..services import vat_duplicates as VD
+    ids = list(dict.fromkeys(str(x) for x in (body.get("payment_ids") or []) if x))
     dry = bool(body.get("dry_run", True))
-    teg_map = body.get("teg_ddtd") if isinstance(body.get("teg_ddtd"), dict) else {}
     note = str(body.get("note") or "").strip()[:120]
     if not ids:
         raise HTTPException(400, "Цуцлах төлбөр сонгогдоогүй байна.")
-    if len(ids) > 500:
-        raise HTTPException(400, f"Нэг удаад 500-аас олон боломжгүй ({len(ids)} ирлээ).")
+    if len(ids) > _DUP_MAX:
+        raise HTTPException(400, f"Нэг удаад {_DUP_MAX}-аас олон боломжгүй ({len(ids)} ирлээ) — "
+                                 "серверийн tools/vat_cancel_duplicates.py ашиглана уу.")
     if not dry and not note:
         raise HTTPException(400, "Цуцлах шалтгааныг бичнэ үү (ТЕГ-ийн бүртгэлд үлдэнэ).")
     scope = _scope(user)
     allowed = None if scope is None else ({scope} if isinstance(scope, str) else set(scope))
 
-    out, done, failed = [], 0, 0
-    for pid in ids:
-        payment = db.get(Payment, pid)
-        if not payment:
-            out.append({"payment_id": pid, "ok": False, "error": "Төлбөр олдсонгүй"})
-            failed += 1
-            continue
-        site = _site_of(payment)
-        if allowed is not None and (site is None or site.id not in allowed):
-            out.append({"payment_id": pid, "ok": False, "error": "Энэ зогсоолын эрхгүй"})
-            failed += 1
-            continue
-        recs = db.query(VatReceipt).filter(VatReceipt.payment_id == pid).all()
-        info = {"payment_id": pid, "site_name": site.name if site else "",
-                "amount": float(payment.amount), "paid_at": payment.paid_at.isoformat()
-                if payment.paid_at else None,
-                "receipts": [{"ddtd": r.ebarimt_id, "provider": r.provider, "status": r.status}
-                             for r in recs]}
-        teg = str(teg_map.get(pid) or "").strip()[:120] or None
-        info["teg_ddtd"] = teg
-        # Зөвхөн МАНАЙ системийн баримт — терминалын (ONTIME/TERMINAL/EXTERNAL) мөрийг
-        # цуцлавал ТЕГ-т үлдсэн цорын ганц хүчинтэй баримтын бүртгэл алга болно
-        # (тулгалтыг дахин ажиллуулахад msgbill-ийн цуцлагдсан мөр «давхар» гарч ирдэг)
-        target = [r for r in recs if r.status in ("SENT", "CANCEL_PENDING") and r.ebarimt_id
-                  and is_system_receipt(r)]
-        if not target:
-            # EXTERNAL = POS терминал (Ontime) гаргасан — манай системийн баримт БИШ
-            ext = any(r.status == "EXTERNAL" or (r.status == "SENT" and not is_system_receipt(r))
-                      for r in recs)
-            out.append({**info, "ok": False, "external": ext,
-                        "error": ("POS терминалын баримт бүртгэлтэй — системээс цуцлах манай "
-                                  "баримт алга" if ext else "Цуцлах ИЛГЭЭГДСЭН баримт алга")})
-            failed += 1
-            continue
-        if dry:
-            # Цуцлалт БОДИТООР ажиллах уу гэдгийг урьдчилан хэлнэ — 61 баримтыг
-            # эхлүүлээд дундуур нь «provider_ref алга» гэж унахаас сэргийлнэ
-            blockers = [b for b in (_cancel_blocker(r, payment, site) for r in target) if b]
-            out.append({**info, "ok": not blockers,
-                        "error": "; ".join(blockers) or None,
-                        "will_cancel": [{"ddtd": r.ebarimt_id, "provider": r.provider}
-                                        for r in target]})
-            done += int(not blockers)
-            failed += int(bool(blockers))
-            continue
-        locked = _lock_payment(db, pid)   # давхар товшилтоос хамгаална
-        if locked is None:
-            out.append({**info, "ok": False, "error": "Баримтын ажиллагаа явагдаж байна"})
-            failed += 1
-            continue
-        mark = {"reason": DUPLICATE_OF_POS, "teg_ddtd": teg, "source": "api", "by": user.username}
-        res = await cancel_ebarimt(db, locked, note, mark=mark, only_ids={r.id for r in target})
-        terminal = None
-        if all(r.status in ("CANCELLED", "CANCEL_PENDING") for r in target):
-            # Манай баримт(ууд) цуцлагдсан/хүлээгдэж буй — терминалын баримтыг бүртгэнэ
-            try:
-                if _lock_payment(db, pid) is not None:
-                    terminal = record_terminal_receipt(db, locked, teg, replaced=target,
-                                                       username=user.username)
-            except HTTPException:
-                terminal = None   # өөр хүсэлт түгжсэн — retry-г тэмдэг (409) хамгаална
-        if terminal is not None:
-            res = {**res, "terminal_receipt": {"status": terminal.status,
-                                               "ebarimt_id": terminal.ebarimt_id,
-                                               "provider": terminal.provider}}
-        db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK", entity="payment",
-                        entity_id=pid, detail={**res, "note": note, "reason": DUPLICATE_OF_POS,
-                                               "teg_ddtd": teg}))
-        db.commit()
-        out.append({**info, **res})
-        done += int(bool(res.get("ok")))
-        failed += int(not res.get("ok"))
     if dry:
-        # Багцын ЗОНХИЛОХ суваг — давхардал нэг сувгаас үүсдэг (жишээ: касс дээр
-        # Ontime POS хэвлэдэг байсан бэлэн/картын төлбөрийн msgbill баримт).
-        # Цөөнх сувгийнх нь цаг+дүнгээр санамсаргүй таарсан байх магадлалтай тул
-        # СЭЖИГТЭЙ гэж тэмдэглэж, UI-д анхдагчаар СОНГОХГҮЙ.
-        provs = Counter(w["provider"] for i in out for w in i.get("will_cancel", []) if w.get("provider"))
-        top = provs.most_common(1)[0][0] if provs else None
-        for i in out:
-            ps = {w.get("provider") for w in i.get("will_cancel", [])}
-            i["provider"] = "/".join(sorted(p for p in ps if p)) or ""
-            i["suspect"] = bool(top and ps and ps != {top})
-    if not dry:
-        db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK_SUMMARY",
-                        entity="vat", detail={"requested": len(ids), "ok": done,
-                                              "failed": failed, "note": note}))
-        db.commit()
-    return {"dry_run": dry, "requested": len(ids), "ok": done, "failed": failed, "items": out}
+        out = [VD.precheck(db, pid, allowed) for pid in ids]
+        db.rollback()
+        ok = sum(1 for i in out if i.get("ok"))
+        return {"dry_run": True, "requested": len(ids), "ok": ok,
+                "already": sum(1 for i in out if i.get("already")),
+                "failed": len(out) - ok, "items": out}
+
+    if _dup_job.get("running"):
+        raise HTTPException(409, "Давхардлын цуцлалт аль хэдийн явагдаж байна — дуустал хүлээнэ үү")
+    # Бодит цуцлалтын өмнөх хамгаалалт: MOCK/тест түлхүүр/түлхүүргүй зогсоол
+    sites = []
+    for pid in ids[:_DUP_MAX]:
+        pay = db.get(Payment, pid)
+        st = (pay.site or (pay.session.site if pay.session else None)) if pay else None
+        if st is not None and st not in sites:
+            sites.append(st)
+    probs = VD.cancel_ready(db, sites)
+    db.rollback()
+    if probs:
+        raise HTTPException(400, "Цуцлалт эхлүүлэх боломжгүй: " + "; ".join(probs))
+    teg = body.get("teg") if isinstance(body.get("teg"), dict) else {}
+    _dup_job.clear()
+    _dup_job.update({"running": True, "started_at": datetime.utcnow().isoformat(),
+                     "finished_at": None, "total": len(ids), "done": 0, "ok": 0, "pending": 0,
+                     "skipped": 0, "failed": 0, "stopped": None, "errors": {}, "failures": [],
+                     "note": note, "username": user.username})
+    import asyncio
+    asyncio.get_event_loop().create_task(
+        _run_dup_cancel(ids, note, user.username, allowed, teg), name="vat_dup_cancel")
+    return {"started": True, "job": _dup_job_public(user)}
+
+
+# Нэг дуудлагад/нэг job-д дээд тоо (CLI-ийн --max-тай ижил анхдагч)
+_DUP_MAX = 2000
+# Цуцлалт хоорондын завсар (сек) — msgbill/ТЕГ-ийг цохихгүй; тестэд 0 болгоно
+_DUP_DELAY = 0.5
+# Явагдаж буй/сүүлийн давхардлын цуцлалтын төлөв (процесс бүрд нэг — 1 worker)
+_dup_job: dict = {}
+
+
+def _dup_job_public(user=None) -> dict:
+    """Job-ийн явц. Алдааны дэлгэрэнгүй (төлбөрийн ID, алдаа, шалтгаан) нь зөвхөн
+    эхлүүлсэн хэрэглэгч эсвэл бүх зогсоолын эрхтэйд (2026-10-13 хяналт: job процесс
+    даяар нэг тул өөр түрээслэгчийн админд бусдын төлбөрийн ID харагдаж байв)."""
+    j = dict(_dup_job)
+    errs = j.pop("errors", {}) or {}
+    owner = j.pop("username", None)
+    if user is None or user.username == owner or _scope(user) is None:
+        j["top_errors"] = [{"error": e, "count": n}
+                           for e, n in sorted(errs.items(), key=lambda kv: -kv[1])[:5]]
+        j["failures"] = (j.get("failures") or [])[:50]
+    else:
+        j["top_errors"], j["failures"] = [], []
+        j.pop("note", None)
+    return j
+
+
+async def _run_dup_cancel(ids: list[str], note: str, username: str, allowed: set | None,
+                          teg: dict) -> None:
+    """Давхардлын цуцлалтын бие — өөрийн DB session-тэй (хүсэлтийнх хаагдсан байдаг)."""
+    import asyncio
+    import logging
+
+    from ..database import SessionLocal
+    from ..services import vat_duplicates as VD
+    log = logging.getLogger("parking.vat_dup_cancel")
+    db = SessionLocal()
+    j = _dup_job
+    auth_streak = 0
+    try:
+        for pid in ids:
+            res = None
+            try:
+                t = teg.get(pid) if isinstance(teg.get(pid), dict) else {}
+                res = await VD.cancel_one(db, pid, note=note, username=username, teg=t,
+                                          allowed_sites=allowed, source="api-bulk")
+            except Exception as e:  # noqa: BLE001 — нэг төлбөрийн алдаа бөөнийг зогсоохгүй
+                log.exception("давхардлын цуцлалт: төлбөр %s дээр алдаа", pid)
+                db.rollback()
+                res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            j["done"] += 1
+            if res.get("skipped"):
+                j["skipped"] += 1
+                continue                     # HTTP хийгээгүй — завсарлах шаардлагагүй
+            if res.get("ok"):
+                j["ok"] += 1
+                auth_streak = 0
+            elif res.get("pending"):
+                j["pending"] += 1
+                auth_streak = 0
+            else:
+                err = (res.get("error") or "?")[:300]
+                j["failed"] += 1
+                j["errors"][err] = j["errors"].get(err, 0) + 1
+                if len(j["failures"]) < 200:
+                    j["failures"].append({"payment_id": pid, "error": err})
+                auth_streak = auth_streak + 1 if res.get("auth_error") else 0
+                if res.get("quota"):
+                    j["stopped"] = "msgbill квот/хязгаарын алдаа — зогслоо, дараа дахин ажиллуулна уу"
+                    break
+                if auth_streak >= 3:
+                    j["stopped"] = "msgbill түлхүүрийн (эрхийн) алдаа 3 удаа дараалсан — зогслоо"
+                    break
+            await asyncio.sleep(_DUP_DELAY)
+        try:
+            db.add(AuditLog(username=username, action="EBARIMT_CANCEL_BULK_SUMMARY", entity="vat",
+                            entity_id="DUPLICATE_OF_POS_TERMINAL",
+                            detail={k: v for k, v in j.items()
+                                    if k not in ("errors", "failures", "username", "running")}))
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+    finally:
+        j["running"] = False
+        j["finished_at"] = datetime.utcnow().isoformat()
+        db.close()
+
+
+@router.get("/vat-reconcile/cancel-duplicates/status")
+def cancel_duplicates_status(user: User = Depends(require("vat", "reports"))):
+    """Явагдаж буй (эсвэл сүүлийн) давхардлын цуцлалтын явц — UI 2с тутам асууна."""
+    if not _dup_job:
+        return {"running": False, "idle": True}
+    return _dup_job_public(user)
 
 
 @router.get("/vat-failures")
@@ -1782,6 +1809,12 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
             finally:
                 j["done"] += 1
             if res is None:
+                continue
+            if res.get("duplicate_of_pos"):
+                # POS терминалын давхардал гэж цуцалсан баримт — бөөн нөхөлт ДАХИН
+                # үүсгэхгүй (ганцаарчилсан «Дахин үүсгэх» + allow_duplicate-ээр л)
+                j["skipped"] += 1
+                j["skipped_duplicate_of_pos"] = j.get("skipped_duplicate_of_pos", 0) + 1
                 continue
             if res.get("ok"):
                 j["ok"] += 1

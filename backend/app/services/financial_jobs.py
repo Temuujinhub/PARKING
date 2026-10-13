@@ -17,7 +17,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, FinancialJob, Payment, VatReceipt
 from . import ebarimt, msgbill, qpay
-from .receipts import assign_ebarimt_id, is_duplicate_cancel
+from .receipts import assign_ebarimt_id, is_duplicate_cancel, is_system_receipt  # noqa: F401
 
 log = logging.getLogger("parking.financial_jobs")
 
@@ -102,16 +102,18 @@ def _mark_terminal(receipt, payment, site):
 
 
 # ── ДАВХАРДЛЫН ЦУЦЛАЛТЫН ДАРААХ ТЕРМИНАЛЫН БАРИМТ (2026-10-13 хяналт #2) ──────
-# Манай СИСТЕМИЙН сувгууд (None = хуучин PosAPI/QPay мөр). Үүнээс бусад нь (TERMINAL,
-# ONTIME, EXT-*, POS-TERMINAL) гадны системийн баримт — давхардлын цуцлалт хөндөхгүй.
-SYSTEM_PROVIDERS = {"MSGBILL", "QPAY", "POSAPI"}
+# Манай/гадны баримтын ялгаа: receipts.is_system_receipt (нэг тодорхойлолт).
 TEG_TERMINAL_PROVIDER = "ONTIME"   # апп ebarimt_provider=ONTIME илгээсэн үетэй ижил
 _TEG_DDTD = re.compile(r"^\d{33}$")
 
 
-def is_system_receipt(rec) -> bool:
-    """Манай систем (msgbill/QPay/PosAPI) гаргасан баримт уу — терминал/гадны биш."""
-    return (rec.provider or "POSAPI") in SYSTEM_PROVIDERS
+def duplicate_guarded(recs) -> bool:
+    """POS-ийн давхардал гэж цуцалсан (тэмдэгтэй) баримттай, ТЭМДЭГГҮЙ ИЛГЭЭГДСЭН баримтгүй
+    төлбөр — систем баримтыг ДАХИН гаргахгүй (retry 409, бөөн нөхөлт алгасна).
+    Нэг л дүрэм: financial_jobs.retry_payment_receipts ба vat-retry-failed хоёулаа үүгээр."""
+    return (any(is_duplicate_cancel(r) for r in recs)
+            and not any(r.status == "SENT" and r.ebarimt_id and not is_duplicate_cancel(r)
+                        for r in recs))
 
 
 def record_terminal_receipt(db, payment, teg_ddtd, *, replaced=(), username="system",
@@ -301,6 +303,16 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
     recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
             .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
     active = [r for r in recs if r.status != "CANCELLED"]
+    # Давхардлын тэмдгийг БУСАД мөрөөс үл хамааран, EXTERNAL-ээс ӨМНӨ шалгана (2026-10-13
+    # хяналт + нэгтгэл): өмнө нь БҮХ баримт CANCELLED үед л хамгаалдаг байсан тул цуцалсан
+    # msgbill + ДДТД-гүй FAILED/REVIEW/PENDING мөртэй төлбөрийг бөөн нөхөлт дахин илгээнэ.
+    # Давхардлын цуцлалт одоо терминалын мөр (ONTIME/SENT эсвэл EXTERNAL) бүртгэдэг —
+    # ONTIME/SENT нь «тэмдэггүй илгээгдсэн» тул хэвийн урсгал (ДДТД-тэй, юу ч үүсгэхгүй);
+    # EXTERNAL бол энд давхардал гэж татгалзана (бөөн нөхөлт skipped_duplicate_of_pos).
+    if not allow_duplicate and duplicate_guarded(recs):
+        # 2026-10-13: POS терминал (Ontime) баримт хэвлэсэн тул манай msgbill
+        # баримтыг ТЕГ тулгалтаар цуцалсан. Дахин үүсгэвэл давхардал буцаж үүснэ.
+        return dict(DUPLICATE_REFUSAL)
     external = [r for r in active if r.status == TERMINAL_STATUS]
     if external:
         # Терминал баримтаа гаргасан — msgbill-ээр дахин гаргавал ТЕГ-т давхар.
@@ -308,10 +320,6 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
             return {"ok": False, "external": True, "error": EXTERNAL_REFUSAL}
         if terminal_issues_receipt(db, payment):
             return {"ok": False, "external": True, "error": EXTERNAL_SETTING_ON}
-        if not allow_duplicate and any(is_duplicate_cancel(r) for r in recs):
-            # ТЕГ-т терминалын баримт БАЙГАА нь тулгалтаар батлагдсан (давхардал гэж
-            # msgbill-ийг цуцалсан) — систем дахин гаргавал давхардал буцаж үүснэ
-            return dict(DUPLICATE_REFUSAL)
         try:
             for rec in external:
                 _reissue_external(db, payment, rec)
@@ -323,10 +331,6 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
         db.commit()
         return {"ok": False, "pending": True,
                 "error": "Терминалын тэмдэглэгээг системийн баримт болгож ажил хадгаллаа"}
-    if recs and not active and not allow_duplicate and any(is_duplicate_cancel(r) for r in recs):
-        # 2026-10-13: POS терминал (Ontime) баримт хэвлэсэн тул манай msgbill
-        # баримтыг ТЕГ тулгалтаар цуцалсан. Дахин үүсгэвэл давхардал буцаж үүснэ.
-        return dict(DUPLICATE_REFUSAL)
     if recs and not active:
         if len(recs) != 1:
             return {"ok": False, "review_required": True,

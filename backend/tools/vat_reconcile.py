@@ -25,6 +25,7 @@ import openpyxl
 
 from app.database import SessionLocal
 from app.models import ParkingSession, Payment, VatReceipt
+from app.services.receipts import is_system_receipt
 
 
 def main():
@@ -61,9 +62,10 @@ def main():
     for rec, pay, plate in ours:
         if rec.status == "CANCELLED":
             continue
-        if rec.status == "EXTERNAL":
-            # POS терминал (Ontime) гаргасан — манай баримт БИШ (ДДТД-гүй); API-тай ижил
-            # «манайх»-т тоолохгүй (2026-10-13)
+        if not is_system_receipt(rec):
+            # POS терминал (Ontime) гаргасан (EXTERNAL / давхардлын цуцлалтын дараах
+            # ONTIME) — манай баримт БИШ; API-тай ижил «манайх»-т тоолохгүй (2026-10-13).
+            # Давхардлын нарийн тулгалт: tools/vat_cancel_duplicates.py
             terminal += 1
             continue
         cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
@@ -81,7 +83,7 @@ def main():
     print(f"\nТААРСАН: {matched} (үүнээс ДДТД яг ижил: {ddtd_equal} — суваг ДДТД-г "
           f"дахин дугаарладаг тул 0 байх нь хэвийн)")
     if terminal:
-        print(f"POS терминал гаргасан (EXTERNAL, манай баримт биш — тулгалтад ороогүй): {terminal}")
+        print(f"POS терминал гаргасан (EXTERNAL/ONTIME, манай баримт биш — тулгалтад ороогүй): {terminal}")
     print(f"\nМАНАЙД БИЙ, ТЕГ-Д АЛГА: {len(unmatched_ours)} "
           "(mock/FAILED баримт, Monnis өөрийн ТТД, цагийн зөрүү байж болно)")
     for row in sorted(unmatched_ours)[:30]:

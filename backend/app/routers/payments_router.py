@@ -1468,6 +1468,9 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
     (мөнгө) хөндөгдөхгүй — зөвхөн татварын баримт. Дараа нь «Дахин үүсгэх»
     шинэ баримт гаргана (retry_ebarimt CANCELLED-ийг алгасдаг).
 
+    msgbill: баримтыг гаргасан данс л цуцлана — одоогийн түлхүүр «олдсонгүй/401»
+    гэвэл нөгөө түлхүүрээр (түрээслэгч ↔ глобал) нэг удаа оролдоно; аль түлхүүрээр
+    цуцалсныг raw.cancel.key_scope + хариуны key_scopes-д бичнэ.
     mark: цуцлалтын шалтгааны тэмдэг (ж: {"reason": DUPLICATE_OF_POS, "teg_ddtd": …}) —
     raw.cancel + ddtd_note-д; POS-ийн давхардал гэж цуцалсныг «Дахин үүсгэх» 409-өөр хамгаална.
     only_ids: зөвхөн эдгээр мөр (давхардлын цуцлалт терминалын ONTIME мөрийг хөндөхгүй)."""
@@ -1486,16 +1489,20 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
                              "системээс цуцлах боломжгүй; буцаалтыг терминалын системд хийнэ үү"}
         return {"ok": False, "error": "Цуцлах ИЛГЭЭГДСЭН баримт олдсонгүй"}
     site = _site_of(payment)
-    cancelled, errors, pending = [], [], []
+    cancelled, errors, pending, key_scopes = [], [], [], {}
     for rec in recs:
         if rec.status == "CANCEL_PENDING" and rec.provider == "MSGBILL" and rec.provider_ref:
             # Хүлээгдэж буй цуцлалтын төлөвийг GET-ээр шалгана (дахин cancel илгээхгүй)
             try:
-                g = await msgbill.get_receipt(msgbill.api_key_for(site), rec.provider_ref)
+                prev = (rec.raw or {}).get("cancel") if isinstance(rec.raw, dict) else None
+                g = await msgbill.get_receipt_any(
+                    site, rec.provider_ref,
+                    prefer_scope=prev.get("key_scope") if isinstance(prev, dict) else None)
+                key_scopes[rec.ebarimt_id] = g.get("key_scope")
                 if g.get("state") == "CANCELLED":
                     rec.status = "CANCELLED"
                     rec.receipt_url = (note or "Цуцлав")[:200]
-                    _mark_cancel(rec, "CANCELLED", None, note, mark)
+                    _mark_cancel(rec, "CANCELLED", g.get("key_scope"), note, mark)
                     cancelled.append(rec.ebarimt_id)
                 else:
                     pending.append(rec.ebarimt_id)
@@ -1512,18 +1519,18 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
                 if not ok:
                     raise RuntimeError("QPay баримт цуцлахыг зөвшөөрсөнгүй")
             elif prov == "MSGBILL":
-                acc = msgbill.api_key_for(site)
-                if not acc.enabled:
-                    raise RuntimeError("msgbill түлхүүр тохируулаагүй")
                 if not rec.provider_ref:
                     raise RuntimeError("msgbill баримтын ID (provider_ref) алга")
-                r = await msgbill.cancel_receipt(acc, rec.provider_ref, note)
+                if not msgbill.cancel_accounts(site):
+                    raise RuntimeError("msgbill түлхүүр тохируулаагүй")
+                r = await msgbill.cancel_receipt_any(site, rec.provider_ref, note)
+                key_scopes[rec.ebarimt_id] = r.get("key_scope")
                 if r.get("state") == "CANCEL_PENDING":
                     # ТЕГ түр амжилтгүй — msgbill 10 мин тутам дахин оролдоно;
                     # receipt.cancelled webhook эсвэл дараагийн «Цуцлах» дарахад GET-ээр эцэслэнэ
                     rec.status = "CANCEL_PENDING"
                     rec.receipt_url = (f"Цуцлалт хүлээгдэж байна (msgbill): {r.get('error') or ''}")[:200]
-                    _mark_cancel(rec, "CANCEL_PENDING", None, note, mark)
+                    _mark_cancel(rec, "CANCEL_PENDING", r.get("key_scope"), note, mark)
                     pending.append(rec.ebarimt_id)
                     continue
                 if r.get("state") not in ("CANCELLED", ""):
@@ -1541,7 +1548,11 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
             continue
         rec.status = "CANCELLED"
         rec.receipt_url = (note or "Цуцлав")[:200]
-        _mark_cancel(rec, "CANCELLED", None, note, mark)
+        # msgbill бол аль түлхүүрээр цуцалсан (key_scopes), бусад сувагт None. Давхардлын
+        # тэмдэг (mark) ЗӨВХӨН msgbill-д — POS-ийн давхардал гэж зөвхөн msgbill баримтыг
+        # цуцалдаг (vat_recon.cancel_block_reason); QPay/PosAPI-д нотолгоо л үлдэнэ
+        _mark_cancel(rec, "CANCELLED", key_scopes.get(rec.ebarimt_id), note,
+                     mark if prov == "MSGBILL" else None)
         ebarimt.cache_qr(payment.id, None)
         cancelled.append(rec.ebarimt_id)
     db.commit()
@@ -1550,7 +1561,7 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
         err = ("ТЕГ түр хариу өгсөнгүй — цуцлалт msgbill дээр хүлээгдэж байна (10 мин тутам "
                "автоматаар дахин оролдоно); дараа нь «Цуцлах» дахин дарж шалгана уу")
     return {"ok": bool(cancelled) and not errors and not pending, "cancelled": cancelled,
-            "pending": pending, "error": err}
+            "pending": pending, "error": err, "key_scopes": key_scopes}
 
 
 def _apply_msgbill_event(db: Session, rec: VatReceipt, event: str, data: dict) -> str:
@@ -1743,14 +1754,14 @@ async def ebarimt_history(payment_id: str, live: bool = True, db: Session = Depe
             _seen(d.get(key), f"audit.{a.action}.{key}", a.created_at.isoformat(), {"by": a.username})
     live_rows = []
     if live and refs:
-        acc = msgbill.api_key_for(site)
         for r in recs:
             if r.provider == "MSGBILL" and r.provider_ref:
                 try:
-                    if not acc.enabled:
-                        raise msgbill.MsgbillError("msgbill түлхүүр тохируулаагүй", code="NOT_CONFIGURED")
-                    g = await msgbill.get_receipt(acc, r.provider_ref)
+                    # Одоогийн түлхүүр «олдсонгүй» бол нөгөөгөөр (Моннисын глобал
+                    # түлхүүрээр гарсан 08-20…09-06-ны баримт) — цуцлалтыг шалгахад
+                    g = await msgbill.get_receipt_any(site, r.provider_ref)
                     live_rows.append({"receipt_id": r.id, "provider_ref": r.provider_ref,
+                                      "key_scope": g.get("key_scope"),
                                       "state": g.get("state"), "receipt_no": g.get("billId") or (g.get("raw") or {}).get("receipt_no"),
                                       "lottery": g.get("lottery"), "error": g.get("error"), "raw": g.get("raw")})
                     _seen((g.get("raw") or {}).get("receipt_no"), "msgbill.live", datetime.utcnow().isoformat(),

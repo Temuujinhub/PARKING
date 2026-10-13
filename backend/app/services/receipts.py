@@ -51,6 +51,21 @@ def is_duplicate_cancel(rec) -> bool:
     return isinstance(cancel, dict) and cancel.get("reason") == DUPLICATE_OF_POS
 
 
+# Баримтыг ХЭН гаргасан (2026-10-13): манай СИСТЕМИЙН сувгууд (None = хуучин PosAPI/
+# QPay мөр; UNCONFIGURED = суваг тохируулаагүй үеийн манай оролдлого). Бусад нь
+# (EXTERNAL төлөв, ONTIME/TERMINAL/POS-TERMINAL/EXT-* provider) — POS терминал/гадны
+# системийн баримт: давхардлын цуцлалт, ТЕГ тулгалтын «манайх», кассын дугаарын
+# таамаг ХӨНДӨХГҮЙ. Нэг л тодорхойлолт — financial_jobs, vat_recon, vat_duplicates бүгд.
+SYSTEM_PROVIDERS = frozenset({"MSGBILL", "QPAY", "POSAPI", "UNCONFIGURED"})
+
+
+def is_system_receipt(rec) -> bool:
+    """Манай систем (msgbill/QPay/PosAPI) гаргасан баримт уу — терминал/гадны биш."""
+    if getattr(rec, "status", None) == "EXTERNAL":
+        return False
+    return (getattr(rec, "provider", None) or "POSAPI") in SYSTEM_PROVIDERS
+
+
 def rank_key(rec) -> tuple:
     """Сонголтын эрэмбэ — тест хийхэд тохиромжтой цэвэр функц."""
     return (_STATUS_RANK.get(rec.status or "", 9),

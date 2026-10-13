@@ -223,12 +223,16 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 асаалттай тул EXTERNAL болж бүртгэгдвэл `200 {created: true, external: true}`.
 
 ### POST /api/reports/vat-reconcile/cancel-duplicates  (vat/reports)
-`{payment_ids[], note, dry_run=true, teg_ddtd?: {payment_id: ТЕГ-ийн терминалын мөрийн ДДТД}}`.
-Зөвхөн МАНАЙ (msgbill/QPay/PosAPI) баримтыг цуцалж `DUPLICATE_OF_POS_TERMINAL` гэж
-тэмдэглэнэ; терминалын ДДТД-г `ONTIME/SENT` мөрөөр бүртгэнэ (33 оронтой биш, манай кассын
-дугаартай эсвэл аль хэдийн бүртгэлтэй бол ДДТД-гүй `EXTERNAL`). Терминалын мөрийг хөндөхгүй.
+`{payment_ids[], note, dry_run=true, teg?: {payment_id: {teg_ddtd, teg_register}}}` — `teg`-ийг
+`vat-reconcile` хариуны `duplicates[]`-ээс авна. `dry_run=true` синхрон (юу цуцлагдах/яагаад
+үгүй); `dry_run=false` АРЫН АЖИЛ — явцыг `GET …/cancel-duplicates/status`. Дүрэм нь серверийн
+CLI `tools/vat_cancel_duplicates.py`-тэй НЭГ (`services/vat_duplicates.cancel_one`): QR биш
+төлбөрийн зөвхөн МАНАЙ msgbill баримтыг цуцалж `DUPLICATE_OF_POS_TERMINAL` гэж тэмдэглэнэ,
+дараа нь терминалын баримтыг бүртгэнэ — итгэх ТЕГ ДДТД (33 орон, манай кассынх биш, давхар
+бүртгэлгүй) бол `ONTIME/SENT`, эс бөгөөс ДДТД-гүй `EXTERNAL`. Терминалын мөрийг хөндөхгүй.
 `vat-reconcile` хариунд `terminal_issued` / `terminal_confirmed` / `terminal_missing[]`
-(EXTERNAL боловч ТЕГ-т баримт алга — баримтгүй борлуулалт байж болзошгүй).
+(EXTERNAL боловч ТЕГ-т баримт алга — баримтгүй борлуулалт байж болзошгүй); терминалын хэвийн
+мөр (`TERMINAL` шалтгаан) `unmatched_tax`-д орохгүй, `tax_verdicts`-д тоологдоно.
 
 ⚠️ `amount` нь системийн тооцсон дүнтэй таарахгүй бол `400` буцна — картаар авахын ӨМНӨ
 `GET /api/sessions/{id}`-ээс дүнг АВЧ баталгаажуулна.
