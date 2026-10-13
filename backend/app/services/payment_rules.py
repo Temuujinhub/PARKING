@@ -431,7 +431,8 @@ def site_report(db, site) -> dict:
 # «Төлбөрөө төлсөн атлаа хаалт нээгдэхгүй» гэсэн гомдол бүрийн ард тохиргооны
 # ХОСЛОЛ байдаг. Тэдгээрийг нэрлээд, аль тохиргоог өөрчлөхийг шууд хэлнэ.
 def check_conflicts(db, site, eff: dict | None = None, tariff: dict | None = None) -> list[dict]:
-    from ..models import Device
+    from ..config import settings
+    from ..models import Device, ParkingSite
     eff = eff if eff is not None else effective(db, site.id)
     # Тарифыг дуудагч өгөөгүй бол ӨӨРӨӨ уншина — эс бол grace_minutes-тэй
     # холбоотой ХАМГИЙН чухал зөрчлүүд чимээгүй алгасагдана.
@@ -572,10 +573,32 @@ def check_conflicts(db, site, eff: dict | None = None, tariff: dict | None = Non
             + " — дугаар уншсан ч хаалт нээгдэхгүй.",
             "«Төхөөрөмж» табаас автомат нээлтийг асаана уу.")
 
-    # 9. Nested зогсоолын тоолуур мөнхөд зогсох эрсдэл
-    if site.parent_site_id is not None and site.transit_max_hours == 0:
-        add("warn", "Доторх зогсоолын тоолуур хязгааргүй зогсоно",
-            "transit_max_hours=0 — доторх гарах уншилт алдагдвал гадна талын "
-            "төлбөрийн тоолуур мөнхөд зогсож машин 0₮-өөр гарна.",
-            "4-8 цагийн хязгаар тавина уу.")
+    # 9. Nested зогсоолын хязгааргүй хасалт — ҮЙЛЧИЛЖ БУЙ утгаар (хүүхэд дээр
+    # хоосон бол эцгийнхийг өвлөнө, nested.child_cap_minutes). Өмнө нь зөвхөн
+    # хүүхэд дээр шууд тавьсан 0-ийг хардаг байсан тул 100 айлын эцэг дээрх
+    # (нуугдсан) 0 огт анхааруулгагүй үйлчилж байв (2026-10-13).
+    from .nested import child_cap_minutes
+    _glob_h = max(0, int(settings.transit_max_hours))
+    _miss = (f"Доторх гарах уншилт алдагдсан зогсолт системийн ерөнхий {_glob_h} цагаар "
+             "таслагдана." if _glob_h else
+             "Системийн ерөнхий утга ч 0 тул доторх гарах уншилт алдагдвал гадна "
+             "тоолуур мөнхөд зогсож машин 0₮-өөр гарна.")
+    if site.parent_site_id is not None:
+        if child_cap_minutes(db, site) == 0:
+            _src = ("энэ зогсоол дээр" if site.transit_max_hours == 0
+                    else "эцэг зогсоолоос өвлөсөн")
+            add("warn", "Доторх зогсоолын хасалт хязгааргүй",
+                f"Хасах хязгаар 0 ({_src}) — доторх ГАРАХ уншилтаар батлагдсан бүх "
+                f"хугацаа гадна төлбөрөөс хасагдана. {_miss}",
+                "Зориуд биш бол 4-8 цагийн хязгаар тавина уу.")
+    elif site.transit_max_hours == 0:
+        _heirs = [k.name for k in db.query(ParkingSite)
+                  .filter(ParkingSite.parent_site_id == site.id,
+                          ParkingSite.transit_max_hours.is_(None)).all()]
+        if _heirs:
+            add("warn", "Доторх зогсоолууд хязгааргүй хасалт өвлөж байна",
+                "Энэ зогсоолын «Дотор хугацааг хасах хязгаар» 0 — утгаа хоосон "
+                f"орхисон доторх зогсоол ({', '.join(_heirs)}) үүнийг өвлөж, доторх "
+                f"гарах уншилтаар батлагдсан бүх хугацаа хасагдана. {_miss}",
+                "Зориуд биш бол энд эсвэл доторх зогсоол дээр 4-8 цагийн хязгаар тавина уу.")
     return out

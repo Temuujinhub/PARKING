@@ -21,6 +21,19 @@ function Section({ title, status, statusClass = 'text-slate-500', open, children
   )
 }
 
+// «Дотор хугацааг хасах хязгаар» талбар ХАРАГДАХ эсэх — SitesSection хадгалахдаа
+// ижил нөхцөлөөр шийднэ: нуугдсан утгыг дахин илгээхгүй (2026-10-07-нд 100 айл
+// дээр түр «эцэг» сонгох үед оруулсан 0 талбар нуугдсаны дараа ч хадгалагдаж,
+// c390ba9-аас хойш хүүхэд зогсоол түүнийг өвлөж төлбөрт нөлөөлөх болсон).
+// Дотроо зогсоолтой ЭЦЭГ зогсоол ч хамаарна — хүүхэд дээр хоосон бол эцгийнх
+// үйлчилнэ (backend nested.child_cap_minutes).
+export const showsInnerTime = (s) => !!(s?.parent_site_id || s?.has_inner_lanes
+  || (s?.child_site_count || 0) > 0)
+
+// Хязгаарын утгыг текстээр: хоосон / 0 (хязгааргүй) / N цаг
+const capLabel = (v) => (v == null || v === '') ? 'хоосон'
+  : +v === 0 ? '0 — хязгааргүй' : `${v}ц`
+
 export default function SiteEditModal({ editing, setEditing, templates, tenants, sites = [],
   onSubmit, onGotoIntegrations }) {
   // Эцэг болж болох зогсоолууд: өөрөө биш, өөрөө дотор зогсоол биш (хоёр давхар
@@ -28,8 +41,13 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
   const isParentItself = (editing?.child_site_count || 0) > 0
   const parentOptions = isParentItself ? [] : sites.filter(
     (s) => s.id !== editing?.id && !s.parent_site_id)
-  const parentName = sites.find((s) => s.id === editing?.parent_site_id)?.name
-  const hasInnerTime = !!(editing?.parent_site_id || editing?.has_inner_lanes)
+  const parentSite = sites.find((s) => s.id === editing?.parent_site_id)
+  const parentName = parentSite?.name
+  const parentCap = parentSite?.transit_max_hours
+  const hasInnerTime = showsInnerTime(editing)
+  // Тусдаа site-тай (parent/child) загвар — «0» нь зөвхөн доторх ГАРАХ уншилтаар
+  // батлагдсан хугацаанд хязгааргүй (НЭГ site доторх камертай загварт бүрэн хязгааргүй)
+  const splitModel = !!editing?.parent_site_id || isParentItself
   const qrError = printedQrError(editing?.qr_url)
 
   // Зогсолтын дүрмийн хэдэн тохиргоо default-аас өөр байгааг summary-д харуулна
@@ -231,7 +249,8 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
           <Section title="Дотор зогсоол ба хугацааны хасалт"
             open={hasInnerTime}
             status={editing.parent_site_id ? (parentName || 'холбогдсон')
-              : editing.has_inner_lanes ? 'энэ зогсоол дотоод камертай' : 'тохируулаагүй'}
+              : editing.has_inner_lanes ? 'энэ зогсоол дотоод камертай'
+              : isParentItself ? `дотроо ${editing.child_site_count} зогсоол` : 'тохируулаагүй'}
             statusClass={hasInnerTime ? 'text-accent' : 'text-slate-500'}>
             {editing.has_inner_lanes && !editing.parent_site_id && (
               <p className="text-sm text-slate-300">
@@ -263,15 +282,32 @@ export default function SiteEditModal({ editing, setEditing, templates, tenants,
             </Field>
             {hasInnerTime && (
               <div>
-                <label className="label" htmlFor="inner-time-hours">Дотор хугацааг үнэгүй хасах дээд хязгаар (цаг)</label>
+                <label className="label" htmlFor="inner-time-hours">
+                  {isParentItself
+                    ? 'Доторх зогсоолуудад үйлчлэх хасах дээд хязгаар (цаг)'
+                    : 'Дотор хугацааг үнэгүй хасах дээд хязгаар (цаг)'}
+                </label>
                 <input id="inner-time-hours" className="input hover:border-accent/60 disabled:opacity-40"
-                  type="number" min="0" max="720" step="1" placeholder="Системийн ерөнхий утга"
+                  type="number" min="0" max="720" step="1"
+                  placeholder={editing.parent_site_id && parentCap != null && parentCap !== ''
+                    ? `Эцэг зогсоолын утга (${capLabel(parentCap)})` : 'Системийн ерөнхий утга'}
                   aria-describedby="inner-time-help"
                   value={editing.transit_max_hours ?? ''}
                   onChange={(e) => setEditing({ ...editing, transit_max_hours: e.target.value })} />
+                {isParentItself && (
+                  <p className="text-sm text-amber-300 mt-2">
+                    Доторх зогсоол(ууд) дээр энэ талбар хоосон бол ЭНЭ утгыг өвлөнө;
+                    доторх зогсоол дээр тавьсан утга давуу.
+                  </p>
+                )}
                 <p id="inner-time-help" className="text-sm text-slate-300 mt-2">
-                  0 = дотор бүртгэгдсэн бүх хугацааг үнэгүй хасна. Хоосон = системийн
-                  ерөнхий утга. Эерэг тоо = дотогш нэг удаа орсон хугацаанаас хамгийн
+                  {splitModel
+                    ? '0 = доторх ГАРАХ уншилтаар батлагдсан бүх хугацааг хасна; гарах уншилт алдагдсан зогсолтыг системийн ерөнхий хязгаараар таслана. '
+                    : '0 = дотор бүртгэгдсэн бүх хугацааг үнэгүй хасна. '}
+                  {editing.parent_site_id
+                    ? `Хоосон = эцэг зогсоолын утга (${capLabel(parentCap)}), тэр ч хоосон бол системийн ерөнхий утга. `
+                    : 'Хоосон = системийн ерөнхий утга. '}
+                  Эерэг тоо = дотогш нэг удаа орсон хугацаанаас хамгийн
                   ихдээ тэр цагийг хасна; хэтэрсэн хугацаанд гаднах тариф үйлчилнэ.
                 </p>
               </div>

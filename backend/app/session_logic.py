@@ -193,7 +193,8 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
     if site is not None and site.parent_site_id:
         # ЭЦЭГ зогсоолын «Дамжин (доторх зогсоолын машин)» TRANSIT гэрээ хүрээнээс
         # үл хамааран доторх зогсоолд хүчинтэй. Жолоочийн UI «Хамрах хүрээ»
-        # талбарыг зөвхөн дотоод КАМЕРТАЙ зогсоолд харуулдаг тул эцэг зогсоолд
+        # талбарыг зөвхөн дотоод КАМЕРТАЙ зогсоолд харуулдаг байсан (10-13-аас
+        # эцэг зогсоолд ч харагдана) тул эцэг зогсоолд
         # импортолсон TRANSIT бүртгэл ямагт «site» болж, «Зөвхөн бүртгэлтэй»
         # доторх зогсоолд хаалт нээгддэггүй байв (Хангарьд → Рашбулаг шороо
         # 2026-10-13: 262 TRANSIT бүртгэлтэй ч автомат нээлт 0).
@@ -667,12 +668,22 @@ def auto_reopen_for_exit(db: Session, plate: str, site_id: str, *, exact_only: b
     canceled = (db.query(Compensation)
                 .filter(Compensation.session_id == s.id, Compensation.status == "PENDING")
                 .update({"status": "CANCELLED"}, synchronize_session=False))
+    _prev_exit = s.exit_time
     s.status = "OPEN"
     s.exit_time = None
     s.exit_device_id = None
     s.duration_minutes = None
     s.total_fee = s.base_fee = s.vat_amount = None
     s.exit_deadline = None
+    # Nested: хаалттай байсан хугацааны доторх зогсолтыг сэргээнэ — хүүхэд сешн
+    # бол эцгийн тоолуурыг «гарц»-аас дахин зогсооно (8507УБР), эцэг сешн бол
+    # хаалттай үеийн хүүхдийн хугацааг хасна (4216УБО). services/nested.py.
+    from .services.nested import reapply_child_pauses, restore_parent_pause
+    _rsite = db.get(ParkingSite, site_id)
+    if _rsite is not None and _rsite.parent_site_id:
+        restore_parent_pause(db, _rsite, s, _prev_exit)
+    else:
+        reapply_child_pauses(db, s, _prev_exit, datetime.utcnow())
     # Төлбөр хүлээлтийн ХУУЧИН төлөвийг цэвэрлэнэ: begin_wait нь зөвхөн хоосон
     # үед тамга дардаг тул хуучин payment_wait_started_at үлдвэл 2 цагийн
     # AWAITING цэвэрлэгээ сэргээсэн сешнийг хэдхэн секундэд `unpaid_exit` өр
@@ -923,6 +934,17 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     # хязгаараар) — гэхдээ барагдуулахгүй бол хаагдсан мөрөнд paused_minutes=0
     # хэвээр үлдэж, тайлан дээр «хасалт хийгээгүй мөртөө хямд» гэж харагдана.
     from .services.nested import close_open_pause
+    _csite = getattr(s, "site", None)
+    if (_csite is not None and getattr(_csite, "parent_site_id", None)
+            and (confirmed or getattr(s, "exit_confirmed", False))):
+        # ДОТООД (хүүхэд) сешн ГАРАХ нотолгоотой хаагдаж байна (camera_sync-ийн
+        # логийн гарах уншилт г.м) — гадна тоолуурыг ТЭР цагаас үргэлжлүүлнэ.
+        # Өмнө нь дуудагддаггүй тул гадна тоолуур гадна гарц хүртэл зогссоор:
+        # 1937УАЕ (10-09) дотор 1 мин байгаад 7 цаг гадаа зогссон хугацаа ч
+        # хасагдаж байв. Нотолгоогүй салаанд (дээрх create_comp=False, OPEN)
+        # хүрэхгүй — гарсан цаг нь тодорхойгүй, гадна гарц дээр хязгаартай.
+        from .services.nested import on_inner_exit
+        on_inner_exit(db, _csite, s.plate_number, at)
     close_open_pause(db, s, at)
     s.exit_time = at
     # Аль хэдийн баримтжсаныг бүү бууруул (camsync логоос цагийг нь оруулсан байж болно)
@@ -1347,6 +1369,12 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                     "session_id": prev_session.id, "old_plate": old_plate, "plate": plate,
                     "by": "system:autocorrect"})
                 _reg = find_registered(db, plate, site_id)
+                if _site and _site.parent_site_id and (not restricted or _reg):
+                    # Nested: эхний (junk) уншилт гадна сешнтэй таарахгүй байсан
+                    # тул тоолуур зогсоогүй — зөв дугаараар хаалт нээгдэж байгаа
+                    # тул ОДОО зогсооно (хэвийн орох замтай ижил нөхцөл).
+                    from .services.nested import on_inner_entry
+                    on_inner_entry(db, _site, plate, prev_session.entry_time)
                 opened = (await ensure_entry_barrier(db, device, plate, prev_session.id, _reg)
                           if allow_open and (not restricted or _reg) else False)
                 db.commit()
@@ -1357,6 +1385,15 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # хэвээр — junk-ийн junk давталт хаалт нээхгүй. Өмнөх нь зөв бол хаалт
         # аль хэдийн нээгдсэн (cooldown давтахгүй) тул нээх нь аюулгүй.
         _held_burst = hold_active and not is_valid_plate(burst_prev.plate_number)
+        if (_site and _site.parent_site_id and is_valid_plate(plate)
+                and not _held_burst and (not restricted or _reg)
+                and get_open_session(db, plate, site_id)):
+            # Nested: зөв дугаар нь аль хэдийн нээлттэй (хуучин) доторх сешнтэй
+            # тул autocorrect алгасагдсан — хаалт нээгдэх тул гадна тоолуурыг
+            # хэвийн замын `existing`-тэй адил ОДООГООС зогсооно (давхар бол no-op).
+            # Доторх сешнгүй бол зогсоохгүй: гарах уншилт түүнийг хааж чадахгүй.
+            from .services.nested import on_inner_entry
+            on_inner_entry(db, _site, plate, now)
         opened = (await ensure_entry_barrier(db, device, plate, registered=_reg)
                   if allow_open and not _held_burst and (not restricted or _reg) else False)
         db.commit()
@@ -1436,16 +1473,28 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
 
         attach_daily_grant(db, session)
 
+    # Хар жагсаалт: ХОРИГЛОХ уу, эсвэл нэвтрүүлээд операторт анхааруулах уу
+    # (Хар жагсаалт → Дүрэм). Default нь анхааруулга — машиныг гадаа орхивол
+    # өрөө хэзээ ч төлөхгүй, харин оруулаад гарахад нь оператор өрийг авна.
+    # Доорх nested зогсолтоос ӨМНӨ тооцно — хаалт нээгдэх эсэхээс хамаарна.
+    from .services.app_settings import get_blacklist_rules
+    _bl_rules = get_blacklist_rules(db, site_id)
+    black_blocks = bool(black) and _bl_rules["block_entry"]
+    denied = restricted and registered is None and not black_blocks
+
     # Nested: энэ зогсоол өөр зогсоолын ДОТОР бол гадна session-ий төлбөрийн
     # тоолуурыг зогсооно. Давхар уншилтад найдвартай (аль хэдийн зогссоныг
     # дахин эхлүүлэхгүй) тул `existing` замд ч дуудаж болно.
-    # «Зөвхөн бүртгэлтэй» доторх зогсоолд бүртгэлгүй машинд хаалт НЭЭГДЭХГҮЙ
-    # (доорх `denied`) — машин дотогш ороогүй тул гадна тоолуурыг зогсоохгүй.
-    # Өмнө нь татгалзсан машины гадна тоолуур ч зогсож (4ц хүртэл) үнэгүй
-    # болдог байв (Рашбулаг шороо 2026-10-13).
-    if _site and _site.parent_site_id and not (restricted and registered is None):
+    # Доторх хаалт НЭЭГДЭХГҮЙ машин дотогш ороогүй тул гадна тоолуурыг
+    # зогсоохгүй: «Зөвхөн бүртгэлтэй» доторх зогсоолын бүртгэлгүй машин
+    # (`denied`; Рашбулаг шороо 2026-10-13) болон хар жагсаалтаар хориглогдсон
+    # машин (`black_blocks` — бүртгэлтэй байсан ч хаалт нээгдэхгүй).
+    if _site and _site.parent_site_id and not (denied or black_blocks):
         from .services.nested import on_inner_entry
-        on_inner_entry(db, _site, plate, session.entry_time)
+        # Хуучин (гарах уншилтгүй үлдсэн) доторх сешн дахин ашиглагдвал түүний
+        # entry_time нь ӨМНӨХ айлчлалынх — гадна сешн эхлэхээс ч өмнө байж
+        # болно (8810УКР 2026-10-13). Зогсолт ОДООГООС эхэлнэ.
+        on_inner_entry(db, _site, plate, now if existing else session.entry_time)
 
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
@@ -1457,15 +1506,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Орох дэлгэцийн текстийг УРЬДЧИЛЖ бэлдэнэ — хаалт нээх командтай ХАМТ
     # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
     # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
-    # Хар жагсаалт: ХОРИГЛОХ уу, эсвэл нэвтрүүлээд операторт анхааруулах уу
-    # (Хар жагсаалт → Дүрэм). Default нь анхааруулга — машиныг гадаа орхивол
-    # өрөө хэзээ ч төлөхгүй, харин оруулаад гарахад нь оператор өрийг авна.
-    from .services.app_settings import get_blacklist_rules
-    _bl_rules = get_blacklist_rules(db, site_id)
-    black_blocks = bool(black) and _bl_rules["block_entry"]
-
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-    denied = restricted and registered is None and not black_blocks
     # Формат буруу дугаар + hold/strict policy → хаалтыг түр барина (доор шийднэ)
     held = hold_active and not black_blocks and not denied
     _entry_lines = None if (black_blocks or denied or held) else _site_screen_lines(db, site_id, "entry")

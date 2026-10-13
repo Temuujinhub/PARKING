@@ -262,6 +262,13 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
             db.flush()
             from .hospital_benefits import attach_daily_grant
             attach_daily_grant(db, s)
+            if site.parent_site_id:
+                # Доторх зогсоолын нөхсөн бүртгэл — live on_inner_entry
+                # дуудагдаагүй тул гадна тоолуурыг мөн нөхнө (5508УАТ г.м).
+                # `ex` байвал доорх close_session_forced-ийн on_inner_exit нь
+                # paused_since хоосон тул дахин тоолохгүй.
+                from .nested import credit_backfilled_child
+                credit_backfilled_child(db, site, plate, ev["time"], ex)
             due = 0.0
             if ex:
                 # `ex` байна = камерын логт ГАРСАН нь тогтоогдсон → баримттай

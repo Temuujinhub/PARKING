@@ -8,7 +8,7 @@ import { Table, useToast } from '../../components/ui'
 import { genDevices } from './shared'
 import { clampNum, clampOrNull } from '../../validation'
 import { locationPayload } from '../../siteLocation'
-import SiteEditModal from './SiteEditModal'
+import SiteEditModal, { showsInnerTime } from './SiteEditModal'
 import SiteQrModal from './SiteQrModal'
 import SiteWizardModal from './SiteWizardModal'
 
@@ -45,6 +45,11 @@ export default function SitesSection({ onGotoIntegrations }) {
         barrier_close_sweep_min: clampOrNull(editing.barrier_close_sweep_min, { min: 0, max: 1440 }),
         transit_max_hours: clampOrNull(editing.transit_max_hours, { min: 0, max: 720 }),
       }
+      // Талбар НУУГДСАН (дотор зогсоолын холбоогүй) бол утгыг илгээхгүй — DB-д
+      // байгаа нь хөндөгдөхгүй. Өмнө нь нуугдсан утга хадгалалт бүрд дахин
+      // илгээгдэж, 100 айл дээр түр «эцэг» сонгох үед оруулсан 0 хэн ч харж,
+      // засаж чадахгүйгээр үлдсэн (2026-10-07; c390ba9-аас төлбөрт нөлөөлдөг).
+      if (!showsInnerTime(editing)) delete body.transit_max_hours
       await api(`/api/admin/sites/${editing.id}`, { method: 'PUT', body })
       toast('Хадгалагдлаа'); setEditing(null); load()
     } catch (err) { toast(err.message, 'error') }

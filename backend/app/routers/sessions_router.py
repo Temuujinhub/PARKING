@@ -11,7 +11,8 @@ from ..auth import (enforce_site, get_current_user, operator_site, operator_site
                     require, require_role, scoped_site)
 from ..database import get_db
 from ..services.device_auth import camera_credentials
-from ..models import (AuditLog, Compensation, Device, LprEvent, ParkingSession, Payment, User)
+from ..models import (AuditLog, Compensation, Device, LprEvent, ParkingSession, ParkingSite,
+                      Payment, User)
 from ..serializers import to_dict
 from ..session_logic import (amount_due, close_session_forced, get_open_session,
                              normalize_plate, paid_total, session_fee_info)
@@ -798,6 +799,13 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
             db.flush()
             from ..services.hospital_benefits import attach_daily_grant
             attach_daily_grant(db, s)
+            _bsite = db.get(ParkingSite, site_id)
+            if _bsite is not None and _bsite.parent_site_id:
+                # Доторх зогсоолд нөхсөн бүртгэл — camera_sync-тэй ижил гадна
+                # тоолуурыг нөхнө (services/nested.credit_backfilled_child)
+                from ..services.nested import credit_backfilled_child
+                credit_backfilled_child(db, _bsite, plate, entry_time,
+                                        s.exit_time if s.status == "AWAITING_PAYMENT" else None)
             due = 0.0
             if s.status == "AWAITING_PAYMENT":
                 # exit_time дээр төлбөрийг царцааж хаана; төлөгдөөгүй тул өр үүснэ
@@ -1383,6 +1391,13 @@ async def reopen_session(session_id: str, db: Session = Depends(get_db),
     dup = get_open_session(db, s.plate_number, s.site_id)
     if dup and dup.id != s.id:
         raise HTTPException(400, f"{s.plate_number} дугаартай өөр нээлттэй бүртгэл байна")
+    # Nested: auto_reopen_for_exit-тэй ижил — хаалттай байсан үеийн доторх
+    # зогсолтыг сэргээнэ (хүүхэд → эцгийн тоолуур, эцэг → хүүхдийн хугацаа).
+    from ..services.nested import reapply_child_pauses, restore_parent_pause
+    if s.site is not None and s.site.parent_site_id:
+        restore_parent_pause(db, s.site, s, s.exit_time)
+    else:
+        reapply_child_pauses(db, s, s.exit_time, datetime.utcnow())
     s.status = "OPEN"
     s.exit_time = None
     s.exit_device_id = None

@@ -26,6 +26,25 @@
     олон удаа орж болох тул хуримтлуулна.
   • Доторх ГАРАХ уншилт алдагдвал тоолуур мөнхөд зогсох тул `transit_max_hours`
     дээд хязгаар тавина — түүнээс хэтэрсэн хугацаа хасагдахгүй, төлбөртэй.
+
+Хязгаарын дүрэм (2026-10-13; «доторх бүх БАТЛАГДСАН хугацааг хасна» — эзэн):
+  • БАТЛАГДСАН зогсолт — доторх ГАРАХ уншилтаар (live `on_inner_exit`,
+    `handle_inner_pass`-ийн гарах, camera_sync-ийн логийн дотоод/хүүхэд
+    сешний гарах уншилт) хаагдсан: тохируулсан хязгаар
+    (`child_cap_minutes`: хүүхэд → эцэг → глобал). 0 = ХЯЗГААРГҮЙ.
+  • БАТЛАГДААГҮЙ зогсолт — доторх гарах уншилт ирээгүй, гадна гарц/албадан
+    хаалт дээр барагдуулсан (`close_open_pause`), мөн одоо явж буй зогсолтын
+    урьдчилсан дүн (`effective_paused_minutes`): `unverified_cap_minutes` —
+    тохируулсан хязгаар > 0 бол тэр, 0 бол глобал `settings.transit_max_hours`
+    (глобал ч 0 бол хязгааргүй). Шалтгаан: эцгийн 0-ийг хүүхэд өвлөснөөс
+    (100 айл) camera_sync/албадан хаалт/алдагдсан уншилтын зогсолт хязгааргүй
+    болж, 1 минут дотор байгаад 7 цаг гадаа зогссон машин 0₮ гарч байв (1937УАЕ).
+    Энэ дүрэм ЗӨВХӨН тусдаа site-тай (parent/child) загварт; НЭГ site доторх
+    (`nested_inner` камер) загварт 0 = хязгааргүй хэвээр (Рашбулаг ЭТТ —
+    2026-09-19 эзэн баталсан `owner_confirmed_unlimited_inner_time`).
+  • Машин дотор байх үеийн урьдчилсан дүн нь «одоо гадна гарцад гарах уншилтгүй
+    ирвэл» авах дүнтэй ЯГ ижил (гарц ч мөн `unverified_cap_minutes`-ээр
+    барагдуулна). Доторх гарах уншилт ирвэл хасалт зөвхөн ӨСНӨ (дүн буурна).
 """
 import logging
 from datetime import datetime
@@ -55,7 +74,9 @@ def child_cap_minutes(db: Session, child: ParkingSite) -> int:
     хоосон бол глобал. Өмнө нь зөвхөн хүүхдийнхийг уншдаг байсан тул админ
     «Дотор хугацааг хасах хязгаар»-ыг гадна (эцэг) зогсоол дээр 0 гэж тавихад
     backend үл тоож глобал 4 цагаар тасалдаг байв — 100 айл 10-07..10-12:
-    эмнэлгийн дотор 8–10 цаг байсан 33 машинд 4 цагийг л хасаж 368,000₮ нэхсэн."""
+    доторх ГАРАХ уншилттай 7–13ц дотор байсан 29 гадна сешнд 4 цагийг л хасаж
+    352,000₮ нэхсэн (audit1013 дахин тооцоолол). 0 = хязгааргүй нь зөвхөн
+    БАТЛАГДСАН зогсолтод — модулийн docstring-ийн хязгаарын дүрмийг үз."""
     if child is not None and child.transit_max_hours is None and child.parent_site_id:
         parent = db.get(ParkingSite, child.parent_site_id)
         if parent is not None and parent.transit_max_hours is not None:
@@ -79,11 +100,34 @@ def pause_cap_minutes(db: Session, site_id: str) -> int:
         алдагдсан машин зогсоолын тохиргоог тойрч, ЗӨВ уншсанаас ИЛҮҮ хугацаа
         үнэгүй авдаг байв (жагсаалт дээрх дүн ба гарц дээрх дүн ч зөрдөг).
     """
+    return _configured_cap(db, site_id)[0]
+
+
+def _configured_cap(db: Session, site_id: str) -> tuple[int, bool]:
+    """(`pause_cap_minutes`, хүүхэд зогсоолтой эсэх) — нэг асуулгаар."""
     kids = db.query(ParkingSite).filter(ParkingSite.parent_site_id == site_id).all()
     if not kids:
-        return cap_minutes(db.get(ParkingSite, site_id))
+        return cap_minutes(db.get(ParkingSite, site_id)), False
     caps = [child_cap_minutes(db, k) for k in kids]
-    return 0 if 0 in caps else min(caps)
+    return (0 if 0 in caps else min(caps)), True
+
+
+def unverified_cap_minutes(db: Session, site_id: str) -> int:
+    """Доторх ГАРАХ уншилтаар БАТЛАГДААГҮЙ зогсолтын хязгаар (минут). 0 = хязгааргүй.
+
+    Тусдаа site-тай (parent/child) загварт «0 = хязгааргүй» нь зөвхөн жинхэнэ
+    доторх гарах уншилтаар хаагдсан зогсолтод үйлчилнэ. Гарах уншилтгүй
+    (гадна гарц/албадан хаалт дээр барагдуулсан, эсвэл одоо явж буй) зогсолтод
+    тохируулсан хязгаар 0 бол глобал `transit_max_hours`-ыг хэрэглэнэ — эс бол
+    доторх гарах уншилт алдагдсан машин бүх гадна хугацаагаа үнэгүй авна
+    (100 айл 1937УАЕ 10-09: дотор 1 мин, гадаа 7ц → 0₮).
+
+    НЭГ site доторх загвар (хүүхэд зогсоолгүй) `pause_cap_minutes`-тэй ижил —
+    Рашбулаг ЭТТ-ийн 0-ийг эзэн 2026-09-19 «хязгааргүй» гэж баталсан."""
+    cap, split = _configured_cap(db, site_id)
+    if cap or not split:
+        return cap
+    return max(0, int(settings.transit_max_hours)) * 60
 
 
 def _parent_session(db: Session, site: ParkingSite, plate: str) -> ParkingSession | None:
@@ -123,7 +167,10 @@ def effective_paused_minutes(db: Session, s: ParkingSession, at: datetime) -> in
     total = int(getattr(s, "paused_minutes", 0) or 0)
     since = getattr(s, "paused_since", None)
     if since:
-        cap = pause_cap_minutes(db, s.site_id)
+        # Явж буй зогсолт = доторх гарах уншилтаар хараахан батлагдаагүй. Гадна
+        # гарц дээр `close_open_pause` ИЖИЛ хязгаараар барагдуулна — урьдчилсан
+        # дүн гарц дээр өөрчлөгдөхгүй (модулийн docstring-ийн хязгаарын дүрэм).
+        cap = unverified_cap_minutes(db, s.site_id)
         mins = max(0, int((at - since).total_seconds() // 60))
         total += min(mins, cap) if cap else mins
     return total
@@ -143,7 +190,10 @@ def on_inner_entry(db: Session, site: ParkingSite, plate: str, at: datetime) -> 
         return False
     if parent.paused_since:
         return False   # аль хэдийн зогссон (давхар уншилт)
-    parent.paused_since = at
+    # Гадна сешн эхлэхээс ӨМНӨХ цагаас зогсоохгүй: хуучин (гарах уншилтгүй
+    # үлдсэн) доторх сешний entry_time энд ирж болно — хасалт гадна зогсолтоос
+    # хэтэрч бүх гадна хугацаа үнэгүй болдог байв (8810УКР 2026-10-13).
+    parent.paused_since = max(at, parent.entry_time) if parent.entry_time else at
     log.info("[nested] %s: «%s»-д орлоо — гадна «%s»-ын тоолуур зогслоо",
              plate, site.name, getattr(parent.site, "name", parent.site_id))
     return True
@@ -154,9 +204,128 @@ def on_inner_exit(db: Session, site: ParkingSite, plate: str, at: datetime) -> i
     parent = _parent_session(db, site, plate)
     if parent is None or not parent.paused_since:
         return 0
+    if parent.paused_since > at:
+        # Энэ гарц нь ӨМНӨХ айлчлалынх (camera_sync/албадан хаалт өнгөрсөн
+        # цагаар дууддаг) — түүнээс хойш эхэлсэн шинэ зогсолтыг бүү хаа.
+        return 0
+    # Жинхэнэ доторх ГАРАХ уншилт — БАТЛАГДСАН зогсолт: тохируулсан хязгаар
+    # (0 = хязгааргүй). Модулийн docstring-ийн хязгаарын дүрмийг үз.
     mins = settle_pause(parent, at, child_cap_minutes(db, site))
     log.info("[nested] %s: «%s»-аас гарлаа — гадна тоолуур %d минут зогссон "
              "(нийт %d мин хасагдана)", plate, site.name, mins, parent.paused_minutes)
+    return mins
+
+
+def restore_parent_pause(db: Session, child_site: ParkingSite, child: ParkingSession,
+                         since: datetime | None) -> bool:
+    """ДОТООД (хүүхэд) сешн «хуурамч гарц»-аас АВТО/гараар СЭРГЭЭГДЛЭЭ — машин
+    дотроо байсаар байжээ. Гадна тоолуурыг тэр «гарц»-ын цагаас дахин зогсооно.
+
+    Доторх ГАРАХ камер дөнгөж ОРЖ буй машиныг уншиж (100 айл 8507УБР
+    2026-10-12: орсноос 15с-ийн дараа) хүүхэд сешн хаагдахад `on_inner_exit`
+    гадна тоолуурыг үргэлжлүүлдэг. Жинхэнэ гарах уншилтаар хүүхэд сешн сэргэхэд
+    гадна тоолуур ҮРГЭЛЖИЛСЭЭР байсан тул дотор өнгөрүүлсэн 7 цагийг нэхдэг байв
+    (4688УБН, 7969УАА, 8507УБР — 70,000₮; зөв дүн 0₮).
+
+    `since` (хуурамч гарцын цаг) хүртэлх минут `paused_minutes`-д аль хэдийн
+    орсон тул давхар тоологдохгүй; дараагийн `on_inner_exit` хязгаараар барагдуулна.
+    Зөвхөн тэр үед идэвхтэй байсан, одоо OPEN, зогсоогүй гадна сешнд."""
+    if since is None:
+        return False
+    parent = _parent_session(db, child_site, child.plate_number)
+    if (parent is None or parent.status != "OPEN" or parent.paused_since
+            or parent.entry_time > since):
+        return False
+    parent.paused_since = since
+    log.info("[nested] %s: «%s» сешн сэргэв — гадна тоолуурыг %s-аас дахин зогсоов",
+             child.plate_number, child_site.name, since)
+    return True
+
+
+def reapply_child_pauses(db: Session, s: ParkingSession, since: datetime | None,
+                         now: datetime) -> int:
+    """ГАДНА (эцэг) сешн сэргээгдлээ — хаалттай байсан хугацаанд (since..now)
+    машин доторх зогсоолд байсан бол тэр хугацааг хасалтад нэмнэ.
+
+    Гадна ГАРАХ камер дөнгөж орж буй машиныг уншиж гадна сешн FREE хаагдана →
+    машин доторх зогсоолд ороход идэвхтэй гадна сешн алга тул тоолуур зогсохгүй
+    (`on_inner_entry`) → жинхэнэ гарахад гадна сешн «хуурамч гарц» гэж сэргэж
+    дотор өнгөрүүлсэн бүх цагийг нэхдэг байв (100 айл 4216УБО 2026-10-07: 11ц,
+    25,000₮; зөв дүн 0₮).
+
+      • ДОТООД гарах уншилттай (exit_confirmed) хаагдсан хүүхэд сешн — давхцсан
+        хэсгийг (интервалуудын нэгдэл) БАТЛАГДСАН хязгаараар `paused_minutes`-д нэмнэ.
+      • Нээлттэй хүүхэд сешн — `paused_since`-ийг эхлүүлнэ; гадна гарц дээр
+        `close_open_pause` батлагдаагүй хязгаараар барагдуулна (live замтай ижил).
+      • Гарах уншилтгүй албадан хаагдсан хүүхэд сешн — цаг нь таамаг тул тооцохгүй.
+    Цонх нь ямагт [сүүлийн хаалт, одоо] тул дахин сэргээхэд давхар тоологдохгүй.
+    Хүүхэд зогсоолгүй (НЭГ site) зогсоолд юу ч хийхгүй."""
+    if since is None or since >= now:
+        return 0
+    kids = [k.id for k in db.query(ParkingSite.id)
+            .filter(ParkingSite.parent_site_id == s.site_id).all()]
+    if not kids:
+        return 0
+    rows = (db.query(ParkingSession)
+            .filter(ParkingSession.site_id.in_(kids),
+                    ParkingSession.plate_number == s.plate_number,
+                    ParkingSession.entry_time < now,
+                    (ParkingSession.exit_time.is_(None)) | (ParkingSession.exit_time > since))
+            .all())
+    spans, open_start = [], None
+    for c in rows:
+        start = max(c.entry_time, since)
+        if c.exit_time is None:
+            if c.status in _ACTIVE:
+                open_start = start if open_start is None else min(open_start, start)
+            continue
+        if c.exit_confirmed:
+            spans.append((start, min(c.exit_time, now)))
+    cap = pause_cap_minutes(db, s.site_id)
+    added, cur = 0, None
+    for a, b in sorted(spans) + [(None, None)]:          # интервалуудын нэгдэл
+        if cur and (a is None or a > cur[1]):
+            mins = max(0, int((cur[1] - cur[0]).total_seconds() // 60))
+            added += min(mins, cap) if cap else mins
+            cur = None
+        if a is not None and b > a:
+            cur = (a, b) if cur is None else (cur[0], max(cur[1], b))
+    if added:
+        s.paused_minutes = int(s.paused_minutes or 0) + added
+    if open_start is not None and not s.paused_since:
+        s.paused_since = open_start
+    if added or open_start is not None:
+        log.info("[nested] %s: гадна сешн сэргэв — доторх %d мин хасалтад нэмэв%s",
+                 s.plate_number, added,
+                 f", тоолуур {open_start}-аас зогссон" if open_start is not None else "")
+    return added
+
+
+def credit_backfilled_child(db: Session, child_site: ParkingSite, plate: str,
+                            start: datetime, end: datetime | None) -> int:
+    """camera_sync-аар НӨХӨЖ үүсгэсэн доторх сешн — live `on_inner_entry`
+    дуудагдаагүй тул гадна тоолуур огт зогсоогүй (100 айл 10-07..10-12: 8333УАО,
+    3016УНЕ, 5508УАТ — дотор 8–9ц, 68,000₮ нэхэмжилсэн, зөв дүн 0₮).
+
+    Гадна сешн тэр үед идэвхтэй (start-аас өмнө орсон) бол:
+      • end байхгүй (машин дотроо) → тоолуурыг start-аас зогсооно;
+      • end байгаа (логийн ГАРАХ уншилт = батлагдсан) → [start, end] минутыг
+        тохируулсан хязгаараар шууд нэмнэ.
+    Гадна тоолуур аль хэдийн зогссон бол давхар тооцохгүй."""
+    parent = _parent_session(db, child_site, plate)
+    if parent is None or parent.entry_time > start or parent.paused_since:
+        return 0
+    if end is None:
+        parent.paused_since = start
+        log.info("[nested] %s: «%s»-ийн нөхсөн бүртгэл — гадна тоолуурыг %s-аас зогсоов",
+                 plate, child_site.name, start)
+        return 0
+    mins = max(0, int((end - start).total_seconds() // 60))
+    cap = child_cap_minutes(db, child_site)
+    mins = min(mins, cap) if cap else mins
+    parent.paused_minutes = int(parent.paused_minutes or 0) + mins
+    log.info("[nested] %s: «%s»-ийн нөхсөн бүртгэл — гадна сешнд %d мин хасалт нэмэв",
+             plate, child_site.name, mins)
     return mins
 
 
@@ -171,7 +340,8 @@ def close_open_pause(db: Session, s: ParkingSession, at: datetime) -> int:
     """
     if not getattr(s, "paused_since", None):
         return 0
-    mins = settle_pause(s, at, pause_cap_minutes(db, s.site_id))
+    # Доторх гарах уншилтгүй → БАТЛАГДААГҮЙ зогсолт (`unverified_cap_minutes`)
+    mins = settle_pause(s, at, unverified_cap_minutes(db, s.site_id))
     log.info("[nested] %s: гадна гарцад уншигдлаа — доторх гарах уншилтгүй үлдсэн "
              "зогсолтыг %d минутаар хаав", s.plate_number, mins)
     return mins

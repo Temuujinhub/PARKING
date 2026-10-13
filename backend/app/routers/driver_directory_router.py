@@ -52,6 +52,14 @@ def driver_options(db: Session = Depends(get_db), user: User = Depends(require('
     nested = {r[0] for r in db.query(Device.site_id).filter(
         Device.site_id.in_([s.id for s in sites]), Device.device_type == 'camera',
         Device.nested_inner.is_(True), Device.status != 'deleted').distinct()}
+    # Тусдаа site-тай (parent/child) загвар: дотроо зогсоолтой ЭЦЭГ зогсоол ч
+    # «Хамрах хүрээ»-тэй — inner/both бүртгэлийг find_registered хүүхэд зогсоол
+    # дээр тоолдог. Өмнө нь зөвхөн дотоод КАМЕРТАЙ site-д харагддаг байсан тул
+    # Хангарьд/100 айл дээр импортолсон бүх бүртгэл «site» болдог байв.
+    # (admin_router-ийн has_inner_lanes-д ХҮРЭХГҮЙ — тэр нь inner_registered_only
+    # тохиргоог удирддаг, зөвхөн дотоод камертай зогсоолд утгатай.)
+    nested |= {r[0] for r in db.query(ParkingSite.parent_site_id).filter(
+        ParkingSite.parent_site_id.in_([s.id for s in sites])).distinct()}
     return [{'id': s.id, 'name': s.name, 'site_code': s.site_code,
              'has_inner_lanes': s.id in nested} for s in sites]
 
