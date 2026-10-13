@@ -936,13 +936,26 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     from .services.nested import close_open_pause
     _csite = getattr(s, "site", None)
     if (_csite is not None and getattr(_csite, "parent_site_id", None)
-            and (confirmed or getattr(s, "exit_confirmed", False))):
+            # Нотолгоо = ЭНЭ хаалтын гарах цаг өөрөө уншилтаас ирсэн. Сэргээгдсэн
+            # сешнд хуучин exit_confirmed=True үлддэг (exit_time хоосон) тул
+            # нотолгоогүй албадан хаалт үүгээр «батлагдсан» болохгүй.
+            and (confirmed or (getattr(s, "exit_confirmed", False)
+                               and s.exit_time is not None))
+            and s.entry_time is not None
+            and (at - s.entry_time).total_seconds()
+            > 60 * int(_exit_rules(db, s.site_id)["fake_exit_minutes"])):
         # ДОТООД (хүүхэд) сешн ГАРАХ нотолгоотой хаагдаж байна (camera_sync-ийн
         # логийн гарах уншилт г.м) — гадна тоолуурыг ТЭР цагаас үргэлжлүүлнэ.
-        # Өмнө нь дуудагддаггүй тул гадна тоолуур гадна гарц хүртэл зогссоор:
-        # 1937УАЕ (10-09) дотор 1 мин байгаад 7 цаг гадаа зогссон хугацаа ч
-        # хасагдаж байв. Нотолгоогүй салаанд (дээрх create_comp=False, OPEN)
-        # хүрэхгүй — гарсан цаг нь тодорхойгүй, гадна гарц дээр хязгаартай.
+        # «Хуурамч гарц»-ын босгоос (fake_exit_minutes) БОГИНО зогсолтод
+        # хүрэхгүй: доторх ГАРАХ камер дөнгөж ОРЖ буй машиныг уншдаг (100 айл
+        # 15–104с). 1937УАЕ 10-09: орсноос 51с-д ийм cross-read-ээр camera_sync
+        # хүүхэд сешнийг хаасан, машин 7ц ДОТОР байж жинхэнэ гарах уншилт нь
+        # зөвхөн логт (live татгалзсан, итгэл 26) — энд эцгийг үргэлжлүүлбэл
+        # 20,000₮ (прод 8,000₮). Live зам ийм гарцыг auto_reopen_for_exit +
+        # restore_parent_pause-аар засдаг, camera_sync-д тийм сэргээлт алга —
+        # тиймээс эцгийн зогсолт нээлттэй үлдэж дараагийн доторх гарах уншилт
+        # (7224УБС) эсвэл гадна гарц (батлагдаагүй хязгаар) барагдуулна.
+        # Нотолгоогүй салаанд (дээрх create_comp=False, OPEN) хүрэхгүй.
         from .services.nested import on_inner_exit
         on_inner_exit(db, _csite, s.plate_number, at)
     close_open_pause(db, s, at)

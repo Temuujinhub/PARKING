@@ -32,31 +32,69 @@
     `handle_inner_pass`-ийн гарах, camera_sync-ийн логийн дотоод/хүүхэд
     сешний гарах уншилт) хаагдсан: тохируулсан хязгаар
     (`child_cap_minutes`: хүүхэд → эцэг → глобал). 0 = ХЯЗГААРГҮЙ.
+  • camera_sync/албадан хаалт хүүхэд сешнийг «хуурамч гарц»-ын босгоос
+    (`fake_exit_minutes`) БОГИНО зогсолттой хаавал энэ нь батлагдсан гарц БИШ:
+    доторх ГАРАХ камер дөнгөж ОРЖ буй машиныг уншдаг (cross-read, 15–104с).
+    Эцгийн зогсолт нээлттэй үлдэнэ (`session_logic.close_session_forced`).
   • БАТЛАГДААГҮЙ зогсолт — доторх гарах уншилт ирээгүй, гадна гарц/албадан
     хаалт дээр барагдуулсан (`close_open_pause`), мөн одоо явж буй зогсолтын
     урьдчилсан дүн (`effective_paused_minutes`): `unverified_cap_minutes` —
     тохируулсан хязгаар > 0 бол тэр, 0 бол глобал `settings.transit_max_hours`
     (глобал ч 0 бол хязгааргүй). Шалтгаан: эцгийн 0-ийг хүүхэд өвлөснөөс
-    (100 айл) camera_sync/албадан хаалт/алдагдсан уншилтын зогсолт хязгааргүй
-    болж, 1 минут дотор байгаад 7 цаг гадаа зогссон машин 0₮ гарч байв (1937УАЕ).
+    (100 айл) доторх гарах уншилт АЛДАГДСАН машин (доторх зогсоолоос гарч
+    гадна талбайд зогссон ч) бүх гадна хугацаагаа үнэгүй авах байв. Үнэ нь:
+    1937УАЕ 10-09 үнэхээр 7ц дотор байсан ч гарах уншилт нь зөвхөн татгалзсан
+    (итгэл 26) тул 4ц хасагдана — прод 8,000₮-тэй ижил (зөв дүн 0₮).
     Энэ дүрэм ЗӨВХӨН тусдаа site-тай (parent/child) загварт; НЭГ site доторх
     (`nested_inner` камер) загварт 0 = хязгааргүй хэвээр (Рашбулаг ЭТТ —
     2026-09-19 эзэн баталсан `owner_confirmed_unlimited_inner_time`).
   • Машин дотор байх үеийн урьдчилсан дүн нь «одоо гадна гарцад гарах уншилтгүй
     ирвэл» авах дүнтэй ЯГ ижил (гарц ч мөн `unverified_cap_minutes`-ээр
     барагдуулна). Доторх гарах уншилт ирвэл хасалт зөвхөн ӨСНӨ (дүн буурна).
+
+Хэнд хасалт өгөх (2026-10-13):
+  • Зөвхөн доторх хаалтаар НЭВТРЭХ эрхтэй машин (`_admitted` — live
+    `handle_entry`-ийн `denied`/`black_blocks`-тэй ижил). Татгалзсан машинд ч
+    доторх сешн үүсдэг (Рашбулаг шороо 10-12..13: 19 сешн, хаалтны команд 0) —
+    сэргээлт/нөхөлтийн зам тэднийг «дотор байсан» гэж тооцохгүй.
+  • Өмнөх айлчлалаас үлдсэн (гадна сешн эхлэхээс өмнө нээгдсэн) доторх сешн
+    энэ айлчлалд зөвхөн шинэ доторх ОРОХ уншилтаас тоологдоно (8810УКР).
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import ParkingSession, ParkingSite
+from ..models import LprEvent, ParkingSession, ParkingSite
 
 log = logging.getLogger("parking.nested")
 
 _ACTIVE = ("OPEN", "AWAITING_PAYMENT", "PAID")
+# Доторх сешн гадна сешнээс ийм хэмжээгээр ӨМНӨ эхэлсэн бол «өмнөх айлчлалынх»
+# (камер/серверийн цагийн бага зөрүүг тэвчинэ)
+_STALE_TOLERANCE = timedelta(minutes=2)
+
+
+def _admitted(db: Session, child_site: ParkingSite, plate: str) -> bool:
+    """Энэ машинд доторх хаалт НЭЭГДЭХ үү — live `handle_entry`-ийн `denied`
+    («Зөвхөн бүртгэлтэй» зогсоолын бүртгэлгүй машин) ба `black_blocks`
+    (хар жагсаалт + орохыг хориглох дүрэм)-тэй ижил шийдвэр.
+
+    Татгалзсан машинд ч доторх сешн үүсдэг (хаалт нээгдэхгүй) — Рашбулаг шороо
+    10-12..13-нд 19 доторх сешн, нэг ч хаалтны команд алга. Live зам тэдний
+    гадна тоолуурыг зогсоодоггүй; сэргээлт/нөхөлтийн зам ч зогсоох ёсгүй
+    (эс бол гадна сешн «хуурамч гарц»-аар сэргэхэд 4ц хүртэл үнэгүй болно).
+    Одоогийн бүртгэл/хар жагсаалтаар шалгана (сешнд шийдвэр хадгалагддаггүй)."""
+    from ..session_logic import find_registered, is_blacklisted
+    if child_site.registered_only and find_registered(db, plate, child_site.id) is None:
+        return False
+    if is_blacklisted(db, plate) is not None:
+        from .app_settings import get_blacklist_rules
+        if get_blacklist_rules(db, child_site.id)["block_entry"]:
+            return False
+    return True
 
 
 def cap_minutes(site: ParkingSite | None) -> int:
@@ -119,8 +157,9 @@ def unverified_cap_minutes(db: Session, site_id: str) -> int:
     доторх гарах уншилтаар хаагдсан зогсолтод үйлчилнэ. Гарах уншилтгүй
     (гадна гарц/албадан хаалт дээр барагдуулсан, эсвэл одоо явж буй) зогсолтод
     тохируулсан хязгаар 0 бол глобал `transit_max_hours`-ыг хэрэглэнэ — эс бол
-    доторх гарах уншилт алдагдсан машин бүх гадна хугацаагаа үнэгүй авна
-    (100 айл 1937УАЕ 10-09: дотор 1 мин, гадаа 7ц → 0₮).
+    доторх гарах уншилт алдагдсан машин (доторх зогсоолоос гараад гадна талбайд
+    зогссон ч) бүх гадна хугацаагаа үнэгүй авна. 1937УАЕ (10-09, 7ц дотор,
+    гарах уншилт зөвхөн татгалзсан) энэ хязгаараар 4ц = прод 8,000₮.
 
     НЭГ site доторх загвар (хүүхэд зогсоолгүй) `pause_cap_minutes`-тэй ижил —
     Рашбулаг ЭТТ-ийн 0-ийг эзэн 2026-09-19 «хязгааргүй» гэж баталсан."""
@@ -229,8 +268,9 @@ def restore_parent_pause(db: Session, child_site: ParkingSite, child: ParkingSes
 
     `since` (хуурамч гарцын цаг) хүртэлх минут `paused_minutes`-д аль хэдийн
     орсон тул давхар тоологдохгүй; дараагийн `on_inner_exit` хязгаараар барагдуулна.
-    Зөвхөн тэр үед идэвхтэй байсан, одоо OPEN, зогсоогүй гадна сешнд."""
-    if since is None:
+    Зөвхөн тэр үед идэвхтэй байсан, одоо OPEN, зогсоогүй гадна сешнд, доторх
+    хаалтаар нэвтрэх эрхтэй машинд (`_admitted`)."""
+    if since is None or not _admitted(db, child_site, child.plate_number):
         return False
     parent = _parent_session(db, child_site, child.plate_number)
     if (parent is None or parent.status != "OPEN" or parent.paused_since
@@ -258,23 +298,48 @@ def reapply_child_pauses(db: Session, s: ParkingSession, since: datetime | None,
       • Нээлттэй хүүхэд сешн — `paused_since`-ийг эхлүүлнэ; гадна гарц дээр
         `close_open_pause` батлагдаагүй хязгаараар барагдуулна (live замтай ижил).
       • Гарах уншилтгүй албадан хаагдсан хүүхэд сешн — цаг нь таамаг тул тооцохгүй.
+      • Доторх хаалтаар нэвтрэх эрхгүй машины (татгалзсан/хориглогдсон) сешн —
+        машин дотогш ороогүй (`_admitted`), тооцохгүй.
+      • ӨМНӨХ айлчлалаас үлдсэн (гадна сешнээс өмнө нээгдсэн) хүүхэд сешн —
+        зөвхөн энэ айлчлалын доторх ОРОХ уншилтаас (`existing` замаар дахин
+        ашиглагдсан) тоолно; уншилтгүй бол машин гадаа байсан гэж үзнэ. Эс бол
+        гарах уншилтгүй үлдсэн phantom сешн гадаа зогссон хугацааг хасдаг (8810УКР
+        хэв маяг; on_inner_entry-ийн «ОДООГООС» дүрэмтэй ижил).
     Цонх нь ямагт [сүүлийн хаалт, одоо] тул дахин сэргээхэд давхар тоологдохгүй.
     Хүүхэд зогсоолгүй (НЭГ site) зогсоолд юу ч хийхгүй."""
     if since is None or since >= now:
         return 0
-    kids = [k.id for k in db.query(ParkingSite.id)
-            .filter(ParkingSite.parent_site_id == s.site_id).all()]
+    kids = {k.id: k for k in db.query(ParkingSite)
+            .filter(ParkingSite.parent_site_id == s.site_id).all()}
     if not kids:
         return 0
     rows = (db.query(ParkingSession)
-            .filter(ParkingSession.site_id.in_(kids),
+            .filter(ParkingSession.site_id.in_(list(kids)),
                     ParkingSession.plate_number == s.plate_number,
                     ParkingSession.entry_time < now,
                     (ParkingSession.exit_time.is_(None)) | (ParkingSession.exit_time > since))
             .all())
+    visit_start = s.entry_time - _STALE_TOLERANCE if s.entry_time else None
+    admitted: dict[str, bool] = {}
     spans, open_start = [], None
     for c in rows:
-        start = max(c.entry_time, since)
+        if c.site_id not in admitted:
+            admitted[c.site_id] = _admitted(db, kids[c.site_id], s.plate_number)
+        if not admitted[c.site_id]:
+            continue
+        start = c.entry_time
+        if visit_start is not None and c.entry_time < visit_start:
+            start = (db.query(func.min(LprEvent.created_at))
+                     .filter(LprEvent.site_id == c.site_id,
+                             LprEvent.plate_number == s.plate_number,
+                             LprEvent.lane_dir == "entry",
+                             LprEvent.accepted.is_(True),
+                             LprEvent.created_at >= visit_start,
+                             LprEvent.created_at <= (c.exit_time or now))
+                     .scalar())
+            if start is None:
+                continue
+        start = max(start, since)
         if c.exit_time is None:
             if c.status in _ACTIVE:
                 open_start = start if open_start is None else min(open_start, start)
@@ -311,9 +376,13 @@ def credit_backfilled_child(db: Session, child_site: ParkingSite, plate: str,
       • end байхгүй (машин дотроо) → тоолуурыг start-аас зогсооно;
       • end байгаа (логийн ГАРАХ уншилт = батлагдсан) → [start, end] минутыг
         тохируулсан хязгаараар шууд нэмнэ.
-    Гадна тоолуур аль хэдийн зогссон бол давхар тооцохгүй."""
+    Гадна тоолуур аль хэдийн зогссон бол давхар тооцохгүй. Логт ОРОХ уншилт
+    байгаа ч доторх хаалтаар нэвтрэх эрхгүй машинд (`_admitted`) хасалт өгөхгүй
+    — камер татгалзсан машиныг ч уншдаг."""
     parent = _parent_session(db, child_site, plate)
     if parent is None or parent.entry_time > start or parent.paused_since:
+        return 0
+    if not _admitted(db, child_site, plate):
         return 0
     if end is None:
         parent.paused_since = start

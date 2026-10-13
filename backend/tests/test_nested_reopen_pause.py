@@ -16,8 +16,11 @@
   d. camera_sync логоос нөхсөн доторх сешн эцгийн тоолуурыг огт зогсоогоогүй
      (5508УАТ, 8333УАО, 3016УНЕ).
   e. camera_sync доторх сешнийг логийн гарах уншилтаар хаахад эцгийн тоолуур
-     үргэлжлээгүй → дотор 1 мин, гадаа 7ц машин эцгийн 0 (хязгааргүй) дор
-     0₮ болох байв (1937УАЕ).
+     ТЭР цагаас үргэлжилнэ (дотор 30 мин, гадаа 7ц → төлбөртэй). Харин
+     «хуурамч гарц»-ын босгоос богино бол энэ нь доторх ГАРАХ камерын
+     cross-read (1937УАЕ 10-09: орсноос 51с, машин 7ц ДОТОР байсан) — эцгийн
+     зогсолт нээлттэй үлдэж прод-оос илүү нэхэхгүй (7224УБС: жинхэнэ гарц
+     live ирвэл 0₮).
   f. Хуучин (гарах уншилтгүй) доторх сешн дахин ашиглагдахад зогсолт өчигдрийн
      цагаас эхэлж бүх гадна хугацаа хасагдана (8810УКР).
   g. Хар жагсаалтаар хориглогдсон (хаалт нээгдээгүй) машины эцгийн тоолуур зогсдог.
@@ -27,6 +30,15 @@
      БАТЛАГДСАН зогсолтод; батлагдаагүйд глобал хязгаар (НЭГ site загварт хэвээр).
   j–m. Төлбөрийн дүрмийн #9 анхааруулга (өвлөсөн 0), админы гараар сэргээх ба
      камерын логоос нөхөх, жолоочийн «Хамрах хүрээ» эцэг зогсоолд.
+  n. Эцэг сэргэхэд ӨМНӨХ айлчлалын (phantom) хүүхэд сешн гадаа зогссон
+     хугацааг «дотор» гэж хасахгүй; дахин ашиглагдсан бол ОРОХ уншилтаас.
+  o. «Зөвхөн бүртгэлтэй» доторх зогсоолд татгалзсан машины хүүхэд сешн эцэг
+     сэргэхэд хасалт өгөхгүй (Рашбулаг шороо: 19 сешн, хаалтны команд 0).
+  p. Гараар сэргээсэн хүүхэд сешнийг нотолгоогүй албадан хаахад эцгийн
+     зогсолт «батлагдсан» (хязгааргүй) болж барагдахгүй.
+
+Дугаарууд нь ХИЙМЭЛ (99xxЖЖА) — бодит харилцагчийн мөрөнд хүрэхгүй; цаг
+шилжүүлэх ба цэвэрлэгээ зөвхөн тестийн зогсоолуудаар хязгаарлагдана.
 """
 import asyncio
 import os
@@ -76,9 +88,8 @@ def check(name, cond, extra=""):
     print(f"  {'✓' if cond else '✗ <<< FAIL'} {name}{'' if cond else f'  [{extra}]'}")
 
 
-PLATES = ["8507УБР", "4216УБО", "1234УБА", "5508УАТ", "3016УНЕ", "1937УАЕ", "8810УКР",
-          "6611ХАР", "5531ТРН", "5531ТР", "7001ЦАП", "7002ЦАП", "7003ЦАП", "4402ДБЛ",
-          "2207ДБХ", "4403ДБЛ"]
+# Дугаарууд ХИЙМЭЛ (99xxЖЖА — бодит харилцагчийн мөрөнд хүрэхгүй). Цаг шилжүүлэх
+# ба цэвэрлэгээ тестийн зогсоолоор (`site_ids`) шүүгдэнэ — DB даяар дугаараар биш.
 db = SessionLocal()
 made: list = []
 site_ids: list = []
@@ -137,17 +148,19 @@ def mk_pair(tpl, parent_cap=0, child_cap=None, **child_kw):
 
 
 def shift(plate, hours):
-    """Тухайн дугаарын бүх цагийг `hours` цагаар ухрааж «цаг өнгөрснийг» дуурайна."""
+    """Тухайн дугаарын ТЕСТИЙН зогсоол дээрх бүх цагийг `hours` цагаар ухрааж
+    «цаг өнгөрснийг» дуурайна."""
     secs = float(hours) * 3600
+    args = {"h": secs, "p": plate, "sids": [str(x) for x in site_ids]}
     db.execute(text(
         "update parking_sessions set entry_time=entry_time-make_interval(secs=>:h), "
         "exit_time=exit_time-make_interval(secs=>:h), paused_since=paused_since-make_interval(secs=>:h), "
         "updated_at=updated_at-make_interval(secs=>:h), "
         "last_exit_seen_at=last_exit_seen_at-make_interval(secs=>:h), "
         "payment_wait_started_at=payment_wait_started_at-make_interval(secs=>:h) "
-        "where plate_number=:p"), {"h": secs, "p": plate})
+        "where plate_number=:p and site_id::text = any(:sids)"), args)
     db.execute(text("update lpr_events set created_at=created_at-make_interval(secs=>:h) "
-                    "where plate_number=:p"), {"h": secs, "p": plate})
+                    "where plate_number=:p and site_id::text = any(:sids)"), args)
     db.commit()
     db.expire_all()
 
@@ -180,7 +193,7 @@ try:
 
     print("\na. Доторх ГАРАХ камер орж буй машиныг уншив (15с); жинхэнэ гарц 7ц дараа (8507УБР)")
     outer, inner, d = mk_pair(tpl)
-    P = "8507УБР"
+    P = "9901ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
     r1 = run(handle_exit(db, d["iexit"], P, 0.95, raw(P)))
@@ -200,7 +213,7 @@ try:
 
     print("\nb. Гадна ГАРАХ камер орж буй машиныг уншив (14с); дотор 11ц (4216УБО)")
     outer, inner, d = mk_pair(tpl)
-    P = "4216УБО"
+    P = "9902ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
     check("хуурамч гарц эцэг сешнийг FREE хаалаа", sess(outer, P).status == "FREE")
@@ -221,7 +234,7 @@ try:
 
     print("\nb2. Жинхэнэ эргэлт (дотогш ороогүй) — сэргэхэд хасалт нэмэгдэхгүй")
     outer, inner, d = mk_pair(tpl)
-    P = "1234УБА"
+    P = "9903ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
     shift(P, 3)
@@ -233,7 +246,7 @@ try:
 
     print("\nd. camera_sync логоос нөхсөн доторх сешн эцгийн тоолуурыг зогсооно (5508УАТ)")
     outer, inner, d = mk_pair(tpl)
-    P = "5508УАТ"
+    P = "9904ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     shift(P, 9)
     po = sess(outer, P)
@@ -248,7 +261,7 @@ try:
           po.paused_since)
     # Гарах уншилттай нөхөлт — минутыг шууд нэмнэ (батлагдсан → эцгийн 0 = хязгааргүй)
     outer2, inner2, d2 = mk_pair(tpl)
-    P2 = "3016УНЕ"
+    P2 = "9905ЖЖА"
     run(handle_entry(db, d2["oentry"], P2, 0.95, raw(P2)))
     shift(P2, 10)
     po2 = sess(outer2, P2)
@@ -262,27 +275,72 @@ try:
           credit_backfilled_child(db, inner, P, t_in, t_in + timedelta(hours=1)) == 0)
     db.rollback()
 
-    print("\ne. camera_sync доторх сешнийг 1 мин дараа хаав, гадаа 7ц (1937УАЕ; эцэг 0)")
+    print("\ne. camera_sync доторх сешнийг логийн гарах уншилтаар хаав — дотор 30 мин, гадаа 7ц")
     outer, inner, d = mk_pair(tpl, parent_cap=0)
-    P = "1937УАЕ"
+    P = "9906ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
-    shift(P, 7 + 5 / 60)
+    shift(P, 7.5)
     po, pi = sess(outer, P), sess(inner, P)
     check("доторх орохоор эцгийн тоолуур зогссон", po.paused_since is not None)
-    res = camsync(inner, [(P, pi.entry_time)], [(P, pi.entry_time + timedelta(minutes=1))])
+    res = camsync(inner, [(P, pi.entry_time)], [(P, pi.entry_time + timedelta(minutes=30))])
     po, pi = sess(outer, P), sess(inner, P)
     check("логийн гарах уншилтаар доторх сешн хаагдав", pi.status != "OPEN" and pi.exit_confirmed,
           (res, pi.status, pi.exit_confirmed))
-    check("эцгийн тоолуур ТЭР цагаас үргэлжлэв (≤1 мин хасалт)",
-          po.paused_since is None and (po.paused_minutes or 0) <= 1,
+    check("эцгийн тоолуур ТЭР цагаас үргэлжлэв (30 мин хасалт)",
+          po.paused_since is None and 29 <= (po.paused_minutes or 0) <= 30,
           (po.paused_since, po.paused_minutes))
     fee = session_fee_info(db, po)
     check("гадаа 7ц → төлбөртэй (эцэг 0 байсан ч)", fee["total_fee"] > 0 and not fee["is_free"], fee)
 
+    print("\ne2. Доторх ГАРАХ камерын cross-read (51с) camera_sync-ээр; машин 7ц ДОТОР (1937УАЕ хэв маяг)")
+    outer, inner, d = mk_pair(tpl, parent_cap=0)
+    P = "9907ЖЖА"
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
+    shift(P, 7 + 3 / 60)
+    po, pi = sess(outer, P), sess(inner, P)
+    t_pause = po.paused_since
+    # Логт: орсноос 51с-д cross-read, жинхэнэ гарц 7ц дараа (live татгалзсан)
+    res = camsync(inner, [(P, pi.entry_time)], [(P, pi.entry_time + timedelta(seconds=51)),
+                                                (P, pi.entry_time + timedelta(hours=7, seconds=10))])
+    po, pi = sess(outer, P), sess(inner, P)
+    check("cross-read доторх сешнийг хаасан (camera_sync)", pi.status != "OPEN" and pi.exit_confirmed,
+          (res, pi.status))
+    check("богино (≤ fake_exit_minutes) гарц эцгийн тоолуурыг ҮРГЭЛЖЛҮҮЛЭЭГҮЙ",
+          po.paused_since == t_pause and not po.paused_minutes, (po.paused_since, po.paused_minutes))
+    r = run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    fee = session_fee_info(db, po, at=po.exit_time)
+    # Төлбөр хүлээж буй (AWAITING) сешний зогсолт хаагдах үед барагдана —
+    # нэхэмжлэлийн дүн effective_paused_minutes-ээр ИЖИЛ хязгаартай.
+    check("гадна гарц: батлагдаагүй хязгаар 240 мин хасагдав (прод-той ижил, 1 мин БИШ)",
+          fee["paused_minutes"] == 240, (r.get("action"), po.status, fee["paused_minutes"]))
+    check("нэхэмжилсэн дүн = 7ц03м − 4ц (прод-оос ИЛҮҮГҮЙ)",
+          float(po.total_fee or 0) == fee["total_fee"] > 0, (po.total_fee, fee["total_fee"]))
+
+    print("\ne3. Мөн cross-read, гэхдээ жинхэнэ доторх гарц LIVE ирэв (7224УБС хэв маяг) → 0₮")
+    outer, inner, d = mk_pair(tpl, parent_cap=0)
+    P = "9908ЖЖА"
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
+    shift(P, 7 + 3 / 60)
+    pi = sess(inner, P)
+    camsync(inner, [(P, pi.entry_time)], [(P, pi.entry_time + timedelta(seconds=44))])
+    r = run(handle_exit(db, d["iexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    check("доторх сешн АВТО сэргэж жинхэнэ гарцаар хаагдав, эцэгт ~423 мин",
+          r.get("action") == "exit_completed" and po.paused_minutes >= 420
+          and po.paused_since is None, (r.get("action"), po.paused_minutes))
+    shift(P, 1 / 60)
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    check("гадна гарц үнэгүй", po.status == "FREE" and float(po.total_fee or 0) == 0,
+          (po.status, po.total_fee))
+
     print("\nf. Хуучин доторх сешн дахин ашиглагдав — зогсолт ОДООГООС (8810УКР)")
     outer, inner, d = mk_pair(tpl, parent_cap=0)
-    P = "8810УКР"
+    P = "9909ЖЖА"
     now = datetime.utcnow()
     stale = ParkingSession(id=str(uuid.uuid4()), site_id=inner.id, plate_number=P,
                            entry_time=now - timedelta(hours=30), status="OPEN", paused_minutes=0)
@@ -309,7 +367,7 @@ try:
 
     print("\ng. Хар жагсаалтаар хориглосон (бүртгэлтэй) машин — эцгийн тоолуур зогсохгүй")
     outer, inner, d = mk_pair(tpl)
-    P = "6611ХАР"
+    P = "9910ЖЖА"
     drv = RegisteredDriver(id=str(uuid.uuid4()), plate_number=P, site_id=outer.id,
                            contract_type="TRANSIT", access_scope="site", is_active=True,
                            valid_from=now - timedelta(days=1), valid_to=now + timedelta(days=30))
@@ -333,12 +391,12 @@ try:
 
     print("\nh. Цуврал уншилт: junk → зөв дугаар (autocorrect) — эцгийн тоолуур зогсоно")
     outer, inner, d = mk_pair(tpl)
-    P = "5531ТРН"
+    P = "9911ЖЖА"
     po = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number=P,
                         entry_time=now - timedelta(minutes=5), status="OPEN", paused_minutes=0)
     db.add(po)
     db.commit()
-    r1 = run(handle_entry(db, d["ientry"], "5531ТР", 0.6, raw("5531ТР")))
+    r1 = run(handle_entry(db, d["ientry"], "9911ЖЖ", 0.6, raw("9911ЖЖ")))
     r2 = run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
     po = sess(outer, P)
     check("2 дахь уншилт autocorrect", r2.get("action") == "plate_autocorrect", (r1, r2))
@@ -347,10 +405,10 @@ try:
     print("\ni. Хязгаарын дүрэм — батлагдсан (0 = хязгааргүй) / батлагдаагүй (глобал)")
     outer, inner, d = mk_pair(tpl, parent_cap=0)
     t6 = datetime.utcnow() - timedelta(hours=6)
-    s_v = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number="7001ЦАП",
+    s_v = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number="9912ЖЖА",
                          entry_time=t6 - timedelta(minutes=5), status="OPEN", paused_minutes=0,
                          paused_since=t6)
-    s_u = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number="7002ЦАП",
+    s_u = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number="9913ЖЖА",
                          entry_time=t6 - timedelta(minutes=5), status="OPEN", paused_minutes=0,
                          paused_since=t6)
     db.add_all([s_v, s_u])
@@ -364,7 +422,7 @@ try:
     close_open_pause(db, s_u, at)
     check("гадна гарц (доторх гарах уншилтгүй) 240 — урьдчилсантай ИЖИЛ",
           s_u.paused_minutes == shown, (s_u.paused_minutes, shown))
-    on_inner_exit(db, inner, "7001ЦАП", at)
+    on_inner_exit(db, inner, "9912ЖЖА", at)
     check("доторх ГАРАХ уншилттай → бүтэн 360 (хязгааргүй)", s_v.paused_minutes == 360,
           s_v.paused_minutes)
     _g = settings.transit_max_hours
@@ -378,7 +436,7 @@ try:
                          capacity=10, transit_max_hours=0, tariff_template_id=tpl.id)
     db.add(single)
     db.flush()
-    s_s = ParkingSession(id=str(uuid.uuid4()), site_id=single.id, plate_number="7003ЦАП",
+    s_s = ParkingSession(id=str(uuid.uuid4()), site_id=single.id, plate_number="9914ЖЖА",
                          entry_time=t6 - timedelta(minutes=5), status="OPEN", paused_minutes=0,
                          paused_since=t6)
     db.add(s_s)
@@ -407,7 +465,7 @@ try:
     from app.routers.sessions_router import register_from_camera, reopen_session
     admin = SimpleNamespace(role="SUPER_ADMIN", username="zz-test", site_ids=[], site_id=None)
     outer, inner, d = mk_pair(tpl)
-    P = "4402ДБЛ"
+    P = "9915ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
     run(handle_exit(db, d["iexit"], P, 0.95, raw(P)))
@@ -421,7 +479,7 @@ try:
     check("хүүхэд гараар сэргэхэд эцгийн тоолуур «гарц»-аас дахин зогсов",
           po.paused_since == fake_exit, (po.paused_since, fake_exit))
     outer2, inner2, d2 = mk_pair(tpl)
-    P2 = "4403ДБЛ"
+    P2 = "9916ЖЖА"
     run(handle_entry(db, d2["oentry"], P2, 0.95, raw(P2)))
     run(handle_exit(db, d2["oexit"], P2, 0.95, raw(P2)))       # хуурамч гадна гарц
     run(handle_entry(db, d2["ientry"], P2, 0.95, raw(P2)))
@@ -438,7 +496,7 @@ try:
 
     print("\nl. Админ камерын логоос нөхөж бүртгэх (доторх зогсоол) — эцгийн тоолуур")
     outer, inner, d = mk_pair(tpl)
-    P = "2207ДБХ"
+    P = "9917ЖЖА"
     run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
     shift(P, 8)
     po = sess(outer, P)
@@ -460,10 +518,105 @@ try:
     check("доторх (хүүхэд, камергүй) зогсоолд хэвээр false",
           opts.get(inner.id, {}).get("has_inner_lanes") is False, opts.get(inner.id))
 
+    print("\nn. Эцэг сэргэхэд ӨМНӨХ айлчлалын нээлттэй хүүхэд сешн — гадаа 3ц хасагдахгүй")
+    outer, inner, d = mk_pair(tpl, parent_cap=None)          # Хангарьд шиг (глобал 4ц)
+    P = "9918ЖЖА"
+    now = datetime.utcnow()
+    db.add(ParkingSession(id=str(uuid.uuid4()), site_id=inner.id, plate_number=P,
+                          entry_time=now - timedelta(hours=20), status="OPEN", paused_minutes=0))
+    db.commit()
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))          # хуурамч гадна гарц
+    check("хуурамч гарц эцгийг FREE хаалаа", sess(outer, P).status == "FREE")
+    shift(P, 3)                                                 # машин 3ц ГАДАА
+    r = run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    check("эцэг АВТО сэргэв",
+          db.query(AuditLog).filter_by(entity_id=po.id, action="AUTO_REOPEN").count() == 1)
+    check("phantom хүүхэд сешнээр хасалт өгөөгүй — 3ц төлбөртэй",
+          not po.paused_minutes and po.paused_since is None
+          and r.get("action") == "awaiting_payment", (r.get("action"), po.paused_minutes))
+
+    print("\nn2. Мөн phantom сешн, гадаа 3ц → дотогш орж (дахин ашиглав) 1ц → гарц")
+    outer, inner, d = mk_pair(tpl, parent_cap=0)              # 100 айл шиг (батлагдсан хязгааргүй)
+    P = "9919ЖЖА"
+    now = datetime.utcnow()
+    stale2 = ParkingSession(id=str(uuid.uuid4()), site_id=inner.id, plate_number=P,
+                            entry_time=now - timedelta(hours=20), status="OPEN", paused_minutes=0)
+    db.add(stale2)
+    db.commit()
+    stale2_id = stale2.id
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))          # хуурамч гадна гарц
+    shift(P, 3)
+    r_in = run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
+    check("хуучин доторх сешн дахин ашиглагдав", r_in.get("session_id") == stale2_id, r_in)
+    shift(P, 1)
+    run(handle_exit(db, d["iexit"], P, 0.95, raw(P)))          # доторх ГАРАХ уншилт
+    shift(P, 1 / 60)
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))          # эцэг сэргэнэ
+    po = sess(outer, P)
+    check("зөвхөн доторх 1ц (ОРОХ уншилтаас) хасагдав, гадаа 3ц биш",
+          59 <= (po.paused_minutes or 0) <= 61, po.paused_minutes)
+
+    print("\no. «Зөвхөн бүртгэлтэй» доторх зогсоол: татгалзсан машины хүүхэд сешн (Рашбулаг шороо)")
+    outer, inner, d = mk_pair(tpl, parent_cap=None, registered_only=True)
+    P = "9920ЖЖА"
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))          # хуурамч гадна гарц
+    r_in = run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))  # бүртгэлгүй → татгалзана
+    pi = sess(inner, P)
+    check("доторх хаалт нээгдээгүй ч сешн үүссэн (phantom)",
+          not r_in.get("barrier_opened") and pi is not None and pi.status == "OPEN",
+          (r_in, pi and pi.status))
+    shift(P, 3)                                                 # машин 3ц ГАДАА
+    r = run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    check("эцэг АВТО сэргэв",
+          db.query(AuditLog).filter_by(entity_id=po.id, action="AUTO_REOPEN").count() == 1)
+    check("татгалзсан машинд доторх хасалт өгөөгүй — 3ц төлбөртэй",
+          not po.paused_minutes and po.paused_since is None
+          and r.get("action") == "awaiting_payment", (r.get("action"), po.paused_minutes))
+    now = datetime.utcnow()
+    po2 = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number="9922ЖЖА",
+                         entry_time=now - timedelta(hours=1), status="OPEN", paused_minutes=0)
+    db.add(po2)
+    db.flush()
+    got = credit_backfilled_child(db, inner, "9922ЖЖА", now - timedelta(minutes=30), None)
+    check("camera_sync нөхөлт: татгалзах машинд эцгийн тоолуур зогсохгүй",
+          got == 0 and po2.paused_since is None, (got, po2.paused_since))
+    db.rollback()
+
+    print("\np. Гараар сэргээсэн хүүхэд сешнийг НОТОЛГООГҮЙ албадан хаав — эцэг «батлагдсан» биш")
+    from app.session_logic import close_session_forced
+    outer, inner, d = mk_pair(tpl, parent_cap=0)
+    P = "9921ЖЖА"
+    run(handle_entry(db, d["oentry"], P, 0.95, raw(P)))
+    run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
+    run(handle_exit(db, d["iexit"], P, 0.95, raw(P)))          # cross-read → хүүхэд хаагдав
+    pi = sess(inner, P)
+    run(reopen_session(pi.id, db, admin))                      # эцэг дахин зогсоно
+    shift(P, 6)
+    pi = sess(inner, P)
+    check("сэргээсэн хүүхэд: exit_confirmed хэвээр, exit_time хоосон",
+          pi.status == "OPEN" and pi.exit_confirmed and pi.exit_time is None,
+          (pi.status, pi.exit_confirmed, pi.exit_time))
+    close_session_forced(db, pi, "zz_remove", "zz-test", create_comp=True)
+    db.commit()
+    po = sess(outer, P)
+    check("нотолгоогүй хаалт эцгийн зогсолтыг 6ц «батлагдсан» болгож барагдуулаагүй",
+          po.paused_since is not None and not po.paused_minutes,
+          (po.paused_since, po.paused_minutes))
+    run(handle_exit(db, d["oexit"], P, 0.95, raw(P)))
+    po = sess(outer, P)
+    fee = session_fee_info(db, po, at=po.exit_time)
+    check("гадна гарц: батлагдаагүй хязгаар 240 мин (6ц биш)", fee["paused_minutes"] == 240,
+          (po.status, fee["paused_minutes"]))
+
 finally:
     db.rollback()
     sess_ids = [r[0] for r in db.query(ParkingSession.id).filter(
-        ParkingSession.plate_number.in_(PLATES) | ParkingSession.site_id.in_(site_ids)).all()]
+        ParkingSession.site_id.in_(site_ids)).all()]
     if sess_ids:
         db.query(Compensation).filter(Compensation.session_id.in_(sess_ids)).delete(
             synchronize_session=False)
@@ -471,8 +624,7 @@ finally:
             synchronize_session=False)
         db.query(AuditLog).filter(AuditLog.entity_id.in_(sess_ids)).delete(
             synchronize_session=False)
-    db.query(LprEvent).filter(LprEvent.plate_number.in_(PLATES) | LprEvent.site_id.in_(site_ids)).delete(
-        synchronize_session=False)
+    db.query(LprEvent).filter(LprEvent.site_id.in_(site_ids)).delete(synchronize_session=False)
     db.query(ParkingSession).filter(ParkingSession.id.in_(sess_ids)).delete(
         synchronize_session=False)
     db.commit()
