@@ -147,7 +147,16 @@ export default function Vat() {
       if (res.ok && res.ebarimt_id) toast(`Баримт баталгаажсан — ДДТД ${res.ebarimt_id}`)
       else toast(res.error || 'Баримтын ажил хүлээгдэж байна; дахин төлөхгүй', res.pending ? 'success' : 'error')
       reloadRows(); reloadFails()
-    } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
+    } catch (e) {
+      // 2026-10-13: POS терминалын давхардал гэж ТЕГ тулгалтаар цуцалсан баримт — сервер
+      // 409 өгнө. Ил тод зөвшөөрөлгүйгээр дахин үүсгэвэл давхардал буцаж үүснэ.
+      if (/POS терминал/.test(e.message) && !opts?.allow_duplicate
+        && window.confirm(`${e.message}\n\nДАВХАР баримт үүсгэхийг зөвшөөрөх үү?`)) {
+        await retry(r, { ...(opts || {}), allow_duplicate: true })
+        return
+      }
+      toast(e.message, 'error')
+    } finally { setRetrying(null) }
   }
   // Худалдан авагчийн дугаар буруу (QPay «customerTin», ТЕГ-т байхгүй регистр) —
   // иргэний баримт болгох эсвэл зөв дугаар өгөх. 2026-09-06: 6853959 регистртэй

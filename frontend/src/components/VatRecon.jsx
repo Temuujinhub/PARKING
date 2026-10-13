@@ -5,16 +5,21 @@
 // (2) түрээслэгч/багана/цагийн тохиргоо тавих газаргүй байв. Одоо алдаа
 // ЗӨВ ХЭВЭЭР үлдэж, дэлгэрэнгүй оношилгоотойгоо хамт харагдана.
 import { AlertTriangle, Ban, FileCheck2, FileSpreadsheet, Upload } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, fmt } from '../api'
 import { Modal, useToast } from './ui'
 
 const TZ_OPTS = [['', 'Авто (өөрөө тааруулна)'], ['0', 'Файл UTC цагаар'], ['-8', 'Файл УБ (локал) цагаар']]
+// 2026-10-13: 3с → 60с. msgbill баримт төлбөрөөс p95 4.8с, Ontime POS 27с хүртэл
+// зөрдөг; сервер хатуу НЭГ-НЭГЭЭР (хамгийн ойр хос эхэлж) тулгадаг тул өргөн цонх аюулгүй
+const DEFAULT_TOL = 60
+const sumLine = (obj) => Object.entries(obj || {})
+  .map(([k, v]) => `${k} ${v.count} (${fmt(v.amount)}₮)`).join(' · ')
 
 export default function VatRecon({ tenants = [] }) {
   const [tenantId, setTenantId] = useState('')
   const [tz, setTz] = useState('')
-  const [tol, setTol] = useState(3)
+  const [tol, setTol] = useState(DEFAULT_TOL)
   const [cols, setCols] = useState({ col_ddtd: '', col_dt: '', col_amount: '' })
   const [file, setFile] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -24,8 +29,9 @@ export default function VatRecon({ tenants = [] }) {
   const [dup, setDup] = useState(null)       // давхардлыг цуцлах цонх
   const [dupNote, setDupNote] = useState('ТЕГ тулгалт: Ontime POS дээр баримт хэвлэгдсэн тул msgbill дэх давхардлыг цуцлав')
   const [dupOk, setDupOk] = useState(false)
-  const [dupSel, setDupSel] = useState([])   // сонгосон төлбөрүүд (сэжигтэйг хасна)
+  const [dupSel, setDupSel] = useState([])   // сонгосон төлбөрүүд
   const [dupBusy, setDupBusy] = useState(false)
+  const [dupJob, setDupJob] = useState(null)  // арын цуцлалтын явц
   const fileRef = useRef(null)
   const toast = useToast()
 
@@ -33,7 +39,7 @@ export default function VatRecon({ tenants = [] }) {
     const p = new URLSearchParams()
     if (tenantId) p.set('tenant_id', tenantId)
     if (tz !== '') p.set('tz_shift', tz)
-    if (Number(tol) !== 3) p.set('tol', String(tol))
+    if (Number(tol) !== DEFAULT_TOL) p.set('tol', String(tol))
     for (const [k, v] of Object.entries(cols)) if (v.trim()) p.set(k, v.trim())
     return p
   }
@@ -75,27 +81,54 @@ export default function VatRecon({ tenants = [] }) {
     } catch (e) { toast(e.message, 'error') }
   }
 
-  // Давхардсан гэж тэмдэглэгдсэн мөрүүдийн ТӨЛБӨРүүд (давхардлыг арилгасан)
-  const dupIds = [...new Set((recon?.unmatched_tax || [])
-    .filter((r) => r.verdict === 'DUPLICATE' && r.payment_id).map((r) => r.payment_id))]
+  // Давхардлын БҮТЭН жагсаалт серверээс (recon.duplicates). Өмнө нь дэлгэцийн эхний
+  // 200 мөрөөс (unmatched_tax) бүтээдэг байсан тул 200-гаас хойших давхардал цуцлагдахгүй үлддэг байв.
+  const dups = recon?.duplicates || []
+  const dupIds = dups.map((d) => d.payment_id)
+  const tegOf = Object.fromEntries(dups.map((d) => [d.payment_id,
+    { teg_ddtd: d.teg_ddtd, teg_register: d.teg_register }]))
 
-  const cancelDup = async (apply) => {
+  // Урьдчилан харах (dry-run) — синхрон, юу ч өөрчлөхгүй
+  const previewDup = async () => {
+    setDupBusy(true); setDupJob(null)
+    try {
+      const res = await api('/api/reports/vat-reconcile/cancel-duplicates', {
+        method: 'POST', body: { payment_ids: dupIds, dry_run: true },
+      })
+      setDup(res)
+      setDupSel(res.items.filter((i) => i.ok).map((i) => i.payment_id))
+    } catch (e) { toast(e.message, 'error') } finally { setDupBusy(false) }
+  }
+
+  // Бодит цуцлалт — АРЫН АЖИЛ (nginx 60с-т 504 өгөхгүй); явцыг 2с тутам асууна
+  const applyDup = async () => {
     setDupBusy(true)
     try {
       const res = await api('/api/reports/vat-reconcile/cancel-duplicates', {
         method: 'POST',
-        body: { payment_ids: apply ? dupSel : dupIds, dry_run: !apply,
-          note: apply ? dupNote : undefined },
+        body: { payment_ids: dupSel, dry_run: false, note: dupNote,
+          teg: Object.fromEntries(dupSel.map((id) => [id, tegOf[id] || {}])) },
       })
-      setDup(res)
-      // Анхдагчаар: цуцлах боломжтой БА сэжиггүй мөрүүд л сонгогдоно
-      if (!apply) setDupSel(res.items.filter((i) => i.ok && !i.suspect).map((i) => i.payment_id))
-      if (apply) {
-        toast(`Цуцлагдсан: ${res.ok} · алдаа: ${res.failed}`, res.failed ? 'error' : undefined)
-        setDupOk(false)
-      }
-    } catch (e) { toast(e.message, 'error') } finally { setDupBusy(false) }
+      setDupJob(res.job)
+      setDupOk(false)
+    } catch (e) { toast(e.message, 'error'); setDupBusy(false) }
   }
+
+  useEffect(() => {
+    if (!dupJob?.running) return undefined
+    const t = setInterval(async () => {
+      try {
+        const j = await api('/api/reports/vat-reconcile/cancel-duplicates/status')
+        setDupJob(j)
+        if (!j.running) {
+          setDupBusy(false)
+          toast(`Цуцлагдсан: ${j.ok} · хүлээгдэж буй: ${j.pending} · алгассан: ${j.skipped} · алдаа: ${j.failed}`,
+            j.failed || j.stopped ? 'error' : undefined)
+        }
+      } catch { /* дараагийн асуултаар дахин оролдоно */ }
+    }, 2000)
+    return () => clearInterval(t)
+  }, [dupJob?.running])
 
   const d = recon?.diag
   return (
@@ -221,6 +254,13 @@ export default function VatRecon({ tenants = [] }) {
                       `…${k}: ${v === 0 ? 'UTC' : `${v > 0 ? '+' : ''}${v}ц`}`).join(' · ')}
                 </div>
               )}
+              {(recon.foreign_registers || []).length > 0 && (
+                <div>Өөр системийн касс (манай баримтад огт гардаггүй — POS терминал г.м): {
+                  recon.foreign_registers.map((k) => {
+                    const st = recon.group_stats?.[k]
+                    return st ? `…${k} (${st.matched}/${st.rows} мөр манай төлбөртэй таарсан)` : `…${k}`
+                  }).join(' · ')}</div>
+              )}
               <div>Манай баримтын касс: {Object.entries(recon.ours_pos || {})
                 .sort((a, b) => b[1] - a[1]).map(([k, v]) => `…${k}: ${v}`).join(' · ') || '—'}</div>
               {Object.keys(recon.unmatched_tax_pos || {}).length > 0 && (
@@ -312,71 +352,85 @@ export default function VatRecon({ tenants = [] }) {
                   </span>
                 ))}
               </div>
-              {dupIds.length > 0 && (
-                <button className="btn-secondary text-xs py-1 mb-2 text-red-400 border-red-500/40"
-                  disabled={dupBusy} onClick={() => { setDupOk(false); cancelDup(false) }}
-                  title="Эхлээд ЮУ цуцлагдахыг бүтнээр нь харуулна — тэр үед л баталгаажуулна">
-                  <Ban size={13} /> Давхардсан {dupIds.length} баримтыг цуцлах…
-                </button>
+              {dups.length > 0 && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3 mb-2 space-y-1 text-xs">
+                  <div className="font-semibold text-red-300">
+                    POS терминалын баримттай давхардсан манай msgbill баримт:{' '}
+                    <b className="font-mono">{recon.duplicate_summary?.count ?? dups.length}</b> ·{' '}
+                    <b className="font-mono">{fmt(recon.duplicate_summary?.amount ?? 0)}₮</b>
+                  </div>
+                  <div className="text-slate-400">Зогсоолоор: {sumLine(recon.duplicate_summary?.by_site)}</div>
+                  <div className="text-slate-400">Аргаар: {sumLine(recon.duplicate_summary?.by_method)}</div>
+                  <div className="text-slate-500">
+                    Зөвхөн QR биш (бэлэн/карт/данс/хэтэвч) төлбөрийн ИЛГЭЭГДСЭН msgbill баримт.
+                    POS терминалын баримт хэвээр үлдэнэ (жолоочид хэвлэгдэж өгсөн нь тэр).
+                  </div>
+                  <button className="btn-secondary text-xs py-1 text-red-400 border-red-500/40"
+                    disabled={dupBusy || dupJob?.running} onClick={() => { setDupOk(false); previewDup() }}
+                    title="Эхлээд ЮУ цуцлагдахыг бүтнээр нь харуулна — тэр үед л баталгаажуулна">
+                    <Ban size={13} /> Давхардсан {dups.length} баримтыг цуцлах…
+                  </button>
+                </div>
               )}
               <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
                 {recon.unmatched_tax.map((r, i) => (
                   <div key={i} className={r.verdict === 'DUPLICATE' || r.verdict === 'PAYMENT_NO_RECEIPT'
                     ? 'text-red-300' : ''}>
-                    {r.dt?.slice(0, 19)} {fmt(r.amount)}₮ {r.ddtd}
+                    {(r.dt_ub || r.dt)?.slice(0, 19)} {fmt(r.amount)}₮ {r.ddtd}
                     {r.plate ? ` · ${r.plate} ${r.site_name} ${r.method}` : ''}
                     {' · '}{(recon.verdict_labels?.[r.verdict] || r.verdict).split(' — ')[0]}
+                    {r.note ? ` (${r.note})` : ''}
                   </div>
                 ))}
+                {recon.unmatched_tax_total > recon.unmatched_tax.length && (
+                  <div className="text-slate-500">… эхний {recon.unmatched_tax.length}-г харуулав
+                    (нийт {recon.unmatched_tax_total}; бүтнээр нь Excel-д)</div>
+                )}
               </div>
             </div>
           )}
         </div>
       )}
-      <Modal open={!!dup} onClose={() => setDup(null)} wide
-        title={dup?.dry_run ? 'Давхар баримтыг цуцлах — урьдчилан харах' : 'Цуцлалтын үр дүн'}>
-        {dup && (
+      <Modal open={!!dup} onClose={() => { if (!dupJob?.running) { setDup(null); setDupJob(null) } }} wide
+        title={dupJob ? 'Давхардлын цуцлалт' : 'Давхар баримтыг цуцлах — урьдчилан харах'}>
+        {dup && !dupJob && (
           <div className="space-y-3 text-sm">
-            {dup.dry_run && (
-              <div className="card border-amber-500/50 bg-amber-500/5 text-xs space-y-1" role="alert">
-                <div className="flex items-center gap-2 text-amber-400 font-semibold">
-                  <AlertTriangle size={14} /> Аль баримт цуцлагдахыг анхаарна уу
-                </div>
-                <div className="text-slate-300">
-                  Доорх жагсаалтад ЯГ ямар ДДТД цуцлагдахыг харуулав — тэмдэглэсэн мөр л
-                  цуцлагдана. Багцын зонхилох сувгаас ӨӨР сувгийнхыг (⚠) санамсаргүй
-                  тааралт байж болзошгүй тул анхдагчаар сонгоогүй. Мөнгө буцаахгүй,
-                  зөвхөн татварын баримт.
-                </div>
+            <div className="card border-amber-500/50 bg-amber-500/5 text-xs space-y-1" role="alert">
+              <div className="flex items-center gap-2 text-amber-400 font-semibold">
+                <AlertTriangle size={14} /> Аль баримт цуцлагдахыг анхаарна уу
               </div>
-            )}
+              <div className="text-slate-300">
+                Доорх жагсаалтад ЯГ ямар (манай msgbill) ДДТД цуцлагдахыг харуулав — тэмдэглэсэн
+                мөр л цуцлагдана. Сервер төлбөр бүрийг дахин шалгаж, QR/QPay баримтыг хэзээ ч
+                цуцлахгүй. Мөнгө буцаахгүй, зөвхөн татварын баримт.
+              </div>
+            </div>
             <div className="flex flex-wrap gap-4 text-xs">
               <span>Хүсэлт: <b className="font-mono">{dup.requested}</b></span>
-              <span className="text-accent">{dup.dry_run ? 'Цуцлах боломжтой' : 'Цуцлагдсан'}: <b className="font-mono">{dup.ok}</b></span>
-              {dup.failed > 0 && <span className="text-red-400">Алдаа: <b className="font-mono">{dup.failed}</b></span>}
+              <span className="text-accent">Цуцлах боломжтой: <b className="font-mono">{dup.ok}</b></span>
+              {dup.already > 0 && <span>Аль хэдийн цуцлагдсан: <b className="font-mono">{dup.already}</b></span>}
+              {dup.failed - (dup.already || 0) > 0 && (
+                <span className="text-red-400">Боломжгүй: <b className="font-mono">{dup.failed - (dup.already || 0)}</b></span>)}
             </div>
             <div className="max-h-64 overflow-auto text-xs font-mono space-y-0.5">
               {(dup.items || []).map((it, i) => (
-                <label key={i} className={`flex items-start gap-2 ${it.ok ? '' : 'text-red-400'} ${
-                  it.suspect ? 'text-amber-400' : ''} ${dup.dry_run && it.ok ? 'cursor-pointer' : ''}`}>
-                  {dup.dry_run && it.ok && (
+                <label key={i} className={`flex items-start gap-2 ${it.ok ? 'cursor-pointer' : 'text-red-400'}`}>
+                  {it.ok && (
                     <input type="checkbox" className="mt-0.5" checked={dupSel.includes(it.payment_id)}
                       onChange={(e) => setDupSel((v) => e.target.checked
                         ? [...v, it.payment_id] : v.filter((x) => x !== it.payment_id))} />
                   )}
                   <span>
-                    {it.paid_at?.slice(0, 19)} {fmt(it.amount)}₮ {it.site_name}
-                    {it.provider ? ` ${it.provider}` : ''}
+                    {it.paid_at?.slice(0, 19)} {fmt(it.amount)}₮ {it.site_name} {it.method || ''}
                     {' · '}
-                    {(it.will_cancel || it.cancelled || []).map((x) => x.ddtd || x).join(', ')
-                      || it.error || ''}
+                    {(it.will_cancel || []).map((x) => x.ddtd).join(', ')}
+                    {tegOf[it.payment_id]?.teg_ddtd ? ` ↔ ТЕГ ${tegOf[it.payment_id].teg_ddtd}` : ''}
                     {it.error ? ` · ${it.error}` : ''}
-                    {it.suspect ? ' · ⚠ өөр суваг — санамсаргүй тааралт байж болно' : ''}
                   </span>
                 </label>
               ))}
             </div>
-            {dup.dry_run && dup.ok > 0 && (
+            {dup.ok > 0 && (
               <div className="space-y-2 border-t border-surface-border/60 pt-3">
                 <label className="block text-xs">
                   <div className="text-slate-400 mb-1">Цуцлах шалтгаан (ТЕГ-ийн бүртгэлд үлдэнэ)</div>
@@ -388,9 +442,37 @@ export default function VatRecon({ tenants = [] }) {
                 </label>
                 <button className="btn-primary bg-red-600 hover:bg-red-500 text-white text-sm py-1.5"
                   disabled={!dupOk || !dupNote.trim() || dupBusy || dupSel.length === 0}
-                  onClick={() => cancelDup(true)}>
-                  <Ban size={14} /> {dupBusy ? 'Цуцалж байна…' : `${dupSel.length} баримтыг цуцлах`}
+                  onClick={applyDup}>
+                  <Ban size={14} /> {dupBusy ? 'Эхлүүлж байна…' : `${dupSel.length} баримтыг цуцлах`}
                 </button>
+              </div>
+            )}
+          </div>
+        )}
+        {dupJob && (
+          <div className="space-y-3 text-sm">
+            <div className="text-xs text-slate-400">
+              {dupJob.running ? 'Цуцалж байна — цонхыг хааж болохгүй (сервер дээр үргэлжилнэ)…' : 'Дууслаа.'}
+            </div>
+            <div className="h-2 rounded bg-surface-border/40 overflow-hidden">
+              <div className="h-2 bg-red-500 transition-all"
+                style={{ width: `${dupJob.total ? Math.round((dupJob.done / dupJob.total) * 100) : 0}%` }} />
+            </div>
+            <div className="flex flex-wrap gap-4 text-xs font-mono">
+              <span>{dupJob.done}/{dupJob.total}</span>
+              <span className="text-accent">цуцлагдсан {dupJob.ok}</span>
+              <span>хүлээгдэж буй {dupJob.pending}</span>
+              <span>алгассан {dupJob.skipped}</span>
+              {dupJob.failed > 0 && <span className="text-red-400">алдаа {dupJob.failed}</span>}
+            </div>
+            {dupJob.stopped && <div className="text-xs text-red-400">⚠ {dupJob.stopped}</div>}
+            {(dupJob.top_errors || []).map((e, i) => (
+              <div key={i} className="text-xs text-red-300 font-mono">{e.count}× {e.error}</div>
+            ))}
+            {!dupJob.running && dupJob.pending > 0 && (
+              <div className="text-xs text-slate-400">
+                «Хүлээгдэж буй» нь msgbill ТЕГ-т дахин оролдож байгаа цуцлалт — хэсэг хугацааны
+                дараа ижил цуцлалтыг дахин ажиллуулахад төлөвийг шалгаж эцэслэнэ.
               </div>
             )}
           </div>

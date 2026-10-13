@@ -16,7 +16,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, FinancialJob, Payment, VatReceipt
 from . import ebarimt, msgbill, qpay
-from .receipts import assign_ebarimt_id
+from .receipts import assign_ebarimt_id, is_duplicate_cancel
 
 log = logging.getLogger("parking.financial_jobs")
 
@@ -122,7 +122,7 @@ def enqueue_receipt_ready(db, payment, receipt):
         payload={"url": original.payload["url"], "partner": original.payload["partner"], "event": event}))
 
 
-def retry_payment_receipts(db, payment):
+def retry_payment_receipts(db, payment, allow_duplicate=False):
     # Also serializes adoption of historical receipts by concurrent operators.
     db.query(Payment).enable_eagerloads(False).filter_by(id=payment.id).with_for_update().one()
     jobs = (db.query(FinancialJob).filter(FinancialJob.payment_id == payment.id,
@@ -131,6 +131,14 @@ def retry_payment_receipts(db, payment):
     recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
             .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
     active = [r for r in recs if r.status != "CANCELLED"]
+    if recs and not active and not allow_duplicate and any(is_duplicate_cancel(r) for r in recs):
+        # 2026-10-13: POS терминал (Ontime) баримт хэвлэсэн тул манай msgbill
+        # баримтыг ТЕГ тулгалтаар цуцалсан. Дахин үүсгэвэл давхардал буцаж үүснэ.
+        return {"ok": False, "duplicate_of_pos": True,
+                "error": "Энэ төлбөрийн баримтыг POS терминалын (касс дээр хэвлэсэн) баримттай "
+                         "ДАВХАРДСАН гэж ТЕГ тулгалтаар цуцалсан — дахин үүсгэвэл ТЕГ-т нэг "
+                         "борлуулалт 2 баримттай болно. Үнэхээр шаардлагатай бол давхардлыг "
+                         "зөвшөөрч (allow_duplicate) дахин дарна уу."}
     if recs and not active:
         if len(recs) != 1:
             return {"ok": False, "review_required": True,

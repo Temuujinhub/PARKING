@@ -330,6 +330,80 @@ async def cancel_receipt(acc: MsgbillAccount, msgbill_id: str, note: str = "") -
     return normalize(data if isinstance(data, dict) else {})
 
 
+# ── Цуцлах түлхүүрийн уналт (2026-10-13) ────────────────────────────────────
+# Баримтыг ЗӨВХӨН түүнийг гаргасан msgbill данс цуцалж чадна. Зогсоолын ОДООГИЙН
+# түлхүүр (api_key_for) нь баримт гаргасан үеийнхээс өөр байж болно: Моннисын
+# 2026-08-20…09-06-ны баримтууд түрээслэгчийн түлхүүр тавигдахаас өмнө ГЛОБАЛ
+# түлхүүрээр гарсан тул одоогийн түлхүүрээр цуцлахад «олдсонгүй» гэж буцдаг.
+# RECEIPT_NOT_FOUND/401/403 үед НӨГӨӨ түлхүүрээр (түрээслэгч ↔ глобал) НЭГ удаа
+# дахин оролдож, аль түлхүүрээр цуцалсныг буцаана.
+
+def cancel_accounts(site) -> list[MsgbillAccount]:
+    """Цуцлах/шалгахад оролдох түлхүүрүүд: одоогийн → нөгөө (давхардалгүй, ≤2).
+
+    Нөгөө түлхүүр нь «өөрийн QPay данстай зогсоолд глобал түлхүүр ХЭРЭГЛЭХГҮЙ»
+    дүрмээс ҮЛ ХАМААРНА — шинэ баримт гаргахгүй, зөвхөн тэр данс өөрөө гаргасан
+    баримтыг цуцлана (өөр дансных бол msgbill «олдсонгүй» гэнэ)."""
+    from ..secretbox import decrypt_secret
+    base = settings.msgbill_base_url.rstrip("/")
+    first = api_key_for(site)
+    out = [first] if first.enabled else []
+    cands = []
+    ten = _tenant_of(site)
+    tkey = decrypt_secret((getattr(ten, "msgbill_api_key", None) or "").strip()) if ten is not None else ""
+    if tkey:
+        cands.append(MsgbillAccount(api_key=tkey, base_url=base, scope="tenant",
+                                    scope_name=getattr(ten, "name", None)))
+    g = (global_config(_db_of(site)).get("api_key") or "").strip()
+    if g:
+        cands.append(MsgbillAccount(api_key=g, base_url=base, scope="global"))
+    for a in cands:
+        if a.api_key not in {x.api_key for x in out}:
+            out.append(a)
+    return out[:2]
+
+
+def _wrong_account(e: "MsgbillError") -> bool:
+    """Энэ алдаа «баримт энэ дансных биш» гэсэн утгатай юу (нөгөө түлхүүрээр оролдох)."""
+    code = (e.code or "").upper()
+    if code == "NOT_SUPPORTED":
+        return False
+    return e.status in (401, 403, 404) or code in ("RECEIPT_NOT_FOUND", "NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN")
+
+
+async def _with_fallback(site, fn, msgbill_id: str, prefer_scope: str | None = None):
+    accs = cancel_accounts(site)
+    if prefer_scope:
+        accs.sort(key=lambda a: a.scope != prefer_scope)
+    if not accs:
+        raise MsgbillError("msgbill API түлхүүр тохируулаагүй", code="NOT_CONFIGURED")
+    for i, acc in enumerate(accs):
+        try:
+            out = await fn(acc)
+        except MsgbillError as e:
+            if i + 1 < len(accs) and _wrong_account(e):
+                log.warning("msgbill %s: %s түлхүүрээр %s — %s түлхүүрээр дахин оролдоно",
+                            msgbill_id, acc.scope, e, accs[i + 1].scope)
+                continue
+            raise
+        out["key_scope"], out["key_fallback"] = acc.scope, i > 0
+        return out
+    raise MsgbillError("msgbill түлхүүр алга", code="NOT_CONFIGURED")   # pragma: no cover
+
+
+async def cancel_receipt_any(site, msgbill_id: str, note: str = "",
+                             prefer_scope: str | None = None) -> dict:
+    """cancel_receipt + түлхүүрийн уналт. Хариунд key_scope (tenant|global), key_fallback."""
+    return await _with_fallback(site, lambda acc: cancel_receipt(acc, msgbill_id, note),
+                                msgbill_id, prefer_scope)
+
+
+async def get_receipt_any(site, msgbill_id: str, prefer_scope: str | None = None) -> dict:
+    """get_receipt + түлхүүрийн уналт (CANCEL_PENDING-ийн төлөвийг эцэслэхэд)."""
+    return await _with_fallback(site, lambda acc: get_receipt(acc, msgbill_id),
+                                msgbill_id, prefer_scope)
+
+
 # ── Webhook (msgbill → бид): X-Billing-Event, X-Billing-Signature = HMAC-SHA256(raw body, whsec_)
 def webhook_secrets(db) -> list[tuple[str, str]]:
     """Мэдэгдэж буй бүх webhook нууц [(scope, whsec_…)] — глобал (DB → .env) + түрээслэгч бүр.
