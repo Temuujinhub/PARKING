@@ -598,6 +598,9 @@ function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
           </div>
           <p className="text-[11px] text-slate-500 mt-1">
             Сонгоогүй арга (ж: бэлэн/карт) локал PosAPI-аар хэвээр. QPay QR төлбөр үргэлж QPay-ийн e-Barimt-аар.
+            {' '}POS терминал (Ontime) карт/бэлэн төлбөрт баримтаа <b className="text-slate-300">өөрөө</b> хэвлэдэг
+            зогсоолд давхар баримтаас сэргийлж: Тохиргоо → Төлбөрийн дүрэм → зогсоол → «POS терминал өөрөө
+            НӨАТ баримт гаргадаг».
           </p>
         </div>
         {result && (

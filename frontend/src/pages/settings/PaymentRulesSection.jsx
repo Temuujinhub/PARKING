@@ -58,10 +58,13 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
       )
     }
     if (row.unit === 'choice') {
+      // Дүрэм өөрийн сонголтуудыг (choices) авчирвал түүгээр — e-Barimt-ын аргууд
+      // (2026-10-13); үгүй бол орох дугаарын шалгалтын policy (хуучин ганц choice)
+      const opts = row.choices ? row.choices.map((c) => [c.value, c.label]) : Object.entries(POLICY_LABEL)
       return (
         <select className="input w-56 text-sm" value={shown} aria-label={row.name}
           onChange={(e) => onChange(e.target.value)}>
-          {Object.entries(POLICY_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
       )
     }

@@ -157,6 +157,8 @@
 | Авто цэвэрлэгээ | `create_debt_reentry` | асаалттай | Дахин орж ирэхэд өр |
 | Авто цэвэрлэгээ | `create_debt_shift_close` | асаалттай | Ээлж хаахад өр |
 | Авто цэвэрлэгээ | `create_debt_night_close` | асаалттай | Шөнийн хаалтад өр |
+| e-Barimt | `pos_terminal_issues` | **унтраалттай** | POS терминал (Ontime) карт/бэлэн төлбөрт баримтаа өөрөө хэвлэдэг зогсоол — систем msgbill-ээр давхар гаргахгүй, `EXTERNAL` гэж бүртгэнэ (2026-10-13; Хангарьд 08-24-нд 63 давхардал) |
+| e-Barimt | `pos_terminal_methods` | `CARD,CASH` | Терминал аль аргад баримт гаргадаг (`CARD` / `CASH` / хоёулаа) |
 
 **Дарах дараалал:** `DEFAULTS` → `.env` (зөвхөн 4 түлхүүрт) → `app_settings`
 глобал → `app_settings._sites[site_id]`.

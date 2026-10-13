@@ -1298,7 +1298,12 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
     q = (q.filter(PAY_SITE.in_(scope_ids)) if scope_ids is not None
          else _flt(q, PAY_SITE, _scope(user)))
     try:
-        ours = q.all()
+        # EXTERNAL (POS терминал/Ontime гаргасан, манайд ДДТД-гүй) нь МАНАЙ баримт
+        # биш — «манайд бий, ТЕГ-д алга» болж хуурамч зөрүү, эсвэл Ontime-ийн мөрийг
+        # «таарсан» гэж залгихгүйн тулд тулгалтаас хасна; тоог нь тусад нь буцаана.
+        rows_all = q.all()
+        ours = [o for o in rows_all if o[0].status != "EXTERNAL"]
+        terminal_rows = len(rows_all) - len(ours)
         r = await _aio.to_thread(_vr.best_shift, tax, ours, shifts, tol)
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -1325,15 +1330,21 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         pq = _flt(pq, PAY_SITE, _scope(user))   # эрхийн хүрээ л барина
         pay_rows = pq.all()
         rec_by_pay: dict[str, list] = {}
+        terminal_pay: set = set()
         if pay_rows:
             ids = [p.id for p, *_ in pay_rows]
-            for pid, eid in db.query(VatReceipt.payment_id, VatReceipt.ebarimt_id).filter(
+            for pid, eid, st in db.query(VatReceipt.payment_id, VatReceipt.ebarimt_id,
+                                         VatReceipt.status).filter(
                     VatReceipt.payment_id.in_(ids)).all():
+                if st == "EXTERNAL":
+                    terminal_pay.add(pid)
+                    continue
                 rec_by_pay.setdefault(pid, []).append(eid)
         probe = [{"id": p.id, "paid_at": p.paid_at, "amount": float(p.amount),
                   "site_id": site_id, "plate": plate, "site_name": site_name,
                   "provider": p.provider, "method": p.payment_method,
-                  "receipts": rec_by_pay.get(p.id, [])}
+                  "receipts": rec_by_pay.get(p.id, []),
+                  "terminal": p.id in terminal_pay}
                  for p, plate, site_name, site_id in pay_rows]
         matched_pay_ids = {t["ours"][1].id for t in tax if t.get("ours")}
         tax_explained = _vr.explain_unmatched_tax(
@@ -1353,6 +1364,9 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # Тулгалтын хүрээнээс ГАДУУР үлдсэн манай баримтууд — «зөрүү» БИШ:
         # файл тэр хугацааг хамраагүй, эсвэл баримт нь цуцлагдсан
         "outside_window": r["outside_window"], "cancelled": r["cancelled"],
+        # POS терминал (Ontime) гаргасан гэж бүртгэсэн төлбөр — манай баримт биш тул
+        # тулгалтад ороогүй; ТЕГ-ийн тэдгээр мөр «TERMINAL» шалтгаантай гарна
+        "terminal_issued": terminal_rows,
         "ddtd_by_provider": r["by_provider"],
         "tenant": tenant.name if tenant else None,
         "diag": diag,
@@ -1458,7 +1472,11 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
                              for r in recs]}
         target = [r for r in recs if r.status in ("SENT", "CANCEL_PENDING") and r.ebarimt_id]
         if not target:
-            out.append({**info, "ok": False, "error": "Цуцлах ИЛГЭЭГДСЭН баримт алга"})
+            # EXTERNAL = POS терминал (Ontime) гаргасан — манай системийн баримт БИШ
+            ext = any(r.status == "EXTERNAL" for r in recs)
+            out.append({**info, "ok": False, "external": ext,
+                        "error": ("POS терминал (Ontime) гаргасан баримт — системээс цуцлах "
+                                  "баримт алга" if ext else "Цуцлах ИЛГЭЭГДСЭН баримт алга")})
             failed += 1
             continue
         if dry:
@@ -1673,6 +1691,14 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
                     log.exception("бөөн нөхөлт: төлбөр %s дээр алдаа", pid)
                     db.rollback()
                     res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                if res.get("external"):
+                    # POS терминал (Ontime) гаргасан баримттай төлбөр — бөөн нөхөлт
+                    # msgbill-ээр ДАВХАР гаргахгүй, алгасна (EXTERNAL-ийг гараар л)
+                    db.rollback()
+                    j["skipped"] += 1
+                    j["external_skipped"] = j.get("external_skipped", 0) + 1
+                    res = None
+                    continue
                 if res.get("ok") or "error" in res:
                     try:
                         db.commit()

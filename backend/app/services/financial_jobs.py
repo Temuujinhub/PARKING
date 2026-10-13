@@ -38,6 +38,62 @@ def _account(provider, site):
     return acc, hashlib.sha256(identity.encode()).hexdigest()
 
 
+# ── POS ТЕРМИНАЛЫН ӨӨРИЙН БАРИМТ (2026-10-13) ────────────────────────────────
+# PAX терминал POS аппаар авсан карт/бэлэн төлбөрт Ontime-ийн e-Barimt-ыг өөрөө
+# хэвлэдэг зогсоолд систем msgbill-ээр ДАХИН баримт гаргаж ТЕГ-т давхардал үүсгэж
+# байв (2026-08-24 Хангарьд 63: 39 бэлэн + 24 карт). Апп тэр ДДТД-г илгээдэггүй
+# тул бид дугаарыг нь мэдэхгүй — зөвхөн «терминал гаргасан» гэсэн EXTERNAL мөр
+# үлдээж, FinancialJob ҮҮСГЭХГҮЙ. Тохиргоо: app_settings.EBARIMT_KEY (зогсоолоор).
+TERMINAL_PROVIDER = "POS-TERMINAL"
+TERMINAL_STATUS = "EXTERNAL"
+TERMINAL_NOTE = "Баримтыг POS терминал (Ontime) гаргасан — систем давхар үүсгээгүй"
+# Хэрэглэгчид харагдах тайлбар — retry/цуцлалт EXTERNAL дээр яагаад татгалздаг вэ
+EXTERNAL_REFUSAL = ("Энэ төлбөрийн НӨАТ баримтыг POS терминал (Ontime) гаргасан тул систем "
+                    "давхар баримт үүсгэхгүй. Терминалын ДДТД-г «баримт холбох»-оор бүртгэнэ үү. "
+                    "Терминал баримт гаргаагүй нь батлагдвал эхлээд Тохиргоо → Төлбөрийн дүрэм → "
+                    "«POS терминал өөрөө НӨАТ баримт гаргадаг»-ийг энэ зогсоолд унтрааж, дараа нь "
+                    "«Систем баримт гаргах»-ыг дарна уу.")
+EXTERNAL_SETTING_ON = ("Энэ зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» тохиргоо асаалттай "
+                       "байна — систем баримт гаргахгүй. Терминал баримт гаргаагүй нь батлагдвал "
+                       "тохиргоог унтрааж байж дахин оролдоно уу.")
+
+
+def is_pos_app_payment(payment) -> bool:
+    """POS аппаар авсан төлбөр: /pos/confirm-ын карт (provider POS) эсвэл
+    X-App-Version толгойтой хүсэлтээр бүртгэгдсэн (source=POSAPP)."""
+    return getattr(payment, "source", None) == "POSAPP" or getattr(payment, "provider", None) == "POS"
+
+
+def terminal_issues_receipt(db, payment) -> bool:
+    """Энэ төлбөрийн НӨАТ баримтыг зогсоолын POS терминал ӨӨРӨӨ гаргасан гэж үзэх үү.
+
+    Гурван нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр, (2) арга CARD/CASH, (3) тухайн
+    зогсоолд тохиргоо асаалттай ба энэ арга сонгогдсон. Тохиргоо уншигдахгүй бол
+    False — хуучин зан (систем баримт гаргана): баримтгүй үлдэхээс давхардал дээр."""
+    method = (payment.payment_method or "").upper()
+    if method not in ("CARD", "CASH") or not is_pos_app_payment(payment):
+        return False
+    site = payment_site(payment)
+    if site is None:
+        return False
+    try:
+        from .app_settings import pos_terminal_receipt_methods
+        return method in pos_terminal_receipt_methods(db, site.id)
+    except Exception:  # noqa: BLE001
+        log.exception("POS терминалын баримтын тохиргоо уншигдсангүй (payment=%s)", payment.id)
+        return False
+
+
+def _mark_terminal(receipt, payment, site):
+    receipt.provider, receipt.status = TERMINAL_PROVIDER, TERMINAL_STATUS
+    receipt.receipt_url = TERMINAL_NOTE
+    receipt.raw = {"terminal": {"rule": "ebarimt_rules.pos_terminal_issues",
+                                "site_id": getattr(site, "id", None),
+                                "method": payment.payment_method,
+                                "source": getattr(payment, "source", None),
+                                "provider": payment.provider}}
+
+
 def receipt_provider(payment):
     if settings.qpay_ebarimt and payment.provider == "QPAY" and payment.provider_payment_id:
         return "QPAY"
@@ -45,8 +101,11 @@ def receipt_provider(payment):
 
 
 def enqueue_receipt(db, payment, *, amount=None, vat=None, session_id=None,
-                    description="Зогсоолын төлбөр", key=None, external=None):
-    """Insert receipt and job in the caller's money transaction; never commit."""
+                    description="Зогсоолын төлбөр", key=None, external=None, terminal=None):
+    """Insert receipt and job in the caller's money transaction; never commit.
+
+    terminal: POS терминал баримтаа өөрөө гаргасан эсэх — None бол энд шийднэ
+    (`terminal_issues_receipt`). Тийм бол EXTERNAL мөр, ажилгүй (msgbill-гүй)."""
     site = payment_site(payment)
     provider, blocked = "UNCONFIGURED", None
     try:
@@ -65,6 +124,11 @@ def enqueue_receipt(db, payment, *, amount=None, vat=None, session_id=None,
             lottery=None if payment.customer_tin else external.get("lottery"))
         receipt.status = "SENT"
         ebarimt.cache_qr(payment.id, external.get("qrData"))
+        return receipt
+    if terminal is None:
+        terminal = terminal_issues_receipt(db, payment)
+    if terminal:
+        _mark_terminal(receipt, payment, site)
         return receipt
     payload = {"provider": provider, "amount": str(receipt.amount),
                "vat": str(receipt.vat_amount), "method": payment.payment_method,
@@ -122,7 +186,41 @@ def enqueue_receipt_ready(db, payment, receipt):
         payload={"url": original.payload["url"], "partner": original.payload["partner"], "event": event}))
 
 
-def retry_payment_receipts(db, payment):
+def _reissue_external(db, payment, rec):
+    """EXTERNAL мөрийг СИСТЕМИЙН баримт болгоно (тохиргоо унтарсны дараа админ
+    тодорхой хүссэн үед л). Мөр нь хэвээр (id тогтвортой) — шинэ PENDING ажил."""
+    site = payment_site(payment)
+    provider = receipt_provider(payment)
+    _, fingerprint = _account(provider, site)
+    if provider == "POSAPI" and settings.ebarimt_mock and not settings.ebarimt_mock_receipts:
+        raise ValueError("Баримтын суваг тохируулаагүй")
+    rec.provider, rec.status, rec.receipt_url = provider, "PENDING", None
+    rec.customer_tin = payment.customer_tin
+    raw = dict(rec.raw) if isinstance(rec.raw, dict) else {}
+    raw["reissued_from_external"] = {"at": datetime.utcnow().isoformat(timespec="seconds")}
+    rec.raw = raw
+    from ..routers.payments_router import _receipt_desc
+    payload = {"provider": provider, "amount": str(rec.amount), "vat": str(rec.vat_amount),
+               "method": payment.payment_method, "customer_tin": payment.customer_tin,
+               "receiver_type": payment.ebarimt_receiver_type or
+                    ("COMPANY" if payment.customer_tin else "CITIZEN"),
+               "provider_payment_id": payment.provider_payment_id,
+               "description": _receipt_desc(payment), "idempotency_key": f"external-{rec.id}",
+               "account_fingerprint": fingerprint}
+    # EXTERNAL мөрийн ажил ердийн урсгалд ҮҮСДЭГГҮЙ; гараар нэмэгдсэн байсан ч deliver
+    # түүнийг сувагт илгээлгүй DONE болгосон — тэр ажлыг дахин ашиглана (job_key unique)
+    job = db.query(FinancialJob).filter_by(job_key=f"receipt:{rec.id}").first()
+    if job is None:
+        db.add(FinancialJob(job_key=f"receipt:{rec.id}", kind="RECEIPT", payment_id=payment.id,
+                            receipt_id=rec.id, payload=payload))
+    else:
+        job.payload, job.status, job.last_error = payload, "PENDING", None
+        job.next_attempt_at, job.lease_token, job.lease_until = datetime.utcnow(), None, None
+
+
+def retry_payment_receipts(db, payment, *, reissue_external=False):
+    """reissue_external=True — ЗӨВХӨН нэг төлбөрийн «Систем баримт гаргах» товч
+    (админ тохиргоог унтраасны дараа). Бөөн нөхөлт EXTERNAL-ийг ХЭЗЭЭ Ч хөндөхгүй."""
     # Also serializes adoption of historical receipts by concurrent operators.
     db.query(Payment).enable_eagerloads(False).filter_by(id=payment.id).with_for_update().one()
     jobs = (db.query(FinancialJob).filter(FinancialJob.payment_id == payment.id,
@@ -131,16 +229,37 @@ def retry_payment_receipts(db, payment):
     recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
             .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
     active = [r for r in recs if r.status != "CANCELLED"]
+    external = [r for r in active if r.status == TERMINAL_STATUS]
+    if external:
+        # Терминал баримтаа гаргасан — msgbill-ээр дахин гаргавал ТЕГ-т давхар.
+        if not reissue_external:
+            return {"ok": False, "external": True, "error": EXTERNAL_REFUSAL}
+        if terminal_issues_receipt(db, payment):
+            return {"ok": False, "external": True, "error": EXTERNAL_SETTING_ON}
+        try:
+            for rec in external:
+                _reissue_external(db, payment, rec)
+        except Exception as exc:  # noqa: BLE001 — суваггүй бол EXTERNAL хэвээр үлдэнэ
+            db.rollback()
+            return {"ok": False, "error": str(exc)[:200]}
+        db.add(AuditLog(username="system", action="EBARIMT_EXTERNAL_REISSUE", entity="payment",
+                        entity_id=payment.id, detail={"receipts": [r.id for r in external]}))
+        db.commit()
+        return {"ok": False, "pending": True,
+                "error": "Терминалын тэмдэглэгээг системийн баримт болгож ажил хадгаллаа"}
     if recs and not active:
         if len(recs) != 1:
             return {"ok": False, "review_required": True,
                     "error": "Олон цуцалсан баримтын дүнг эхлээд санхүү тулгана уу"}
         # Cancellation is already confirmed. Explicit operator request creates
         # replacement rows with new stable keys, preserving every old receipt.
-        for rec in recs:
-            enqueue_receipt(db, payment, amount=rec.amount, vat=rec.vat_amount,
-                session_id=rec.session_id, key=f"replace-{rec.id}")
+        new = [enqueue_receipt(db, payment, amount=rec.amount, vat=rec.vat_amount,
+                               session_id=rec.session_id, key=f"replace-{rec.id}")
+               for rec in recs]
         db.commit()
+        if all(r.status == TERMINAL_STATUS for r in new):
+            # Тохиргоо асаалттай — орлох баримтыг терминалынх гэж бүртгэв, msgbill-гүй
+            return {"ok": False, "external": True, "error": EXTERNAL_REFUSAL}
         return {"ok": False, "pending": True, "error": "Шинэ баримтын ажил хадгалагдлаа"}
     if active and all(r.ebarimt_id for r in active):
         return {"ok": True, "ebarimt_id": active[0].ebarimt_id, "lottery": active[0].lottery_code}
@@ -160,7 +279,7 @@ def retry_payment_receipts(db, payment):
         return {"ok": False, "pending": True, "error": "Хуучин баримтын төлөвийг нөхөн шалгана"}
     for job in jobs:
         rec = db.get(VatReceipt, job.receipt_id)
-        if rec and rec.ebarimt_id:
+        if rec and (rec.ebarimt_id or rec.status == TERMINAL_STATUS):
             continue
         if job.status == "UNKNOWN":
             return {"ok": False, "review_required": True,
@@ -225,6 +344,12 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
             db.commit()
             return
         rec = db.get(VatReceipt, receipt_id) if receipt_id else None
+        if rec and rec.status == TERMINAL_STATUS:
+            # Терминал гаргасан баримт — сувагт ХЭЗЭЭ Ч илгээхгүй (давхардал)
+            job.status, job.last_error = "DONE", "EXTERNAL: " + TERMINAL_NOTE[:150]
+            job.lease_until, job.lease_token = None, None
+            db.commit()
+            return
         if rec and (rec.ebarimt_id or rec.status == "CANCELLED"):
             if rec.status == "SENT" and rec.ebarimt_id:
                 enqueue_receipt_ready(db, payment, rec)

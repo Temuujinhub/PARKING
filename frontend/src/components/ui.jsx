@@ -63,6 +63,8 @@ const badgeColors = {
   SUCCESS: 'bg-accent/15 text-accent',
   SENT: 'bg-accent/15 text-accent',
   REVIEW: 'bg-red-500/15 text-red-400',
+  // НӨАТ баримт: POS терминал (Ontime) өөрөө гаргасан — алдаа биш, систем үүсгээгүй
+  EXTERNAL: 'bg-cyan-500/15 text-cyan-300',
   active: 'bg-accent/15 text-accent',
 }
 const badgeLabels = {
@@ -71,6 +73,7 @@ const badgeLabels = {
   PENDING: 'Хүлээгдэж буй', FAILED: 'Амжилтгүй', SUCCESS: 'Амжилттай', SENT: 'Илгээсэн',
   SKIPPED: 'Илгээгээгүй',
   REVIEW: 'Шалгах шаардлагатай', active: 'Идэвхтэй', CANCELLED: 'Цуцалсан', CANCEL_PENDING: 'Цуцлалт хүлээгдэж буй',
+  EXTERNAL: 'Терминал гаргасан',
 }
 
 export function Badge({ value }) {

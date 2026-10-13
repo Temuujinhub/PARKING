@@ -340,14 +340,23 @@ def vat_receipts_excel(rows):
     """Ибаримтын жагсаалтын Excel — (VatReceipt, plate, site_name) кортежууд.
 
     Төлөв/суваг монголоор, огноо локал цагаар. «Шалтгаан» багана нь FAILED/
-    CANCELLED баримтын алдааны текст (receipt_url-д хадгалагддаг)."""
+    CANCELLED баримтын алдааны текст (receipt_url-д хадгалагддаг).
+
+    EXTERNAL (2026-10-13) = POS терминал (Ontime) өөрөө гаргасан, систем үүсгээгүй —
+    алдаа ч биш, манай баримт ч биш; нийт мөрөнд ТУСАД НЬ тоологдоно."""
     status_mn = {"SENT": "Илгээсэн", "FAILED": "Амжилтгүй", "PENDING": "Хүлээгдэж буй",
-                 "CANCELLED": "Цуцалсан", "CANCEL_PENDING": "Цуцлалт хүлээгдэж буй"}
+                 "REVIEW": "Тулгах шаардлагатай",
+                 "CANCELLED": "Цуцалсан", "CANCEL_PENDING": "Цуцлалт хүлээгдэж буй",
+                 "EXTERNAL": "POS терминал гаргасан"}
     provider_mn = {"QPAY": "QPay", "MSGBILL": "msgbill.mn", "POSAPI": "PosAPI",
-                   "TERMINAL": "POS терминал"}
+                   "TERMINAL": "POS терминал", "POS-TERMINAL": "POS терминал (Ontime)"}
     data = []
+    terminal_n, terminal_amt = 0, 0.0
     for r, plate, site_name in rows:
-        failed = r.status in ("FAILED", "CANCELLED", "CANCEL_PENDING")
+        show_reason = r.status in ("FAILED", "REVIEW", "CANCELLED", "CANCEL_PENDING", "EXTERNAL")
+        if r.status == "EXTERNAL":
+            terminal_n += 1
+            terminal_amt += float(r.amount or 0)
         data.append([
             plate or "", site_name or "",
             r.ebarimt_id or "", r.lottery_code or "",
@@ -356,10 +365,12 @@ def vat_receipts_excel(rows):
             provider_mn.get(r.provider, r.provider or ""),
             status_mn.get(r.status, r.status),
             r.customer_tin or "",
-            (r.receipt_url or "")[:250] if failed else "",
+            (r.receipt_url or "")[:250] if show_reason else "",
         ])
     total_row = ["Нийт", "", "", "", sum(d[4] for d in data), sum(d[5] for d in data),
-                 "", "", f"{len(data)} мөр", "", ""]
+                 "", "", f"{len(data)} мөр", "",
+                 (f"Үүнээс POS терминал гаргасан: {terminal_n} мөр, {terminal_amt:,.0f}₮"
+                  if terminal_n else "")]
     return _xlsx(
         "ebarimt", "Ибаримт",
         ["Дугаар", "Зогсоол", "ДДТД (billId)", "Сугалаа", "Дүн (₮)", "НӨАТ (₮)",

@@ -22,6 +22,7 @@ BARRIER_KEY = "barrier_rules"
 DRIVERTYPE_KEY = "driver_type_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
+EBARIMT_KEY = "ebarimt_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
 CAMHEALTH_STATE = "camhealth_state"
@@ -211,6 +212,19 @@ DEFAULTS: dict[str, dict] = {
         "night_from": "21:00",
         "night_until": "08:00",
     },
+    EBARIMT_KEY: {
+        # POS ТЕРМИНАЛ ӨӨРӨӨ НӨАТ БАРИМТ ГАРГАДАГ ЗОГСООЛ (2026-10-13).
+        # Зарим зогсоолын PAX терминал POS аппаар авсан КАРТ, БЭЛЭН төлбөрт
+        # Ontime-ийн (касс …10002990) e-Barimt-ыг өөрөө хэвлэдэг ч апп тэр ДДТД-г
+        # /pos/confirm, /cash-д илгээдэггүй тул систем msgbill-ээр ДАХИН баримт
+        # гаргадаг байв — ТЕГ тулгалт: 2026-08-24-нд Хангарьд 63 давхар баримт
+        # (39 бэлэн + 24 карт, pos.khangarid). Моннисын «Building» POS-д Ontime
+        # баримт байгаагүй — аль зогсоолын терминал хэвлэдэг нь тодорхойгүй тул
+        # анхдагч УНТРААЛТТАЙ, зогсоол бүрээр асаана.
+        "pos_terminal_issues": False,
+        # Аль аргад терминал баримт гаргадаг вэ: "CARD,CASH" | "CARD" | "CASH"
+        "pos_terminal_methods": "CARD,CASH",
+    },
     CAMHEALTH_KEY: {
         # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).
         # Гацсан = event стрим АМЬД (200) атлаа snapshot.cgi ШУУД 400 буцаана
@@ -263,8 +277,9 @@ def _base(key: str) -> dict:
 SITE_OVERLAY = "_sites"
 
 # Зогсоол бүрээр ДАРЖ болох түлхүүрүүд. Энд БАЙХГҮЙ түлхүүр зөвхөн глобал —
-# UI мөн үүгээр «глобал» гэж тэмдэглэнэ (ж: e-Barimt/НӨАТ нь ТТД-тэй уялдаатай
-# тул зогсоол бүрээр салгаж болохгүй).
+# UI мөн үүгээр «глобал» гэж тэмдэглэнэ (ж: e-Barimt-ын СУВАГ/ТТД нь
+# түрээслэгчтэй уялдаатай тул зогсоол бүрээр салгаж болохгүй; харин «терминал
+# өөрөө баримт хэвлэдэг үү» гэдэг нь ЗОГСООЛЫН ТӨХӨӨРӨМЖИЙН шинж тул зогсоолоор).
 PER_SITE: dict[str, set[str]] = {
     BLACKLIST_KEY: {"auto_enabled", "debt_count", "debt_amount",
                     "block_entry", "block_exit_debt_count"},
@@ -281,6 +296,7 @@ PER_SITE: dict[str, set[str]] = {
                     "invoice_quote_minutes", "wallet_auto_deduct"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
                   "reopen_cooldown_sec", "exit_dedup_reopen"},
+    EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_methods"},
     # DRIVERTYPE_KEY (шөнийн цонх) ЗОРИУД байхгүй: энэ нь тодорхой МАШИНУУДАД
     # (NIGHT төрлийн гэрээт) олгодог нөхцөл тул зогсоолд биш, Бүртгэлтэй машин
     # хуудасны 🌙 тохиргоонд харьяалагдана (2026-09-03).
@@ -289,9 +305,13 @@ PER_SITE: dict[str, set[str]] = {
 # Сонголттой (enum) утгын зөвшөөрөгдөх багц — (бүлэг, түлхүүр) бүрээр.
 # dict төрлийн түлхүүрт БҮХ утга нь энэ багцад багтах ёстой (site_overrides г.м).
 _POLICY_CHOICES = {"open", "hold", "strict"}
+# Терминалын баримтын аргууд — эрэмбэлэгдсэн хэлбэрээр л хадгална
+# (payment_rules.clamp_values "CASH,CARD"-ыг "CARD,CASH" болгож ирүүлнэ).
+POS_TERMINAL_METHOD_CHOICES = {"CARD,CASH", "CARD", "CASH"}
 CHOICES: dict[tuple[str, str], set] = {
     (ENTRYPLATE_KEY, "policy"): _POLICY_CHOICES,
     (ENTRYPLATE_KEY, "site_overrides"): _POLICY_CHOICES,
+    (EBARIMT_KEY, "pos_terminal_methods"): POS_TERMINAL_METHOD_CHOICES,
 }
 
 _cache: dict[str, tuple[float, dict, dict]] = {}
@@ -558,6 +578,20 @@ def no_session_exit_fee(db, site_id: str | None) -> int:
         return max(0, int(float(raw)))
     except (TypeError, ValueError):
         return 0
+
+
+def pos_terminal_receipt_methods(db, site_id: str | None) -> set[str]:
+    """Энэ зогсоолын POS терминал ӨӨРӨӨ НӨАТ баримт гаргадаг төлбөрийн аргууд.
+
+    Хоосон багц = унтраалттай (систем өөрөө баримт гаргана — хуучин зан). Буруу/
+    хоосон аргын утга асаалттай үед анхдагч CARD+CASH руу унана: «асаасан ч юу ч
+    хамаарахгүй» гэсэн чимээгүй тохиргоо үлдээхгүй."""
+    r = get_rules(db, EBARIMT_KEY, site_id)
+    if not r.get("pos_terminal_issues"):
+        return set()
+    raw = str(r.get("pos_terminal_methods") or "").upper()
+    methods = {m.strip() for m in raw.split(",") if m.strip()} & {"CARD", "CASH"}
+    return methods or {"CARD", "CASH"}
 
 
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")

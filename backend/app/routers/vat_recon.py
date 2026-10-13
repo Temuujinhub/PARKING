@@ -458,6 +458,9 @@ VERDICTS = {
     "RECEIPT_NOT_MATCHED": "Баримт бий ч цаг/дүнгээр таарсангүй",
     "OTHER_SCOPE": "ӨӨР ЗОГСООЛ — сонгосон түрээслэгчийн шүүлтээс гадуур",
     "NO_PAYMENT": "Манайд төлбөр ч алга — өөр систем/POS",
+    # 2026-10-13: «POS терминал өөрөө НӨАТ баримт гаргадаг» зогсоолын төлбөр — систем
+    # баримт үүсгээгүй (EXTERNAL), ТЕГ-ийн мөр нь терминалын баримт. Зөрүү БИШ.
+    "TERMINAL": "POS ТЕРМИНАЛ гаргасан — систем давхар үүсгээгүй (хэвийн)",
 }
 
 
@@ -481,6 +484,8 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                                          abs((x["paid_at"] - when).total_seconds())))
             if scope_ids is not None and p["site_id"] not in scope_ids:
                 v = "OTHER_SCOPE"
+            elif p.get("terminal") and not p["receipts"]:
+                v = "TERMINAL"
             elif not p["receipts"]:
                 v = "PAYMENT_NO_RECEIPT"
             elif p["id"] in matched_pay_ids:

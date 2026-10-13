@@ -606,7 +606,9 @@ def today_exits(site_id: str, db: Session = Depends(get_db), user: User = Depend
         pays.setdefault(p.session_id, p)
     paid_amounts = _paid_by_session(db, pay_rows)
     recs = {r.session_id for r in db.query(VatReceipt.session_id)
-            .filter(VatReceipt.session_id.in_(ids), VatReceipt.status == "SENT").all()} if ids else set()
+            # EXTERNAL — POS терминал (Ontime) жолоочид баримт ӨГСӨН (систем үүсгээгүй)
+            .filter(VatReceipt.session_id.in_(ids),
+                    VatReceipt.status.in_(("SENT", "EXTERNAL"))).all()} if ids else set()
     prov_mn = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт"}
     rows = []
     for s in sessions:

@@ -192,7 +192,7 @@ export default function VatRecon({ tenants = [] }) {
           {/* Хоёр «зөрүү» хоорондоо ТААРАХ ЁСГҮЙ — эдгээр нь тулгалтын хүрээнээс
               гадуур үлдсэн, огт өөр шалтгаантай баримтууд. Тэр шалтгааныг задалж
               харуулна (өмнө нь зөвхөн эцсийн тоо харагдаж, «яагаад?» нь далд байв) */}
-          {(recon.outside_window > 0 || recon.cancelled > 0) && (
+          {(recon.outside_window > 0 || recon.cancelled > 0 || recon.terminal_issued > 0) && (
             <div className="text-xs text-slate-400 flex flex-wrap gap-4">
               {recon.outside_window > 0 && (
                 <span title="Асуулга нь цагийн шилжилтэд зориулж ±9 цагийн нөөцтэй татдаг. Файл тэр хугацааг хамраагүй тул эдгээр нь зөрүү БИШ.">
@@ -202,6 +202,13 @@ export default function VatRecon({ tenants = [] }) {
               {recon.cancelled > 0 && (
                 <span title="Цуцлагдсан баримт ТЕГ-д байхгүй нь хэвийн">
                   Цуцлагдсан: <b className="font-mono">{recon.cancelled}</b> (алгассан)
+                </span>
+              )}
+              {/* 2026-10-13: «POS терминал өөрөө НӨАТ баримт гаргадаг» зогсоолын төлбөр —
+                  манай баримт биш тул тулгалтад оруулаагүй; ТЕГ-ийн мөр нь TERMINAL шалтгаантай */}
+              {recon.terminal_issued > 0 && (
+                <span className="text-cyan-300" title="Баримтыг POS терминал (Ontime) гаргасан — систем давхар үүсгээгүй. Манай баримт биш тул тулгалтад ороогүй.">
+                  POS терминал гаргасан: <b className="font-mono">{recon.terminal_issued}</b> (манай баримт биш)
                 </span>
               )}
             </div>

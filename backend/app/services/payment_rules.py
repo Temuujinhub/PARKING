@@ -248,6 +248,28 @@ CATALOG: list[dict] = [
      "desc": "Нэхэмжлэл хуудасны «Шөнийн хаалт» үйлдэлд.",
      "applies": "Шөнийн хаалт", "not_applied": "—"},
 
+    # ── e-Barimt (НӨАТ баримт) ──────────────────────────────────────────────
+    {"group": A.EBARIMT_KEY, "key": "pos_terminal_issues", "unit": "bool",
+     "name": "POS терминал өөрөө НӨАТ баримт гаргадаг",
+     "desc": "Энэ зогсоолын PAX терминал POS аппаар авсан төлбөрт Ontime-ийн "
+             "e-Barimt-ыг ӨӨРӨӨ хэвлэдэг бол асаана — систем msgbill-ээр ДАВХАР "
+             "баримт гаргахгүй, «POS терминал гаргасан» гэж бүртгэнэ (ДДТД-гүй). "
+             "2026-08-24 Хангарьд: 63 төлбөрт хоёр баримт (Ontime + msgbill). "
+             "Терминал хэвлэдэггүй зогсоолд АСААВАЛ жолооч баримтгүй үлдэнэ.",
+     "applies": "POS аппын карт (/pos/confirm) ба X-App-Version толгойтой бэлэн/өрийн "
+                "төлөлт, бүртгэлтэй терминалын картын өрийн төлөлт · апп ДДТД илгээгээгүй үед",
+     "not_applied": "QPay QR, дансаар, веб касс (толгойгүй бэлэн), апп ebarimt_id "
+                    "илгээсэн төлбөр"},
+    {"group": A.EBARIMT_KEY, "key": "pos_terminal_methods", "unit": "choice",
+     "name": "Терминал аль төлбөрт баримт гаргадаг",
+     "desc": "Дээрх асаалттай үед л үйлчилнэ. Терминал зөвхөн картын гүйлгээнд "
+             "баримт хэвлэдэг бол «Зөвхөн карт» — бэлэн төлбөрийн баримтыг систем "
+             "msgbill-ээр гаргасаар байна.",
+     "applies": "POS аппын төлбөр · асаалттай зогсоол",
+     "not_applied": "Унтраалттай зогсоол",
+     "choices": [{"value": "CARD,CASH", "label": "Карт ба бэлэн"},
+                 {"value": "CARD", "label": "Зөвхөн карт"},
+                 {"value": "CASH", "label": "Зөвхөн бэлэн"}]},
 ]
 
 # Зогсоолын БАГАНААР тохируулагддаг (app_settings-д биш) дүрмүүд — UI-д
@@ -286,6 +308,7 @@ _GROUP_NAMES = {
     A.ENTRYPLATE_KEY: "Орох дугаарын шалгалт",
     A.BLACKLIST_KEY: "Өр ба хар жагсаалт",
     A.AUTOCLOSE_KEY: "Авто цэвэрлэгээ ба өр үүсгэх",
+    A.EBARIMT_KEY: "e-Barimt (НӨАТ баримт) — POS терминал",
 }
 
 # Тоон дүрмийн ЗӨВШӨӨРӨГДӨХ ДЭЭД хязгаар — өмнө нь зөвхөн UI (AutoCloseSection
@@ -328,6 +351,11 @@ def clamp_values(group: str, values: dict) -> dict:
     out = {}
     for k, v in (values or {}).items():
         default = A.DEFAULTS.get(group, {}).get(k)
+        if (group, k) == (A.EBARIMT_KEY, "pos_terminal_methods") and isinstance(v, str) and v.strip():
+            # "cash, card" → "CARD,CASH" — CHOICES эрэмбэлэгдсэн хэлбэрийг л хүлээнэ
+            ms = sorted({m.strip().upper() for m in v.split(",") if m.strip()})
+            out[k] = ",".join(ms)
+            continue
         if (v is None or (isinstance(v, str) and not v.strip())
                 or isinstance(default, (bool, str, dict)) or default is None):
             out[k] = v

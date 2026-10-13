@@ -44,7 +44,8 @@ def receipt_info(db: Session, payment: Payment) -> dict | None:
     return {"ddtd": r.ebarimt_id, "lottery": r.lottery_code,
             "amount": float(r.amount or 0), "vat_amount": float(r.vat_amount or 0),
             "status": r.status, "provider": r.provider,
-            "error": (r.receipt_url or "")[:200] if r.status != "SENT" else None,
+            # EXTERNAL = POS терминал өөрөө гаргасан (алдаа биш) — тайлбарыг error-д бүү хий
+            "error": (r.receipt_url or "")[:200] if r.status not in ("SENT", "EXTERNAL") else None,
             "qr_data": _eb.get_cached_qr(payment.id),
             "created_at": r.created_at.isoformat() if r.created_at else None}
 
