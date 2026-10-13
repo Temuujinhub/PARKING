@@ -159,6 +159,7 @@
 | Авто цэвэрлэгээ | `create_debt_night_close` | асаалттай | Шөнийн хаалтад өр |
 | e-Barimt | `pos_terminal_issues` | **унтраалттай** | POS терминал (Ontime) карт/бэлэн төлбөрт баримтаа өөрөө хэвлэдэг зогсоол — систем msgbill-ээр давхар гаргахгүй, `EXTERNAL` гэж бүртгэнэ (2026-10-13; Хангарьд 08-24-нд 63 давхардал) |
 | e-Barimt | `pos_terminal_methods` | `CARD,CASH` | Терминал аль аргад баримт гаргадаг (`CARD` / `CASH` / хоёулаа) |
+| e-Barimt | `pos_terminal_users` | хоосон | POS аппын хэрэглэгчид (таслалаар, ж: `pos.khangarid`) — `X-App-Version` толгойгүй ирсэн бэлэн/өрийн төлбөрийг POS аппынх гэж тооцно. `pos_terminal_issues`-тэй хамт **зөвхөн зогсоолоор** (ерөнхийд хадгалагдахгүй) |
 
 **Дарах дараалал:** `DEFAULTS` → `.env` (зөвхөн 4 түлхүүрт) → `app_settings`
 глобал → `app_settings._sites[site_id]`.

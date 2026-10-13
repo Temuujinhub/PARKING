@@ -561,6 +561,18 @@ def monthly_report(date_from: str | None = None, date_to: str | None = None,
 PROVIDER_MN = {"CASH": "Бэлэн", "QPAY": "QPay", "POS": "Банкны карт", "TRANSFER": "Дансаар"}
 STATUS_MN2 = {"PAID": "Төлсөн", "FREE": "Үнэгүй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
               "OPEN": "Нээлттэй", "CLOSED": "Хаагдсан"}
+# НӨАТ баримтыг ХЭН гаргасан — Бичилтэд «манай систем» ба «POS терминал» ялгах (2026-10-13)
+RECEIPT_ISSUER_MN = {"MSGBILL": "msgbill.mn", "QPAY": "QPay", "POSAPI": "PosAPI",
+                     "TERMINAL": "POS терминал", "ONTIME": "POS терминал (Ontime)",
+                     "POS-TERMINAL": "POS терминал (Ontime)"}
+
+
+def _receipt_issuer(rec) -> str | None:
+    if rec is None:
+        return None
+    if rec.status == "EXTERNAL":
+        return "POS терминал (Ontime)"   # систем үүсгээгүй — ДДТД манайд алга
+    return RECEIPT_ISSUER_MN.get(rec.provider or "", rec.provider or "PosAPI/QPay")
 
 
 def _car_type(s) -> str:
@@ -606,8 +618,15 @@ def _txn_rows(db, sessions):
     if ids:
         for p in db.query(Payment).filter(Payment.session_id.in_(ids)).all():
             pays_by_sess.setdefault(p.session_id, []).append(p)
-    rec_by_sess = {r.session_id: r for r in
-                   db.query(VatReceipt).filter(VatReceipt.session_id.in_(ids)).all()} if ids else {}
+    # Сешн бүрийн «албан ёсны» баримт (receipts.choose_primary: SENT > … > EXTERNAL > …
+    # > CANCELLED) — өмнө нь дурын (DB-ийн дараалал) мөр сонгогдож, цуцлагдсан msgbill
+    # баримт терминалын хүчинтэй баримтыг дарж харагдах боломжтой байв
+    from ..services.receipts import choose_primary
+    _recs: dict = {}
+    if ids:
+        for r in db.query(VatReceipt).filter(VatReceipt.session_id.in_(ids)).all():
+            _recs.setdefault(r.session_id, []).append(r)
+    rec_by_sess = {sid: choose_primary(rs) for sid, rs in _recs.items()}
     # Төлбөрт НИЙЛҮҮЛЖ төлөгдсөн ӨМНӨХ ӨР (Compensation.payment_id) — борлуулалтыг
     # «одоогийн зогсолт» / «өрийн төлөлт» гэж салгаж харуулна (2026-09-13 санхүүгийн
     # тулгалт: 9-р сард 154 төлбөр 1.74 сая₮-ийн 1.15 сая нь өр байсан ч тайланд
@@ -659,6 +678,10 @@ def _txn_rows(db, sessions):
             # тулгахдаа ЭНЭ баганыг ашиглана.
             "receipt_amount": float(rec.amount or 0) if rec else None,
             "receipt_vat": float(rec.vat_amount or 0) if rec else None,
+            # Баримтын төлөв + гаргагч: EXTERNAL = POS терминал (Ontime) гаргасан, манай
+            # ДДТД-гүй — ТЕГ тулгахад алдаа/хүлээгдэж буйтай андуурахгүй (хяналт #6)
+            "receipt_status": rec.status if rec else None,
+            "receipt_issuer": _receipt_issuer(rec),
             # Гарц: камерын уншилттай (баримттай) уу, таамаг (авто/гараар хаасан) уу
             "exit_kind": (None if not s.exit_time
                           else "confirmed" if s.exit_confirmed else "inferred"),
@@ -1303,14 +1326,19 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # «таарсан» гэж залгихгүйн тулд тулгалтаас хасна; тоог нь тусад нь буцаана.
         rows_all = q.all()
         ours = [o for o in rows_all if o[0].status != "EXTERNAL"]
-        terminal_rows = len(rows_all) - len(ours)
+        external_rows = [o for o in rows_all if o[0].status == "EXTERNAL"]
         r = await _aio.to_thread(_vr.best_shift, tax, ours, shifts, tol)
+        # EXTERNAL-ийг ҮЛДСЭН ТЕГ мөрүүдтэй тулгана: таарсан = терминал баримтаа
+        # гаргасан нь батлагдсан; таараагүй = ТЕГ-т баримтгүй борлуулалт (хяналт #3)
+        term = _vr.match_terminal(tax, [t for t in tax if not t["used"]], external_rows,
+                                  shifts, tol)
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
         raise HTTPException(400, "Манай баримттай тулгах үед алдаа гарлаа: "
                                  f"{type(e).__name__}: {str(e)[:200]}")
     shift, matched, un_ours = r["shift"], r["matched"], r["unmatched_ours"]
+    terminal_missing = term["missing"]
     _tail = _vr.pos_tail_len([t["ddtd"] for t in tax])
     left = [t for t in tax if not t["used"]]
     # «ТЕГ-д бий, манайд алга» мөрүүдийг манай ТӨЛБӨРийн бүртгэлээр тайлна:
@@ -1354,8 +1382,10 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
     if excel:
         # Санхүүд илгээх НЭГТГЭСЭН файл: ТЕГ-ийн мөр бүрийн хажууд манай таарсан
         # баримт (машины дугаар, зогсоол, суваг, манай ДДТД) + зөрүүний хуудаснууд
+        # «Манайд бий, ТЕГ-д алга» хуудсанд терминалын баримт ОЛДООГҮЙ төлбөрүүд ч орно
+        # (status EXTERNAL) — санхүүд баримтгүй борлуулалт гэж харагдах ёстой
         return await _aio.to_thread(
-            _vr.reconcile_excel, tax, ours, un_ours, tol, _cfg.tz_offset_hours,
+            _vr.reconcile_excel, tax, ours, un_ours + terminal_missing, tol, _cfg.tz_offset_hours,
             tenant.name if tenant else "Бүх зогсоол", shift,
             {r["ddtd"]: r for r in tax_explained})
     return {
@@ -1364,9 +1394,15 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # Тулгалтын хүрээнээс ГАДУУР үлдсэн манай баримтууд — «зөрүү» БИШ:
         # файл тэр хугацааг хамраагүй, эсвэл баримт нь цуцлагдсан
         "outside_window": r["outside_window"], "cancelled": r["cancelled"],
-        # POS терминал (Ontime) гаргасан гэж бүртгэсэн төлбөр — манай баримт биш тул
-        # тулгалтад ороогүй; ТЕГ-ийн тэдгээр мөр «TERMINAL» шалтгаантай гарна
-        "terminal_issued": terminal_rows,
+        # POS терминал (Ontime) гаргасан гэж бүртгэсэн төлбөр (файлын хугацаанд) — манай
+        # баримт биш тул «манайх»-т ороогүй; ТЕГ-ийн терминалын мөртэй ТУСАД НЬ тулгана:
+        #   terminal_confirmed — ТЕГ-т терминалын баримт олдсон (хэвийн)
+        #   terminal_missing   — ТЕГ-т баримт АЛГА: терминал хэвлээгүй байж болзошгүй,
+        #                        «Систем баримт гаргах»-аар нөхнө (хяналт #3)
+        "terminal_issued": term["inside"],
+        "terminal_confirmed": term["matched"],
+        "terminal_missing": sorted(terminal_missing, key=lambda x: x["paid_at"])[:200],
+        "terminal_missing_total": len(terminal_missing),
         "ddtd_by_provider": r["by_provider"],
         "tenant": tenant.name if tenant else None,
         "diag": diag,
@@ -1429,7 +1465,14 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
                                     user: User = Depends(require("vat", "reports"))):
     """Тулгалтаар илэрсэн ДАВХАР баримтуудыг БӨӨНӨӨР цуцлах.
 
-    body: {payment_ids: [...], note: str, dry_run: bool = true}
+    body: {payment_ids: [...], note: str, dry_run: bool = true,
+           teg_ddtd?: {payment_id: ТЕГ-ийн давхар (терминалын) мөрийн ДДТД}}
+
+    2026-10-13: зөвхөн МАНАЙ системийн (msgbill/QPay/PosAPI) баримтыг цуцална —
+    терминалын (ONTIME/EXTERNAL) мөрийг хэзээ ч хөндөхгүй. Цуцалсан мөрийг
+    DUPLICATE_OF_POS гэж тэмдэглэж («Дахин үүсгэх» 409), терминалын баримтыг
+    (teg_ddtd) ONTIME/SENT мөрөөр бүртгэнэ — эс бөгөөс «Дахин үүсгэх» msgbill-ээр
+    давхардлыг сэргээдэг байв.
 
     ⚠ ЧУХАЛ — АЛЬ баримт цуцлагдахыг ойлгох: манай систем зөвхөн ӨӨРИЙН
     үүсгэсэн (VatReceipt хүснэгтэд байгаа) баримтыг цуцалж чадна. Тулгалтад
@@ -1439,9 +1482,12 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
     (ДДТД, суваг) бүтнээр нь буцаадаг ба UI үүнийг заавал харуулна.
 
     Мөнгө буцаахгүй — зөвхөн татварын баримт."""
+    from ..services.financial_jobs import is_system_receipt, record_terminal_receipt
+    from ..services.receipts import DUPLICATE_OF_POS
     from .payments_router import _lock_payment, _site_of, cancel_ebarimt
     ids = [str(x) for x in (body.get("payment_ids") or []) if x]
     dry = bool(body.get("dry_run", True))
+    teg_map = body.get("teg_ddtd") if isinstance(body.get("teg_ddtd"), dict) else {}
     note = str(body.get("note") or "").strip()[:120]
     if not ids:
         raise HTTPException(400, "Цуцлах төлбөр сонгогдоогүй байна.")
@@ -1470,12 +1516,19 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
                 if payment.paid_at else None,
                 "receipts": [{"ddtd": r.ebarimt_id, "provider": r.provider, "status": r.status}
                              for r in recs]}
-        target = [r for r in recs if r.status in ("SENT", "CANCEL_PENDING") and r.ebarimt_id]
+        teg = str(teg_map.get(pid) or "").strip()[:120] or None
+        info["teg_ddtd"] = teg
+        # Зөвхөн МАНАЙ системийн баримт — терминалын (ONTIME/TERMINAL/EXTERNAL) мөрийг
+        # цуцлавал ТЕГ-т үлдсэн цорын ганц хүчинтэй баримтын бүртгэл алга болно
+        # (тулгалтыг дахин ажиллуулахад msgbill-ийн цуцлагдсан мөр «давхар» гарч ирдэг)
+        target = [r for r in recs if r.status in ("SENT", "CANCEL_PENDING") and r.ebarimt_id
+                  and is_system_receipt(r)]
         if not target:
             # EXTERNAL = POS терминал (Ontime) гаргасан — манай системийн баримт БИШ
-            ext = any(r.status == "EXTERNAL" for r in recs)
+            ext = any(r.status == "EXTERNAL" or (r.status == "SENT" and not is_system_receipt(r))
+                      for r in recs)
             out.append({**info, "ok": False, "external": ext,
-                        "error": ("POS терминал (Ontime) гаргасан баримт — системээс цуцлах "
+                        "error": ("POS терминалын баримт бүртгэлтэй — системээс цуцлах манай "
                                   "баримт алга" if ext else "Цуцлах ИЛГЭЭГДСЭН баримт алга")})
             failed += 1
             continue
@@ -1495,9 +1548,24 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
             out.append({**info, "ok": False, "error": "Баримтын ажиллагаа явагдаж байна"})
             failed += 1
             continue
-        res = await cancel_ebarimt(db, locked, note)
+        mark = {"reason": DUPLICATE_OF_POS, "teg_ddtd": teg, "source": "api", "by": user.username}
+        res = await cancel_ebarimt(db, locked, note, mark=mark, only_ids={r.id for r in target})
+        terminal = None
+        if all(r.status in ("CANCELLED", "CANCEL_PENDING") for r in target):
+            # Манай баримт(ууд) цуцлагдсан/хүлээгдэж буй — терминалын баримтыг бүртгэнэ
+            try:
+                if _lock_payment(db, pid) is not None:
+                    terminal = record_terminal_receipt(db, locked, teg, replaced=target,
+                                                       username=user.username)
+            except HTTPException:
+                terminal = None   # өөр хүсэлт түгжсэн — retry-г тэмдэг (409) хамгаална
+        if terminal is not None:
+            res = {**res, "terminal_receipt": {"status": terminal.status,
+                                               "ebarimt_id": terminal.ebarimt_id,
+                                               "provider": terminal.provider}}
         db.add(AuditLog(username=user.username, action="EBARIMT_CANCEL_BULK", entity="payment",
-                        entity_id=pid, detail={**res, "note": note}))
+                        entity_id=pid, detail={**res, "note": note, "reason": DUPLICATE_OF_POS,
+                                               "teg_ddtd": teg}))
         db.commit()
         out.append({**info, **res})
         done += int(bool(res.get("ok")))

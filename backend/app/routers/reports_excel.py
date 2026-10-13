@@ -91,11 +91,13 @@ def transactions_excel(rows):
     # баримт 1,000). Санхүү борлуулалтын бүртгэлтэй тулгахдаа баримтын баганыг
     # ашиглана. «Гарц» = камерын уншилттай (баримттай) / таамаг (авто, гараар).
     EXIT_MN = {"confirmed": "Баримттай", "inferred": "Таамаг", None: ""}
+    # «Баримтын төлөв» (2026-10-13): POS терминал (Ontime) гаргасан (EXTERNAL) мөр ДДТД-гүй —
+    # ТЕГ тулгахад амжилтгүй/хүлээгдэж буй баримттай андуурагдахгүйн тулд гаргагчтай нь
     headers = ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Гарц", "Төлсөн", "Хугацаа(мин)",
                "Машины төрөл", "Хөнгөлөлт", "Үндсэн(₮)", "Хөнгөлсөн(₮)",
                "Бодогдсон НӨАТ(₮)", "Бодогдсон дүн(₮)", "Төлсөн(₮)",
                "Үүнээс энэ зогсолт(₮)", "Үүнээс өмнөх өр(₮)",
-               "Баримтын дүн(₮)", "Баримтын НӨАТ(₮)",
+               "Баримтын дүн(₮)", "Баримтын НӨАТ(₮)", "Баримтын төлөв",
                "Төлбөрийн хэрэгсэл", "Гүйлгээний утга", "Төлөв", "Кассчин", "ДДТД", "Сугалаа", "ТТД"]
     xrows = [[r["plate_number"], r["site_name"],
               _iso_local(r["entry_time"]), _iso_local(r["exit_time"]),
@@ -106,13 +108,30 @@ def transactions_excel(rows):
               r.get("session_paid", r["paid_amount"]), r.get("debt_paid", 0),
               "" if r.get("receipt_amount") is None else r["receipt_amount"],
               "" if r.get("receipt_vat") is None else r["receipt_vat"],
+              _receipt_state(r),
               r["provider"] or "",
               r["invoice_no"] or "",
               r["status"], r["cashier"] or "", r["ebarimt_id"] or "", r["lottery_code"] or "",
               r["customer_tin"] or ""] for r in rows]
     return _xlsx("bichilt", "Бичилт", headers, xrows,
                  widths=(11, 14, 17, 17, 10, 17, 11, 12, 12, 11, 11, 12, 13, 11, 14, 14, 13, 13,
-                         16, 26, 15, 14, 20, 12, 12))
+                         24, 16, 26, 15, 14, 20, 12, 12))
+
+
+RECEIPT_STATUS_MN = {"SENT": "Илгээсэн", "FAILED": "Амжилтгүй", "PENDING": "Хүлээгдэж буй",
+                     "REVIEW": "Тулгах шаардлагатай", "CANCELLED": "Цуцалсан",
+                     "CANCEL_PENDING": "Цуцлалт хүлээгдэж буй", "EXTERNAL": "POS терминал гаргасан"}
+
+
+def _receipt_state(r: dict) -> str:
+    """«Илгээсэн · msgbill.mn», «POS терминал гаргасан · POS терминал (Ontime)» г.м."""
+    st = r.get("receipt_status")
+    if not st:
+        return ""
+    label = RECEIPT_STATUS_MN.get(st, st)
+    issuer = r.get("receipt_issuer")
+    return f"{label} · {issuer}" if issuer and st != "EXTERNAL" else (
+        f"{label} (Ontime)" if st == "EXTERNAL" else label)
 
 
 def settlement_excel(rows):

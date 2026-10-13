@@ -206,6 +206,13 @@ Authorization: Bearer {token}
 холбох бол `POST /api/payments/{payment_id}/ebarimt` (API_REFERENCE) — EXTERNAL мөр
 терминалын ДДТД-тэй SENT болно.
 
+Толгой прод-д ирж байгаа нь **батлагдаагүй** (2026-10-13: `devices`-д PAX терминал 0,
+аудитад `app_version` 0 мөр). Апп шинэчлэгдэх хүлээлгүйгээр серверийн талаас: тэр
+зогсоолын «POS аппын хэрэглэгчид» (`pos_terminal_users`, ж: `pos.khangarid`) жагсаалтад
+байгаа хэрэглэгчийн бэлэн/өрийн төлбөрийг толгойгүй ч POS аппынх гэж тооцно
+(`raw_payload.pos_app_via = "user_list"`, `CASH_PAYMENT` аудитад мөн). Веб кассын ажилтныг
+(олон зогсоолд бэлэн авдаг sogii, bamanna г.м) жагсаалтад нэмэхгүй.
+
 ### 3.4b Бэлэн төлбөр
 
 ```

@@ -415,18 +415,31 @@ def _pos_app_version(request: Request | None) -> str | None:
     return v or None
 
 
-def _mark_pos_app(payment: Payment, request: Request | None, *, always: bool = False) -> None:
+def _mark_pos_app(payment: Payment, request: Request | None, *, always: bool = False,
+                  user: User | None = None, db: Session | None = None,
+                  site_id: str | None = None) -> None:
     """POS аппаар авсан төлбөрийг source=POSAPP гэж тэмдэглэнэ (2026-10-13).
 
     Яагаад: зарим зогсоолын PAX терминал карт/бэлэн төлбөрт Ontime-ийн e-Barimt-ыг
     өөрөө хэвлэдэг — тэр зогсоолд систем ДАВХАР баримт гаргахгүйн тулд (Тохиргоо →
     Төлбөрийн дүрэм → e-Barimt) аль төлбөр POS аппынх болохыг мэдэх ёстой.
-    always=True — /pos/confirm (зөвхөн POS апп дууддаг картын баталгаажуулалт)."""
+    always=True — /pos/confirm (зөвхөн POS апп дууддаг картын баталгаажуулалт).
+
+    Толгойгүй үед (апп X-App-Version илгээдэг нь прод-д БАТЛАГДААГҮЙ — 08-24-ний
+    давхардлын 62% нь бэлэн) зогсоолын «POS аппын хэрэглэгчид» жагсаалтад (ж:
+    pos.khangarid) байгаа хэрэглэгчийн төлбөрийг POS аппынх гэж тооцно — апп шинэчлэх
+    шаардлагагүй, серверийн талаас. Веб кассын ажилтан жагсаалтад байхгүй тул хуучин зан."""
     v = _pos_app_version(request)
-    if v or always:
+    via = "header" if v else ("confirm" if always else None)
+    if via is None and user is not None and db is not None and site_id:
+        from ..services.app_settings import pos_app_users
+        if (user.username or "").lower() in pos_app_users(db, site_id):
+            via = "user_list"
+    if via:
         payment.source = "POSAPP"
-    if v:
-        payment.raw_payload = {**(payment.raw_payload or {}), "app_version": v}
+    if v or via == "user_list":
+        payment.raw_payload = {**(payment.raw_payload or {}),
+                               **({"app_version": v} if v else {"pos_app_via": via})}
 
 
 def _remember_app_version(terminal, version: str | None):
@@ -955,7 +968,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     if body.get("customer_tin"):
         payment.customer_tin = str(body["customer_tin"]).strip()[:20]
         payment.ebarimt_receiver_type = "COMPANY"
-    _mark_pos_app(payment, request)
+    _mark_pos_app(payment, request, user=user, db=db, site_id=session.site_id)
     # Гадна системд (POS/өөр e-Barimt API) үүссэн баримт ирвэл түүнийг бүртгэнэ
     await _finalize_paid(db, payment, external_receipt=_external_receipt(body))
     # source/app_version — POS аппын бэлэн төлбөр толгойгоо үнэхээр илгээж байгааг
@@ -963,7 +976,8 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     db.add(AuditLog(username=user.username, action="CASH_PAYMENT", entity="payment",
                     entity_id=payment.id, detail={"amount": float(payment.amount),
                                                   "source": payment.source,
-                                                  "app_version": _pos_app_version(request)}))
+                                                  "app_version": _pos_app_version(request),
+                                                  "pos_app_via": (payment.raw_payload or {}).get("pos_app_via")}))
     db.commit()
     return {"ok": True, "status": payment.status, "payment_id": payment.id,
             "amount": float(payment.amount), **payment_outcome(db, payment)}
@@ -1410,17 +1424,39 @@ async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
     return reg or None
 
 
-async def retry_ebarimt(db: Session, payment: Payment, *, reissue_external: bool = False) -> dict:
+async def retry_ebarimt(db: Session, payment: Payment, *, reissue_external: bool = False,
+                        allow_duplicate: bool = False, username: str = "system") -> dict:
     """Resume a saved receipt job; never issue an untracked second receipt.
     EXTERNAL (POS терминал гаргасан) баримтыг зөвхөн reissue_external=True үед,
-    тохиргоо унтраалттай бол л системийн баримт болгоно (financial_jobs)."""
+    тохиргоо унтраалттай бол л системийн баримт болгоно (financial_jobs).
+    allow_duplicate: POS терминалын давхардал гэж цуцлагдсан баримтыг ДАХИН
+    үүсгэхийг ил тодоор зөвшөөрөх (UI-д баталгаажуулалттай) — эс бөгөөс 409."""
     if payment.status != "PAID":
         return {"ok": False, "error": "Төлбөр PAID биш"}
     from ..services.financial_jobs import retry_payment_receipts
-    return retry_payment_receipts(db, payment, reissue_external=reissue_external)
+    return retry_payment_receipts(db, payment, reissue_external=reissue_external,
+                                  allow_duplicate=allow_duplicate, username=username)
 
 
-async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
+def _mark_cancel(rec: VatReceipt, state: str, key_scope: str | None, note: str,
+                 mark: dict | None) -> None:
+    """Цуцлалтын нотолгоо: аль түлхүүрээр, ямар шалтгаанаар (raw.cancel) — POS-ийн
+    давхардал бол ddtd_note-д DUPLICATE_OF_POS тэмдэг (Ибаримт хуудсанд харагдана,
+    «Дахин үүсгэх» 409 өгөх үндэс)."""
+    cur = getattr(rec, "raw", None)
+    raw = dict(cur) if isinstance(cur, dict) else {}
+    raw["cancel"] = {**(raw.get("cancel") if isinstance(raw.get("cancel"), dict) else {}),
+                     "state": state, "key_scope": key_scope, "note": note,
+                     "at": datetime.utcnow().isoformat(), **(mark or {})}
+    rec.raw = raw
+    if mark and mark.get("reason") and mark["reason"] not in (rec.ddtd_note or ""):
+        tail = f" ТЕГ {mark['teg_ddtd']}" if mark.get("teg_ddtd") else ""
+        prev = f" | {rec.ddtd_note}" if rec.ddtd_note else ""
+        rec.ddtd_note = (f"{mark['reason']}: POS терминалын баримттай давхардсан тул цуцлав{tail}{prev}")[:300]
+
+
+async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | None = None,
+                         only_ids: set | None = None) -> dict:
     """ИЛГЭЭГДСЭН (SENT) e-Barimt баримтыг сувгаар нь цуцална (буцаалт).
 
     Суваг бүрийн цуцлах зам:
@@ -1430,11 +1466,17 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
                   талд одоогоор БАЙХГҮЙ → NOT_SUPPORTED алдаа буцна
     Амжилттай бол VatReceipt.status=CANCELLED, receipt_url=тэмдэглэл. Төлбөр
     (мөнгө) хөндөгдөхгүй — зөвхөн татварын баримт. Дараа нь «Дахин үүсгэх»
-    шинэ баримт гаргана (retry_ebarimt CANCELLED-ийг алгасдаг)."""
+    шинэ баримт гаргана (retry_ebarimt CANCELLED-ийг алгасдаг).
+
+    mark: цуцлалтын шалтгааны тэмдэг (ж: {"reason": DUPLICATE_OF_POS, "teg_ddtd": …}) —
+    raw.cancel + ddtd_note-д; POS-ийн давхардал гэж цуцалсныг «Дахин үүсгэх» 409-өөр хамгаална.
+    only_ids: зөвхөн эдгээр мөр (давхардлын цуцлалт терминалын ONTIME мөрийг хөндөхгүй)."""
     recs = (db.query(VatReceipt)
             .filter(VatReceipt.payment_id == payment.id,
                     VatReceipt.status.in_(["SENT", "CANCEL_PENDING"]),
                     VatReceipt.ebarimt_id.isnot(None)).all())
+    if only_ids is not None:
+        recs = [r for r in recs if r.id in only_ids]
     if not recs:
         if (db.query(VatReceipt.id).filter(VatReceipt.payment_id == payment.id,
                                            VatReceipt.status == "EXTERNAL").first()):
@@ -1453,6 +1495,7 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
                 if g.get("state") == "CANCELLED":
                     rec.status = "CANCELLED"
                     rec.receipt_url = (note or "Цуцлав")[:200]
+                    _mark_cancel(rec, "CANCELLED", None, note, mark)
                     cancelled.append(rec.ebarimt_id)
                 else:
                     pending.append(rec.ebarimt_id)
@@ -1480,6 +1523,7 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
                     # receipt.cancelled webhook эсвэл дараагийн «Цуцлах» дарахад GET-ээр эцэслэнэ
                     rec.status = "CANCEL_PENDING"
                     rec.receipt_url = (f"Цуцлалт хүлээгдэж байна (msgbill): {r.get('error') or ''}")[:200]
+                    _mark_cancel(rec, "CANCEL_PENDING", None, note, mark)
                     pending.append(rec.ebarimt_id)
                     continue
                 if r.get("state") not in ("CANCELLED", ""):
@@ -1497,6 +1541,7 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str) -> dict:
             continue
         rec.status = "CANCELLED"
         rec.receipt_url = (note or "Цуцлав")[:200]
+        _mark_cancel(rec, "CANCELLED", None, note, mark)
         ebarimt.cache_qr(payment.id, None)
         cancelled.append(rec.ebarimt_id)
     db.commit()
@@ -1809,15 +1854,32 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
             if receipt:
                 receipt.customer_tin = payment.customer_tin
         db.flush()
-    res = await retry_ebarimt(db, payment, reissue_external=reissue and has_external)
-    if res.get("external"):
-        db.rollback()   # татгалзсан — хүлээн авагчийн өөрчлөлтийг ч хадгалахгүй
+    allow_dup = bool(body.get("allow_duplicate"))
+    res = await retry_ebarimt(db, payment, reissue_external=reissue and has_external,
+                              allow_duplicate=allow_dup, username=user.username)
+    if res.get("duplicate_of_pos"):
+        # Юу ч үүсгээгүй — POS терминалын давхардал гэж цуцалсан баримтыг дахин
+        # гаргавал ТЕГ-т нэг борлуулалт дахиад 2 баримттай болно (2026-10-13)
+        db.rollback()
+        db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_REFUSED", entity="payment",
+                        entity_id=payment_id, detail={"reason": "DUPLICATE_OF_POS_TERMINAL"}))
+        db.commit()
+        raise HTTPException(409, res["error"])
+    # created=True: бүгд цуцлагдсан төлбөрийн орлох мөрийг тохиргоо асаалттай тул
+    # «терминал гаргасан» (EXTERNAL) гэж БҮРТГЭСЭН — төлөв өөрчлөгдсөн тул 200 (UI
+    # дахин ачаална). Үгүй бол татгалзал — хүлээн авагчийн өөрчлөлтийг ч хадгалахгүй.
+    refused = bool(res.get("external")) and not res.get("created")
+    if refused:
+        db.rollback()
     db.add(AuditLog(username=user.username, action="EBARIMT_RETRY", entity="payment",
                     entity_id=payment_id, detail={**res, **({"changed": changed} if changed else {}),
-                                                  **({"reissue_external": True} if reissue else {})}))
+                                                  **({"reissue_external": True} if reissue else {}),
+                                                  **({"allow_duplicate": True} if allow_dup else {})}))
     db.commit()
-    if res.get("external"):
+    if refused:
         raise HTTPException(409, res.get("error"))
+    if res.get("created"):
+        return res
     if not res.get("ok") and not res.get("pending"):
         raise HTTPException(400, f"Баримт үүсгэж чадсангүй: {res.get('error')}")
     return res

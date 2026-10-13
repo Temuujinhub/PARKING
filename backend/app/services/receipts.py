@@ -36,6 +36,20 @@ log = logging.getLogger("parking.receipts")
 _STATUS_RANK = {"SENT": 0, "CANCEL_PENDING": 1, "EXTERNAL": 2, "PENDING": 3, "REVIEW": 4,
                 "FAILED": 5, "CANCELLED": 6}
 
+# Цуцлалтын ШАЛТГААНЫ тэмдэг (2026-10-13): POS терминал (Ontime …10002990) аль
+# хэдийн баримт хэвлэсэн төлбөрийн манай msgbill баримтыг ТЕГ тулгалтаар цуцалсан.
+# Ийм төлбөрт «Дахин үүсгэх» дарвал ДАХИН давхардал үүснэ — retry 409 өгнө.
+DUPLICATE_OF_POS = "DUPLICATE_OF_POS_TERMINAL"
+
+
+def is_duplicate_cancel(rec) -> bool:
+    """Энэ баримт «POS-ийн давхардал» гэж цуцлагдсан (эсвэл цуцлалт хүлээгдэж буй) юу."""
+    if DUPLICATE_OF_POS in (getattr(rec, "ddtd_note", None) or ""):
+        return True
+    raw = getattr(rec, "raw", None)
+    cancel = raw.get("cancel") if isinstance(raw, dict) else None
+    return isinstance(cancel, dict) and cancel.get("reason") == DUPLICATE_OF_POS
+
 
 def rank_key(rec) -> tuple:
     """Сонголтын эрэмбэ — тест хийхэд тохиромжтой цэвэр функц."""
