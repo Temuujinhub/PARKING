@@ -43,11 +43,18 @@ const SOURCE_BADGE = {
 function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
   const edited = draft !== undefined
   const shown = edited ? draft : row.value
-  const locked = row.source === 'site_column'
+  // site_only (2026-10-13): «POS терминал өөрөө НӨАТ баримт гаргадаг» г.м зогсоолын
+  // төхөөрөмжийн шинж — ерөнхийд асаавал терминал хэвлэдэггүй зогсоолын жолооч баримтгүй
+  // үлдэнэ; сервер ч ерөнхий утгыг хадгалахгүй тул энд зөвхөн харуулна
+  const siteOnly = isGlobal && row.site_only
+  const locked = row.source === 'site_column' || siteOnly
   const [badgeText, badgeCls] = SOURCE_BADGE[edited && !isGlobal ? 'site' : row.source] || SOURCE_BADGE.global
   const overridden = !isGlobal && (row.source === 'site' || edited)
 
   const control = () => {
+    if (siteOnly) {
+      return <span className="text-xs text-slate-500">зогсоол сонгож тохируулна</span>
+    }
     if (locked) {
       return <span className="font-mono text-cyan-300 text-sm">{String(shown)}</span>
     }
@@ -58,11 +65,21 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
       )
     }
     if (row.unit === 'choice') {
+      // Дүрэм өөрийн сонголтуудыг (choices) авчирвал түүгээр — e-Barimt-ын аргууд
+      // (2026-10-13); үгүй бол орох дугаарын шалгалтын policy (хуучин ганц choice)
+      const opts = row.choices ? row.choices.map((c) => [c.value, c.label]) : Object.entries(POLICY_LABEL)
       return (
         <select className="input w-56 text-sm" value={shown} aria-label={row.name}
           onChange={(e) => onChange(e.target.value)}>
-          {Object.entries(POLICY_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
+      )
+    }
+    if (row.unit === 'text') {
+      // Чөлөөт мөр (ж: POS аппын хэрэглэгчид «pos.khangarid,pos.oros») — сервер цэвэрлэнэ
+      return (
+        <input className="input w-64 font-mono text-sm" value={shown || ''} aria-label={row.name}
+          placeholder="pos.khangarid, …" onChange={(e) => onChange(e.target.value)} />
       )
     }
     if (row.unit === 'time') {
@@ -90,6 +107,11 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
           {!row.per_site && !locked && !isGlobal && (
             <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600/40 text-slate-500">
               зөвхөн ерөнхий
+            </span>
+          )}
+          {row.site_only && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-500/30 text-cyan-300">
+              зөвхөн зогсоолоор
             </span>
           )}
           {edited && (

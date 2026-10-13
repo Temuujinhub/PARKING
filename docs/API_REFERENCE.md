@@ -193,6 +193,16 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 ```
 Хариунд ижил `ebarimt_id/lottery_code/qr_data` буцна; Ибаримт хуудсанд суваг = тухайн нэр.
 
+**POS терминал өөрөө баримт гаргадаг зогсоол (2026-10-13):** Тохиргоо → Төлбөрийн дүрэм →
+«e-Barimt» бүлэг (`ebarimt_rules.pos_terminal_issues` + `pos_terminal_methods`, зогсоол
+бүрээр, анхдагч УНТРААЛТТАЙ). Асаалттай зогсоолд POS аппын төлбөр (`pos/confirm` — үргэлж;
+`cash` болон `compensations/{id}/pay` — `X-App-Version` толгойтой эсвэл зогсоолын
+`pos_terminal_users` жагсаалтын хэрэглэгч бол, `payments.source=POSAPP`)
+ДДТД-гүй ирвэл систем msgbill баримт ГАРГАХГҮЙ: `vat_receipts.status=EXTERNAL`,
+`provider=POS-TERMINAL`, FinancialJob үүсэхгүй. EXTERNAL-ийг retry/бөөн нөхөлт/цуцлалт
+хөндөхгүй (retry → 409); тохиргоог унтраасны дараа `retry-ebarimt {"reissue_external": true}`
+л системийн баримт болгоно. `{payment_id}/ebarimt` (холбох) EXTERNAL мөрийг SENT болгоно.
+
 ### POST /api/payments/{payment_id}/ebarimt  (OPERATOR+ / vat)
 Төлөгдсөн төлбөрт **гадна системд үүссэн баримтыг ДАРАА нь холбох** (систем баримт
 үүсгэж чадаагүй/амжилтгүй үед, эсвэл баримтыг өөр e-Barimt API-аар гаргасан үед):
@@ -205,7 +215,20 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 манай бүртгэл CANCELLED болно. `{note?}` → `{ok, cancelled[], pending[], error}`.
 
 ### POST /api/payments/{payment_id}/retry-ebarimt  (vat/reports)
-Амжилтгүй/цуцалсан баримтыг системээр дахин үүсгэнэ (мөнгө дахин авахгүй).
+Амжилтгүй/цуцалсан баримтыг системээр дахин үүсгэнэ (мөнгө дахин авахгүй). EXTERNAL
+(POS терминал гаргасан) баримттай төлбөрт **409**; `{"reissue_external": true}` +
+зогсоолын тохиргоо унтраалттай үед л системийн баримт болгоно. POS терминалын давхардал
+гэж ТЕГ тулгалтаар цуцалсан (`DUPLICATE_OF_POS_TERMINAL`) баримтыг **409**-өөр хамгаална —
+`{"allow_duplicate": true}` ил зөвшөөрлөөр л. Бүгд цуцлагдсан төлбөрийн орлох мөр тохиргоо
+асаалттай тул EXTERNAL болж бүртгэгдвэл `200 {created: true, external: true}`.
+
+### POST /api/reports/vat-reconcile/cancel-duplicates  (vat/reports)
+`{payment_ids[], note, dry_run=true, teg_ddtd?: {payment_id: ТЕГ-ийн терминалын мөрийн ДДТД}}`.
+Зөвхөн МАНАЙ (msgbill/QPay/PosAPI) баримтыг цуцалж `DUPLICATE_OF_POS_TERMINAL` гэж
+тэмдэглэнэ; терминалын ДДТД-г `ONTIME/SENT` мөрөөр бүртгэнэ (33 оронтой биш, манай кассын
+дугаартай эсвэл аль хэдийн бүртгэлтэй бол ДДТД-гүй `EXTERNAL`). Терминалын мөрийг хөндөхгүй.
+`vat-reconcile` хариунд `terminal_issued` / `terminal_confirmed` / `terminal_missing[]`
+(EXTERNAL боловч ТЕГ-т баримт алга — баримтгүй борлуулалт байж болзошгүй).
 
 ⚠️ `amount` нь системийн тооцсон дүнтэй таарахгүй бол `400` буцна — картаар авахын ӨМНӨ
 `GET /api/sessions/{id}`-ээс дүнг АВЧ баталгаажуулна.

@@ -7,6 +7,7 @@
 import { AlertTriangle, Ban, FileCheck2, FileSpreadsheet, Upload } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { api, fmt } from '../api'
+import TerminalMissing from './TerminalMissing'
 import { Modal, useToast } from './ui'
 
 const TZ_OPTS = [['', 'Авто (өөрөө тааруулна)'], ['0', 'Файл UTC цагаар'], ['-8', 'Файл УБ (локал) цагаар']]
@@ -76,8 +77,16 @@ export default function VatRecon({ tenants = [] }) {
   }
 
   // Давхардсан гэж тэмдэглэгдсэн мөрүүдийн ТӨЛБӨРүүд (давхардлыг арилгасан)
-  const dupIds = [...new Set((recon?.unmatched_tax || [])
-    .filter((r) => r.verdict === 'DUPLICATE' && r.payment_id).map((r) => r.payment_id))]
+  const dupRows = (recon?.unmatched_tax || []).filter((r) => r.verdict === 'DUPLICATE' && r.payment_id)
+  const dupIds = [...new Set(dupRows.map((r) => r.payment_id))]
+  // Төлбөр бүрийн ТЕГ-ийн давхар (терминалын) мөрийн ДДТД — цуцалсны дараа сервер түүнийг
+  // терминалын баримт (ONTIME) болгон бүртгэж, «Дахин үүсгэх» давхардлыг сэргээхгүй.
+  // Нэг төлбөрт хоёр мөр таарвал аль нь терминалынх нь тодорхойгүй — илгээхгүй.
+  const tegDdtd = {}
+  for (const id of dupIds) {
+    const rows = dupRows.filter((r) => r.payment_id === id)
+    if (rows.length === 1 && rows[0].ddtd) tegDdtd[id] = rows[0].ddtd
+  }
 
   const cancelDup = async (apply) => {
     setDupBusy(true)
@@ -85,7 +94,7 @@ export default function VatRecon({ tenants = [] }) {
       const res = await api('/api/reports/vat-reconcile/cancel-duplicates', {
         method: 'POST',
         body: { payment_ids: apply ? dupSel : dupIds, dry_run: !apply,
-          note: apply ? dupNote : undefined },
+          note: apply ? dupNote : undefined, teg_ddtd: tegDdtd },
       })
       setDup(res)
       // Анхдагчаар: цуцлах боломжтой БА сэжиггүй мөрүүд л сонгогдоно
@@ -192,7 +201,7 @@ export default function VatRecon({ tenants = [] }) {
           {/* Хоёр «зөрүү» хоорондоо ТААРАХ ЁСГҮЙ — эдгээр нь тулгалтын хүрээнээс
               гадуур үлдсэн, огт өөр шалтгаантай баримтууд. Тэр шалтгааныг задалж
               харуулна (өмнө нь зөвхөн эцсийн тоо харагдаж, «яагаад?» нь далд байв) */}
-          {(recon.outside_window > 0 || recon.cancelled > 0) && (
+          {(recon.outside_window > 0 || recon.cancelled > 0 || recon.terminal_issued > 0) && (
             <div className="text-xs text-slate-400 flex flex-wrap gap-4">
               {recon.outside_window > 0 && (
                 <span title="Асуулга нь цагийн шилжилтэд зориулж ±9 цагийн нөөцтэй татдаг. Файл тэр хугацааг хамраагүй тул эдгээр нь зөрүү БИШ.">
@@ -204,8 +213,18 @@ export default function VatRecon({ tenants = [] }) {
                   Цуцлагдсан: <b className="font-mono">{recon.cancelled}</b> (алгассан)
                 </span>
               )}
+              {/* 2026-10-13: «POS терминал өөрөө НӨАТ баримт гаргадаг» зогсоолын төлбөр —
+                  манай баримт биш тул тулгалтад оруулаагүй; ТЕГ-ийн мөр нь TERMINAL шалтгаантай */}
+              {recon.terminal_issued > 0 && (
+                <span className="text-cyan-300" title="Баримтыг POS терминал (Ontime) гаргасан — систем давхар үүсгээгүй. Манай баримт биш тул тулгалтад ороогүй.">
+                  POS терминал гаргасан: <b className="font-mono">{recon.terminal_issued}</b> (манай баримт биш
+                  {recon.terminal_confirmed != null && <>, ТЕГ-т олдсон <b className="font-mono">{recon.terminal_confirmed}</b></>})
+                </span>
+              )}
             </div>
           )}
+          {/* Терминал баримт гаргасан гэж бүртгэсэн ч ТЕГ-т АЛГА — баримтгүй борлуулалт (хяналт #3) */}
+          <TerminalMissing recon={recon} toast={toast} />
           {/* Кассын (POS) дугаараар — ДДТД-ийн сүүлийн 8 орон нь баримт гаргасан
               кассыг заана. Файлд ямар касс байна, манайд ямар байна вэ. */}
           {Object.keys(recon.tax_pos || {}).length > 0 && (

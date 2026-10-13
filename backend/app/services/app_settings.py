@@ -22,6 +22,7 @@ BARRIER_KEY = "barrier_rules"
 DRIVERTYPE_KEY = "driver_type_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
+EBARIMT_KEY = "ebarimt_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
 CAMHEALTH_STATE = "camhealth_state"
@@ -211,6 +212,24 @@ DEFAULTS: dict[str, dict] = {
         "night_from": "21:00",
         "night_until": "08:00",
     },
+    EBARIMT_KEY: {
+        # POS ТЕРМИНАЛ ӨӨРӨӨ НӨАТ БАРИМТ ГАРГАДАГ ЗОГСООЛ (2026-10-13).
+        # Зарим зогсоолын PAX терминал POS аппаар авсан КАРТ, БЭЛЭН төлбөрт
+        # Ontime-ийн (касс …10002990) e-Barimt-ыг өөрөө хэвлэдэг ч апп тэр ДДТД-г
+        # /pos/confirm, /cash-д илгээдэггүй тул систем msgbill-ээр ДАХИН баримт
+        # гаргадаг байв — ТЕГ тулгалт: 2026-08-24-нд Хангарьд 63 давхар баримт
+        # (39 бэлэн + 24 карт, pos.khangarid). Моннисын «Building» POS-д Ontime
+        # баримт байгаагүй — аль зогсоолын терминал хэвлэдэг нь тодорхойгүй тул
+        # анхдагч УНТРААЛТТАЙ, зогсоол бүрээр асаана.
+        "pos_terminal_issues": False,
+        # Аль аргад терминал баримт гаргадаг вэ: "CARD,CASH" | "CARD" | "CASH"
+        "pos_terminal_methods": "CARD,CASH",
+        # POS аппын хэрэглэгчид (таслалаар, ж: "pos.khangarid") — X-App-Version
+        # толгойгүй ирсэн бэлэн/өрийн төлбөрийг ч POS аппынх гэж тооцно. Яагаад:
+        # апп толгойгоо илгээдэг нь прод-д БАТЛАГДААГҮЙ (pax_terminal төхөөрөмж 0,
+        # аудитад app_version алга), харин давхардлын 62% нь БЭЛЭН (08-24: 39/63).
+        "pos_terminal_users": "",
+    },
     CAMHEALTH_KEY: {
         # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).
         # Гацсан = event стрим АМЬД (200) атлаа snapshot.cgi ШУУД 400 буцаана
@@ -263,8 +282,9 @@ def _base(key: str) -> dict:
 SITE_OVERLAY = "_sites"
 
 # Зогсоол бүрээр ДАРЖ болох түлхүүрүүд. Энд БАЙХГҮЙ түлхүүр зөвхөн глобал —
-# UI мөн үүгээр «глобал» гэж тэмдэглэнэ (ж: e-Barimt/НӨАТ нь ТТД-тэй уялдаатай
-# тул зогсоол бүрээр салгаж болохгүй).
+# UI мөн үүгээр «глобал» гэж тэмдэглэнэ (ж: e-Barimt-ын СУВАГ/ТТД нь
+# түрээслэгчтэй уялдаатай тул зогсоол бүрээр салгаж болохгүй; харин «терминал
+# өөрөө баримт хэвлэдэг үү» гэдэг нь ЗОГСООЛЫН ТӨХӨӨРӨМЖИЙН шинж тул зогсоолоор).
 PER_SITE: dict[str, set[str]] = {
     BLACKLIST_KEY: {"auto_enabled", "debt_count", "debt_amount",
                     "block_entry", "block_exit_debt_count"},
@@ -281,17 +301,36 @@ PER_SITE: dict[str, set[str]] = {
                     "invoice_quote_minutes", "wallet_auto_deduct"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
                   "reopen_cooldown_sec", "exit_dedup_reopen"},
+    EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_methods", "pos_terminal_users"},
     # DRIVERTYPE_KEY (шөнийн цонх) ЗОРИУД байхгүй: энэ нь тодорхой МАШИНУУДАД
     # (NIGHT төрлийн гэрээт) олгодог нөхцөл тул зогсоолд биш, Бүртгэлтэй машин
     # хуудасны 🌙 тохиргоонд харьяалагдана (2026-09-03).
 }
 
+# ЗӨВХӨН зогсоолоор тохируулагддаг түлхүүрүүд — ЕРӨНХИЙ (глобал) утга нь
+# хадгалагдахгүй, уншихад ч тоологдохгүй. «POS терминал баримтаа өөрөө гаргадаг»
+# нь тухайн зогсоолын төхөөрөмжийн шинж: ерөнхийд асаавал терминал нь Ontime
+# хэвлэдэггүй зогсоолын (Моннис «Building»: 08-01-ээс 720 карт + 113 бэлэн)
+# жолооч НӨАТ баримтгүй үлдэнэ (2026-10-13 хяналт).
+SITE_ONLY: dict[str, set[str]] = {
+    EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_users"},
+}
+
+# Мөр төрлийн утгын урт — анхдагч 30 (бодлогын нэр г.м); хэрэглэгчийн жагсаалт урт.
+STR_LIMIT: dict[tuple[str, str], int] = {
+    (EBARIMT_KEY, "pos_terminal_users"): 300,
+}
+
 # Сонголттой (enum) утгын зөвшөөрөгдөх багц — (бүлэг, түлхүүр) бүрээр.
 # dict төрлийн түлхүүрт БҮХ утга нь энэ багцад багтах ёстой (site_overrides г.м).
 _POLICY_CHOICES = {"open", "hold", "strict"}
+# Терминалын баримтын аргууд — эрэмбэлэгдсэн хэлбэрээр л хадгална
+# (payment_rules.clamp_values "CASH,CARD"-ыг "CARD,CASH" болгож ирүүлнэ).
+POS_TERMINAL_METHOD_CHOICES = {"CARD,CASH", "CARD", "CASH"}
 CHOICES: dict[tuple[str, str], set] = {
     (ENTRYPLATE_KEY, "policy"): _POLICY_CHOICES,
     (ENTRYPLATE_KEY, "site_overrides"): _POLICY_CHOICES,
+    (EBARIMT_KEY, "pos_terminal_methods"): POS_TERMINAL_METHOD_CHOICES,
 }
 
 _cache: dict[str, tuple[float, dict, dict]] = {}
@@ -353,9 +392,10 @@ def _load(db, key: str) -> tuple[dict, dict]:
     return stored, overlay
 
 
-def _coerce(default, v):
+def _coerce(default, v, limit: int = 30):
     """DB-д мөр хэлбэрээр хадгалагдсан утгыг DEFAULTS-ийн ТӨРӨЛД буулгана.
-    Хөрвүүлж чадахгүй бол None → дуудагч глобал утгыг хэвээр үлдээнэ."""
+    Хөрвүүлж чадахгүй бол None → дуудагч глобал утгыг хэвээр үлдээнэ.
+    limit: мөр төрлийн дээд урт (STR_LIMIT)."""
     try:
         if isinstance(default, bool):
             if isinstance(v, bool):
@@ -367,7 +407,7 @@ def _coerce(default, v):
                 return False
             return None
         if isinstance(default, str):
-            return str(v).strip()[:30] or None
+            return str(v).strip()[:limit] or None
         if isinstance(default, dict):
             return None                      # dict төрлийн түлхүүр давхаргад ордоггүй
         return max(0, int(float(v)))
@@ -382,7 +422,9 @@ def get_rules(db, key: str, site_id: str | None = None) -> dict:
     зөвшөөрөгдөөгүй эсвэл төрөл нь таарахгүй түлхүүр АВТОМАТААР алгасагдана —
     буруу тохиргоо биллингийг унагаахгүй."""
     stored, overlay = _load(db, key)
-    rules = {**_base(key), **stored}
+    # ЗӨВХӨН зогсоолын түлхүүрийн ерөнхий утгыг (гараар DB-д бичигдсэн ч) үл тооно
+    site_only = SITE_ONLY.get(key, set())
+    rules = {**_base(key), **{k: v for k, v in stored.items() if k not in site_only}}
     site = overlay.get(site_id or "") if site_id else None
     if not site:
         return rules
@@ -391,7 +433,7 @@ def get_rules(db, key: str, site_id: str | None = None) -> dict:
     for k, v in site.items():
         if k not in allowed_keys or k not in DEFAULTS[key]:
             continue
-        cv = _coerce(DEFAULTS[key][k], v)
+        cv = _coerce(DEFAULTS[key][k], v, STR_LIMIT.get((key, k), 30))
         if cv is None:
             continue
         allowed = CHOICES.get((key, k))
@@ -427,7 +469,7 @@ def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> d
         if v is None or (isinstance(v, str) and not v.strip()):
             site.pop(k, None)             # глобал руу буцаана
             continue
-        cv = _coerce(DEFAULTS[key][k], v)
+        cv = _coerce(DEFAULTS[key][k], v, STR_LIMIT.get((key, k), 30))
         if cv is None:
             continue
         allowed = CHOICES.get((key, k))
@@ -449,9 +491,10 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
     """Дүрмийг хадгална (зөвхөн мэдэгдэж буй түлхүүр, төрлөө шалгана)."""
     from ..models import AppSetting
     clean: dict = {}
+    site_only = SITE_ONLY.get(key, set())
     for k, default in DEFAULTS[key].items():
-        if k not in values:
-            continue
+        if k not in values or k in site_only:
+            continue                          # site_only: ерөнхийд хадгалахгүй (зогсоолоор л)
         v = values[k]
         allowed = CHOICES.get((key, k))
         if isinstance(default, bool):
@@ -459,7 +502,7 @@ def set_rules(db, key: str, values: dict, username: str) -> dict:
             if cv is not None:
                 clean[k] = cv
         elif isinstance(default, str):
-            v = str(v).strip()[:30]
+            v = str(v).strip()[:STR_LIMIT.get((key, k), 30)]
             if allowed and v not in allowed:
                 continue                      # мэдэхгүй утга — хуучин нь хэвээр
             clean[k] = v
@@ -558,6 +601,35 @@ def no_session_exit_fee(db, site_id: str | None) -> int:
         return max(0, int(float(raw)))
     except (TypeError, ValueError):
         return 0
+
+
+def pos_terminal_receipt_methods(db, site_id: str | None) -> set[str]:
+    """Энэ зогсоолын POS терминал ӨӨРӨӨ НӨАТ баримт гаргадаг төлбөрийн аргууд.
+
+    Хоосон багц = унтраалттай (систем өөрөө баримт гаргана — хуучин зан). Буруу/
+    хоосон аргын утга асаалттай үед анхдагч CARD+CASH руу унана: «асаасан ч юу ч
+    хамаарахгүй» гэсэн чимээгүй тохиргоо үлдээхгүй. Асаалт нь ЗӨВХӨН зогсоолын
+    давхаргаас (SITE_ONLY) — ерөнхий утга хэзээ ч бүх зогсоолыг асаахгүй."""
+    if not site_id:
+        return set()
+    r = get_rules(db, EBARIMT_KEY, site_id)
+    if not r.get("pos_terminal_issues"):
+        return set()
+    raw = str(r.get("pos_terminal_methods") or "").upper()
+    methods = {m.strip() for m in raw.split(",") if m.strip()} & {"CARD", "CASH"}
+    return methods or {"CARD", "CASH"}
+
+
+def pos_app_users(db, site_id: str | None) -> set[str]:
+    """Энэ зогсоолд POS аппаар нэвтэрдэг хэрэглэгчид (жижиг үсгээр) — X-App-Version
+    толгойгүй ирсэн бэлэн/өрийн төлбөрийг POS аппынх гэж танихад (2026-10-13)."""
+    if not site_id:
+        return set()
+    try:
+        raw = get_rules(db, EBARIMT_KEY, site_id).get("pos_terminal_users") or ""
+    except Exception:  # noqa: BLE001 — тохиргоо уншигдахгүй бол хуучин зан
+        return set()
+    return {u.strip().lower() for u in re.split(r"[,;\s]+", str(raw)) if u.strip()}
 
 
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")

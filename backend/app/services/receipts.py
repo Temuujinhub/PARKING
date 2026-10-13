@@ -12,8 +12,10 @@
 
 Дүрэм (энэ модуль л хэрэгжүүлнэ):
   1. `primary_receipt()` — төлбөрийн «албан ёсны» баримт: SENT > CANCEL_PENDING >
-     PENDING > FAILED > CANCELLED, тэнцвэл хамгийн ЭРТ үүссэн (толгой баримт өрийн
-     баримтаас өмнө үүсдэг). Хэвлэх/харуулах/POS/public БҮГД үүгээр.
+     EXTERNAL > PENDING > REVIEW > FAILED > CANCELLED, тэнцвэл хамгийн ЭРТ үүссэн
+     (толгой баримт өрийн баримтаас өмнө үүсдэг). Хэвлэх/харуулах/POS/public БҮГД үүгээр.
+     EXTERNAL (2026-10-13) = POS терминал (Ontime) өөрөө гаргасан, систем үүсгээгүй —
+     ДДТД-гүй ч ЭЦСИЙН төлөв тул түр зуурын PENDING/алдаанаас өмнө.
   2. `assign_ebarimt_id()` — ДДТД аль хэдийн байгаа мөрийг ӨӨР дугаараар ДАРАХГҮЙ:
      зөрчлийг `ddtd_note` + AuditLog(EBARIMT_ID_CONFLICT)-д бичиж, хадгалсан (хэвлэсэн)
      дугаарыг хэвээр үлдээнэ. Хоосон мөрөнд бичихэд ч AuditLog(EBARIMT_ID_SET).
@@ -31,7 +33,22 @@ from ..models import AuditLog, VatReceipt
 
 log = logging.getLogger("parking.receipts")
 
-_STATUS_RANK = {"SENT": 0, "CANCEL_PENDING": 1, "PENDING": 2, "REVIEW": 3, "FAILED": 4, "CANCELLED": 5}
+_STATUS_RANK = {"SENT": 0, "CANCEL_PENDING": 1, "EXTERNAL": 2, "PENDING": 3, "REVIEW": 4,
+                "FAILED": 5, "CANCELLED": 6}
+
+# Цуцлалтын ШАЛТГААНЫ тэмдэг (2026-10-13): POS терминал (Ontime …10002990) аль
+# хэдийн баримт хэвлэсэн төлбөрийн манай msgbill баримтыг ТЕГ тулгалтаар цуцалсан.
+# Ийм төлбөрт «Дахин үүсгэх» дарвал ДАХИН давхардал үүснэ — retry 409 өгнө.
+DUPLICATE_OF_POS = "DUPLICATE_OF_POS_TERMINAL"
+
+
+def is_duplicate_cancel(rec) -> bool:
+    """Энэ баримт «POS-ийн давхардал» гэж цуцлагдсан (эсвэл цуцлалт хүлээгдэж буй) юу."""
+    if DUPLICATE_OF_POS in (getattr(rec, "ddtd_note", None) or ""):
+        return True
+    raw = getattr(rec, "raw", None)
+    cancel = raw.get("cancel") if isinstance(raw, dict) else None
+    return isinstance(cancel, dict) and cancel.get("reason") == DUPLICATE_OF_POS
 
 
 def rank_key(rec) -> tuple:

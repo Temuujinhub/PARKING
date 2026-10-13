@@ -57,9 +57,14 @@ def main():
             .filter(Payment.paid_at >= lo, Payment.paid_at < hi).all())
     print(f"Манайх: {len(ours)} баримт (paid_at-аар)")
 
-    matched, ddtd_equal, unmatched_ours = 0, 0, []
+    matched, ddtd_equal, unmatched_ours, terminal = 0, 0, [], 0
     for rec, pay, plate in ours:
         if rec.status == "CANCELLED":
+            continue
+        if rec.status == "EXTERNAL":
+            # POS терминал (Ontime) гаргасан — манай баримт БИШ (ДДТД-гүй); API-тай ижил
+            # «манайх»-т тоолохгүй (2026-10-13)
+            terminal += 1
             continue
         cand = [t for t in tax if not t["used"] and abs(float(rec.amount) - t["amount"]) < 1
                 and abs((t["dt"] - pay.paid_at).total_seconds()) <= args.tol]
@@ -75,6 +80,8 @@ def main():
 
     print(f"\nТААРСАН: {matched} (үүнээс ДДТД яг ижил: {ddtd_equal} — суваг ДДТД-г "
           f"дахин дугаарладаг тул 0 байх нь хэвийн)")
+    if terminal:
+        print(f"POS терминал гаргасан (EXTERNAL, манай баримт биш — тулгалтад ороогүй): {terminal}")
     print(f"\nМАНАЙД БИЙ, ТЕГ-Д АЛГА: {len(unmatched_ours)} "
           "(mock/FAILED баримт, Monnis өөрийн ТТД, цагийн зөрүү байж болно)")
     for row in sorted(unmatched_ours)[:30]:

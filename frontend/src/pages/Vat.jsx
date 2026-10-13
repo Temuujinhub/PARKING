@@ -14,9 +14,15 @@ const TABS = [['receipts', 'Баримт'], ['recon', 'ТЕГ тулгалт']]
 // дугаартай, дүн ДДТД-тэй андуурагдаж олддог байсныг салгав (2026-09-01)
 const EMPTY_FILTERS = { plate: '', ddtd: '', lottery: '', site: '', provider: '', status: '', amount: '' }
 const STATUS_OPTS = [['', 'Төлөв: бүгд'], ['SENT', 'Илгээсэн'], ['FAILED', 'Амжилтгүй'],
-  ['PENDING', 'Хүлээгдэж буй'], ['REVIEW', 'Тулгах шаардлагатай'], ['CANCELLED', 'Цуцалсан'], ['CANCEL_PENDING', 'Цуцлалт хүлээгдэж буй']]
+  ['PENDING', 'Хүлээгдэж буй'], ['REVIEW', 'Тулгах шаардлагатай'], ['CANCELLED', 'Цуцалсан'], ['CANCEL_PENDING', 'Цуцлалт хүлээгдэж буй'],
+  ['EXTERNAL', 'POS терминал гаргасан']]
 const PROVIDER_OPTS = [['', 'Суваг: бүгд'], ['QPAY', 'QPay'], ['MSGBILL', 'msgbill.mn'],
-  ['POSAPI', 'PosAPI'], ['TERMINAL', 'POS терминал']]
+  ['POSAPI', 'PosAPI'], ['TERMINAL', 'POS терминал'], ['POS-TERMINAL', 'POS терминал (Ontime, ДДТД-гүй)']]
+// EXTERNAL (2026-10-13): «POS терминал өөрөө НӨАТ баримт гаргадаг» зогсоолд POS аппын
+// карт/бэлэн төлбөрийн баримтыг терминал (Ontime) гаргасан — систем msgbill-ээр давхар
+// үүсгээгүй. Алдаа ч биш, манай баримт ч биш: «Дахин үүсгэх»/«Цуцлах» харагдахгүй.
+const PROVIDER_LABEL = { MSGBILL: 'msgbill.mn', QPAY: 'QPay', TERMINAL: 'POS терминал',
+  POSAPI: 'PosAPI', 'POS-TERMINAL': 'POS терминал (Ontime)' }
 
 export default function Vat() {
   // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
@@ -145,9 +151,19 @@ export default function Vat() {
       const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`,
         { method: 'POST', ...(opts ? { body: opts } : {}) })
       if (res.ok && res.ebarimt_id) toast(`Баримт баталгаажсан — ДДТД ${res.ebarimt_id}`)
-      else toast(res.error || 'Баримтын ажил хүлээгдэж байна; дахин төлөхгүй', res.pending ? 'success' : 'error')
+      // created: тохиргоо асаалттай зогсоолд орлох мөрийг «POS терминал гаргасан» гэж бүртгэв
+      else toast(res.error || 'Баримтын ажил хүлээгдэж байна; дахин төлөхгүй', res.pending || res.created ? 'success' : 'error')
       reloadRows(); reloadFails()
-    } catch (e) { toast(e.message, 'error') } finally { setRetrying(null) }
+    } catch (e) {
+      // 2026-10-13: POS терминалын давхардал гэж ТЕГ тулгалтаар цуцалсан баримт — сервер
+      // 409 өгнө. Ил тод зөвшөөрөлгүйгээр дахин үүсгэвэл давхардал буцаж үүснэ.
+      if (/POS терминал/.test(e.message) && /ДАВХАРДСАН/.test(e.message) && !opts?.allow_duplicate
+        && window.confirm(`${e.message}\n\nДАВХАР баримт үүсгэхийг зөвшөөрөх үү?`)) {
+        await retry(r, { ...(opts || {}), allow_duplicate: true })
+        return
+      }
+      toast(e.message, 'error')
+    } finally { setRetrying(null) }
   }
   // Худалдан авагчийн дугаар буруу (QPay «customerTin», ТЕГ-т байхгүй регистр) —
   // иргэний баримт болгох эсвэл зөв дугаар өгөх. 2026-09-06: 6853959 регистртэй
@@ -159,6 +175,17 @@ export default function Vat() {
     if (!window.confirm(`${r.plate_number || ''} — худалдан авагчийн дугаар (${r.customer_tin || '?'}) буруу.\n`
       + 'ИРГЭНИЙ (нэргүй) баримт болгож дахин үүсгэх үү? Байгууллага НӨАТ-аа буцаан авах боломжгүй болно.')) return
     retry(r, { receiver_type: 'CITIZEN' })
+  }
+  // EXTERNAL — терминал (Ontime) баримтаа гаргасан гэж бүртгэгдсэн. Систем баримтыг
+  // зөвхөн терминал ГАРГААГҮЙ нь батлагдвал, зогсоолын тохиргоог унтраасны дараа л
+  // гаргана (эс бөгөөс ТЕГ-т давхар баримт) — сервер тохиргоо асаалттай бол 409.
+  const reissueExternal = (r) => {
+    if (!window.confirm(`${r.plate_number || ''} — ${fmt(r.amount)}₮\n`
+      + 'Энэ төлбөрийн НӨАТ баримтыг POS терминал (Ontime) гаргасан гэж бүртгэгдсэн.\n'
+      + 'Терминал баримт ГАРГААГҮЙ нь батлагдсан уу? Систем msgbill-ээр шинэ баримт гаргана.\n\n'
+      + 'Анхаар: Тохиргоо → Төлбөрийн дүрэм → «POS терминал өөрөө НӨАТ баримт гаргадаг» '
+      + 'энэ зогсоолд УНТРААЛТТАЙ байх ёстой.')) return
+    retry(r, { reissue_external: true })
   }
   const retryWithTin = (r) => {
     const v = prompt(`${r.plate_number || ''} — зөв дугаар оруул (ААН регистр 7 орон / ТТД 11–14 орон / иргэний регистр АА00112233):`,
@@ -343,6 +370,12 @@ export default function Vat() {
           <span className="text-xs text-slate-500">
             {loading ? 'Хайж байна…' : `${rows.length} баримт${hasFilter ? ' (шүүлттэй)' : ''}${rows.length >= 1000 ? ' — 1000-ын хязгаарт хүрсэн, хугацааг багасга' : ''}`}
           </span>
+          {/* Терминалын (Ontime) баримт — алдаа ч биш, манай баримт ч биш: тусад нь тоолно */}
+          {!loading && rows.some((r) => r.status === 'EXTERNAL') && (
+            <span className="text-xs text-cyan-300" title="POS терминал өөрөө гаргасан — систем давхар үүсгээгүй">
+              · үүнээс POS терминал гаргасан: {rows.filter((r) => r.status === 'EXTERNAL').length}
+            </span>
+          )}
           {hasFilter && (
             <button className="btn-secondary py-0.5 px-2 text-xs"
               onClick={() => setF(EMPTY_FILTERS)} aria-label="Шүүлтүүр цэвэрлэх">
@@ -377,10 +410,10 @@ export default function Vat() {
             <td className="td font-mono text-xs">{fmtDate(r.created_at)}</td>
             <td className="td">
               <Badge value={r.status} />
-              {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{r.provider === 'MSGBILL' ? 'msgbill.mn' : r.provider === 'QPAY' ? 'QPay' : r.provider === 'TERMINAL' ? 'POS терминал' : r.provider === 'POSAPI' ? 'PosAPI' : r.provider}</div>}
+              {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{PROVIDER_LABEL[r.provider] || r.provider}</div>}
             </td>
-            <td className={`td text-[11px] max-w-[14rem] break-words ${r.status === 'CANCELLED' ? 'text-slate-400' : 'text-amber-400'}`}>
-              {['FAILED', 'REVIEW', 'CANCELLED', 'CANCEL_PENDING'].includes(r.status) ? (r.receipt_url || '—') : ''}
+            <td className={`td text-[11px] max-w-[14rem] break-words ${['CANCELLED', 'EXTERNAL'].includes(r.status) ? 'text-slate-400' : 'text-amber-400'}`}>
+              {['FAILED', 'REVIEW', 'CANCELLED', 'CANCEL_PENDING', 'EXTERNAL'].includes(r.status) ? (r.receipt_url || '—') : ''}
             </td>
             <td className="td whitespace-nowrap">
               <div className="flex items-center gap-1">
@@ -394,7 +427,15 @@ export default function Vat() {
                     <QrCode size={14} />
                   </button>
                 )}
-                {(r.status === 'FAILED' || r.status === 'CANCELLED' || !r.ebarimt_id) && (
+                {r.status === 'EXTERNAL' && (
+                  <button className="btn-secondary py-1 px-2 text-xs text-slate-300" disabled={retrying === r.id}
+                    onClick={() => reissueExternal(r)}
+                    title="Терминал баримт ГАРГААГҮЙ нь батлагдсан үед л — зогсоолын тохиргоог эхлээд унтраана">
+                    <RefreshCw size={12} className={retrying === r.id ? 'animate-spin' : ''} />
+                    {retrying === r.id ? '…' : 'Систем баримт гаргах'}
+                  </button>
+                )}
+                {r.status !== 'EXTERNAL' && (r.status === 'FAILED' || r.status === 'CANCELLED' || !r.ebarimt_id) && (
                   <button className="btn-secondary py-1 px-2 text-xs" disabled={retrying === r.id}
                     onClick={() => retry(r)}
                     title="Мөнгө дахин авахгүй — зөвхөн НӨАТ баримтыг (шинээр) үүсгэнэ">

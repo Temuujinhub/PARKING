@@ -11,7 +11,7 @@
 import logging
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -147,8 +147,13 @@ def list_compensations(status: str | None = None, plate: str | None = None,
 
 @router.post("/{comp_id}/pay")
 async def pay_compensation(comp_id: str, body: dict | None = None, db: Session = Depends(get_db),
-                           user: User = Depends(require("compensations"))):
-    """Collect one receivable atomically, including debts without a stay."""
+                           user: User = Depends(require("compensations")),
+                           request: Request = None):
+    """Collect one receivable atomically, including debts without a stay.
+
+    X-App-Version толгойтой эсвэл зогсоолын «POS аппын хэрэглэгчид» жагсаалтын хэрэглэгч
+    (POS апп) бол source=POSAPP — терминал баримтаа өөрөө гаргадаг зогсоолд систем давхар
+    баримт үүсгэхгүй (financial_jobs.terminal_issues_receipt)."""
     from decimal import Decimal
     from uuid import uuid4
     from ..config import settings
@@ -198,6 +203,9 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
         ebarimt_receiver_type="COMPANY" if tin else "CITIZEN",
         raw_payload={"compensation_id": comp.id, "plate_number": comp.plate_number,
                      "card_evidence": "operator_receipt_reference" if method == "CARD" else None})
+    from .payments_router import _mark_pos_app
+    # веб касс (толгойгүй, «POS аппын хэрэглэгчид»-д ороогүй) → source="POS" хэвээр
+    _mark_pos_app(pay, request, user=user, db=db, site_id=comp.site_id)
     db.add(pay)
     if reference:
         claim_reference(db, pay, f"terminal:{device.id}", reference)

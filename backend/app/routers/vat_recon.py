@@ -366,7 +366,7 @@ def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
             un_ours.append({"paid_at": pay.paid_at.isoformat(), "plate": plate,
                             "site_name": site_name, "amount": float(rec.amount),
                             "status": rec.status, "provider": rec.provider or "POSAPI",
-                            "ebarimt_id": rec.ebarimt_id})
+                            "ebarimt_id": rec.ebarimt_id, "payment_id": getattr(pay, "id", None)})
     return {"matched": matched, "ddtd_equal": ddtd_equal, "unmatched_ours": un_ours,
             "cancelled": cancelled, "by_provider": by_provider}
 
@@ -419,6 +419,46 @@ def best_shift(tax: list, ours: list, candidates: list[float], tol: int) -> dict
             "group_shifts": {k: rows[0]["shift"] for k, rows in groups.items()}}
 
 
+def match_terminal(tax: list, left: list, external: list, candidates: list[float],
+                   tol: int) -> dict:
+    """«POS терминал гаргасан» (EXTERNAL) гэж бүртгэсэн төлбөрүүдийг ТЕГ-ийн ҮЛДСЭН
+    (манай баримттай таараагүй) мөрүүдтэй цаг+дүнгээр тулгана.
+
+    Яагаад (2026-10-13 хяналт #3): EXTERNAL нь «манайх»-аас хасагддаг тул терминал
+    баримт ХЭВЛЭЭГҮЙ (унтарсан, цаасгүй, Ontime салгасан) үед тэр борлуулалт ТЕГ-т
+    огт баримтгүй үлдсэнийг юу ч харуулдаггүй байв. Таарсан = терминал баримтаа
+    гаргасан нь батлагдсан; таараагүй (`missing`) = БАРИМТГҮЙ борлуулалт байж
+    болзошгүй → «Систем баримт гаргах».
+
+    Терминалын кассын цагийн бүс манай кассынхаас өөр байж болно (ТЕГ-ийн нэг экспорт
+    дотор холилддог) — үлдсэн мөрийн КАСС бүрийн шилжилтийг EXTERNAL мөртэй илүү
+    таарвал л солино (манай баримттай таарсан мөр хөндөгдөхгүй). Файлын хамрах
+    хугацаанаас гадуурх EXTERNAL мөр «дутуу» БИШ (clip_to_file)."""
+    if not tax or not external:
+        return {"matched": 0, "missing": [], "inside": 0}
+    groups: dict[str, list] = {}
+    for t in left:
+        groups.setdefault(t.get("group", "*"), []).append(t)
+    for rows in groups.values():
+        cur = rows[0].get("shift", candidates[0])
+        best_sh, best_n = cur, match_pass(rows, external, cur, tol)["matched"]
+        for sh in candidates:
+            if sh == cur:
+                continue
+            for x in rows:
+                x["shift"] = sh
+            n = match_pass(rows, external, sh, tol)["matched"]
+            if n > best_n:
+                best_sh, best_n = sh, n
+        for x in rows:
+            x["shift"] = best_sh
+    # Шилжилтийг тогтоосны ДАРАА файлын хугацаагаар тайрна (эс бөгөөс терминалын
+    # кассын буруу шилжилтээр цонх 8 цаг зөрж, гадуурх мөр «дутуу» болж харагдана)
+    inside, _ = clip_to_file(tax, external, candidates[0], tol)
+    res = match_pass(left, inside, candidates[0], tol)
+    return {"matched": res["matched"], "missing": res["unmatched_ours"], "inside": len(inside)}
+
+
 def pos_tail_len(ids: list[str]) -> int | None:
     """ДДТД-ийн төгсгөл дэх КАССЫН дугаарын уртыг өгөгдлөөс олно.
 
@@ -458,6 +498,9 @@ VERDICTS = {
     "RECEIPT_NOT_MATCHED": "Баримт бий ч цаг/дүнгээр таарсангүй",
     "OTHER_SCOPE": "ӨӨР ЗОГСООЛ — сонгосон түрээслэгчийн шүүлтээс гадуур",
     "NO_PAYMENT": "Манайд төлбөр ч алга — өөр систем/POS",
+    # 2026-10-13: «POS терминал өөрөө НӨАТ баримт гаргадаг» зогсоолын төлбөр — систем
+    # баримт үүсгээгүй (EXTERNAL), ТЕГ-ийн мөр нь терминалын баримт. Зөрүү БИШ.
+    "TERMINAL": "POS ТЕРМИНАЛ гаргасан — систем давхар үүсгээгүй (хэвийн)",
 }
 
 
@@ -481,6 +524,8 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                                          abs((x["paid_at"] - when).total_seconds())))
             if scope_ids is not None and p["site_id"] not in scope_ids:
                 v = "OTHER_SCOPE"
+            elif p.get("terminal") and not p["receipts"]:
+                v = "TERMINAL"
             elif not p["receipts"]:
                 v = "PAYMENT_NO_RECEIPT"
             elif p["id"] in matched_pay_ids:
@@ -546,7 +591,9 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
     for c in ws2[1]:
         c.font = bold
     for r in sorted(un_ours, key=lambda x: x["paid_at"]):
-        note = ("MOCK/амжилтгүй баримт" if r["status"] != "SENT" else
+        note = ("POS терминал гаргасан гэж бүртгэсэн ч ТЕГ-т баримт АЛГА — баримтгүй борлуулалт "
+                "байж болзошгүй" if r["status"] == "EXTERNAL" else
+                "MOCK/амжилтгүй баримт" if r["status"] != "SENT" else
                 "Өөр ТТД дээр бүртгэгдсэн байж болно" if r["provider"] == "QPAY" else "")
         dt = datetime.fromisoformat(r["paid_at"]) + loc
         ws2.append([dt.strftime("%Y-%m-%d %H:%M:%S"), r["plate"] or "", r.get("site_name") or "",
@@ -554,11 +601,13 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
 
     ws3 = wb.create_sheet("Дүгнэлт")
     matched = sum(1 for t in tax if t.get("ours"))
+    term_n = sum(1 for t in tax if t.get("ours") and t["ours"][0].status == "EXTERNAL")
     lines = [
         ("Тулгалт", title or "—"),
         ("ТЕГ файлын баримт", len(tax)),
         ("Манай баримт (тухайн хугацаанд)", len(ours)),
         ("Таарсан (цаг ±%dс + дүн)" % tol, matched),
+        ("  үүнээс POS терминал гаргасан гэж бүртгэсэн төлбөр (EXTERNAL)", term_n),
         ("ТЕГ-д бий, манайд алга", len(tax) - matched),
         ("Манайд бий, ТЕГ-д алга", len(un_ours)),
         ("", ""),
