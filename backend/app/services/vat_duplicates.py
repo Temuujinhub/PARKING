@@ -261,7 +261,8 @@ def precheck(db, payment_id: str, allowed_sites: set | None = None) -> dict:
 
 async def cancel_one(db, payment_id: str, *, note: str, username: str,
                      teg: dict | None = None, allowed_sites: set | None = None,
-                     source: str = "api", mark_extra: dict | None = None) -> dict:
+                     source: str = "api", mark_extra: dict | None = None,
+                     guard=None) -> dict:
     """НЭГ төлбөрийн манай msgbill баримтыг «POS терминалын давхардал» гэж цуцална.
 
     • Төлбөрийг FOR UPDATE NOWAIT түгжинэ (давхар товшилт/зэрэг job-оос хамгаална).
@@ -279,7 +280,10 @@ async def cancel_one(db, payment_id: str, *, note: str, username: str,
       бөгөөс ДДТД-гүй EXTERNAL) — хэвлэлт/тайлан/ТЕГ тулгалт «баримттай» гэж харна.
       Аль хэдийн цуцлагдсан (тэмдэгтэй) боловч терминалын мөргүй бол (өмнөх ажиллагаа
       дундуур тасарсан) энэ удаа нөхөж бүртгэнэ — дахин ажиллуулахад аюулгүй.
-    mark: DUPLICATE_OF_POS-ийн нэмэлт талбар (ж: {"rule": "pos_app"}) — raw.cancel-д.
+    mark_extra: DUPLICATE_OF_POS-ийн нэмэлт талбар (ж: {"rule": "pos_app"}) — raw.cancel-д.
+    guard(payment, recs) -> шалтгаан | None: түгжээний ДАРАА дахин шалгах нэмэлт дүрэм
+      (POS аппын горим: ААН/ТТД, сонгосон зогсоол, өөр сувгийн SENT баримт г.м) —
+      сонголтоос хойш өөрчлөгдсөн төлбөрийг цуцлахгүй.
     Буцаах: {ok, cancelled, pending, error, skipped?, key_scopes?, auth_error?, quota?,
              terminal_receipt?}"""
     from fastapi import HTTPException
@@ -300,6 +304,11 @@ async def cancel_one(db, payment_id: str, *, note: str, username: str,
         return {"payment_id": payment_id, "ok": False, "error": "Энэ зогсоолын эрхгүй"}
     recs = db.query(VatReceipt).filter(VatReceipt.payment_id == payment_id).all()
     info = _info(payment, site, recs)
+    if guard is not None:
+        why = guard(payment, recs)
+        if why:
+            db.rollback()
+            return {**info, "ok": False, "error": why}
     p = payment_probe(payment, recs, None, site)
     teg = teg or {}
 
@@ -312,7 +321,10 @@ async def cancel_one(db, payment_id: str, *, note: str, username: str,
     if not p["active"] and p["cancelled_msgbill"]:
         terminal = None
         marked = [r for r in recs if r.status == "CANCELLED" and is_duplicate_cancel(r)]
-        if marked and not p["terminal"]:
+        # Терминалын мөр алга (өмнөх ажиллагаа тасарсан) эсвэл ДДТД-гүй EXTERNAL байхад
+        # ТЕГ-ийн ДДТД ирсэн — record_terminal_receipt нөхнө/шинэчилнэ (идемпотент)
+        if marked and (not p["terminal"] or (teg.get("teg_ddtd")
+                                              and not any(t["ebarimt_id"] for t in p["terminal"]))):
             terminal = _record(payment, marked)
             db.add(AuditLog(username=username, action="EBARIMT_CANCEL_BULK", entity="payment",
                             entity_id=payment_id,
@@ -368,3 +380,268 @@ def _term_info(rec) -> dict | None:
         return None
     return {"id": rec.id, "status": rec.status, "provider": rec.provider,
             "ebarimt_id": rec.ebarimt_id}
+
+
+# ─────────────── POS аппын дүрмээр цуцлах (2026-10-13 эзний шийдвэр) ───────────────
+#
+# Эзэн: ИйзиПаркинг ХХК-ийн POS терминалтай БҮХ зогсоолд PAX терминал POS аппаар авсан
+# КАРТ, БЭЛЭН борлуулалт бүрд Ontime-ийн e-Barimt-ыг өөрөө хэвлэдэг. Тиймээс тэдгээр
+# борлуулалтад манай msgbill-ээр гаргасан баримт нь ДАВХАРДАЛ — ТЕГ экспортгүйгээр
+# (файл бүрийг татах боломжгүй) дүрмээр сонгож цуцална. Ontime баримт хэвлэгдээгүй
+# борлуулалт байвал (терминал унтарсан г.м) цуцалсны дараа e-Barimt-гүй үлдэнэ —
+# эзэн энэ эрсдэлийг хүлээн зөвшөөрсөн; CLI dry-run үүнийг заавал анхааруулна.
+# Сонголт (`select_pos_app`) ба цуцлалтын дахин шалгалт (`pos_app_guard`) НЭГ дүрэм.
+
+POS_APP_TENANTS = frozenset({"EASYPARKING"})        # Моннис (өөр ТТД, өөр терминал) ХАМААРАХГҮЙ
+POS_APP_GO_LIVE = datetime(2026, 8, 19)             # msgbill эхэлсэн өдөр (УБ) — анхдагч --from
+POS_APP_TEST_SITES = frozenset({"KH", "SITE10"})    # тест зогсоол — --site-аар нэрлэсэн үед л
+POS_APP_MIN_CARD = 20                               # POS-оор ≥20 карт авсан хэрэглэгч = POS апп
+POS_APP_RULE = "pos_app_terminal_2026-10-13"
+POS_APP_METHODS = ("CARD", "CASH")
+
+
+def resolve_tenant(db, value: str):
+    """Түрээслэгчийг code / нэр / id-аар (CLI-үүд). Олдохгүй бол ValueError."""
+    from sqlalchemy import or_
+
+    from ..models import Tenant
+    conds = [Tenant.code.ilike(value), Tenant.name.ilike(value)]
+    if len(value) == 36:                       # UUID
+        conds.append(Tenant.id == value)
+    t = db.query(Tenant).filter(or_(*conds)).first()
+    if t is None:
+        raise ValueError(f"Түрээслэгч олдсонгүй: {value}")
+    return t
+
+
+def ub_window(date_from: str | None, date_to: str | None) -> tuple[datetime, datetime]:
+    """УБ-ын огноо (YYYY-MM-DD, хоёулаа хамааруулна) → UTC [lo, hi). Анхдагч: go-live → одоо."""
+    off = timedelta(hours=settings.tz_offset_hours)
+    lo = (datetime.strptime(date_from, "%Y-%m-%d") if date_from else POS_APP_GO_LIVE) - off
+    hi = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1) - off if date_to
+          else datetime.utcnow() + timedelta(minutes=1))
+    return lo, hi
+
+
+def pos_app_sites(db, tenant, site_codes=None) -> list:
+    """Түрээслэгчийн зогсоолууд; --site өгвөл зөвхөн тэд (өөр түрээслэгчийнх бол алдаа).
+    Тест зогсоол (KH, SITE10) зөвхөн --site-аар нэрлэсэн үед."""
+    q = db.query(ParkingSite).filter(ParkingSite.tenant_id == tenant.id)
+    sites = q.order_by(ParkingSite.site_code).all()
+    if site_codes:
+        want = {c.upper() for c in site_codes}
+        out = [s for s in sites if (s.site_code or "").upper() in want]
+        missing = want - {(s.site_code or "").upper() for s in out}
+        if missing:
+            raise ValueError(f"«{tenant.code}»-ийн зогсоол биш/олдсонгүй: {', '.join(sorted(missing))}")
+        return out
+    return [s for s in sites if (s.site_code or "").upper() not in POS_APP_TEST_SITES]
+
+
+def derive_pos_users(db, site_ids, *, min_card: int = POS_APP_MIN_CARD) -> dict:
+    """Зогсоол бүрд POS аппаар (provider POS = /pos/confirm) ≥min_card КАРТ авсан
+    хэрэглэгчид {site_id: {username: тоо}} — go-live-аас хойш. Веб кассын ажилтан
+    (sogii, bamanna, operator) POS картгүй тул энд орохгүй."""
+    from ..models import User
+    if not site_ids:
+        return {}
+    rows = (db.query(PAY_SITE, User.username, func.count(Payment.id))
+            .select_from(Payment)
+            .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+            .join(User, User.id == Payment.cashier_id)
+            .filter(Payment.status == "PAID", Payment.provider == "POS",
+                    Payment.payment_method == "CARD",
+                    Payment.paid_at >= POS_APP_GO_LIVE - timedelta(hours=settings.tz_offset_hours),
+                    PAY_SITE.in_(list(site_ids)))
+            .group_by(PAY_SITE, User.username).all())
+    out: dict = {sid: {} for sid in site_ids}
+    for sid, uname, n in rows:
+        if n >= min_card and uname:
+            out.setdefault(sid, {})[uname.lower()] = int(n)
+    return out
+
+
+def parse_pos_user_override(values) -> dict:
+    """--pos-user: «pos.a,pos.b» (бүх сонгосон зогсоолд) эсвэл «HANGARID=pos.khangarid»
+    (тухайн зогсоолд). Буцаах {site_code|"*": {users}}."""
+    import re
+    out: dict = {}
+    for v in values or []:
+        code, _, users = v.partition("=") if "=" in v else ("*", "", v)
+        names = {u.strip().lower() for u in re.split(r"[,;\s]+", users) if u.strip()}
+        out.setdefault(code.strip().upper() or "*", set()).update(names)
+    return out
+
+
+def pos_users_for_sites(db, sites, *, override: dict | None = None,
+                        min_card: int = POS_APP_MIN_CARD) -> dict:
+    """Зогсоол бүрийн «POS аппын хэрэглэгчид» ба эх сурвалж — НЭГ дүрэм (цуцлалт ба
+    тохиргооны хэрэгсэл хоёулаа): --pos-user > тохиргоо (pos_terminal_users) > ≥min_card
+    POS карт авсан хэрэглэгч. {site_id: {"users", "source", "derived"}}"""
+    from . import app_settings as A
+    derived = derive_pos_users(db, [s.id for s in sites], min_card=min_card)
+    out = {}
+    for s in sites:
+        ov = (override or {}).get((s.site_code or "").upper()) or (override or {}).get("*")
+        configured = A.pos_app_users(db, s.id)
+        if ov:
+            users, src = set(ov), "--pos-user"
+        elif configured:
+            users, src = configured, "тохиргоо"
+        else:
+            users, src = set(derived.get(s.id, {})), f"≥{min_card} POS карт"
+        out[s.id] = {"users": users, "source": src, "derived": derived.get(s.id, {})}
+    return out
+
+
+def pos_app_via(payment, username, site_users) -> str | None:
+    """Энэ төлбөр POS аппынх уу — яаж танив (provider POS / source POSAPP / хэрэглэгч)."""
+    if payment.provider == "POS":
+        return "provider=POS"
+    if getattr(payment, "source", None) == "POSAPP":
+        return "source=POSAPP"
+    if username and username.lower() in (site_users or set()):
+        return f"user={username.lower()}"
+    return None
+
+
+def pos_app_exclusion(payment, recs, *, username, site_users, include_company=False,
+                      site_ids=None, site=None) -> str | None:
+    """POS аппын дүрмээр цуцлах эсэх. None = цуцална; эс бөгөөс шалтгааны КОД.
+    Сонголт ба түгжээний дараах дахин шалгалт (guard) хоёулаа үүгээр."""
+    if payment.status != "PAID":
+        return "NOT_PAID"
+    if (payment.payment_method or "").upper() not in POS_APP_METHODS:
+        return "METHOD"
+    if site_ids is not None and (site is None or site.id not in site_ids):
+        return "SITE"
+    if pos_app_via(payment, username, site_users) is None:
+        return "NOT_POS_APP"
+    if not include_company and (payment.ebarimt_receiver_type == "COMPANY"
+                                or (payment.customer_tin or "").strip()):
+        return "COMPANY"
+    if any(r.status == "SENT" and (r.provider or "POSAPI") != "MSGBILL" and not is_duplicate_cancel(r)
+           for r in recs):
+        return "OTHER_ISSUER_SENT"
+    issued = [r for r in recs if r.provider == "MSGBILL" and r.status in VR.ACTIVE_STATUSES
+              and r.provider_ref]
+    if not issued:
+        return "NO_MSGBILL"
+    if VR.cancel_block_reason(payment_probe(payment, recs, None, site)) is not None:
+        return "RULE"
+    return None
+
+
+POS_APP_EXCLUSION_MN = {
+    "NOT_POS_APP": "POS аппынх биш (веб касс/бусад хэрэглэгч)",
+    "COMPANY": "ААН/ТТД-тэй баримт — терминал иргэний баримт хэвлэдэг тул ХӨНДӨХГҮЙ",
+    "OTHER_ISSUER_SENT": "өөр сувгийн (QPay/PosAPI/терминал) тэмдэггүй SENT баримттай — гараар",
+    "NO_MSGBILL": "цуцлах msgbill баримт алга (QPay/PosAPI/MOCK/FAILED/REVIEW эсвэл цуцлагдсан)",
+    "RULE": "цуцлах дүрэм хангаагүй (provider_ref/ДДТД/дүн) — гараар",
+    "METHOD": "карт/бэлэн биш", "NOT_PAID": "PAID биш", "SITE": "сонгосон зогсоолд биш",
+}
+
+
+def select_pos_app(db, *, sites, lo: datetime, hi: datetime, site_users: dict,
+                   include_company: bool = False) -> dict:
+    """POS аппын карт/бэлэн төлбөрүүдээс цуцлах msgbill баримттайг сонгоно (READ ONLY).
+
+    Буцаах: {"selected": [мөр], "excluded": Counter(код), "company": [мөр],
+             "complete": [мөр]} — complete = өмнө нь тэмдэгтэйгээр цуцлагдсан боловч
+    терминалын мөр бүртгэгдээгүй (ажиллагаа тасарсан) → apply нөхнө (msgbill дуудахгүй)."""
+    from collections import Counter
+
+    from ..models import User
+    by_id = {s.id: s for s in sites}
+    if not by_id:
+        return {"selected": [], "excluded": Counter(), "company": [], "complete": []}
+    q = (db.query(Payment, User.username, PAY_PLATE, PAY_SITE).enable_eagerloads(False)
+         .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+         .outerjoin(User, User.id == Payment.cashier_id)
+         .filter(Payment.status == "PAID", Payment.payment_method.in_(POS_APP_METHODS),
+                 Payment.paid_at >= lo, Payment.paid_at < hi, PAY_SITE.in_(list(by_id))))
+    rows = q.order_by(Payment.paid_at, Payment.id).all()
+    recs: dict[str, list] = {}
+    ids = [p.id for p, *_ in rows]
+    for i in range(0, len(ids), 1000):
+        for r in db.query(VatReceipt).filter(VatReceipt.payment_id.in_(ids[i:i + 1000])).all():
+            recs.setdefault(r.payment_id, []).append(r)
+    loc = timedelta(hours=settings.tz_offset_hours)
+    out, excluded, company, complete = [], Counter(), [], []
+    for p, uname, plate, sid in rows:
+        site = by_id.get(sid)
+        rs = recs.get(p.id, [])
+        users = (site_users.get(sid) or {}).get("users", set())
+        why = pos_app_exclusion(p, rs, username=uname, site_users=users,
+                                include_company=include_company, site_ids=set(by_id), site=site)
+        issued = [r for r in rs if r.provider == "MSGBILL" and r.status in VR.ACTIVE_STATUSES]
+        row = {"payment_id": p.id, "site_id": sid, "site_code": site.site_code if site else "",
+               "site_name": site.name if site else "", "plate": plate or "",
+               "method": (p.payment_method or "").upper(), "amount": float(p.amount),
+               "paid_at": p.paid_at.isoformat(), "paid_at_ub": (p.paid_at + loc).strftime("%Y-%m-%d %H:%M:%S"),
+               "month": (p.paid_at + loc).strftime("%Y-%m"), "cashier": uname or "",
+               "via": pos_app_via(p, uname, users) or "",
+               "our_ddtd": ", ".join(r.ebarimt_id or "" for r in issued),
+               "our_provider_ref": ", ".join(r.provider_ref or "" for r in issued),
+               "our_status": "/".join(sorted({r.status for r in issued})),
+               "receiver_type": p.ebarimt_receiver_type or "", "customer_tin": p.customer_tin or "",
+               "teg_ddtd": None, "teg_register": None}
+        if why is None:
+            out.append(row)
+            continue
+        if why == "COMPANY" and issued:
+            company.append(row)
+        if (why == "NO_MSGBILL" and pos_app_via(p, uname, users)
+                and any(r.status == "CANCELLED" and is_duplicate_cancel(r) for r in rs)
+                and not any(not is_system_receipt(r) and r.status != "CANCELLED" for r in rs)):
+            complete.append(row)
+        excluded[why] += 1
+    return {"selected": out, "excluded": excluded, "company": company, "complete": complete}
+
+
+def pos_app_guard(site_users: dict, site_ids: set, include_company: bool = False):
+    """cancel_one(guard=…) — түгжээний дараа ЯГ сонголтын дүрмээр дахин шалгана."""
+    from sqlalchemy.orm import object_session
+
+    from ..models import User
+
+    def guard(payment, recs):
+        from ..routers.payments_router import _site_of
+        site = _site_of(payment)
+        uname = None
+        sess = object_session(payment)
+        if payment.cashier_id and sess is not None:
+            usr = sess.get(User, payment.cashier_id)
+            uname = usr.username if usr is not None else None
+        users = (site_users.get(site.id) if site is not None else None) or {}
+        why = pos_app_exclusion(payment, recs, username=uname, site_users=users.get("users", set()),
+                                include_company=include_company, site_ids=site_ids, site=site)
+        if why in (None, "NO_MSGBILL"):
+            # NO_MSGBILL: аль хэдийн цуцлагдсан (дахин ажиллуулсан) — cancel_one өөрөө
+            # «already»/терминалын мөр нөхөх эсвэл дүрмээр татгалзана; msgbill дуудахгүй
+            return None
+        return f"POS аппын дүрэм: {POS_APP_EXCLUSION_MN.get(why, why)}"
+    return guard
+
+
+def pos_app_evidence(db, tax: list, rows: list, *, tol: int, shifts: list[float],
+                     site_ids: set | None) -> dict:
+    """НЭМЭЛТ НОТОЛГОО (--evidence): ТЕГ экспорт өгвөл түүний хамрах хугацаанд байгаа
+    сонгогдсон POS аппын төлбөр бүрд Ontime (өөр кассын) мөр таарсан эсэх.
+
+    Тулгалт нь --file горимтой ЯГ НЭГ (reconcile_db → explain_unmatched_tax: кассын
+    шилжилт, нэг-нэгээр). Хамрах хугацаанд байгаа боловч Ontime мөргүй төлбөр = терминал
+    баримт ХЭВЛЭЭГҮЙ нь батлагдсан → цуцлахгүй (цорын ганц e-Barimt нь манайх). Ижил
+    дүнтэй хоёр борлуулалт ±tol дотор байвал аль нь «баримтгүй» болох нь солигдож болно
+    — тоо нь зөв. Буцаах {"window", "inside", "with_ontime", "missing"}."""
+    a = reconcile_db(db, tax, shifts=shifts, tol=tol, ours_sites=list(site_ids) if site_ids else None,
+                     probe_sites=list(site_ids) if site_ids else None, scope_ids=site_ids)
+    lo, hi = VR.file_window(tax, tol, a["r"]["shift"])
+    ontime = {x["payment_id"] for x in a["explained"]
+              if x.get("foreign") and x.get("payment_id")
+              and x["verdict"] not in ("OTHER_SCOPE", "NO_PAYMENT")}
+    inside = [r for r in rows if lo <= datetime.fromisoformat(r["paid_at"]) <= hi]
+    missing = [r for r in inside if r["payment_id"] not in ontime]
+    return {"window": (lo, hi), "inside": len(inside),
+            "with_ontime": {r["payment_id"] for r in inside} & ontime, "missing": missing,
+            "foreign_registers": a["r"].get("foreign_registers", [])}

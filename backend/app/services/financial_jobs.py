@@ -74,11 +74,17 @@ def is_pos_app_payment(payment) -> bool:
 def terminal_issues_receipt(db, payment) -> bool:
     """Энэ төлбөрийн НӨАТ баримтыг зогсоолын POS терминал ӨӨРӨӨ гаргасан гэж үзэх үү.
 
-    Гурван нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр, (2) арга CARD/CASH, (3) тухайн
-    зогсоолд тохиргоо асаалттай ба энэ арга сонгогдсон. Тохиргоо уншигдахгүй бол
-    False — хуучин зан (систем баримт гаргана): баримтгүй үлдэхээс давхардал дээр."""
+    Дөрвөн нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр, (2) арга CARD/CASH, (3) тухайн
+    зогсоолд тохиргоо асаалттай ба энэ арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт
+    БИШ — терминал (Ontime) ИРГЭНИЙ баримт хэвлэдэг тул байгууллагын НӨАТ-ын баримтыг
+    систем гаргасаар байна (түүхэн цуцлалт `vat_cancel_duplicates --pos-app` ч ААН-ийг
+    хөндөхгүй — 2026-10-13 нэгтгэл, нэг бодлого). Тохиргоо уншигдахгүй бол False —
+    хуучин зан (систем баримт гаргана): баримтгүй үлдэхээс давхардал дээр."""
     method = (payment.payment_method or "").upper()
     if method not in ("CARD", "CASH") or not is_pos_app_payment(payment):
+        return False
+    if (getattr(payment, "ebarimt_receiver_type", None) == "COMPANY"
+            or (getattr(payment, "customer_tin", None) or "").strip()):
         return False
     site = payment_site(payment)
     if site is None:
@@ -129,19 +135,30 @@ def record_terminal_receipt(db, payment, teg_ddtd, *, replaced=(), username="sys
     ДДТД-д итгэхгүй бол (33 оронтой биш · Excel-ийн тоон эвдрэл · цуцалсан манай баримтын
     КАССтай ижил = тулгалт хосыг сольж msgbill-ийн өөрийнх нь мөр үлдсэн · өөр мөрөнд
     аль хэдийн бүртгэлтэй) ДДТД-гүй EXTERNAL мөр (терминал гаргасан) бүртгэнэ.
-    Идемпотент: терминалын мөр аль хэдийн байвал түүнийг буцаана. Commit хийхгүй."""
+    Идемпотент: терминалын мөр аль хэдийн байвал түүнийг буцаана — ДДТД-гүй EXTERNAL
+    мөр байхад итгэх ТЕГ ДДТД ирвэл (ж: POS аппын дүрмээр цуцалсны дараа ТЕГ файлаар
+    дахин ажиллуулсан) тэр мөрийг ONTIME/SENT болгож ДДТД-г нь бичнэ (шинэ мөр нэмэхгүй —
+    нэг төлбөрт хоёр терминалын баримт харагдахгүй). Commit хийхгүй."""
     recs = db.query(VatReceipt).filter_by(payment_id=payment.id).all()
-    for r in recs:
-        if r.status == TERMINAL_STATUS or (r.status in ("SENT", "CANCEL_PENDING")
-                                           and not is_system_receipt(r)):
-            return r
     ddtd = str(teg_ddtd or "").strip()
-    ours_pos = {(r.ebarimt_id or "")[-8:] for r in recs if r.ebarimt_id}
+    ours_pos = {(r.ebarimt_id or "")[-8:] for r in recs if r.ebarimt_id and is_system_receipt(r)}
     trusted = (bool(_TEG_DDTD.match(ddtd)) and ddtd[-8:] not in ours_pos
                and not ddtd.endswith("00000000")
                and db.query(VatReceipt.id).filter(VatReceipt.ebarimt_id == ddtd).first() is None)
     info = {"teg_ddtd": ddtd or None, "replaces": [r.id for r in replaced],
             "by": username, "source": source}
+    for r in recs:
+        if r.status == TERMINAL_STATUS or (r.status in ("SENT", "CANCEL_PENDING")
+                                           and not is_system_receipt(r)):
+            if r.status == TERMINAL_STATUS and not r.ebarimt_id and trusted:
+                r.provider, r.status, r.receipt_url = TEG_TERMINAL_PROVIDER, "SENT", None
+                assign_ebarimt_id(db, r, ddtd, source=f"teg:{source}", username=username, raw=info)
+                db.add(AuditLog(username=username, action="EBARIMT_TERMINAL_RECORDED",
+                                entity="payment", entity_id=payment.id,
+                                detail={"receipt_id": r.id, "status": r.status,
+                                        "ebarimt_id": r.ebarimt_id, "upgraded_external": True,
+                                        **info}))
+            return r
     rec = VatReceipt(id=str(uuid.uuid4()), payment_id=payment.id, session_id=payment.session_id,
                      amount=payment.amount, vat_amount=payment.vat_amount,
                      customer_tin=payment.customer_tin)
