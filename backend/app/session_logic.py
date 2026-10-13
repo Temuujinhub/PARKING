@@ -872,6 +872,16 @@ def close_paid_as_inferred_exit(db: Session, s: ParkingSession, trigger: str) ->
              s.plate_number, trigger, fee["total_fee"])
 
 
+def _inner_reentry_after(db: Session, s: ParkingSession, at: datetime) -> bool:
+    """Энэ (доторх) зогсоолд энэ машин `at`-аас 60с+ хойш ДАХИН орсон уу (хүлээн авсан
+    live орох уншилт) — camera_sync өнгөрсөн цагийн гарцаар хүүхэд сешн хаахад."""
+    return (db.query(LprEvent.id)
+            .filter(LprEvent.site_id == s.site_id, LprEvent.plate_number == s.plate_number,
+                    LprEvent.lane_dir == "entry", LprEvent.accepted.is_(True),
+                    LprEvent.created_at > at + timedelta(seconds=60))
+            .first()) is not None
+
+
 def close_session_forced(db: Session, s: ParkingSession, reason: str, username: str,
                          create_comp: bool = True) -> float:
     """Админ/авто цэвэрлэгээ: гацсан session-ийг хааж, төлөгдөөгүй дүнгээр өр үүсгэнэ.
@@ -889,6 +899,11 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
     # уншигдахад auto_reopen_for_exit сэргээж 2 хоногийн дүн (50,000₮) нэхдэг
     # байв (Маршил 2026-09-13, 53 сешн). exit_device_id = гарах камерт уншигдсан.
     confirmed = s.status == "AWAITING_PAYMENT" and bool(s.exit_time or s.exit_device_id)
+    # Сэргээгдсэн (reopen) сешнд хуучин exit_confirmed=True үлддэг (exit_time хоосон).
+    # Гарах цаггүй + гарах уншилтгүй хаалт нь «батлагдсан гарц» БИШ — эс бөгөөс
+    # nested.reapply_child_pauses хязгааргүй хасалт өгнө, camera_sync «баримтжсан
+    # цонх» гэж шүүнэ (2026-10-13 нэгтгэлийн хяналт E4).
+    had_exit = s.exit_time is not None
     if s.status == "PAID" and s.paid_at:
         # Төлчихсөн машин — grace дотор гарсан гэж үзэж төлбөрийг ТӨЛСӨН/deadline
         # үедээ царцаана. Эс бол одоог хүртэлх хугацаагаар хэт нэхэж, худал өр үүснэ.
@@ -909,6 +924,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         from .services.nested import close_open_pause
         close_open_pause(db, s, now)
         s.exit_time = now
+        s.exit_confirmed = False           # гарах уншилтгүй — хуучин тэмдгийг бүү үлдээ
         s.duration_minutes = None          # хэзээ гарсныг МЭДЭХГҮЙ — таамаглахгүй
         s.base_fee, s.vat_amount, s.total_fee = 0, 0, 0
         s.status = "MANUAL_CLOSED"
@@ -943,7 +959,13 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
                                and s.exit_time is not None))
             and s.entry_time is not None
             and (at - s.entry_time).total_seconds()
-            > 60 * int(_exit_rules(db, s.site_id)["fake_exit_minutes"])):
+            > 60 * int(_exit_rules(db, s.site_id)["fake_exit_minutes"])
+            # Машин тэр гарцаас ХОЙШ доторх зогсоолд дахин орсон (live хүлээн авсан
+            # орох уншилт) — нээлттэй хүүхэд сешнийг дахин ашигласан тул camera_sync-ийн
+            # хожуу ГАРАХ лог (өнгөрсөн цаг) гадна тоолуурыг ЭХЛҮҮЛЭХГҮЙ: машин одоо
+            # дотор байна. Эцгийн зогсолт нээлттэй үлдэж гадна гарц дээр батлагдаагүй
+            # хязгаараар барагдана (прод-той ижил). Нэгтгэлийн хяналт E1.
+            and not _inner_reentry_after(db, s, at)):
         # ДОТООД (хүүхэд) сешн ГАРАХ нотолгоотой хаагдаж байна (camera_sync-ийн
         # логийн гарах уншилт г.м) — гадна тоолуурыг ТЭР цагаас үргэлжлүүлнэ.
         # «Хуурамч гарц»-ын босгоос (fake_exit_minutes) БОГИНО зогсолтод
@@ -960,8 +982,9 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         on_inner_exit(db, _csite, s.plate_number, at)
     close_open_pause(db, s, at)
     s.exit_time = at
-    # Аль хэдийн баримтжсаныг бүү бууруул (camsync логоос цагийг нь оруулсан байж болно)
-    s.exit_confirmed = bool(s.exit_confirmed) or confirmed
+    # Аль хэдийн баримтжсаныг бүү бууруул (camsync логоос цагийг нь оруулсан байж болно) —
+    # гэхдээ гарах цаггүй байсан бол хуучин (сэргээлтийн өмнөх) тэмдэг нотолгоо биш
+    s.exit_confirmed = (bool(s.exit_confirmed) and had_exit) or confirmed
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     # ТӨЛӨВ нь ЮУ БОЛСНЫГ хэлнэ, ХЭН хаасныг биш (түүнийг `closed_by` хэлдэг):

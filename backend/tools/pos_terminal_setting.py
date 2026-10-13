@@ -115,8 +115,11 @@ def main(argv=None):
             der = ", ".join(f"{u} {n}" for u, n in sorted(i["derived"].items(), key=lambda kv: -kv[1]))
             head = f"\n{s.site_code} ({s.name})"
             if r["skip"]:
-                if b["issues"] or i["derived"]:
+                below = ", ".join(f"{u} {n}" for u, n in sorted(i["below"].items(), key=lambda kv: -kv[1]))
+                if b["issues"] or i["derived"] or below:
                     print(head + f": {r['skip']}" + (f" · POS карт: {der}" if der else "")
+                          + (f" · ⚠ босгоос доош POS карт: {below} — терминалтай бол --pos-user "
+                             f"{s.site_code}=<хэрэглэгч>" if below else "")
                           + (" · ⚠ одоо АСААЛТТАЙ" if b["issues"] else ""))
                 continue
             print(head + f"  [хэрэглэгч: {i['source']}" + (f"; POS карт: {der}" if der else "") + "]")

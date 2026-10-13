@@ -358,6 +358,9 @@ DEFAULT_TOL = 60
 TEG_DDTD_LEN = 33           # ТЕГ-ийн ДДТД; MOCK PosAPI-ийнх 40 оронтой байв
 REGISTER_LEN = 8            # ДДТД-ийн сүүлийн 8 орон = кассын дугаар
 NON_QR_METHODS = ("CASH", "CARD", "TRANSFER", "WALLET")
+# Ontime POS терминал зөвхөн касс дээрх БЭЛЭН/КАРТ борлуулалтад баримт хэвлэдэг —
+# данс/хэтэвчийн төлбөр (Easy Wallet гарц г.м) давхардал байж ЧАДАХГҮЙ (нэгтгэлийн хяналт)
+TERMINAL_METHODS = ("CASH", "CARD")
 ACTIVE_STATUSES = ("SENT", "CANCEL_PENDING")
 
 
@@ -688,17 +691,24 @@ VERDICTS = {
 }
 
 
-def cancel_block_reason(p: dict) -> str | None:
+def cancel_block_reason(p: dict, *, allow_company: bool = False) -> str | None:
     """Энэ төлбөрийн МАНАЙ баримтыг «POS-ийн давхардал» гэж цуцалж БОЛОХ уу.
     None = болно; эс бөгөөс шалтгаан. API, CLI, арын job БҮГД энэ нэг дүрмээр.
 
     Дүрэм (2026-10-13): Ontime POS зөвхөн БЭЛЭН/КАРТ (касс дээрх) төлбөрт баримт
     хэвлэдэг. QR/QPay төлбөрийн «давхардал» = цаг+дүнгийн санамсаргүй тааралт.
     Цуцлах боломжтой нь зөвхөн манай ИЛГЭЭГДСЭН msgbill баримт (provider_ref-тэй) —
-    MOCK 40 оронтой / provider NULL баримт ТЕГ-т очоогүй тул «цуцлах» юм алга."""
+    MOCK 40 оронтой / provider NULL баримт ТЕГ-т очоогүй тул «цуцлах» юм алга.
+    Данс/хэтэвчийн төлбөр ч биш (терминал хэвлэдэггүй), ААН/ТТД-тэй баримт биш (терминал
+    ИРГЭНИЙ баримт хэвлэдэг — байгууллага НӨАТ-аа алдана; allow_company=True зөвхөн
+    `--pos-app --include-company`)."""
     m = (p.get("method") or "").upper()
     if m not in NON_QR_METHODS:
         return f"{m or '?'} төлбөр — POS терминал баримт хэвлэдэггүй (QR/QPay) тул давхардал гэж үзэхгүй"
+    if m not in TERMINAL_METHODS:
+        return f"{m} төлбөр — POS терминал зөвхөн бэлэн/картын баримт хэвлэдэг тул давхардал гэж үзэхгүй"
+    if p.get("company") and not allow_company:
+        return "ААН/ТТД-тэй баримт — терминал иргэний баримт хэвлэдэг тул цуцлахгүй (гараар шалгана)"
     act = p.get("active") or []
     if not act:
         return "Цуцлах идэвхтэй (SENT) баримт алга"
@@ -733,6 +743,22 @@ def _qr_rank(p: dict) -> int:
     """0 = касс дээрх (бэлэн/карт/данс/хэтэвч) төлбөр — POS терминал баримт хэвлэдэг;
     1 = QR/QPay — POS терминал баримт хэвлэдэггүй тул тааралт нь санамсаргүй."""
     return 0 if (p.get("method") or "").upper() in NON_QR_METHODS else 1
+
+
+def _pos_tier(p: dict) -> int:
+    """Ontime мөрийн ЖИНХЭНЭ борлуулалт байх магадлалын эрэмбэ (бага нь түрүүнд):
+    0 = POS аппынх (provider POS / source POSAPP / терминалын мөр / зогсоолын POS аппын
+    хэрэглэгч — vat_duplicates.payment_probe «pos_app»), 1 = бусад бэлэн/карт (веб касс),
+    2 = данс/хэтэвч, 3 = QR. Нэгтгэлийн хяналт (2026-10-13): өмнө нь QR-ээс бусад бүх
+    төлбөр ижил эрэмбэтэй байсан тул Ontime мөр (төлбөрөөс 27с хүртэл хоцордог) ±60с
+    доторх ижил дүнтэй Easy Wallet гарц / веб кассын бэлэн рүү очиж, тэр ХУУЛЬ ЁСНЫ
+    цорын ганц баримт цуцлагдах боломжтой байв."""
+    m = (p.get("method") or "").upper()
+    if p.get("pos_app"):
+        return 0
+    if m in TERMINAL_METHODS:
+        return 1
+    return 2 if m in NON_QR_METHODS else 3
 
 
 def foreign_register_sites(left: list, probe: list, tol: int, shift: float = 0.0) -> dict:
@@ -797,13 +823,31 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
     def f_cost(pr):
         _d, a, j = pr
         sid = reg_site(left[fi[a]])
-        return (0 if sid is None or probe[j].get("site_id") == sid else 1, _qr_rank(probe[j]))
+        return (0 if sid is None or probe[j].get("site_id") == sid else 1, _pos_tier(probe[j]))
 
     times = [_when(t, shift) for t in left]
     hit = {}
-    for a, j, d in match_probe([left[i] for i in fi], probe, tol, shift, f_cost):
+    frows = [left[i] for i in fi]
+    for a, j, d in match_probe(frows, probe, tol, shift, f_cost):
         hit[fi[a]] = (j, d)
     taken = {j for j, _d in hit.values()}
+    # ТОДОРХОЙГҮЙ хос: Ontime мөрд оноогдсон төлбөртэй ИЖИЛ эрэмбийн (зогсоол, _pos_tier)
+    # өөр, ямар ч Ontime мөрд оноогдоогүй нэр дэвшигч ±tol дотор байвал аль нь терминалын
+    # борлуулалт болохыг мэдэхгүй → цуцлахгүй (гараар). Нэг-нэгээр тулгалт ТООГ зөв
+    # өгдөг ч ХЭН гэдгийг биш — буруу төлбөрийн цорын ганц баримтыг цуцлахаас сэргийлнэ.
+    ambiguous = set()
+    if fi:
+        cand: dict[int, list] = {}
+        for _d, a, j in _pairs([_when(t, shift) for t in frows], [t["amount"] for t in frows],
+                               [p["paid_at"] for p in probe], [p["amount"] for p in probe], tol):
+            cand.setdefault(a, []).append(j)
+        for a, i in enumerate(fi):
+            if i not in hit:
+                continue
+            j = hit[i][0]
+            mine = f_cost((0, a, j))
+            if any(k != j and k not in taken and f_cost((0, a, k)) == mine for k in cand.get(a, ())):
+                ambiguous.add(i)
 
     def o_cost(pr):
         # Ontime мөрөөр тайлагдсан төлбөрийг ХОЖУУ сонгоно (нэг борлуулалтад 2 тайлбар
@@ -843,6 +887,15 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                 elif v == "DUPLICATE" and rs is not None and p.get("site_id") != rs["site_id"]:
                     v, note = "DUPLICATE_NOT_CANCELLABLE", (
                         f"өөр зогсоол — касс …{t.get('group')} нь «{rs['site_name']}»-ийнх")
+                elif v == "DUPLICATE" and i in ambiguous:
+                    v, note = "DUPLICATE_NOT_CANCELLABLE", (
+                        f"±{tol}с дотор ижил дүнтэй өөр боломжит төлбөр бий — Ontime мөр аль "
+                        "борлуулалтынх нь тодорхойгүй, гараар шалгана")
+                elif v == "DUPLICATE" and p["id"] not in matched_pay_ids:
+                    # Давхардлын шууд нотолгоо = манай баримт ч ЭНЭ файлд (ТЕГ-т) байх. Эс
+                    # бөгөөс (манай касс «өөр систем» гэж буруу ангилагдсан г.м) цуцлахгүй
+                    v, note = "DUPLICATE_NOT_CANCELLABLE", (
+                        "манай баримт энэ ТЕГ файлд олдсонгүй — давхардлын нотолгоо дутуу")
             elif p["id"] in matched_pay_ids:
                 v = "EXTRA_SAME_REGISTER"
             else:

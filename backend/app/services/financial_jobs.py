@@ -381,6 +381,8 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
                 receipt_id=rec.id, payload={"provider": "MSGBILL", "account_fingerprint": fingerprint}))
         db.commit()
         return {"ok": False, "pending": True, "error": "Хуучин баримтын төлөвийг нөхөн шалгана"}
+    terminal_now = None
+    converted = 0
     for job in jobs:
         rec = db.get(VatReceipt, job.receipt_id)
         if rec and (rec.ebarimt_id or rec.status == TERMINAL_STATUS):
@@ -389,6 +391,17 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
             return {"ok": False, "review_required": True,
                     "error": "Баримт өмнө үүссэн байж болно. Сувгаар тулгаж ДДТД-г батална уу; дахин илгээгээгүй"}
         if job.status == "BLOCKED" and job.attempts == 0:
+            if terminal_now is None:
+                terminal_now = terminal_issues_receipt(db, payment)
+            if terminal_now and rec is not None:
+                # Сувагт ОГТ илгээгээгүй (attempts 0) ба зогсоолд «POS терминал өөрөө НӨАТ
+                # баримт гаргадаг» асаалттай болсон — шинэ төлбөртэй ижил EXTERNAL болгоно;
+                # msgbill-ээр гаргавал терминалын баримттай давхардана (нэгтгэлийн хяналт)
+                _mark_terminal(rec, payment, payment_site(payment))
+                job.status, job.last_error = "DONE", "EXTERNAL: " + TERMINAL_NOTE[:150]
+                job.lease_until, job.lease_token = None, None
+                converted += 1
+                continue
             # No HTTP was attempted. It is safe to adopt repaired configuration.
             try:
                 provider = receipt_provider(payment)
@@ -403,6 +416,10 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
             job.status, job.next_attempt_at = "PENDING", datetime.utcnow()
             rec.status, rec.receipt_url = "PENDING", None
     db.commit()
+    if converted and not any(j.status in ("PENDING", "RETRY") for j in jobs):
+        return {"ok": False, "external": True, "created": True,
+                "error": "Терминалын (Ontime) баримт гэж бүртгэлээ — систем баримт үүсгээгүй "
+                         "(зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» асаалттай)"}
     return {"ok": False, "pending": True, "error": "Баримтын хадгалсан ажлыг боловсруулж байна; дахин төлөхгүй"}
 
 

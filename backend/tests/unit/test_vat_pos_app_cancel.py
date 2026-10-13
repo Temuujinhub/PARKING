@@ -451,3 +451,79 @@ def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, m
     assert [r.status for r in _recs(db, lacks.id)] == ["SENT"]        # нотолгоогүй — хөндөөгүй
     for p in (has, outside):
         assert sorted(r.status for r in _recs(db, p.id)) == ["CANCELLED", "EXTERNAL"]
+
+
+# ───────────── нэгтгэлийн хяналтын засварууд ─────────────
+
+def test_debt_card_by_web_cashier_is_not_pos_app(db):
+    """«Нөхөн төлбөр» хуудсаар веб кассчны авсан КАРТЫН өр (provider POS, kind DEBT) POS
+    аппын хэрэглэгчийн таамагт тоологдохгүй, provider-оор POS апп гэж танигдахгүй."""
+    w = build(db)
+    for _ in range(25):
+        p = pay(db, w, "HANGARID", "sogii", rec=None)
+        p.kind = "DEBT"
+    web_cash = pay(db, w, "HANGARID", "sogii", method="CASH")
+    debt_card = pay(db, w, "HANGARID", "sogii")
+    debt_card.kind = "DEBT"
+    db.commit()
+    hid = w.sites["HANGARID"].id
+    assert VD.derive_pos_users(db, [hid]) == {hid: {}}
+    sel, _ = select(db, w)
+    assert not {web_cash.id, debt_card.id} & {r["payment_id"] for r in sel["selected"]}
+
+
+def test_site_methods_setting_limits_pos_app_selection(db):
+    """Зогсоолын тохиргоо «зөвхөн CARD» — терминал бэлэнд баримт хэвлэдэггүй тул бэлэн
+    төлбөрийн msgbill баримтыг цуцлахгүй."""
+    w = build(db)
+    bulk_cards(db, w, "HANGARID", "pos.k", 20)
+    card = pay(db, w, "HANGARID", "pos.k")
+    cash = pay(db, w, "HANGARID", "pos.k", method="CASH")
+    hid = w.sites["HANGARID"].id
+    A.set_site_rules(db, A.EBARIMT_KEY, hid, {"pos_terminal_issues": True, "pos_terminal_methods": "CARD"}, "t")
+    db.commit()
+    A.invalidate_cache()
+    sel, su = select(db, w)
+    assert su[hid]["methods"] == {"CARD"}
+    assert {r["payment_id"] for r in sel["selected"]} == {card.id}
+    assert sel["excluded"]["METHOD"] == 1 and cash.id
+
+
+def test_server_guards_prod_copy_names_and_test_keys(db, monkeypatch):
+    w = build(db)
+    monkeypatch.setenv("PARKING_DEPLOY_ROLE", "production")
+    for name in ("audit1013", "t_integ", "parking_fixtest", "test_db"):
+        monkeypatch.setattr(settings, "database_url", f"postgresql+psycopg2://u:p@localhost/{name}")
+        assert VD.server_problems(), name
+    monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking_prod")
+    assert VD.server_problems() == []
+    monkeypatch.delenv("PARKING_DEPLOY_ROLE")
+    monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking")
+    w.ep.msgbill_api_key = "bsk_test_TENANT"                      # тест + бодит глобал
+    db.commit()
+    msgbill.invalidate_cache()
+    probs = VD.cancel_ready(db, [w.sites["HANGARID"]])
+    assert any("ТЕСТ" in p for p in probs)
+
+
+def test_blocked_job_becomes_external_when_setting_on(db):
+    """Сувагт ОГТ илгээгээгүй (BLOCKED, attempts 0) хуучин ажил — тохиргоо асаалттай
+    болсны дараа «Дахин үүсгэх» msgbill-ээр биш EXTERNAL болгоно (давхардлаас сэргийлнэ)."""
+    w = build(db)
+    p = pay(db, w, "HANGARID", "pos.k", rec="FAILED", ref=False)
+    db.flush()
+    rec = db.query(M.VatReceipt).filter_by(payment_id=p.id).one()
+    db.add(M.FinancialJob(job_key=f"receipt:{rec.id}", kind="RECEIPT", payment_id=p.id,
+                          receipt_id=rec.id, status="BLOCKED", attempts=0,
+                          payload={"provider": "MSGBILL"}))
+    hid = w.sites["HANGARID"].id
+    A.set_site_rules(db, A.EBARIMT_KEY, hid, {"pos_terminal_issues": True}, "t")
+    db.commit()
+    A.invalidate_cache()
+    out = J.retry_payment_receipts(db, p)
+    assert out.get("created") and out.get("external")
+    db.expire_all()
+    rec = db.query(M.VatReceipt).filter_by(payment_id=p.id).one()
+    job = db.query(M.FinancialJob).filter_by(receipt_id=rec.id).one()
+    assert (rec.status, rec.provider, job.status) == ("EXTERNAL", "POS-TERMINAL", "DONE")
+    assert FakeHTTP.calls == []

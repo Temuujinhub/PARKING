@@ -195,7 +195,7 @@ def write_csv(path, rows, fields):
 
 
 async def apply_cancel(db, dups, *, note, username, delay=0.5, log=print, source="cli",
-                       mark_extra=None, guard=None):
+                       mark_extra=None, guard=None, allow_company=False):
     """Жагсаалтын төлбөр бүрийг ДАРААЛАН цуцална (cancel_one: түгжээ, дүрэм дахин
     шалгах, идемпотент, AuditLog, commit, терминалын мөр). Квот/эрхийн алдаа давтагдвал
     зогсоно. --file ба --pos-app хоёулаа ЭНЭ НЭГ зам."""
@@ -205,7 +205,8 @@ async def apply_cancel(db, dups, *, note, username, delay=0.5, log=print, source
             res = await VD.cancel_one(db, d["payment_id"], note=note, username=username,
                                       teg={"teg_ddtd": d.get("teg_ddtd"),
                                            "teg_register": d.get("teg_register")},
-                                      source=source, mark_extra=mark_extra, guard=guard)
+                                      source=source, mark_extra=mark_extra, guard=guard,
+                                      allow_company=allow_company)
         except Exception as e:  # noqa: BLE001 — нэг төлбөрийн алдаа бусдыг зогсоохгүй
             db.rollback()
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -324,7 +325,15 @@ def main_pos_app(args):
                 continue
             der = ", ".join(f"{u} {n}" for u, n in sorted(info["derived"].items(), key=lambda kv: -kv[1]))
             print(f"  {s_.site_code:<12} [{info['source']}] {', '.join(sorted(info['users'])) or '—'}"
-                  + (f"  (POS карт: {der})" if der else ""))
+                  + (f"  (POS карт: {der})" if der else "")
+                  + ("" if info["methods"] == set(VD.POS_APP_METHODS)
+                     else f"  · тохиргоо: зөвхөн {','.join(sorted(info['methods']))}"))
+        low = {s_.site_code: info["below"] for s_ in sites
+               for info in [site_users[s_.id]] if info["below"]}
+        if low:
+            print("  ⚠ босгоос доош POS карттай хэрэглэгч (POS аппынх гэж ТООЦООГҮЙ — "
+                  "хэрэгтэй бол --pos-user): " + " · ".join(
+                      f"{k}: " + ", ".join(f"{u} {n}" for u, n in v.items()) for k, v in sorted(low.items())))
         skipped_test = sorted(c for c in VD.POS_APP_TEST_SITES
                               if c not in {(x.site_code or '').upper() for x in sites})
         if skipped_test:
@@ -356,7 +365,9 @@ def main_pos_app(args):
             write_csv(f"{stem}_no_ontime.csv", no_ontime, POSAPP_FIELDS)
             print(f"Ontime нотолгоогүй {len(drop)} төлбөрийг жагсаалтаас хасав → {stem}_no_ontime.csv"
                   f" · цуцлах {len(rows)} ({sum(r['amount'] for r in rows):,.0f}₮)")
-        work = [{**r, "kind": "complete_terminal"} for r in sel["complete"]] + rows
+        # Цуцлах мөр ЭХЭНДЭЭ (--limit 1 туршилт msgbill цуцлалтыг шалгана), дараа нь
+        # өмнө цуцлагдсан боловч терминалын мөр дутуу (msgbill дуудахгүй) нөхөлт
+        work = rows + [{**r, "kind": "complete_terminal"} for r in sel["complete"]]
         write_csv(out, work, POSAPP_FIELDS)
         write_csv(f"{stem}_company.csv", sel["company"], POSAPP_FIELDS)
         print(f"\nCSV: {out} ({len(work)}) · {stem}_company.csv ({len(sel['company'])})"
@@ -410,7 +421,7 @@ def main_pos_app(args):
     guard = VD.pos_app_guard(site_users, {s_.id for s_ in sites}, args.include_company)
     res_rows, cnt, stopped = asyncio.run(apply_cancel(
         db, work, note=note, username=username, delay=args.delay, source="cli-pos-app",
-        mark_extra={"rule": VD.POS_APP_RULE}, guard=guard))
+        mark_extra={"rule": VD.POS_APP_RULE}, guard=guard, allow_company=bool(args.include_company)))
     try:
         db.add(AuditLog(username=username, action="EBARIMT_CANCEL_BULK_SUMMARY", entity="vat",
                         entity_id="DUPLICATE_OF_POS_TERMINAL",

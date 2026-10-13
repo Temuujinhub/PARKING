@@ -476,9 +476,12 @@ def test_duplicate_requires_non_qr_issued_msgbill():
     ]
     left = [_left(t0 + timedelta(minutes=i, seconds=3), 1000, _reg_ddtd(i, "10002990")) for i in range(6)]
     out = explain_unmatched_tax(left, probe, 0, 30, {p["id"] for p in probe}, None)
+    # Хэтэвч (Easy Wallet гарц)/данс — терминал баримт хэвлэдэггүй тул давхардал БИШ
+    # (нэгтгэлийн хяналт: зөвхөн БЭЛЭН/КАРТ)
     assert [o["verdict"] for o in out] == ["DUPLICATE_NOT_CANCELLABLE", "OURS_MOCK", "DUPLICATE_CANCELLED",
-                                           "DUPLICATE_NOT_CANCELLABLE", "DUPLICATE", "DUPLICATE"]
-    assert "QR" in out[0]["note"] and "provider_ref" in out[3]["note"]
+                                           "DUPLICATE_NOT_CANCELLABLE", "DUPLICATE",
+                                           "DUPLICATE_NOT_CANCELLABLE"]
+    assert "QR" in out[0]["note"] and "provider_ref" in out[3]["note"] and "WALLET" in out[5]["note"]
     assert cancel_block_reason(probe[4]) is None
     assert set(VERDICTS) >= {o["verdict"] for o in out}
 
@@ -636,10 +639,10 @@ def test_own_and_foreign_rows_explain_independently():
             _left(BASE + timedelta(seconds=5), 1000, MSG_DDTD, foreign=False)]
     probe = [_cash("p1", BASE + timedelta(seconds=4)),
              _probe("p2", BASE + timedelta(seconds=30), 1000, [MSG_DDTD], method="TRANSFER", provider="BANK")]
-    out = explain_unmatched_tax(left, probe, 0, 60, set(), None)
+    out = explain_unmatched_tax(left, probe, 0, 60, {"p1"}, None)
     assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "p1"), ("RECEIPT_NOT_MATCHED", "p2")]
-    out = explain_unmatched_tax(left, probe[:1], 0, 60, set(), None)
-    assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "p1"), ("RECEIPT_NOT_MATCHED", "p1")]
+    out = explain_unmatched_tax(left, probe[:1], 0, 60, {"p1"}, None)
+    assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "p1"), ("EXTRA_SAME_REGISTER", "p1")]
 
 
 def test_foreign_register_other_site_is_not_cancellable():
@@ -659,7 +662,7 @@ def test_foreign_register_other_site_is_not_cancellable():
     from app.routers.vat_recon import foreign_register_sites
     rs = foreign_register_sites(left, probe, 60)
     assert rs["10002990"]["site_id"] == "S1" and rs["10002990"]["sites"] == 2
-    out = explain_unmatched_tax(left, probe, 0, 60, set(), None, register_sites=rs)
+    out = explain_unmatched_tax(left, probe, 0, 60, {p["id"] for p in probe}, None, register_sites=rs)
     got = [(o["verdict"], o["payment_id"]) for o in out]
     assert got[:4] == [("DUPLICATE", f"h{i}") for i in range(4)]
     assert got[4] == ("DUPLICATE_NOT_CANCELLABLE", "other") and "өөр зогсоол" in out[4]["note"]
@@ -689,3 +692,41 @@ def test_register_tail_is_8_for_ontime_heavy_teg_files():
     assert register_tail_len(ontime + [MSG_DDTD]) == 8
     # ТЕГ биш формат (35 оронтой г.м) — өмнөх шигээ өгөгдлөөс таамаглана
     assert register_tail_len(["0152000200900009726%08d10002990" % i for i in range(90)]) == 8
+
+
+# ───────────── нэгтгэлийн хяналт (2026-10-13): Ontime мөрийн хосын нарийвчлал ─────────────
+
+def test_ontime_row_prefers_pos_app_sale_over_wallet_or_web_cash():
+    """Ontime мөр төлбөрөөс 27с хүртэл хоцордог. ±60с дотор ижил дүнтэй Easy Wallet гарц
+    (2с) эсвэл веб кассын бэлэн (2с) байхад POS аппын бэлэн (25с) түрүүлнэ — эс бөгөөс
+    хууль ёсны цорын ганц баримт цуцлагдана."""
+    pos = _cash("pos", BASE + timedelta(seconds=25))
+    pos["pos_app"] = True
+    wallet = _probe("wallet", BASE + timedelta(seconds=2), 1000, [MSG_DDTD], method="WALLET",
+                    provider="EP_WALLET")
+    web = _cash("web", BASE + timedelta(seconds=2))
+    left = [_left(BASE, 1000, ONTIME)]
+    out = explain_unmatched_tax(left, [pos, wallet, web], 0, 60, {"pos", "wallet", "web"}, None)
+    assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "pos")]
+    # POS аппынх гэж танигдахгүй (түүхэн бэлэн, хэрэглэгчийн жагсаалтгүй) — ижил эрэмбийн
+    # хоёр нэр дэвшигч → аль нь болох тодорхойгүй → цуцлахгүй (гараар)
+    pos.pop("pos_app")
+    out = explain_unmatched_tax(left, [pos, wallet, web], 0, 60, {"pos", "wallet", "web"}, None)
+    assert out[0]["verdict"] == "DUPLICATE_NOT_CANCELLABLE" and "тодорхойгүй" in out[0]["note"]
+    # Хоёр Ontime мөр, хоёр бэлэн — нэг-нэгээр, тодорхой (нөгөө нь өөр мөрд оноогдсон)
+    left2 = left + [_left(BASE + timedelta(seconds=20), 1000, ONTIME[:-11] + "00000210002990")]
+    out = explain_unmatched_tax(left2, [pos, web], 0, 60, {"pos", "web"}, None)
+    assert sorted(o["verdict"] for o in out) == ["DUPLICATE", "DUPLICATE"]
+
+
+def test_company_and_not_in_file_are_not_cancellable():
+    """ААН/ТТД-тэй баримт (терминал иргэний баримт хэвлэдэг) болон манай баримт ТЕГ файлд
+    олдоогүй төлбөрийг файлын горимд ч цуцлахгүй."""
+    comp = _cash("comp", BASE + timedelta(seconds=3))
+    comp["company"] = True
+    out = explain_unmatched_tax([_left(BASE, 1000, ONTIME)], [comp], 0, 60, {"comp"}, None)
+    assert out[0]["verdict"] == "DUPLICATE_NOT_CANCELLABLE" and "ААН" in out[0]["note"]
+    assert cancel_block_reason(comp, allow_company=True) is None
+    out = explain_unmatched_tax([_left(BASE, 1000, ONTIME)], [_cash("x", BASE + timedelta(seconds=3))],
+                                0, 60, set(), None)
+    assert out[0]["verdict"] == "DUPLICATE_NOT_CANCELLABLE" and "файлд" in out[0]["note"]
