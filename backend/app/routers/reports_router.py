@@ -1347,6 +1347,9 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         # Тулгалтын хүрээнээс ГАДУУР үлдсэн манай баримтууд — «зөрүү» БИШ:
         # файл тэр хугацааг хамраагүй, эсвэл баримт нь цуцлагдсан
         "outside_window": r["outside_window"], "cancelled": r["cancelled"],
+        # Манай ЦУЦЛАГДСАН баримтын мөр файлд байгаа (файлыг цуцлалтаас өмнө татсан) —
+        # тэдгээр нь цуцлагдсан баримттайгаа холбогдоно, «зөрүү» биш
+        "cancelled_in_file": r.get("cancelled_in_file", 0),
         "ddtd_by_provider": r["by_provider"],
         "tenant": tenant.name if tenant else None,
         "diag": diag,
@@ -1365,6 +1368,9 @@ async def vat_reconcile(file: UploadFile = File(...), tz_shift: float | None = N
         "foreign_registers": r.get("foreign_registers", []),
         # Касс бүрд: мөр, таарсан (манайх — баримттай; өөр систем — төлбөртэй), шилжилт
         "group_stats": r.get("group_stats", {}),
+        # Өөр системийн касс бүрийн зогсоол (QR биш тааралтын олонх) — өөр зогсоолын
+        # төлбөр тэр кассын давхардал гэж ЦУЦЛАГДАХГҮЙ
+        "register_sites": a.get("register_sites", {}),
         "unmatched_ours": sorted(un_ours, key=lambda x: x["paid_at"])[:100],
         "unmatched_ours_total": len(un_ours),
         # Дэлгэцэнд 200 мөр л — цуцлах жагсаалтыг ҮҮНЭЭС БҮҮ бүтээ (доорх duplicates)
@@ -1464,7 +1470,7 @@ async def cancel_duplicate_receipts(body: dict, db: Session = Depends(get_db),
     import asyncio
     asyncio.get_event_loop().create_task(
         _run_dup_cancel(ids, note, user.username, allowed, teg), name="vat_dup_cancel")
-    return {"started": True, "job": _dup_job_public()}
+    return {"started": True, "job": _dup_job_public(user)}
 
 
 # Нэг дуудлагад/нэг job-д дээд тоо (CLI-ийн --max-тай ижил анхдагч)
@@ -1475,13 +1481,20 @@ _DUP_DELAY = 0.5
 _dup_job: dict = {}
 
 
-def _dup_job_public() -> dict:
+def _dup_job_public(user=None) -> dict:
+    """Job-ийн явц. Алдааны дэлгэрэнгүй (төлбөрийн ID, алдаа, шалтгаан) нь зөвхөн
+    эхлүүлсэн хэрэглэгч эсвэл бүх зогсоолын эрхтэйд (2026-10-13 хяналт: job процесс
+    даяар нэг тул өөр түрээслэгчийн админд бусдын төлбөрийн ID харагдаж байв)."""
     j = dict(_dup_job)
     errs = j.pop("errors", {}) or {}
-    j["top_errors"] = [{"error": e, "count": n}
-                       for e, n in sorted(errs.items(), key=lambda kv: -kv[1])[:5]]
-    j["failures"] = (j.get("failures") or [])[:50]
-    j.pop("username", None)
+    owner = j.pop("username", None)
+    if user is None or user.username == owner or _scope(user) is None:
+        j["top_errors"] = [{"error": e, "count": n}
+                           for e, n in sorted(errs.items(), key=lambda kv: -kv[1])[:5]]
+        j["failures"] = (j.get("failures") or [])[:50]
+    else:
+        j["top_errors"], j["failures"] = [], []
+        j.pop("note", None)
     return j
 
 
@@ -1551,7 +1564,7 @@ def cancel_duplicates_status(user: User = Depends(require("vat", "reports"))):
     """Явагдаж буй (эсвэл сүүлийн) давхардлын цуцлалтын явц — UI 2с тутам асууна."""
     if not _dup_job:
         return {"running": False, "idle": True}
-    return _dup_job_public()
+    return _dup_job_public(user)
 
 
 @router.get("/vat-failures")
@@ -1739,6 +1752,12 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
             finally:
                 j["done"] += 1
             if res is None:
+                continue
+            if res.get("duplicate_of_pos"):
+                # POS терминалын давхардал гэж цуцалсан баримт — бөөн нөхөлт ДАХИН
+                # үүсгэхгүй (ганцаарчилсан «Дахин үүсгэх» + allow_duplicate-ээр л)
+                j["skipped"] += 1
+                j["skipped_duplicate_of_pos"] = j.get("skipped_duplicate_of_pos", 0) + 1
                 continue
             if res.get("ok"):
                 j["ok"] += 1

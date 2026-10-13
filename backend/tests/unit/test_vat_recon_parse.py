@@ -570,3 +570,122 @@ def test_excel_uses_per_register_time_and_lists_duplicates():
     assert times["10045952"].startswith(want) and times["10002990"].startswith(want)
     dsheet = list(wb["Давхардал (цуцлах)"].iter_rows(values_only=True))
     assert len(dsheet) == 2 and dsheet[1][-1] == "p1"
+
+
+# ───────────── 2026-10-13 хяналтын засвар ─────────────────────────────────────
+
+def _resume_case(p1_cancelled):
+    """P1 = Ontime давхардалтай бэлэн төлбөр; P2 = 26с хойно ижил дүнтэй ХУУЛЬ ЁСНЫ
+    шилжүүлэг (зөвхөн манай msgbill баримттай, Ontime-гүй). ТЕГ файл НЭГ л (P1-ийг
+    цуцлахаас ӨМНӨ татсан) — P1-ийн msgbill мөр файлд үлдсэн."""
+    from app.services import vat_duplicates as VD
+    b = datetime(2026, 8, 24, 2, 0, 0)
+    msg1, msg2 = _reg_ddtd(11, "10045952"), _reg_ddtd(12, "10045952")
+    r1 = _rec(1000, msg1, status="CANCELLED" if p1_cancelled else "SENT")
+    ours = [(r1, _pay(b + timedelta(seconds=4), "P1"), "1111УБА", "Хангарьд"),
+            (_rec(1000, msg2), _pay(b + timedelta(seconds=30), "P2"), "2222УБА", "Хангарьд")]
+    tax = _file([
+        ["x", _reg_ddtd(1, "10002990"), b.strftime("%Y-%m-%d %H:%M:%S"), 1000],
+        ["x", msg1, (b + timedelta(hours=8, seconds=5)).strftime("%Y-%m-%d %H:%M:%S"), 1000],
+        ["x", msg2, (b + timedelta(hours=8, seconds=31)).strftime("%Y-%m-%d %H:%M:%S"), 1000],
+    ])
+    p1 = _cash("P1", b + timedelta(seconds=4))
+    if p1_cancelled:
+        p1 = _probe("P1", b + timedelta(seconds=4), 1000, [msg1], method="CASH", provider="CASH", active=[],
+                    primary=_rcpt("r1", status="CANCELLED", ddtd=msg1), cancelled_msgbill=True)
+    p2 = _probe("P2", b + timedelta(seconds=30), 1000, [msg2], method="TRANSFER", provider="BANK",
+                active=[_rcpt("r2", ddtd=msg2, ref="rcp-2")])
+    return VD.analyze(tax, ours, [p1, p2], shifts=[0.0, -8.0], tol=60), tax
+
+
+def test_rerun_same_file_after_partial_cancel_never_moves_to_legit_payment():
+    """ХЯНАЛТЫН ГОЛ ОЛДВОР: «--limit 1 → дахин ажиллуулах» урсгалд ИЖИЛ файлаар дахин
+    тулгахад цуцалсан P1-ийн хуучин msgbill мөр «эзэнгүй» болж P1-ийг булааж, Ontime
+    мөрийг хууль ёсны P2 рүү түлхэж P2-г ЦУЦЛАХ жагсаалтад оруулдаг байв."""
+    a, _ = _resume_case(False)
+    assert [d["payment_id"] for d in a["duplicates"]] == ["P1"]
+    a, tax = _resume_case(True)
+    assert a["duplicates"] == []                                   # P2 хэзээ ч орохгүй
+    assert [(x["register"], x["verdict"], x["payment_id"]) for x in a["explained"]] == [
+        ("10002990", "DUPLICATE_CANCELLED", "P1")]
+    # P1-ийн хуучин мөр цуцлагдсан баримттайгаа холбогдсон — matched-д биш
+    assert a["r"]["matched"] == 1 and a["r"]["cancelled_in_file"] == 1
+    dead = [t for t in tax if t.get("ours_cancelled")]
+    assert len(dead) == 1 and dead[0]["ours"][1].id == "P1"
+    assert a["matched_pay_ids"] == {"P1", "P2"}
+
+
+def test_cancelled_receipt_never_takes_row_from_live_receipt():
+    """Цуцлагдсан баримт идэвхтэй баримтын ДАРАА, ҮЛДСЭН өөрийн кассын мөртэй л холбогдоно;
+    өөр системийн (Ontime) мөртэй хэзээ ч холбогдохгүй."""
+    dead = (_rec(1000, _reg_ddtd(1, "10045952"), status="CANCELLED"), _pay(BASE, "dead"), "", "")
+    live = (_rec(1000, _reg_ddtd(2, "10045952")), _pay(BASE + timedelta(seconds=5), "live"), "", "")
+    tax = _file([["x", _reg_ddtd(3, "10045952"), (BASE + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"), 1000],
+                 ["x", _reg_ddtd(4, "10002990"), BASE.strftime("%Y-%m-%d %H:%M:%S"), 1000]])
+    r = best_shift(tax, [dead, live], [0.0], 60, probe=[_cash("live", BASE + timedelta(seconds=5))])
+    assert r["matched"] == 1 and r["cancelled_in_file"] == 0 and r["cancelled"] == 1
+    assert [t["ours"][1].id for t in tax if t.get("ours")] == ["live"]   # 1с ойр байсан ч
+
+
+def test_own_and_foreign_rows_explain_independently():
+    """Манай кассын үлдсэн мөр (1с ойр) Ontime мөрийн төлбөрийг булааж, Ontime мөрийг
+    өөр (хууль ёсны) шилжүүлэг рүү түлхэхгүй — Ontime-ийн хос зөвхөн төлбөрөөс хамаарна.
+    Манай кассын мөр Ontime-оор тайлагдсан төлбөрийг ХОЖУУ сонгоно, гэхдээ өөр нэр
+    дэвшигч байхгүй бол нэг борлуулалт хоёуланг нь тайлж болно."""
+    left = [_left(BASE, 1000, ONTIME),
+            _left(BASE + timedelta(seconds=5), 1000, MSG_DDTD, foreign=False)]
+    probe = [_cash("p1", BASE + timedelta(seconds=4)),
+             _probe("p2", BASE + timedelta(seconds=30), 1000, [MSG_DDTD], method="TRANSFER", provider="BANK")]
+    out = explain_unmatched_tax(left, probe, 0, 60, set(), None)
+    assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "p1"), ("RECEIPT_NOT_MATCHED", "p2")]
+    out = explain_unmatched_tax(left, probe[:1], 0, 60, set(), None)
+    assert [(o["verdict"], o["payment_id"]) for o in out] == [("DUPLICATE", "p1"), ("RECEIPT_NOT_MATCHED", "p1")]
+
+
+def test_foreign_register_other_site_is_not_cancellable():
+    """Ontime касс (…10002990) Хангарьд (S1)-д байрладаг. ТЕГ экспорт ТТД-ээр гардаг тул
+    ижил ТТД-ийн өөр зогсоолын (S2) бэлэн төлбөр ±60с дотор таарч болно — тэр нь
+    ДАВХАРДАЛ гэж цуцлагдахгүй; кассын зогсоолын төлбөр ойр биш байсан ч түрүүлнэ."""
+    left = [_left(BASE + timedelta(minutes=i), 1000, _reg_ddtd(i, "10002990")) for i in range(4)]
+    left.append(_left(BASE + timedelta(minutes=10), 1000, _reg_ddtd(10, "10002990")))
+    left.append(_left(BASE + timedelta(minutes=20), 1000, _reg_ddtd(20, "10002990")))
+    probe = [_cash(f"h{i}", BASE + timedelta(minutes=i, seconds=3)) for i in range(4)]
+    probe.append(_probe("other", BASE + timedelta(minutes=10, seconds=2), 1000, [MSG_DDTD],
+                        site="S2", method="CASH", provider="CASH"))
+    # 20-р минут: өөр зогсоолынх 1с, кассын зогсоолынх 40с — кассын зогсоолынх сонгогдоно
+    probe.append(_probe("near-other", BASE + timedelta(minutes=20, seconds=1), 1000, [MSG_DDTD],
+                        site="S2", method="CASH", provider="CASH"))
+    probe.append(_cash("far-own", BASE + timedelta(minutes=20, seconds=40)))
+    from app.routers.vat_recon import foreign_register_sites
+    rs = foreign_register_sites(left, probe, 60)
+    assert rs["10002990"]["site_id"] == "S1" and rs["10002990"]["sites"] == 2
+    out = explain_unmatched_tax(left, probe, 0, 60, set(), None, register_sites=rs)
+    got = [(o["verdict"], o["payment_id"]) for o in out]
+    assert got[:4] == [("DUPLICATE", f"h{i}") for i in range(4)]
+    assert got[4] == ("DUPLICATE_NOT_CANCELLABLE", "other") and "өөр зогсоол" in out[4]["note"]
+    assert got[5] == ("DUPLICATE", "far-own")
+    assert "other" not in {d["payment_id"] for d in duplicate_list(out, probe, set(), 8)}
+
+
+def test_foreign_register_with_no_majority_site_cancels_nothing():
+    left = [_left(BASE, 1000, _reg_ddtd(1, "10002990")),
+            _left(BASE + timedelta(minutes=5), 1000, _reg_ddtd(2, "10002990"))]
+    probe = [_cash("a", BASE + timedelta(seconds=3)),
+             _probe("b", BASE + timedelta(minutes=5, seconds=3), 1000, [MSG_DDTD], site="S2",
+                    method="CASH", provider="CASH")]
+    out = explain_unmatched_tax(left, probe, 0, 60, set(), None)
+    assert [o["verdict"] for o in out] == ["DUPLICATE_NOT_CANCELLABLE"] * 2
+    assert "тодорхойгүй" in out[0]["note"]
+
+
+def test_register_tail_is_8_for_ontime_heavy_teg_files():
+    """Ontime-ийн ДДТД-ийн төгсгөлөөс 9 дэх орон зөвхөн {1,3,5,7,9} — Ontime давамгайлсан
+    файлд хуучин эвристик 9 оронтой «касс» сонгож манай msgbill мөрийг «өөр систем»
+    болгодог байв. ТЕГ-ийн 33 оронтой ДДТД бол ҮРГЭЛЖ 8."""
+    from app.routers.vat_recon import pos_tail_len
+    ontime = ["0152000200900000972600%02d%d10002990" % (i, (1, 3, 5, 7, 9)[i % 5]) for i in range(63)]
+    assert pos_tail_len(ontime[:24]) == 9                          # хуучин эвристикийн алдаа
+    assert register_tail_len(ontime[:24]) == 8
+    assert register_tail_len(ontime + [MSG_DDTD]) == 8
+    # ТЕГ биш формат (35 оронтой г.м) — өмнөх шигээ өгөгдлөөс таамаглана
+    assert register_tail_len(["0152000200900009726%08d10002990" % i for i in range(90)]) == 8

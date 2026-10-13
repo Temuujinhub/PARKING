@@ -131,7 +131,12 @@ def retry_payment_receipts(db, payment, allow_duplicate=False):
     recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
             .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
     active = [r for r in recs if r.status != "CANCELLED"]
-    if recs and not active and not allow_duplicate and any(is_duplicate_cancel(r) for r in recs):
+    # Давхардлын тэмдгийг БУСАД мөрөөс үл хамааран шалгана (2026-10-13 хяналт): өмнө нь
+    # БҮХ баримт CANCELLED үед л хамгаалдаг байсан тул цуцалсан msgbill + ДДТД-гүй
+    # FAILED/REVIEW/PENDING мөртэй төлбөрийг бөөн нөхөлт (vat-retry-failed) дахин илгээнэ.
+    # Тэмдэггүй ИЛГЭЭГДСЭН баримт (ж: allow_duplicate-ээр гаргасан) байвал хэвийн урсгал.
+    if (not allow_duplicate and any(is_duplicate_cancel(r) for r in recs)
+            and not any(r.status == "SENT" and r.ebarimt_id and not is_duplicate_cancel(r) for r in recs)):
         # 2026-10-13: POS терминал (Ontime) баримт хэвлэсэн тул манай msgbill
         # баримтыг ТЕГ тулгалтаар цуцалсан. Дахин үүсгэвэл давхардал буцаж үүснэ.
         return {"ok": False, "duplicate_of_pos": True,

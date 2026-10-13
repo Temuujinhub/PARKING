@@ -445,25 +445,45 @@ def _compatible(t: dict, rec) -> bool:
     return reg is None or reg == g     # ДДТД-гүй (FAILED/REVIEW) бол аль ч манай касс
 
 
+def _cancelled_compatible(t: dict, rec) -> bool:
+    """ЦУЦЛАГДСАН манай баримт энэ мөртэй таарч болох уу — ЗӨВХӨН өөрийн кассын
+    мөр, кассын дугаар нь ДДТД-ээр БАТЛАГДСАН үед (касс тодорхойгүй бол үгүй)."""
+    g = t.get("group")
+    if g in (None, "*") or t.get("foreign"):
+        return False
+    return receipt_register(getattr(rec, "ebarimt_id", None), t.get("tail")) == g
+
+
 def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
     """Тулгалт (цаг ±tol, дүн) — ХАТУУ НЭГ-НЭГЭЭР, хамгийн ойр хосоос эхэлж.
 
     ДДТД-ЭЭР ТУЛГАДАГГҮЙ — суваг бүр (QPay, msgbill) операторын кодтой билл
     буцаадаг бол ТЕГ такспэерийн ТТД + өөрийн counter-оор ӨӨР ДДТД олгодог.
     Гэхдээ таарсан хос бүрийн хоёр ДДТД-г ХАРЬЦУУЛЖ, сувгаар нь тоолно —
-    «манай дугаар ТЕГ-ийнхтэй таарч байна уу» гэдгийг хэмжих цорын ганц зам."""
+    «манай дугаар ТЕГ-ийнхтэй таарч байна уу» гэдгийг хэмжих цорын ганц зам.
+
+    ЦУЦЛАГДСАН баримт (2026-10-13 хяналт): ТЕГ-ийн файлыг цуцлалтаас ӨМНӨ татсан
+    бол манай цуцалсан баримтын мөр файлд ҮЛДСЭН байдаг. Түүнийг хаяхад тэр мөр
+    «эзэнгүй» болж өөр төлбөрт тайлагдаж, Ontime мөрийг өөр (хууль ёсны) бэлэн/
+    шилжүүлгийн төлбөр рүү түлхэж ХУУРАМЧ давхардал үүсгэж байв («--limit 1 →
+    дахин ажиллуулах» урсгал). Одоо идэвхтэй баримтыг эхэлж, дараа нь цуцлагдсаныг
+    ҮЛДСЭН өөрийн кассын мөртэй нэг-нэгээр холбоно (идэвхтэйгээс мөр булаахгүй);
+    тэдгээрийг matched-д биш cancelled_in_file-д тоолно."""
     for t in tax:
         t["used"] = False
         t.pop("ours", None)
         t.pop("gap", None)
+        t.pop("ours_cancelled", None)
         t.setdefault("shift", shift)
-    un_ours, cancelled, live = [], 0, []
+    un_ours, cancelled, live, dead = [], 0, [], []
     for o in ours:
         rec, pay = o[0], o[1]
         if pay.paid_at is None:
             continue
         if rec.status == "CANCELLED":
-            cancelled += 1          # ТЕГ-т цуцлагдсан тул файлд байхгүй нь ХЭВИЙН
+            cancelled += 1          # ТЕГ-т цуцлагдсан тул ШИНЭ файлд байхгүй нь ХЭВИЙН
+            if is_teg_ddtd(rec.ebarimt_id) and not is_mock_receipt(rec):
+                dead.append(o)      # …гэхдээ ХУУЧИН файлд мөр нь үлдсэн байж болно
             continue
         if is_mock_receipt(rec):
             un_ours.append(_un_row(o, mock=True))
@@ -490,8 +510,20 @@ def match_pass(tax: list, ours: list, shift: float, tol: int) -> dict:
             # Ялгаатай хосын ЖИШЭЭ — хоёр дугаарыг зэрэгцүүлж харуулна
             st["sample"] = {"ours": rec.ebarimt_id or "", "tax": t["ddtd"]}
     un_ours += [_un_row(o) for j, o in enumerate(live) if j not in used_j]
+    # Цуцлагдсан баримт — идэвхтэй баримтын ДАРАА, үлдсэн мөртэй л
+    free = [i for i, t in enumerate(tax) if not t["used"]]
+    in_file = 0
+    if free and dead:
+        pairs = _pairs([times[i] for i in free], [tax[i]["amount"] for i in free],
+                       [o[1].paid_at for o in dead], [float(o[0].amount) for o in dead], tol,
+                       ok=lambda a, j: _cancelled_compatible(tax[free[a]], dead[j][0]))
+        for a, j, _d in _assign(pairs):
+            t, o = tax[free[a]], dead[j]
+            t["used"], t["ours"], t["ours_cancelled"] = True, o, True
+            t["gap"] = round((o[1].paid_at - times[free[a]]).total_seconds(), 1)
+            in_file += 1
     return {"matched": matched, "ddtd_equal": ddtd_equal, "unmatched_ours": un_ours,
-            "cancelled": cancelled, "by_provider": by_provider}
+            "cancelled": cancelled, "cancelled_in_file": in_file, "by_provider": by_provider}
 
 
 def _un_row(o, mock: bool = False) -> dict:
@@ -565,7 +597,10 @@ def best_shift(tax: list, ours: list, candidates: list[float], tol: int,
             if rows[0]["foreign"]:
                 n = len(match_probe(rows, probe or [], tol))
             else:
-                n = match_pass(rows, ours, sh, tol)["matched"]
+                # Цуцлагдсан баримтын мөрийг ч тоолно — хэсэгчлэн цуцалсны дараа ижил
+                # файлыг дахин тулгахад шилжилт өөрчлөгдөхгүй
+                m = match_pass(rows, ours, sh, tol)
+                n = m["matched"] + m["cancelled_in_file"]
             if n > best_n:
                 best_sh, best_n = sh, n
         for x in rows:
@@ -603,13 +638,17 @@ def pos_tail_len(ids: list[str]) -> int | None:
 
 
 def register_tail_len(ids: list[str]) -> int | None:
-    """pos_tail_len + уналт: цөөн мөртэй ч бүгд ТЕГ-ийн 33 оронтой ДДТД бол
-    кассын дугаар нь сүүлийн 8 орон (ТЕГ-ийн дугаарлалт)."""
-    tail = pos_tail_len(ids)
-    if tail:
-        return tail
+    """Кассын дугаарын урт: бүгд ТЕГ-ийн 33 оронтой ДДТД бол ШУУД сүүлийн 8 орон
+    (ТЕГ-ийн дугаарлалт); бусад форматад л pos_tail_len-ээр таамаглана.
+
+    2026-10-13 хяналт: өмнө нь pos_tail_len-ийг ЭХЭЛЖ ажиллуулдаг байсан. Ontime-ийн
+    ДДТД-ийн төгсгөлөөс 9 дэх орон зөвхөн {1,3,5,7,9} утга авдаг тул Ontime мөр
+    давамгайлсан файлд (24+ Ontime мөр, эсвэл 63 Ontime + 1 msgbill) 9 оронтой
+    «касс» сонгогдож, манай msgbill мөр «өөр систем» болж ангилагдах эрсдэлтэй байв."""
     ids = [i for i in ids if i]
-    return REGISTER_LEN if ids and all(is_teg_ddtd(i) for i in ids) else None
+    if ids and all(is_teg_ddtd(i) for i in ids):
+        return REGISTER_LEN
+    return pos_tail_len(ids)
 
 
 def pos_groups(ids: list[str], tail: int | None = None) -> dict:
@@ -685,25 +724,90 @@ def _foreign_verdict(p: dict) -> tuple[str, str | None]:
     return "DUPLICATE_NOT_CANCELLABLE", reason
 
 
+def _qr_rank(p: dict) -> int:
+    """0 = касс дээрх (бэлэн/карт/данс/хэтэвч) төлбөр — POS терминал баримт хэвлэдэг;
+    1 = QR/QPay — POS терминал баримт хэвлэдэггүй тул тааралт нь санамсаргүй."""
+    return 0 if (p.get("method") or "").upper() in NON_QR_METHODS else 1
+
+
+def foreign_register_sites(left: list, probe: list, tol: int, shift: float = 0.0) -> dict:
+    """Өөр системийн касс (Ontime POS г.м) бүр АЛЬ ЗОГСООЛЫНХ вэ — файлаас тодорхойлно.
+
+    POS терминал бол НЭГ газар байрладаг физик төхөөрөмж (08-24: …10002990 = Хангарьд,
+    63/63). ТЕГ-ийн экспорт ТТД-ээр гардаг тул нэг ТТД-ийн БУСАД зогсоолын бэлэн/
+    шилжүүлгийн төлбөр ±60с дотор ижил дүнтэй таарч болно (2026-10-13 хяналт:
+    08-20…08-26-нд Хангарьдын 339 төлбөрийн 8-д нь өөр зогсоолд ийм нэр дэвшигч
+    байсан). Кассын мөрүүдийн QR биш төлбөртэй таарсан тааралтын ОЛОНХ (>50%) нь
+    унасан зогсоолыг тэр кассын зогсоол гэж үзнэ; олонх байхгүй бол site_id=None
+    (тодорхойгүй — тэр кассын нэг ч мөрийг цуцлахгүй)."""
+    rows = [t for t in left if t.get("foreign")]
+    if not rows:
+        return {}
+    hits = match_probe(rows, probe, tol, shift, cost=lambda pr: (_qr_rank(probe[pr[2]]),))
+    by_reg: dict[str, Counter] = {}
+    names = {}
+    for i, j, _d in hits:
+        p = probe[j]
+        if _qr_rank(p):
+            continue
+        by_reg.setdefault(rows[i].get("group") or "", Counter())[p.get("site_id")] += 1
+        names[p.get("site_id")] = p.get("site_name") or p.get("site_code") or ""
+    out = {}
+    for reg, c in by_reg.items():
+        (sid, n), total = c.most_common(1)[0], sum(c.values())
+        major = n * 2 > total
+        out[reg] = {"site_id": sid if major else None, "site_name": names.get(sid, "") if major else "",
+                    "share": round(n / total, 3), "hits": total, "sites": len(c)}
+    return out
+
+
 def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
-                          matched_pay_ids: set, scope_ids: set | None) -> list:
+                          matched_pay_ids: set, scope_ids: set | None,
+                          register_sites: dict | None = None) -> list:
     """Тохироогүй ТЕГ мөр бүрийг манай ТӨЛБӨРүүдтэй (баримттай эсэхээс үл хамааран)
     цаг+дүнгээр, мөр бүрийн ӨӨРИЙН кассын шилжилтээр, НЭГ-НЭГЭЭР тулгаж ангилна.
     probe: {id, paid_at, amount, site_id, method, receipts, primary, active, ...}.
 
+    ӨӨР кассын мөр ба МАНАЙ кассын мөрийг ТУСАД НЬ (тус бүр нэг-нэгээр) тулгана —
+    нэг борлуулалт Ontime-ийн НЭГ, манай кассын НЭГ мөртэй байж болно. 2026-10-13
+    хяналт: хамтад нь тулгахад манай кассын үлдсэн мөр (ж: цуцалсан баримтын хуучин
+    мөр) Ontime мөрийн жинхэнэ төлбөрийг «булааж», Ontime мөрийг ±60с доторх өөр
+    хууль ёсны бэлэн/шилжүүлгийн төлбөр рүү түлхэж ХУУРАМЧ давхардал үүсгэдэг байв.
+    Одоо Ontime мөрийн хос зөвхөн ТӨЛБӨРүүдээс (арга, зогсоол) хамаарна — манай
+    баримтын төлөв (цуцалсан эсэх) өөрчлөгдөхөд хос нь өөрчлөгдөхгүй.
+
     • ӨӨР кассын мөр (Ontime POS) → тухайн төлбөрт манай баримт бас байвал
-      ДАВХАРДАЛ; бэлэн/карт төлбөр (QR биш) түрүүлж сонгогдоно.
+      ДАВХАРДАЛ; тэр кассын зогсоолын (foreign_register_sites) бэлэн/карт төлбөр
+      түрүүлж сонгогдоно; өөр зогсоолынх бол цуцлахгүй (гараар шалгана).
     • МАНАЙ кассын мөр → баримтгүй/таараагүй төлбөр түрүүлж сонгогдоно (завгүй
       цагт ижил дүнтэй хоёр төлбөр байхад хуурамч «давхардал» гаргахгүй)."""
-    def cost(pr):
-        _d, i, j = pr
-        p = probe[j]
-        if left[i].get("foreign"):
-            return (0 if (p.get("method") or "").upper() in NON_QR_METHODS else 1,)
-        return (1 if p["id"] in matched_pay_ids else 0,)
+    if register_sites is None:
+        register_sites = foreign_register_sites(left, probe, tol, shift)
+    fi = [i for i, t in enumerate(left) if t.get("foreign")]
+    oi = [i for i, t in enumerate(left) if not t.get("foreign")]
+
+    def reg_site(t):
+        return (register_sites.get(t.get("group") or "") or {}).get("site_id")
+
+    def f_cost(pr):
+        _d, a, j = pr
+        sid = reg_site(left[fi[a]])
+        return (0 if sid is None or probe[j].get("site_id") == sid else 1, _qr_rank(probe[j]))
 
     times = [_when(t, shift) for t in left]
-    hit = {i: (j, d) for i, j, d in match_probe(left, probe, tol, shift, cost)}
+    hit = {}
+    for a, j, d in match_probe([left[i] for i in fi], probe, tol, shift, f_cost):
+        hit[fi[a]] = (j, d)
+    taken = {j for j, _d in hit.values()}
+
+    def o_cost(pr):
+        # Ontime мөрөөр тайлагдсан төлбөрийг ХОЖУУ сонгоно (нэг борлуулалтад 2 тайлбар
+        # хамгийн сүүлд) — Ontime-ийн хос үүнээс ҮЛ хамаарна (дээр аль хэдийн оноогдсон)
+        j = pr[2]
+        return (1 if j in taken else 0, 1 if probe[j]["id"] in matched_pay_ids else 0)
+
+    for a, j, d in match_probe([left[i] for i in oi], probe, tol, shift, o_cost):
+        hit[oi[a]] = (j, d)
     out = []
     for i, t in enumerate(left):
         row = {"dt": t["dt"].isoformat(), "dt_utc": times[i].isoformat(),
@@ -722,6 +826,14 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                 v = "PAYMENT_NO_RECEIPT"
             elif t.get("foreign"):
                 v, note = _foreign_verdict(p)
+                rs = register_sites.get(t.get("group") or "")
+                if v == "DUPLICATE" and rs is not None and rs["site_id"] is None:
+                    v, note = "DUPLICATE_NOT_CANCELLABLE", (
+                        f"касс …{t.get('group')} аль зогсоолынх нь тодорхойгүй "
+                        f"({rs['sites']} зогсоолд тарсан) — гараар шалгана")
+                elif v == "DUPLICATE" and rs is not None and p.get("site_id") != rs["site_id"]:
+                    v, note = "DUPLICATE_NOT_CANCELLABLE", (
+                        f"өөр зогсоол — касс …{t.get('group')} нь «{rs['site_name']}»-ийнх")
             elif p["id"] in matched_pay_ids:
                 v = "EXTRA_SAME_REGISTER"
             else:
@@ -821,7 +933,8 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
         row = [(_when(t, shift) + loc).strftime("%Y-%m-%d %H:%M:%S"), t["amount"], t["ddtd"], t["src"]]
         if o:
             rec, pay, plate, site_name = o
-            row += ["ТААРСАН", plate or "", site_name or "", rec.provider or "POSAPI",
+            row += ["ТААРСАН (манайх цуцлагдсан)" if t.get("ours_cancelled") else "ТААРСАН",
+                    plate or "", site_name or "", rec.provider or "POSAPI",
                     rec.ebarimt_id or "", rec.lottery_code or "", rec.status,
                     (pay.paid_at + loc).strftime("%Y-%m-%d %H:%M:%S") if pay.paid_at else ""]
         else:
@@ -864,13 +977,15 @@ def reconcile_excel(tax: list, ours: list, un_ours: list, tol: int, tz: int,
             wsd.column_dimensions[col].width = w
 
     ws3 = wb.create_sheet("Дүгнэлт")
-    matched = sum(1 for t in tax if t.get("ours"))
+    matched = sum(1 for t in tax if t.get("ours") and not t.get("ours_cancelled"))
+    dead = sum(1 for t in tax if t.get("ours_cancelled"))
     lines = [
         ("Тулгалт", title or "—"),
         ("ТЕГ файлын баримт", len(tax)),
         ("Манай баримт (тухайн хугацаанд)", len(ours)),
         ("Таарсан (цаг ±%dс + дүн)" % tol, matched),
-        ("ТЕГ-д бий, манайд алга", len(tax) - matched),
+        ("Файлд бий, манайд ЦУЦЛАГДСАН (файл цуцлалтаас өмнө татагдсан)", dead),
+        ("ТЕГ-д бий, манайд алга", len(tax) - matched - dead),
         ("Манайд бий, ТЕГ-д алга", len(un_ours)),
         ("Давхардал (манай msgbill баримтыг цуцлах)", len(duplicates or [])),
         ("Давхардлын дүн ₮", sum(x["amount"] for x in duplicates or [])),

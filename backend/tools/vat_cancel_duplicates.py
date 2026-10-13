@@ -15,16 +15,24 @@ CSV тайлан бичнэ. --apply үед ЗӨВХӨН тэр жагсаалт
 дахин ажиллуулахад цуцлагдсаныг алгасна, CANCEL_PENDING-ийг GET-ээр эцэслэнэ).
 
     cd /root/PARKING/backend
-    venv/bin/python tools/vat_cancel_duplicates.py --file /root/teg_0824.xlsx            # харах
+    venv/bin/python tools/vat_cancel_duplicates.py --file /root/teg_0824.xlsx \\
+        --tenant EASYPARKING                                                              # харах
     venv/bin/python tools/vat_cancel_duplicates.py --file a.xlsx --file b.xlsx \\
         --tenant EASYPARKING --site HANGARID --out /root/dup_report.csv                  # шүүх
     venv/bin/python tools/vat_cancel_duplicates.py --file /root/teg_0824.xlsx \\
+        --tenant EASYPARKING --site HANGARID \\
         --apply --user temuujin --note "ТЕГ тулгалт 08-24: Ontime POS давхардал"        # цуцлах
 
-Хамгаалалт: msgbill MOCK/тест түлхүүр/түлхүүргүй үед --apply ажиллахгүй; --max (2000)-аас
-олон бол зогсоно; TTY дээр «YES» гэж баталгаажуулна (--yes-ээр алгасна); квот/эрхийн
-алдаа давтагдвал зогсоно. Төлбөр бүрд AuditLog EBARIMT_CANCEL_BULK + commit.
-Мөнгө буцаахгүй — зөвхөн татварын баримт.
+Хамгаалалт: --apply зөвхөн ажиллаж буй «parking» DB + прод сервер дээр (продын ХУУЛБАР
+audit*/t_* эсвэл ТЕСТ сервер дээр татгалзана), --tenant заавал; msgbill MOCK/тест
+түлхүүр/түлхүүргүй үед ажиллахгүй; --max (2000)-аас олон бол зогсоно; YES-ийн өмнө DB,
+сервер, түрээслэгч, msgbill түлхүүрийн хүрээг хэвлэнэ; TTY дээр «YES» гэж баталгаажуулна
+(--yes-ээр алгасна); квот/эрхийн алдаа давтагдвал зогсоно. Төлбөр бүрд AuditLog
+EBARIMT_CANCEL_BULK + commit. Мөнгө буцаахгүй — зөвхөн татварын баримт.
+
+Дахин ажиллуулах (--limit 1 → бүгд) ИЖИЛ файлаар ч аюулгүй: цуцалсан баримтын хуучин мөр
+өөрийн цуцлагдсан баримттайгаа холбогдож, Ontime мөр өөр төлбөр рүү шилжихгүй (тэр
+төлбөр «ДАВХАРДАЛ ЦУЦЛАГДСАН» гэж гарна).
 """
 import argparse
 import asyncio
@@ -102,11 +110,18 @@ def analyze_files(db, files, *, tol, shifts, tenant_sites, log=print):
                         f"{r['group_shifts'].get(k, 0):g}ц{', өөр систем' if k in r['foreign_registers'] else ''})"
                         for k, v in sorted(VR.pos_groups([t['ddtd'] for t in tax], r.get('tail')).items())))
         log(f"   манай баримттай таарсан {r['matched']} · манайд бий/ТЕГ-д алга {len(r['unmatched_ours'])}"
-            f" · ТЕГ-д бий/манайд алга {len(a['left'])}")
+            f" · ТЕГ-д бий/манайд алга {len(a['left'])}"
+            + (f" · манай ЦУЦЛАГДСАН баримтын мөр файлд {r['cancelled_in_file']}"
+               if r.get("cancelled_in_file") else ""))
         for k, st in sorted(r.get("group_stats", {}).items()):
             if st["foreign"]:
                 rate = st["matched"] / max(st["rows"], 1)
+                rs = a.get("register_sites", {}).get(k)
+                where = ("" if rs is None else
+                         f" · зогсоол «{rs['site_name']}» ({rs['share']:.0%} / {rs['hits']})" if rs["site_id"]
+                         else f" · ⚠ зогсоол ТОДОРХОЙГҮЙ ({rs['sites']} зогсоолд тарсан) — цуцлахгүй")
                 log(f"   өөр системийн касс …{k}: {st['matched']}/{st['rows']} мөр манай төлбөртэй таарсан"
+                    + where
                     + ("" if rate >= 0.5 else
                        "  ⚠ ХАГАСААС БАГА — энэ касс манай зогсоолынх биш байж магадгүй, "
                        "давхардлыг CSV-ээс гараар шалгана уу"))
@@ -230,6 +245,10 @@ def main(argv=None):
     for f in args.file:
         if not os.path.isfile(f):
             raise SystemExit(f"Файл олдсонгүй: {f}")
+    if args.apply and not args.tenant:
+        # ТЕГ экспорт ТТД-ээр гардаг — түрээслэгчгүй бол бусад ТТД-ийн төлбөр ч нэр
+        # дэвшигч болно (2026-10-13 хяналт)
+        raise SystemExit("--apply үед --tenant заавал (ТЕГ файлын ТТД-ийн түрээслэгч, ж: EASYPARKING)")
     shifts = [0.0, -float(settings.tz_offset_hours)] if args.tz_shift is None else [args.tz_shift]
     username = args.user or f"cli:{os.getenv('SUDO_USER') or getpass.getuser()}"
     out = args.out or f"vat_duplicates_{datetime.now():%Y%m%d_%H%M%S}.csv"
@@ -277,10 +296,16 @@ def main(argv=None):
         if probs:
             print("\nЗОГСОВ — цуцлах боломжгүй: " + "; ".join(probs))
             return 3
+        scopes = VD.account_scopes(sites)
     finally:
         db.rollback()          # dry-run/шинжилгээний READ ONLY транзакцыг хаана
 
     total = sum(d["amount"] for d in dups)
+    by_site = VR.duplicate_summary(dups)["by_site"]
+    print(f"\nЦУЦЛАХ ГЭЖ БАЙНА: DB {VD.db_name()} · сервер {settings.public_base_url} · түрээслэгч "
+          f"{tenant.code} · " + " · ".join(f"{k} {v['count']} ({v['amount']:,.0f}₮)" for k, v in by_site.items())
+          + "\n  msgbill түлхүүр (оролдох дараалал): "
+          + " · ".join(f"{k}: {' → '.join(v) or '—'}" for k, v in scopes.items()))
     if not args.yes:
         if not sys.stdin.isatty():
             print("\nЗОГСОВ: баталгаажуулах терминал алга — --yes өгнө үү.")

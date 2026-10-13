@@ -76,6 +76,11 @@ def fake_http(monkeypatch):
     monkeypatch.setattr(settings, "msgbill_base_url", "https://msgbill.mn/api/v1")
     monkeypatch.setattr(settings, "ebarimt_mock_receipts", False)
     monkeypatch.setattr(settings, "secret_enc_key", "")
+    # Бодит цуцлалтын хамгаалалт (server_problems): ажиллаж буй «parking» DB + прод сервер.
+    # Тестийн engine нь санах ойн SQLite — энэ URL-аар холбогдохгүй, зөвхөн нэрийг нь шалгана
+    monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking")
+    monkeypatch.setattr(settings, "public_base_url", "https://easy-parking.mn")
+    monkeypatch.delenv("PARKING_DEPLOY_ROLE", raising=False)
     msgbill.invalidate_cache()
     FakeHTTP.script, FakeHTTP.calls = [], []
     yield
@@ -382,7 +387,8 @@ def test_cli_apply_guards_and_resumes(db, engine, tmp_path, monkeypatch, capsys)
     _, pays = _setup(db, n=3)
     f = _teg_file(tmp_path, pays)
     out = str(tmp_path / "rep.csv")
-    base = ["--file", f, "--out", out, "--apply", "--yes", "--delay", "0", "--user", "temuujin"]
+    base = ["--file", f, "--out", out, "--apply", "--yes", "--delay", "0", "--user", "temuujin",
+            "--tenant", "EASY"]
     assert cli.main(base + ["--max", "2"]) == 2                    # --max-аас олон → зогсоно
     monkeypatch.setattr(settings, "ebarimt_mock_receipts", True)
     assert cli.main(base) == 3                                     # MOCK горим → зогсоно
@@ -422,3 +428,159 @@ def test_cli_never_touches_qr_payment(db, engine, tmp_path, monkeypatch):
     assert cli.main(["--file", f, "--out", str(out)]) == 0
     body = out.read_text(encoding="utf-8-sig")
     assert pays[0].id in body and qr.id not in body
+
+
+# ───────────────────────── 2026-10-13 хяналтын засвар ─────────────────────────
+
+@pytest.mark.parametrize("db_url,base_url,role,why", [
+    ("postgresql+psycopg2://u:p@localhost/audit1013", "https://easy-parking.mn", None, "ХУУЛБАР"),
+    ("postgresql+psycopg2://u:p@localhost/parking", "https://test.easy-parking.mn", None, "ТЕСТ сервер"),
+    ("postgresql+psycopg2://u:p@localhost/parking", "https://easy-parking.mn", "staging", "staging"),
+], ids=["продын-хуулбар", "тест-сервер", "staging"])
+def test_apply_refused_on_prod_copy_or_test_server(db, job_env, engine, tmp_path, monkeypatch, capsys,
+                                                   db_url, base_url, role, why):
+    """TEST сервер дээр audit1013 (продын жинхэнэ msgbill түлхүүртэй хуулбар) руу
+    --apply хийхэд юу ч саадгүй байв — продын баримт цуцлагдах эрсдэл."""
+    _, pays = _setup(db)
+    monkeypatch.setattr(settings, "database_url", db_url)
+    monkeypatch.setattr(settings, "public_base_url", base_url)
+    if role:
+        monkeypatch.setenv("PARKING_DEPLOY_ROLE", role)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(R.cancel_duplicate_receipts({"payment_ids": [pays[0].id], "dry_run": False,
+                                                 "note": "x"}, db=db, user=_user(db)))
+    assert e.value.status_code == 400 and why in e.value.detail and not R._dup_job
+    cli = _cli()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    f = _teg_file(tmp_path, pays)
+    assert cli.main(["--file", f, "--out", str(tmp_path / "r.csv"), "--tenant", "EASY",
+                     "--apply", "--yes", "--delay", "0"]) == 3
+    assert why in capsys.readouterr().out and FakeHTTP.calls == []
+    assert _recs(db, pays[0].id)[0].status == "SENT"
+
+
+def test_explicit_production_role_allows_other_db_name(monkeypatch):
+    monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking_prod")
+    assert VD.server_problems()
+    monkeypatch.setenv("PARKING_DEPLOY_ROLE", "production")
+    assert VD.server_problems() == []
+
+
+def test_cli_apply_requires_tenant(db, engine, tmp_path, monkeypatch):
+    cli = _cli()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    _, pays = _setup(db)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--file", _teg_file(tmp_path, pays), "--apply", "--yes"])
+    assert "--tenant" in str(e.value) and FakeHTTP.calls == []
+
+
+def test_cli_rerun_same_file_after_limit_1_does_not_cancel_legit_payment(db, engine, tmp_path, monkeypatch,
+                                                                       capsys):
+    """Хяналтын ГОЛ олдвор (CLI-ээр): P1 (бэлэн, Ontime давхардалтай) + 26с хойно ижил
+    дүнтэй хууль ёсны ШИЛЖҮҮЛЭГ P2 (зөвхөн манай msgbill). --limit 1 → P1 цуцлагдана;
+    ИЖИЛ файлаар дахин ажиллуулахад P2 хэзээ ч цуцлагдах ёсгүй."""
+    cli = _cli()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    _, (p1,) = _setup(db)
+    p2 = M.Payment(site_id=p1.site_id, provider="BANK", payment_method="TRANSFER", amount=Decimal("1000"),
+                   vat_amount=Decimal("90.91"), status="PAID", sender_invoice_no="inv-tr",
+                   paid_at=p1.paid_at + timedelta(seconds=26), raw_payload={"plate_number": "2222УБА"})
+    db.add(p2)
+    db.flush()
+    msg2 = MSG_DDTD[:-12] + "0999" + MSG_DDTD[-8:]
+    db.add(M.VatReceipt(payment_id=p2.id, ebarimt_id=msg2, amount=Decimal("1000"), vat_amount=Decimal("90.91"),
+                        status="SENT", provider="MSGBILL", provider_ref="rcp-tr"))
+    db.commit()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Пос дугаар", "ДДТД", "Огноо", "Нийт дүн", "Систем нийлүүлэгч"])
+    ws.append(["7524322", "015200020090000097260000110002990",          # Ontime (UTC, P1-ээс 4с өмнө)
+               (p1.paid_at - timedelta(seconds=4)).strftime("%Y-%m-%d %H:%M:%S"), 1000, "Ontime"])
+    for p, rid in ((p1, _recs(db, p1.id)[0].ebarimt_id), (p2, msg2)):  # манай msgbill (УБ локал)
+        ws.append(["8164522", rid[:-11] + "1" + rid[-10:],
+                   (p.paid_at + timedelta(hours=8, seconds=1)).strftime("%Y-%m-%d %H:%M:%S"), 1000,
+                   "Онлайм нетворк"])
+    f = str(tmp_path / "teg.xlsx")
+    wb.save(f)
+    base = ["--file", f, "--out", str(tmp_path / "r.csv"), "--tenant", "EASY", "--apply", "--yes",
+            "--delay", "0"]
+    FakeHTTP.script = [(200, {"state": "CANCELLED"})]
+    assert cli.main(base + ["--limit", "1"]) == 0
+    assert [c[1].rsplit("/", 2)[-2] for c in FakeHTTP.calls] == ["rcp-0"]
+    FakeHTTP.script = [(200, {"state": "CANCELLED"})] * 3
+    assert cli.main(base) == 0
+    assert len(FakeHTTP.calls) == 1                                  # P2-т ХҮРЭЭГҮЙ
+    assert _recs(db, p2.id)[0].status == "SENT"
+    assert cli.main(["--file", f, "--out", str(tmp_path / "r2.csv"), "--tenant", "EASY"]) == 0
+    text = capsys.readouterr().out
+    assert "DUPLICATE_CANCELLED" in text and "ЦУЦЛАГДСАН баримтын мөр файлд 1" in text
+
+
+def test_retry_guard_with_failed_sibling_row_and_bulk_job_skips(db, job_env):
+    """(f) хамгаалалт өмнө нь БҮХ баримт CANCELLED үед л ажилладаг байв — цуцалсан msgbill +
+    ДДТД-гүй FAILED мөртэй төлбөрийг бөөн нөхөлт (vat-retry-failed) дахин илгээнэ."""
+    _, (pay,) = _setup(db)
+    FakeHTTP.script = [(200, {"state": "CANCELLED"})]
+    asyncio.run(VD.cancel_one(db, pay.id, note="x", username="t"))
+    db.add(M.VatReceipt(payment_id=pay.id, amount=Decimal("1000"), vat_amount=Decimal("90.91"),
+                        status="FAILED", provider="MSGBILL", receipt_url="quota"))
+    db.commit()
+    res = J.retry_payment_receipts(db, pay)
+    assert res.get("duplicate_of_pos")
+    assert J.retry_payment_receipts(db, pay, allow_duplicate=True).get("duplicate_of_pos") is None
+    db.rollback()
+    R._bulk_job.clear()
+    R._bulk_job.update({"running": True, "total": 1, "done": 0, "ok": 0, "skipped": 0, "failed": 0,
+                        "stopped": None, "errors": {}, "username": "fin"})
+    try:
+        asyncio.run(R._run_bulk_retry([pay.id]))
+        assert (R._bulk_job["skipped"], R._bulk_job["failed"], R._bulk_job["ok"]) == (1, 0, 0)
+        assert R._bulk_job["skipped_duplicate_of_pos"] == 1
+    finally:
+        R._bulk_job.clear()
+    assert db.query(M.FinancialJob).count() == 0                       # юу ч дараалалд ороогүй
+
+
+def test_job_status_details_only_for_starter_or_global_user(db, job_env):
+    site, pays = _setup(db)
+    FakeHTTP.script = [(500, {"code": "X"})] * 4
+    asyncio.run(_run_job(db, [pays[0].id]))
+    assert R.cancel_duplicates_status(user=_user(db))["failures"]          # эхлүүлсэн
+    other = M.User(username="tenant-admin", password_hash="x", role="ADMIN", site_ids=[site.id])
+    db.add(other)
+    db.commit()
+    st = R.cancel_duplicates_status(user=other)
+    assert st["failures"] == [] and st["top_errors"] == [] and "note" not in st and st["failed"] == 1
+
+
+@pytest.mark.parametrize("rprov", ["QPAY", None], ids=["QPAY", "POSAPI"])
+def test_cancel_ebarimt_qpay_and_posapi_branches(db, monkeypatch, rprov):
+    """cancel_ebarimt-ийн QPAY/POSAPI замыг хамгаална — тэднийг шалгадаг байсан
+    tests/test_ebarimt_cancel.py өмнөөсөө (хуучирсан fake) унадаг. msgbill руу
+    НЭГ Ч дуудлага явахгүй, msgbill-ийн давхардлын тэмдэг тавигдахгүй."""
+    from app.services import ebarimt, qpay
+    seen = {}
+
+    async def _qcancel(pid, note="", acc=None):
+        seen["qpay"] = (pid, note)
+        return True
+
+    async def _pdel(bill, date):
+        seen["posapi"] = (bill, date)
+        return True
+    monkeypatch.setattr(qpay, "cancel_ebarimt", _qcancel)
+    monkeypatch.setattr(ebarimt, "delete_receipt", _pdel)
+    _, (pay,) = _setup(db, method="QR" if rprov else "CASH", provider="QPAY" if rprov else "CASH",
+                       rprov=rprov, ddtd="030101065006000097260000410014863")
+    pay.provider_payment_id = "GP1"
+    db.commit()
+    res = asyncio.run(P.cancel_ebarimt(db, P._lock_payment(db, pay.id), "буруу ТТД",
+                                       mark={"reason": DUPLICATE_OF_POS}))
+    rec = _recs(db, pay.id)[0]
+    assert res["ok"] and rec.status == "CANCELLED" and rec.receipt_url == "буруу ТТД"
+    if rprov == "QPAY":
+        assert seen == {"qpay": ("GP1", "буруу ТТД")}
+    else:
+        assert list(seen) == ["posapi"] and seen["posapi"][0] == rec.ebarimt_id
+    assert FakeHTTP.calls == [] and not is_duplicate_cancel(rec)

@@ -102,11 +102,14 @@ def analyze(tax: list, ours: list, probe: list, *, shifts: list[float], tol: int
     мөрийг төлбөрөөр тайлах → давхардлын БҮТЭН жагсаалт."""
     r = VR.best_shift(tax, ours, shifts, tol, probe=probe)
     left = [t for t in tax if not t["used"]]
+    # Цуцлагдсан манай баримттай холбогдсон мөрийн төлбөр ч «манай баримт файлд бий»
     matched_pay_ids = {t["ours"][1].id for t in tax if t.get("ours")}
-    explained = VR.explain_unmatched_tax(left, probe, r["shift"], tol, matched_pay_ids, scope_ids)
+    reg_sites = VR.foreign_register_sites(left, probe, tol, r["shift"])
+    explained = VR.explain_unmatched_tax(left, probe, r["shift"], tol, matched_pay_ids, scope_ids,
+                                         register_sites=reg_sites)
     dups = VR.duplicate_list(explained, probe, matched_pay_ids, settings.tz_offset_hours)
     return {"r": r, "left": left, "explained": explained, "matched_pay_ids": matched_pay_ids,
-            "duplicates": dups}
+            "register_sites": reg_sites, "duplicates": dups}
 
 
 def reconcile_db(db, tax: list, *, shifts: list[float], tol: int, ours_sites=None,
@@ -123,14 +126,72 @@ def reconcile_db(db, tax: list, *, shifts: list[float], tol: int, ours_sites=Non
 
 # ───────────────────────── цуцлах ─────────────────────────────────────────
 
+# Ажиллаж буй системийн DB-ийн нэр (config.py-ийн анхдагч, .env.example) — бодит
+# цуцлалт ЗӨВХӨН энэ DB дээрээс. audit1013/t_* г.м продын ХУУЛБАР нь продын жинхэнэ
+# msgbill түлхүүр + provider_ref агуулдаг тул тэндээс цуцлахад продын баримт цуцлагдана.
+LIVE_DB_NAME = "parking"
+
+
+def db_name(url: str | None = None) -> str:
+    from sqlalchemy.engine import make_url
+    try:
+        return make_url(url or settings.database_url).database or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def server_problems() -> list[str]:
+    """Энэ сервер/DB дээрээс БОДИТ цуцлалт хийж болох уу (2026-10-13 хяналт: TEST
+    сервер дээр audit1013 (продын хуулбар, продын жинхэнэ msgbill түлхүүртэй) руу
+    --apply хийхэд юу ч саадгүй байв).
+
+    • PARKING_DEPLOY_ROLE=staging → үгүй.
+    • DB нь «parking» биш, эсвэл сервер нь test.*/localhost → үгүй; ГЭХДЭЭ
+      PARKING_DEPLOY_ROLE=production-ийг ил тод заасан бол (прод өөр нэртэй байвал) болно."""
+    import os
+    from urllib.parse import urlparse
+    probs = []
+    role = (os.environ.get("PARKING_DEPLOY_ROLE") or "").strip().lower()
+    if role == "staging":
+        return ["PARKING_DEPLOY_ROLE=staging — ТЕСТ сервер; бодит цуцлалтыг зөвхөн прод дээр хийнэ"]
+    if role == "production":
+        return []
+    name = db_name()
+    if name != LIVE_DB_NAME:
+        probs.append(f"DB «{name}» нь ажиллаж буй системийн «{LIVE_DB_NAME}» биш (продын ХУУЛБАР "
+                     "байж магадгүй) — хуулбар дээрээс бодит msgbill баримт цуцлахгүй")
+    host = (urlparse(settings.public_base_url or "").hostname or "").lower()
+    if host.startswith("test."):
+        probs.append(f"ТЕСТ сервер ({settings.public_base_url}) — бодит цуцлалтыг зөвхөн прод "
+                     "сервер дээр хийнэ")
+    elif host in ("", "localhost", "127.0.0.1"):
+        probs.append(f"сервер тодорхойгүй (PARKING_PUBLIC_BASE_URL={settings.public_base_url or '—'}) — "
+                     ".env ачаалагдаагүй байж магадгүй: /root/PARKING/backend-ээс ажиллуулна уу")
+    return probs
+
+
+def account_scopes(sites: list | None) -> dict:
+    """Зогсоол бүрд цуцлахад оролдох msgbill түлхүүрүүд (түлхүүр БИШ — хүрээ нь):
+    «Хангарьд»: ["tenant:EasyParking", "global"]. YES асуултын өмнө харуулна."""
+    from . import msgbill
+    out = {}
+    for site in sites or []:
+        accs = msgbill.cancel_accounts(site)
+        out[getattr(site, "name", None) or getattr(site, "id", "?")] = [
+            a.scope + (f":{a.scope_name}" if a.scope_name else "") + (" (ТЕСТ)" if a.is_test else "")
+            for a in accs]
+    return out
+
+
 def cancel_ready(db=None, sites: list | None = None) -> list[str]:
     """БОДИТ цуцлалт эхлүүлэхээс өмнөх хамгаалалт. Хоосон жагсаалт = бэлэн.
 
     «msgbill хуурамч» гэдэг нь: MOCK баримт асаалттай тест сервер, ТЕСТ түлхүүр
     (bsk_test_ — msgbill симуляц хийдэг, ТЕГ-т юу ч цуцлагдахгүй) эсвэл localhost
-    хаяг. Түлхүүргүй зогсоол байвал түүний баримтыг цуцалж чадахгүй."""
+    хаяг. Түлхүүргүй зогсоол байвал түүний баримтыг цуцалж чадахгүй. DB нь
+    ажиллаж буй «parking» биш (продын хуулбар) эсвэл ТЕСТ сервер бол цуцлахгүй."""
     from . import msgbill
-    probs = []
+    probs = server_problems()
     if settings.ebarimt_mock_receipts:
         probs.append("PARKING_EBARIMT_MOCK_RECEIPTS=true — MOCK баримттай тест сервер; бодит цуцлалт хийхгүй")
     base = (settings.msgbill_base_url or "").lower()

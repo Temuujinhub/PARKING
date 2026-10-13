@@ -119,6 +119,15 @@ export default function VatRecon({ tenants = [] }) {
     const t = setInterval(async () => {
       try {
         const j = await api('/api/reports/vat-reconcile/cancel-duplicates/status')
+        if (j.idle) {
+          // Сервер дахин эхэлсэн (autodeploy г.м) — job-ийн төлөв санах ойд байсан тул
+          // алга. Цуцлагдсан нь DB-д commit хийгдсэн; дахин тулгаж үлдсэнийг харна.
+          setDupJob(null)
+          setDupBusy(false)
+          toast('Цуцлалтын явцын мэдээлэл алга (сервер дахин эхэлсэн байж магадгүй) — '
+            + 'файлаа дахин тулгаж үлдсэнийг шалгана уу', 'error')
+          return
+        }
         setDupJob(j)
         if (!j.running) {
           setDupBusy(false)
@@ -237,6 +246,11 @@ export default function VatRecon({ tenants = [] }) {
                   Цуцлагдсан: <b className="font-mono">{recon.cancelled}</b> (алгассан)
                 </span>
               )}
+              {recon.cancelled_in_file > 0 && (
+                <span title="ТЕГ файлыг цуцлалтаас ӨМНӨ татсан тул манай цуцалсан баримтын мөр файлд үлдсэн — цуцлагдсан баримттайгаа холбогдсон, зөрүү биш. Шинэ экспортод эдгээр мөр алга болно.">
+                  Үүнээс файлд үлдсэн: <b className="font-mono">{recon.cancelled_in_file}</b>
+                </span>
+              )}
             </div>
           )}
           {/* Кассын (POS) дугаараар — ДДТД-ийн сүүлийн 8 орон нь баримт гаргасан
@@ -258,7 +272,11 @@ export default function VatRecon({ tenants = [] }) {
                 <div>Өөр системийн касс (манай баримтад огт гардаггүй — POS терминал г.м): {
                   recon.foreign_registers.map((k) => {
                     const st = recon.group_stats?.[k]
-                    return st ? `…${k} (${st.matched}/${st.rows} мөр манай төлбөртэй таарсан)` : `…${k}`
+                    // Кассын зогсоол (QR биш тааралтын олонх) — өөр зогсоолын төлбөр цуцлагдахгүй
+                    const rs = recon.register_sites?.[k]
+                    const where = !rs ? '' : rs.site_id ? `, «${rs.site_name}» ${Math.round(rs.share * 100)}%`
+                      : `, зогсоол ТОДОРХОЙГҮЙ (${rs.sites} зогсоолд) — цуцлахгүй`
+                    return st ? `…${k} (${st.matched}/${st.rows} мөр манай төлбөртэй таарсан${where})` : `…${k}`
                   }).join(' · ')}</div>
               )}
               <div>Манай баримтын касс: {Object.entries(recon.ours_pos || {})

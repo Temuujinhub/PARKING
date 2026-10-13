@@ -280,6 +280,7 @@ export default function Vat() {
               {job.running ? '⏳ Нөхөлт явагдаж байна' : '✔ Сүүлийн нөхөлт дууссан'} · {job.done}/{job.total}
               {' '}· баталгаажсан <b className="font-mono">{job.ok}</b> · хүлээгдэж буй <b className="font-mono">{job.queued || 0}</b> · шалгах <b className="font-mono">{job.failed}</b>
               {job.skipped ? ` · алгассан ${job.skipped}` : ''}
+              {job.skipped_duplicate_of_pos ? ` (үүнээс POS-ийн давхардал гэж цуцалсан ${job.skipped_duplicate_of_pos} — дахин үүсгэхгүй)` : ''}
               {job.remaining ? ` · үлдсэн ${fmt(job.remaining)} (дахин дарна)` : ''}
               {job.stopped ? ` · ${job.stopped}` : ''}
               {!job.running && job.top_errors?.[0] && <span className="text-amber-400"> · «{job.top_errors[0].error.slice(0, 220)}» ×{job.top_errors[0].count}</span>}
