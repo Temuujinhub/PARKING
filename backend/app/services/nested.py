@@ -48,6 +48,21 @@ def cap_minutes(site: ParkingSite | None) -> int:
     return max(0, int(hours)) * 60
 
 
+def child_cap_minutes(db: Session, child: ParkingSite) -> int:
+    """ТУСДАА site-тай (parent/child) загварын хүүхэд зогсоолын хязгаар.
+
+    Хүүхэд дээр тохируулаагүй (NULL) бол ЭЦЭГ зогсоолын утгыг авна, тэр ч
+    хоосон бол глобал. Өмнө нь зөвхөн хүүхдийнхийг уншдаг байсан тул админ
+    «Дотор хугацааг хасах хязгаар»-ыг гадна (эцэг) зогсоол дээр 0 гэж тавихад
+    backend үл тоож глобал 4 цагаар тасалдаг байв — 100 айл 10-07..10-12:
+    эмнэлгийн дотор 8–10 цаг байсан 33 машинд 4 цагийг л хасаж 368,000₮ нэхсэн."""
+    if child is not None and child.transit_max_hours is None and child.parent_site_id:
+        parent = db.get(ParkingSite, child.parent_site_id)
+        if parent is not None and parent.transit_max_hours is not None:
+            return cap_minutes(parent)
+    return cap_minutes(child)
+
+
 def pause_cap_minutes(db: Session, site_id: str) -> int:
     """Гадна session дээрх зогсолтод хэрэглэх дээд хязгаар (минут). 0 = хязгааргүй.
 
@@ -55,7 +70,8 @@ def pause_cap_minutes(db: Session, site_id: str) -> int:
     хэрэглэхээ мэдэх хэрэгтэй, гэвч аль доторх зогсоолд орсныг session өөрөө
     хадгалдаггүй.
 
-      • ТУСДАА site-тай (parent/child) загвар: хүүхэд зогсоол(ууд)-ын тохиргоо.
+      • ТУСДАА site-тай (parent/child) загвар: хүүхэд зогсоол(ууд)-ын тохиргоо
+        (хүүхэд дээр хоосон бол эцгийнх — `child_cap_minutes`).
         Хэд хэдэн доторх зогсоолтой бол ХАМГИЙН БАГА хязгаарыг авна (аюулгүй тал).
       • НЭГ site доторх (`nested_inner` камер) загвар: хүүхэд зогсоол байхгүй тул
         тухайн зогсоолын ӨӨРИЙН `transit_max_hours`. Өмнө нь энэ тохиолдолд
@@ -66,7 +82,7 @@ def pause_cap_minutes(db: Session, site_id: str) -> int:
     kids = db.query(ParkingSite).filter(ParkingSite.parent_site_id == site_id).all()
     if not kids:
         return cap_minutes(db.get(ParkingSite, site_id))
-    caps = [cap_minutes(k) for k in kids]
+    caps = [child_cap_minutes(db, k) for k in kids]
     return 0 if 0 in caps else min(caps)
 
 
@@ -138,7 +154,7 @@ def on_inner_exit(db: Session, site: ParkingSite, plate: str, at: datetime) -> i
     parent = _parent_session(db, site, plate)
     if parent is None or not parent.paused_since:
         return 0
-    mins = settle_pause(parent, at, cap_minutes(site))
+    mins = settle_pause(parent, at, child_cap_minutes(db, site))
     log.info("[nested] %s: «%s»-аас гарлаа — гадна тоолуур %d минут зогссон "
              "(нийт %d мин хасагдана)", plate, site.name, mins, parent.paused_minutes)
     return mins

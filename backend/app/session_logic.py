@@ -179,8 +179,8 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
         тэр машин гадна талбайд энгийн жолооч шиг төлбөр төлнө. Түүний эрхийг
         `find_inner_registered` шалгана.
       • Тусдаа site-тай (parent/child) давхар зогсоолд: ХҮҮХЭД зогсоол дээр дуудагдвал
-        ЭЦЭГ зогсоолд «дотоод» (inner/both) хүрээгээр бүртгэсэн машин ч гэрээт гэж
-        тоологдоно — ингэснээр «Рашбулаг ЭТТ»-д дотоод жагсаалтаа нэг л газар
+        ЭЦЭГ зогсоолд «дотоод» (inner/both) хүрээгээр эсвэл TRANSIT гэрээгээр
+        бүртгэсэн машин ч гэрээт гэж тоологдоно — ингэснээр «Рашбулаг ЭТТ»-д дотоод жагсаалтаа нэг л газар
         хөтөлж, аль ч загварт (нэг site / хоёр site) ижил үйлчилнэ.
     Тусгай хэрэгцээт (ХБИ г.м) жагсаалт ч түрээслэгчийн хил ДОТРОО л үйлчилнэ:
     site_id NULL + тухайн түрээслэгчийн tenant_id = түрээслэгчийн бүх зогсоол.
@@ -191,8 +191,15 @@ def find_registered(db: Session, plate: str, site_id: str) -> RegisteredDriver |
         & (RegisteredDriver.access_scope != "inner")
     cond = outer
     if site is not None and site.parent_site_id:
+        # ЭЦЭГ зогсоолын «Дамжин (доторх зогсоолын машин)» TRANSIT гэрээ хүрээнээс
+        # үл хамааран доторх зогсоолд хүчинтэй. Жолоочийн UI «Хамрах хүрээ»
+        # талбарыг зөвхөн дотоод КАМЕРТАЙ зогсоолд харуулдаг тул эцэг зогсоолд
+        # импортолсон TRANSIT бүртгэл ямагт «site» болж, «Зөвхөн бүртгэлтэй»
+        # доторх зогсоолд хаалт нээгддэггүй байв (Хангарьд → Рашбулаг шороо
+        # 2026-10-13: 262 TRANSIT бүртгэлтэй ч автомат нээлт 0).
         cond = outer | ((RegisteredDriver.site_id == site.parent_site_id)
-                        & RegisteredDriver.access_scope.in_(INNER_SCOPES))
+                        & (RegisteredDriver.access_scope.in_(INNER_SCOPES)
+                           | (RegisteredDriver.contract_type == "TRANSIT")))
     return _registered_order(_registered_base(db, plate).filter(cond)).first()
 
 
@@ -1432,7 +1439,11 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Nested: энэ зогсоол өөр зогсоолын ДОТОР бол гадна session-ий төлбөрийн
     # тоолуурыг зогсооно. Давхар уншилтад найдвартай (аль хэдийн зогссоныг
     # дахин эхлүүлэхгүй) тул `existing` замд ч дуудаж болно.
-    if _site and _site.parent_site_id:
+    # «Зөвхөн бүртгэлтэй» доторх зогсоолд бүртгэлгүй машинд хаалт НЭЭГДЭХГҮЙ
+    # (доорх `denied`) — машин дотогш ороогүй тул гадна тоолуурыг зогсоохгүй.
+    # Өмнө нь татгалзсан машины гадна тоолуур ч зогсож (4ц хүртэл) үнэгүй
+    # болдог байв (Рашбулаг шороо 2026-10-13).
+    if _site and _site.parent_site_id and not (restricted and registered is None):
         from .services.nested import on_inner_entry
         on_inner_entry(db, _site, plate, session.entry_time)
 
