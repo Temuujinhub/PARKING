@@ -719,6 +719,15 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
                     entity_id=s.id, detail={"plate": plate, "entry_time": entry_time.isoformat()}))
     from ..services.hospital_benefits import attach_daily_grant
     attach_daily_grant(db, s)
+    # Доторх (хүүхэд) зогсоолд гараар бүртгэсэн машин — live орох уншилттай ижил
+    # гадна тоолуурыг зогсооно (2026-10-14: өмнө нь огт зогсоодоггүй, дотор
+    # өнгөрүүлсэн хугацаа нэхэгддэг байв). Доторх хаалтаар нэвтрэх эрхгүй машинд
+    # (бүртгэлгүй/хориглогдсон — live handle_entry-ийн denied/black_blocks) үгүй.
+    _msite = db.get(ParkingSite, site_id)
+    if _msite is not None and _msite.parent_site_id:
+        from ..services.nested import _admitted, on_inner_entry
+        if _admitted(db, _msite, plate):
+            on_inner_entry(db, _msite, plate, entry_time, child=s)
     db.commit()
     await manager.broadcast(site_id, "ENTRY_EVENT", {
         "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),

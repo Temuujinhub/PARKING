@@ -181,6 +181,14 @@ DEFAULTS: dict[str, dict] = {
         "invoice_quote_minutes": 10,
         # Гарах хаалтан дээр данснаас автомат хасалт хийх эсэх.
         "wallet_auto_deduct": True,
+        # ДОТООД ЗОГСООЛЫН ГАРАХ УНШИЛТ АЛДАГДСАН зогсолтын хасах дээд хязгаар (цаг)
+        # — ЭЦЭГ (гадна) зогсоолоор (2026-10-14). Доторх зогсоолын «Дотор хугацааг
+        # хасах хязгаар» 0 (батлагдсан зогсолт хязгааргүй) үед л үйлчилнэ
+        # (nested.unverified_cap_minutes). Анхдагч = .env transit_max_hours (4).
+        # 100 айл: эзэн 24ц гэж шийдсэн (6238ӨМҮ ~22ц дотор байсан ч 4ц хасагдана).
+        # 0 = хязгааргүй (доторх гарах уншилт алдагдсан машин бүх гадна хугацаагаа
+        # үнэгүй авна — эрсдэлтэй).
+        "inner_unverified_cap_hours": 4,
     },
     BARRIER_KEY: {
         # Хаалт/уншилтын ЦАГИЙН цонхнууд — өмнө нь зөвхөн .env-д байсан тул
@@ -251,6 +259,7 @@ ENV_FALLBACK: dict[tuple[str, str], str] = {
     (BARRIER_KEY, "entry_burst_seconds"): "entry_burst_seconds",
     (BARRIER_KEY, "reopen_cooldown_sec"): "barrier_reopen_cooldown_sec",
     (EXITRULES_KEY, "fake_exit_minutes"): "suspicious_exit_minutes",
+    (EXITRULES_KEY, "inner_unverified_cap_hours"): "transit_max_hours",
 }
 
 
@@ -298,7 +307,8 @@ PER_SITE: dict[str, set[str]] = {
                     "reopen_max_hours", "reopen_skip_exit_read",
                     "paid_wait_fallback_minutes", "exit_reread_seconds",
                     "exit_read_valid_minutes",
-                    "invoice_quote_minutes", "wallet_auto_deduct"},
+                    "invoice_quote_minutes", "wallet_auto_deduct",
+                    "inner_unverified_cap_hours"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
                   "reopen_cooldown_sec", "exit_dedup_reopen"},
     EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_methods", "pos_terminal_users"},

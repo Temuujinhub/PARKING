@@ -1410,7 +1410,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
                     # тул тоолуур зогсоогүй — зөв дугаараар хаалт нээгдэж байгаа
                     # тул ОДОО зогсооно (хэвийн орох замтай ижил нөхцөл).
                     from .services.nested import on_inner_entry
-                    on_inner_entry(db, _site, plate, prev_session.entry_time)
+                    on_inner_entry(db, _site, plate, prev_session.entry_time,
+                                   child=prev_session)
                 opened = (await ensure_entry_barrier(db, device, plate, prev_session.id, _reg)
                           if allow_open and (not restricted or _reg) else False)
                 db.commit()
@@ -1530,7 +1531,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # Хуучин (гарах уншилтгүй үлдсэн) доторх сешн дахин ашиглагдвал түүний
         # entry_time нь ӨМНӨХ айлчлалынх — гадна сешн эхлэхээс ч өмнө байж
         # болно (8810УКР 2026-10-13). Зогсолт ОДООГООС эхэлнэ.
-        on_inner_entry(db, _site, plate, now if existing else session.entry_time)
+        # Шинээр үүссэн сешнийг өгнө — OCR-ойролцоо гадна сешнтэй тохирвол дугаарыг засна.
+        on_inner_entry(db, _site, plate, now if existing else session.entry_time,
+                       child=None if existing else session)
 
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
@@ -1543,8 +1546,13 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # (нэг RPC сессээр) илгээгдэнэ. Ингэснээр нэвтрэлт хоёр дахин цөөрч,
     # камерын сессийн давхцлаас (худал «нууц үг буруу») сэргийлнэ.
     _local_hm = (session.entry_time + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
-    # Формат буруу дугаар + hold/strict policy → хаалтыг түр барина (доор шийднэ)
-    held = hold_active and not black_blocks and not denied
+    # Формат буруу дугаар + hold/strict policy → хаалтыг түр барина (доор шийднэ).
+    # Доторх зогсоол: on_inner_entry гадна сешний ЗӨВ дугаараар засварласан бол
+    # (OCR-ойролцоо ганц тохирол — 7969УА → 7969УАА) зөв уншилт ирсэнтэй адил —
+    # барихгүй. Эс бол entry_hold_expire засагдсан дугаарыг «autocorrect нээсэн»
+    # гэж үзээд хаалтыг ОГТ нээхгүй үлдээнэ.
+    held = (hold_active and not black_blocks and not denied
+            and not is_valid_plate(session.plate_number))
     _entry_lines = None if (black_blocks or denied or held) else _site_screen_lines(db, site_id, "entry")
     if black_blocks:
         _welcome = ""
@@ -1771,10 +1779,19 @@ def exit_low_confidence_override(db, device, plate, reason) -> bool:
     харагдсан (EREL 39) — бүгд хаягдаж «төлсөн ч нээгдээгүй»/гараар гаргалт
     болсон. Санамсаргүй буруу уншилт яг өөр машины ИДЭВХТЭЙ бүртгэлийн 7
     тэмдэгттэй давхцах магадлал маш бага. Текстийн зөрчил, формат буруу,
-    ойролцоо (fuzzy) тохирол — хэвээр review."""
+    ойролцоо (fuzzy) тохирол — хэвээр review.
+
+    ДОТООД (хүүхэд, parent_site_id) зогсоолд ХЭРЭГЛЭХГҮЙ (2026-10-14): доторх
+    гарах камер дөнгөж ОРЖ буй машиныг ч уншдаг тул итгэл багатай уншилт идэвхтэй
+    доторх сешнтэй таарах нь элбэг — Рашбулаг шороо 4464УБЛ итгэл 22-оор «гарч»,
+    гадна тоолуур дотор байх хугацаанд үргэлжилсэн. Төлбөргүй зогсоолд хаалт
+    нээгдээгүйн хохирол бага (оператор), буруу «гарц»-ын хохирол — гадна төлбөр."""
     if not plate or not reason:
         return False
     if not (reason.startswith('confidence<') or reason == 'plate_confidence_unknown'):
+        return False
+    _site = db.get(ParkingSite, device.site_id)
+    if _site is not None and _site.parent_site_id:
         return False
     return is_valid_plate(plate) and get_open_session(db, plate, device.site_id) is not None
 
@@ -1790,6 +1807,124 @@ def reject_exit_for_review(db, device, plate, confidence, raw, reason):
                                                   'lane_no': device.lane_no, 'lane_dir': 'exit',
                                                   'created_at': event.created_at.isoformat()})
     return {'action': 'review_required', 'plate': plate, 'barrier_opened': False, 'reason': reason}
+
+
+def _inner_exit_candidate(db: Session, device: Device, plate: str,
+                          now: datetime) -> ParkingSession | None:
+    """Төлбөргүй (no_charge) ДОТООД зогсоолын гарах уншилт — доторх сешн ЯГ/OCR
+    андуурлаар олдоогүй. Машины ЗОГССОН гадна сешн (яг, эсвэл ганц OCR-ойролцоо —
+    `nested.match_paused_parent`) байвал түүнийг буцаана: энэ нь БАТЛАГДСАН доторх
+    гарц (`_inner_exit_fallback`). 2026-10-14 өглөө 100 айлын доторх гарах 26
+    уншилтын 25 нь `no_matching_stay_review` болж хаалт нээгдээгүй — доторх сешн нь
+    орох OCR хувилбараар (7969УА) үүссэн байв.
+
+    None = ердийн урсгал (review) хэвээр:
+      • үл мэдэгдэх машин — зогссон гадна сешн алга (яг дугаартай нь зогсоогүй ч);
+      • зогсолт `fake_exit_minutes`-ээс богино — доторх ГАРАХ камер дөнгөж ОРЖ буй
+        машиныг уншдаг (cross-read 15–104с; close_session_forced-тэй ижил босго);
+      • өрийн дүрмээр гарах хаалт хаагдах машин (ердийн гарцтай ижил)."""
+    site = db.get(ParkingSite, device.site_id)
+    if not (site and site.parent_site_id and getattr(site, "no_charge", False)):
+        return None
+    from .services.nested import match_paused_parent
+    parent = match_paused_parent(db, site, plate, now)
+    if parent is None:
+        return None
+    if (now - parent.paused_since).total_seconds() <= 60 * int(
+            _exit_rules(db, site.id)["fake_exit_minutes"]):
+        return None
+    from .services.app_settings import get_blacklist_rules
+    _block_at = get_blacklist_rules(db, site.id)["block_exit_debt_count"]
+    if _block_at and find_registered(db, parent.plate_number, site.id) is None:
+        from .models import Compensation
+        if (db.query(Compensation).filter(Compensation.plate_number == parent.plate_number,
+                                          Compensation.status == "PENDING").count() >= _block_at):
+            return None
+    return parent
+
+
+async def _inner_exit_fallback(db: Session, device: Device, parent: ParkingSession, plate: str,
+                               confidence: float, raw: dict, now: datetime,
+                               allow_open: bool) -> dict | None:
+    """`_inner_exit_candidate`-ийн олсон ЗОГССОН гадна сешн — батлагдсан доторх гарц:
+    гадна тоолуурыг уншилтын цагаар үргэлжлүүлж (`on_inner_exit`, батлагдсан
+    хязгаар), тухайн айлчлалын хувилбар (OCR зөрүүтэй) доторх сешнийг хааж, доторх
+    гарах хаалтыг нээнэ (төлөх зүйлгүй). None = мөр өөрчлөгдсөн (уралдаан)."""
+    site = db.get(ParkingSite, device.site_id)
+    from .services.nested import inner_plate_similar, on_inner_exit
+    from sqlalchemy.exc import OperationalError
+    try:
+        parent = (db.query(ParkingSession).enable_eagerloads(False)
+                  .filter(ParkingSession.id == parent.id,
+                          ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+                  .populate_existing().with_for_update(nowait=True).first())
+    except OperationalError:
+        db.rollback()
+        return {"action": "processing", "plate": plate}
+    if parent is None or not parent.paused_since or parent.paused_since > now:
+        return None
+    paused_from = parent.paused_since
+    mins = on_inner_exit(db, site, parent.plate_number, now, parent=parent)
+    # Тухайн айлчлалын доторх сешн(үүд) — гадна дугаартай ижил/ойролцоо. Өөр
+    # идэвхтэй гадна сешнтэй (яг/ойролцоо) холбогдож болохыг ХӨНДӨХГҮЙ.
+    others = (db.query(ParkingSession.plate_number)
+              .filter(ParkingSession.site_id == parent.site_id, ParkingSession.id != parent.id,
+                      ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])).all())
+    lo = parent.entry_time - timedelta(minutes=2) if parent.entry_time else None
+    closed = []
+    for c in (db.query(ParkingSession)
+              .filter(ParkingSession.site_id == site.id,
+                      ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+              .all()):
+        if not (c.plate_number == parent.plate_number
+                or inner_plate_similar(c.plate_number, parent.plate_number)):
+            continue
+        if (lo is not None and c.entry_time < lo) or c.entry_time > now:
+            continue
+        if any(p == c.plate_number or inner_plate_similar(c.plate_number, p) for (p,) in others):
+            continue
+        fee = session_fee_info(db, c, at=now)
+        c.exit_time, c.exit_confirmed, c.exit_device_id = now, True, device.id
+        c.confidence_exit = confidence
+        c.duration_minutes = fee["duration_minutes"]
+        c.base_fee, c.vat_amount, c.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
+        c.status = "FREE" if fee["is_free"] else "MANUAL_CLOSED"
+        finish_hospital_usage(c, fee)
+        c.note = (f"{c.note + ' | ' if c.note else ''}Доторх гарах уншилт «{plate}» — гадна "
+                  f"«{parent.plate_number}»-ийн доторх бүртгэл (хаав)")[:1000]
+        closed.append(c)
+    db.add(LprEvent(site_id=site.id, device_id=device.id, plate_number=plate,
+                    lane_dir="exit", confidence=confidence, accepted=True,
+                    raw=strip_images(raw)))
+    from .models import AuditLog
+    db.add(AuditLog(username="system", action="NESTED_INNER_EXIT", entity="session",
+                    entity_id=parent.id,
+                    detail={"read_plate": plate, "parent_plate": parent.plate_number,
+                            "paused_since": paused_from.isoformat(), "credited_minutes": mins,
+                            "closed_child_sessions": [c.id for c in closed],
+                            "device_id": device.id}))
+    db.commit()
+    log.info("[nested] %s: «%s» доторх гарах — доторх сешнгүй ч гадна «%s» зогссон байсан: "
+             "батлагдсан гарц (%d мин), хаалт нээнэ", plate, site.name, parent.plate_number, mins)
+    opened = False
+    if allow_open:
+        opened = await ensure_inner_barrier(db, device, closed[0].id if closed else None,
+                                            parent.plate_number, "inner_exit")
+    _hm = (now + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
+    _lines = _site_screen_lines(db, site.id, "exit")
+    _stay = int((now - paused_from).total_seconds() // 60)
+    _bye = (_screen_text_from_lines(_lines, plate=parent.plate_number, time_str=_hm,
+                                    duration_minutes=_stay, reason="Үнэгүй")
+            if _lines else render_screen_text(settings.screen_bye_free_text,
+                                              plate=parent.plate_number, duration_minutes=_stay))
+    notify(site.id, "EXIT_COMPLETED", {
+        "session_id": closed[0].id if closed else None, "plate": parent.plate_number,
+        "status": "FREE", "barrier_opened": opened, "total_fee": 0.0,
+        "parent_session_id": parent.id, "inner_exit_fallback": True})
+    schedule_display(device.ip_address, _bye, camera_credentials(device))
+    return {"action": "inner_exit_fallback", "session_id": closed[0].id if closed else None,
+            "parent_session_id": parent.id, "plate": parent.plate_number,
+            "credited_minutes": mins, "barrier_opened": opened}
 
 
 async def handle_exit(db: Session, device: Device, plate: str, confidence: float, raw: dict,
@@ -1810,7 +1945,14 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # the blanket review stopped ~80% of former EXIT_OCR_MATCH openings).
     ocr_session = (None if get_open_session(db, plate, site_id)
                    else ocr_confusion_match(db, plate, site_id))
-    if ocr_session is None:
+    # Төлбөргүй доторх зогсоолын гарах уншилт — доторх сешнгүй ч гадна сешн нь
+    # ЗОГССОН машин (2026-10-14: 26-аас 25 review). Доорх эхний review-үүдийг
+    # алгасаж, ердийн сэргээлтийн (auto_reopen) дараа `_inner_exit_fallback`-аар
+    # гаргана. Үл мэдэгдэх машинд None — review хэвээр.
+    _fb_parent = (_inner_exit_candidate(db, device, plate, now)
+                  if ocr_session is None and get_open_session(db, plate, site_id) is None
+                  else None)
+    if ocr_session is None and _fb_parent is None:
         if not is_valid_plate(plate):
             return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
         _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
@@ -1916,6 +2058,12 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         # Машин дотор байсаар байтал авто хаалт хаачихсан тохиолдол (7 хоногт
         # «бүртгэлгүй гарах»-ын 23%). Олдвол ердийн гарах урсгал үргэлжилнэ.
         session = auto_reopen_for_exit(db, plate, site_id, exact_only=True)
+    if session is None and _fb_parent is not None:
+        _fb = await _inner_exit_fallback(db, device, _fb_parent, plate, confidence, raw, now,
+                                         allow_open)
+        if _fb is not None:
+            return _fb
+        return reject_exit_for_review(db, device, plate, confidence, raw, 'no_matching_stay_review')
     if session is None and find_registered(db, plate, site_id) is None:
         # Unknown text is not evidence for a zero-fee/no-entry gate opening.
         # The site's «Орох цаг олдоогүй машины суурь хураамж» (no_session_fee,

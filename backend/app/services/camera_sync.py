@@ -32,6 +32,26 @@ BURST_SEC = 600          # нэг дугаарын дараалсан уншил
 ACTIVE = ("OPEN", "AWAITING_PAYMENT", "PAID")
 
 
+def _inner_variant_exists(db, site_id: str, plate: str, at: datetime) -> bool:
+    """ДОТООД (хүүхэд) зогсоолд энэ уншилтын OCR хувилбар дугаартай бүртгэл аль
+    хэдийн бий юу — идэвхтэй, ±1 цагт орсон, эсвэл гарах нотолгоотой зогсолт
+    `at`-ыг агуулсан (энгийн яг-дугаарын шалгалтуудтай ижил гурван нөхцөл).
+    Ойролцоо = `nested.inner_plate_similar` (гадна сешн тохируулахтай ижил)."""
+    from sqlalchemy import or_
+    from .nested import inner_plate_similar
+    rows = (db.query(ParkingSession.plate_number)
+            .filter(ParkingSession.site_id == site_id,
+                    ParkingSession.plate_number != plate,
+                    or_(ParkingSession.status.in_(ACTIVE),
+                        ParkingSession.entry_time.between(at - timedelta(hours=1),
+                                                          at + timedelta(hours=1)),
+                        (ParkingSession.exit_confirmed.is_(True)
+                         & (ParkingSession.entry_time <= at)
+                         & (ParkingSession.exit_time >= at))))
+            .all())
+    return any(inner_plate_similar(plate, p) for (p,) in rows)
+
+
 def _sync_inner(db, site, cam: dict, watermark, horizon, rules: dict,
                 dry_run: bool) -> tuple[int, int]:
     """ДОТООД (дамжин) хаалтны логийг нөхөх — ЭНГИЙН ДҮРЭМ ЭНД ҮЙЛЧЛЭХГҮЙ.
@@ -246,6 +266,13 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 ParkingSession.exit_time >= ev["time"]).first():
             skipped += 1
             continue
+        # ДОТООД (хүүхэд) зогсоол: дээрх гурван шалгалтыг OCR-ойролцоо дугаараар ч
+        # хийнэ. Доторх камер нэг машиныг 7969УАА / 7969УА гэж ээлжлэн уншдаг тул
+        # live-аар үүссэн сешнтэй давхар бүртгэл үүсч (төлбөргүй ч «дотор байгаа»
+        # машин олширч), гадна тоолуурын тохиролыг будлиулдаг байв (2026-10-14).
+        if site.parent_site_id and _inner_variant_exists(db, site.id, plate, ev["time"]):
+            skipped += 1
+            continue
         if dry_run:
             created += 1
             continue
@@ -268,7 +295,7 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 # `ex` байвал доорх close_session_forced-ийн on_inner_exit нь
                 # paused_since хоосон тул дахин тоолохгүй.
                 from .nested import credit_backfilled_child
-                credit_backfilled_child(db, site, plate, ev["time"], ex)
+                credit_backfilled_child(db, site, plate, ev["time"], ex, child=s)
             due = 0.0
             if ex:
                 # `ex` байна = камерын логт ГАРСАН нь тогтоогдсон → баримттай

@@ -392,8 +392,11 @@ try:
     print("\nh. Цуврал уншилт: junk → зөв дугаар (autocorrect) — эцгийн тоолуур зогсоно")
     outer, inner, d = mk_pair(tpl)
     P = "9911ЖЖА"
+    # Гадна орсноос 15 мин (> OCR-ойролцоо тохирлын 10 мин цонх) — эхний junk уншилт
+    # гадна сешнтэй тохирохгүй тул autocorrect зам өөрөө шалгагдана (2026-10-14)
     po = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number=P,
-                        entry_time=now - timedelta(minutes=5), status="OPEN", paused_minutes=0)
+                        entry_time=datetime.utcnow() - timedelta(minutes=15), status="OPEN",
+                        paused_minutes=0)
     db.add(po)
     db.commit()
     r1 = run(handle_entry(db, d["ientry"], "9911ЖЖ", 0.6, raw("9911ЖЖ")))
@@ -401,6 +404,24 @@ try:
     po = sess(outer, P)
     check("2 дахь уншилт autocorrect", r2.get("action") == "plate_autocorrect", (r1, r2))
     check("autocorrect замд эцгийн тоолуур зогсов", po.paused_since is not None, po.paused_since)
+
+    print("\nh2. Junk уншилт гадна орсноос 10 мин дотор — OCR-ойролцоо ганц гадна сешн (2026-10-14)")
+    outer, inner, d = mk_pair(tpl)
+    P = "9941ЖЖА"
+    po = ParkingSession(id=str(uuid.uuid4()), site_id=outer.id, plate_number=P,
+                        entry_time=datetime.utcnow() - timedelta(minutes=1), status="OPEN",
+                        paused_minutes=0)
+    db.add(po)
+    db.commit()
+    r1 = run(handle_entry(db, d["ientry"], "9941ЖЖ", 0.6, raw("9941ЖЖ")))
+    po = sess(outer, P)
+    ki = db.get(ParkingSession, r1.get("session_id"))
+    check("эхний junk уншилтаар эцгийн тоолуур зогсов", po.paused_since is not None, r1)
+    check("доторх сешний дугаар гадныхаар засагдав", ki is not None and ki.plate_number == P,
+          ki.plate_number if ki else None)
+    check("hold-д баригдалгүй хаалт нээгдэв", r1.get("barrier_opened") and not r1.get("held"), r1)
+    r2 = run(handle_entry(db, d["ientry"], P, 0.95, raw(P)))
+    check("2 дахь (зөв) уншилт шинэ сешн үүсгэсэнгүй", r2.get("action") in ("burst_dedup", "dedup"), r2)
 
     print("\ni. Хязгаарын дүрэм — батлагдсан (0 = хязгааргүй) / батлагдаагүй (глобал)")
     outer, inner, d = mk_pair(tpl, parent_cap=0)

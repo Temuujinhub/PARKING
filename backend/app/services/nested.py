@@ -59,15 +59,58 @@
     сэргээлт/нөхөлтийн зам тэднийг «дотор байсан» гэж тооцохгүй.
   • Өмнөх айлчлалаас үлдсэн (гадна сешн эхлэхээс өмнө нээгдсэн) доторх сешн
     энэ айлчлалд зөвхөн шинэ доторх ОРОХ уншилтаас тоологдоно (8810УКР).
+
+OCR-ойролцоо тохирол (2026-10-14; `match_parent`, `inner_plate_similar`):
+  Гадна ба доторх ОРОХ камер нэг машиныг 1 тэмдэгтээр зөрүүтэй уншдаг —
+  7969УАА/7969УА, 6238ӨМҮ/6238ӨМ, 2678УКР/2678УР, 9707УАС/9707УАО, 4171УЕА/4171УРА,
+  0450УЕМ/0450УБ, 8333УАО/8333УАС. Яг таарах гадна сешн олдохгүй тул тоолуур
+  зогсоогүй, дотор өнгөрүүлсэн бүх хугацаа нэхэгдэж байв (6238ӨМҮ ~1,348 мин дотор →
+  25,000₮ + 2,000₮ өр; 7969УАА 280-аас 272 мин дотор → 11,000₮; 2678УКР 1,000₮).
+  Дүрэм — ЯГ таарах идэвхтэй гадна сешн байхгүй үед л:
+    • ойролцоо (`inner_plate_similar`: `plates_ocr_similar` ба тайрагдсан уншилт,
+      эсвэл ижил 4 цифр + үсгийн хэсэг ≤1 засвар, OCR андуурлын хос 0-ээр) гадна
+      идэвхтэй сешн ЯГ НЭГ байх — 0 эсвэл 2+ бол тохируулахгүй (өнөөдрийнх шиг);
+    • тэр нь өөр доторх зогсолтоор аль хэдийн ЗОГСООГҮЙ байх;
+    • гадна камерт сүүлд харагдсан (орох эсвэл гарах уншилт) нь доторх уншилтаас
+      `_FUZZY_WINDOW` (10 мин) дотор ӨМНӨ байх. Хэмжилт (audit1014, 10-07..14):
+      гадна орох → доторх орох хоцрогдол 100 айл медиан 17с, max 136с; Рашбулаг
+      шороо медиан 44с, max 571с. 10 мин нь max-ыг багтаана; түүнээс урт
+      хоцрогдол бол гадна талбайд зогсоод хожим орсон машин — ойролцоо уншилтаар
+      ТААМАГЛАХГҮЙ (дутуу нэхэмжлэхээс илүү ихээр нэхэх нь аюулгүй тал).
+  Тохирвол доторх сешний дугаарыг гадныхаар засна (тэмдэглэлтэй) — дараагийн
+  доторх гарах уншилт тэр сешнтэй таарна. Доторх гарах уншилтад (`on_inner_exit`)
+  нөхцөл нь «ЗОГССОН ганц нэр дэвшигч» (цонхгүй — машин хэдэн цаг дотор байж
+  болно). `reapply_child_pauses` яг дугаараар хэвээр (хоёр уншилт хоёулаа
+  алдагдсан тохиолдол — нотолгоо сул).
+
+Доторх гарах уншилтын нөхөлт (`match_paused_parent`, session_logic.handle_exit):
+  төлбөргүй (no_charge) доторх зогсоолын гарах камер доторх сешнгүй машин уншвал
+  ЗОГССОН гадна сешнийг (яг, эсвэл дээрх ганц ойролцоо) хайна — олдвол батлагдсан
+  доторх гарц, хаалт нээнэ. Олдохгүй (үл мэдэгдэх машин) бол review хэвээр.
+  10-14 өглөө 100 айлын доторх гарах 26 уншилтын 25 нь review болж хаалт нээгдээгүй.
+
+Гарцад татгалзсан машин дотогш буцвал (`_revert_refused_exit`): гадна сешн
+  AWAITING_PAYMENT (төлбөргүй, төлбөрийн оролдлогогүй) байхад доторх ОРОХ уншилт
+  ирвэл гадна сешнийг OPEN болгож тоолуурыг зогсооно — дараагийн жинхэнэ гарцад
+  ердийнхөөрөө бодогдоно. Өмнө нь гарах уншилтын үеийн дүн царцаж (6238ӨМҮ
+  10-14 06:44 → 25,000₮), 2 цагийн дараа өр болж, жинхэнэ гарцад нэмж 2,000₮
+  «орох уншилтгүй» хураамж үүсдэг байв.
+
+Хязгаар (2026-10-14 эзэн): 100 айлд доторх гарах уншилт алдагдвал 24 цаг хүртэл
+  хасна — Тохиргоо → Төлбөрийн дүрэм → «Доторх гарах уншилт алдагдсан зогсолтын
+  хязгаар» (`inner_unverified_cap_hours`, эцэг зогсоол дээр). Хүүхдийн
+  `transit_max_hours`=24 нь БАТЛАГДСАН зогсолтыг ч 24ц-аар таслах тул (7685УБО 55ц,
+  6238ӨМҮ 31ц батлагдсан) тусдаа тохиргоо болгов — `unverified_cap_minutes`.
 """
 import logging
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import LprEvent, ParkingSession, ParkingSite
+from ..models import AuditLog, LprEvent, ParkingSession, ParkingSite
 
 log = logging.getLogger("parking.nested")
 
@@ -75,6 +118,183 @@ _ACTIVE = ("OPEN", "AWAITING_PAYMENT", "PAID")
 # Доторх сешн гадна сешнээс ийм хэмжээгээр ӨМНӨ эхэлсэн бол «өмнөх айлчлалынх»
 # (камер/серверийн цагийн бага зөрүүг тэвчинэ)
 _STALE_TOLERANCE = timedelta(minutes=2)
+# OCR-ойролцоо тохиролд: гадна камерт сүүлд харагдсанаас доторх ОРОХ уншилт хүртэл
+# (модулийн docstring — Рашбулаг шороо max 571с, 100 айл max 136с)
+_FUZZY_WINDOW = timedelta(minutes=10)
+_DIGITS_LETTERS = re.compile(r"^(\d{4})(\D+)$")
+
+
+def _letters_close(a: str, b: str) -> bool:
+    """Үсгийн хэсэг ≤1 засвараар (оруулах/хасах/солих) ижил. OCR андуурлын хос
+    (`_ocr_canon`, `_OCR_CONFUSABLE_PAIRS` — Б/Е, У/Ү г.м.) солилт үнэгүй."""
+    from ..session_logic import _OCR_CONFUSABLE_PAIRS, _ocr_canon
+    if abs(len(a) - len(b)) > 1:
+        return False
+
+    def same(x, y):
+        return (x == y or _ocr_canon(x) == _ocr_canon(y)
+                or frozenset((x, y)) in _OCR_CONFUSABLE_PAIRS)
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (0 if same(a[i - 1], b[j - 1]) else 1))
+        prev = cur
+    return prev[-1] <= 1
+
+
+def inner_plate_similar(read: str, outer: str) -> bool:
+    """Доторх камерын уншилт гадна сешний дугаартай НЭГ машин байж болох уу.
+
+    `plates_ocr_similar` (1 солилт, жигдэлсэн ижил, тайрагдсан 7969УА ← 7969УАА)
+    + ижил 4 цифр, үсгийн хэсэг ≤1 засвар (2678УР ← 2678УКР, 0450УБ ← 0450УЕМ).
+    Дангаараа шийдвэр БИШ — `_fuzzy_parent` ганц нэр дэвшигч + цонхыг шаардана."""
+    from ..session_logic import plates_ocr_similar
+    if not read or not outer:
+        return False
+    if plates_ocr_similar(read, outer):
+        return True
+    a, b = _DIGITS_LETTERS.match(read), _DIGITS_LETTERS.match(outer)
+    return bool(a and b and a.group(1) == b.group(1) and _letters_close(a.group(2), b.group(2)))
+
+
+def _seen_outside(s: ParkingSession, at: datetime) -> bool:
+    """Гадна камерт (орох эсвэл татгалзсан гарах уншилт) `at`-аас өмнө
+    `_FUZZY_WINDOW` дотор харагдсан уу."""
+    for t in (s.entry_time, getattr(s, "last_exit_seen_at", None)):
+        if t is not None and at - _FUZZY_WINDOW <= t <= at + _STALE_TOLERANCE:
+            return True
+    return False
+
+
+def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
+                  paused: bool, window: bool) -> ParkingSession | None:
+    """ЯГ таарах гадна сешн байхгүй үеийн OCR-ойролцоо тохирол (модулийн docstring).
+
+    Эцэг зогсоолын БҮХ идэвхтэй сешнээс ойролцоо нь ЯГ НЭГ байх (2+ = хоёрдмол,
+    буруу машиныг зогсоож дутуу нэхэмжлэх эрсдэл — тохируулахгүй).
+    paused=False (орох): тэр нь зогсоогүй; paused=True (гарах): `at`-аас өмнө
+    зогссон. window: гадна камерт `_FUZZY_WINDOW` дотор харагдсан."""
+    if not site or not site.parent_site_id or not plate:
+        return None
+    cands = [s for s in (db.query(ParkingSession)
+                         .filter(ParkingSession.site_id == site.parent_site_id,
+                                 ParkingSession.status.in_(_ACTIVE)).all())
+             if inner_plate_similar(plate, s.plate_number)]
+    if len(cands) != 1:
+        if cands:
+            log.info("[nested] %s: «%s» — ойролцоо гадна сешн %d (%s), хоёрдмол тул "
+                     "тохируулсангүй", plate, site.name, len(cands),
+                     ", ".join(c.plate_number for c in cands[:5]))
+        return None
+    c = cands[0]
+    if paused:
+        if not c.paused_since or c.paused_since > at:
+            return None
+    elif c.paused_since:
+        return None
+    if window and not _seen_outside(c, at):
+        return None
+    return c
+
+
+def match_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
+                 paused: bool) -> tuple[ParkingSession | None, bool]:
+    """(гадна сешн, ойролцоо эсэх). ЯГ дугаар давуу (нөхцөлгүй — дуудагч шалгана);
+    байхгүй бол `_fuzzy_parent` (paused=False үед цонхтой)."""
+    exact = _parent_session(db, site, plate)
+    if exact is not None:
+        return exact, False
+    fz = _fuzzy_parent(db, site, plate, at, paused=paused, window=not paused)
+    return fz, fz is not None
+
+
+def match_paused_parent(db: Session, site: ParkingSite, plate: str,
+                        at: datetime) -> ParkingSession | None:
+    """Доторх гарах уншилтын нөхөлтөд — `at`-аас өмнө ЗОГССОН гадна сешн (яг эсвэл
+    ганц ойролцоо). Яг дугаартай сешн зогсоогүй бол None (машин дотор байсан нь
+    бүртгэгдээгүй — review хэвээр)."""
+    parent, _fz = match_parent(db, site, plate, at, paused=True)
+    if parent is None or not parent.paused_since or parent.paused_since > at:
+        return None
+    return parent
+
+
+def _note_fuzzy(db: Session, child_site: ParkingSite, parent: ParkingSession, read: str,
+                child: ParkingSession | None, why: str) -> None:
+    """Ойролцоо тохирлыг баримтжуулна; боломжтой бол доторх сешний дугаарыг
+    гадныхаар засна (дараагийн доторх гарах уншилт таарна)."""
+    from ..session_logic import is_valid_plate
+    renamed = False
+    if (child is not None and child.plate_number != parent.plate_number
+            and is_valid_plate(parent.plate_number)
+            and not getattr(child, "hospital_grant_id", None)
+            and db.query(ParkingSession.id)
+            .filter(ParkingSession.site_id == child.site_id,
+                    ParkingSession.plate_number == parent.plate_number,
+                    ParkingSession.status.in_(_ACTIVE),
+                    ParkingSession.id != child.id).first() is None):
+        old = child.plate_number
+        child.plate_number = parent.plate_number
+        child.note = (f"{child.note + ' | ' if child.note else ''}Доторх OCR зөрүү «{old}» → "
+                      f"гадна «{parent.plate_number}» (засав)")[:1000]
+        renamed = True
+    db.add(AuditLog(username="system", action="NESTED_OCR_MATCH", entity="session",
+                    entity_id=parent.id,
+                    detail={"read_plate": read, "parent_plate": parent.plate_number,
+                            "child_site": child_site.name, "why": why,
+                            "child_session_id": child.id if child is not None else None,
+                            "child_renamed": renamed}))
+    log.info("[nested] %s: «%s» — гадна «%s» сешнд OCR-ойролцоогоор тохов (%s)%s",
+             read, child_site.name, parent.plate_number, why,
+             ", доторх сешний дугаарыг засав" if renamed else "")
+
+
+def _lock_parent(db: Session, parent: ParkingSession) -> ParkingSession | None:
+    """Гадна мөрийг SKIP LOCKED-оор түгжинэ. Түгжээтэй (төлбөр/гарц яг тэр мөрийг
+    боловсруулж буй) бол None — хүлээвэл lock_timeout (3с)-оор бүх транзакц
+    (доторх сешн, орох хаалт) унана (2026-10-14 уралдааны тест)."""
+    db.flush()
+    return (db.query(ParkingSession).enable_eagerloads(False)
+            .filter(ParkingSession.id == parent.id, ParkingSession.status.in_(_ACTIVE))
+            .populate_existing().with_for_update(skip_locked=True).first())
+
+
+def _revert_refused_exit(db: Session, parent: ParkingSession, at: datetime) -> bool:
+    """Гадна гарцад төлбөр хүлээж (AWAITING_PAYMENT) байсан машин доторх зогсоол
+    руу буцаж орлоо — гарах оролдлогыг цуцалж OPEN болгоно (модулийн docstring,
+    6238ӨМҮ). Төлбөр/төлбөрийн оролдлого (QR нэхэмжлэл г.м) байвал эсвэл дүн
+    царцсан (орох уншилтгүй суурь хураамж) бол ХҮРЭХГҮЙ — өмнөх зан төлөв хэвээр.
+    Дуудагч мөрийг `_lock_parent`-аар түгжсэн байна (төлбөртэй уралдахгүй)."""
+    from ..session_logic import paid_total
+    from .checkout import active_attempts
+    seen = parent.last_exit_seen_at or parent.payment_wait_started_at
+    if (parent.status != "AWAITING_PAYMENT" or getattr(parent, "fee_locked", False)
+            or parent.paid_at or seen is None or seen > at):
+        return False
+    if active_attempts(db, parent.id) or paid_total(db, parent) > 0:
+        return False
+    quoted = float(parent.total_fee) if parent.total_fee is not None else None
+    parent.status = "OPEN"
+    parent.exit_time = None
+    parent.exit_device_id = None
+    parent.exit_deadline = None
+    parent.last_exit_seen_at = None
+    parent.payment_wait_started_at = None
+    parent.payment_quote = None
+    parent.payment_quote_until = None
+    parent.duration_minutes = None
+    parent.total_fee = parent.base_fee = parent.vat_amount = None
+    parent.note = (f"{parent.note + ' | ' if parent.note else ''}Гарцад төлбөр хүлээж байгаад "
+                   f"доторх зогсоол руу буцаж орсон — гарах оролдлогыг цуцлав")[:1000]
+    db.add(AuditLog(username="system", action="NESTED_EXIT_REVERT", entity="session",
+                    entity_id=parent.id,
+                    detail={"plate": parent.plate_number, "exit_seen_at": seen.isoformat(),
+                            "inner_entry_at": at.isoformat(), "quoted_fee": quoted}))
+    log.info("[nested] %s: гарцад төлбөр хүлээж байсан машин дотогш буцлаа — гадна сешнийг "
+             "OPEN болгов (хүлээж байсан дүн %s)", parent.plate_number, quoted)
+    return True
 
 
 def _admitted(db: Session, child_site: ParkingSite, plate: str) -> bool:
@@ -162,11 +382,17 @@ def unverified_cap_minutes(db: Session, site_id: str) -> int:
     гарах уншилт зөвхөн татгалзсан) энэ хязгаараар 4ц = прод 8,000₮.
 
     НЭГ site доторх загвар (хүүхэд зогсоолгүй) `pause_cap_minutes`-тэй ижил —
-    Рашбулаг ЭТТ-ийн 0-ийг эзэн 2026-09-19 «хязгааргүй» гэж баталсан."""
+    Рашбулаг ЭТТ-ийн 0-ийг эзэн 2026-09-19 «хязгааргүй» гэж баталсан.
+
+    Глобал утгыг эцэг зогсоол бүрээр дарж болно (2026-10-14): Тохиргоо →
+    Төлбөрийн дүрэм → «Доторх гарах уншилт алдагдсан зогсолтын хязгаар»
+    (`exit_rules.inner_unverified_cap_hours`, анхдагч = .env transit_max_hours).
+    100 айл: 24ц (эзэн) — батлагдсан зогсолт хязгааргүй хэвээр."""
     cap, split = _configured_cap(db, site_id)
     if cap or not split:
         return cap
-    return max(0, int(settings.transit_max_hours)) * 60
+    from .app_settings import get_exit_rules
+    return max(0, int(get_exit_rules(db, site_id)["inner_unverified_cap_hours"])) * 60
 
 
 def _parent_session(db: Session, site: ParkingSite, plate: str) -> ParkingSession | None:
@@ -215,32 +441,52 @@ def effective_paused_minutes(db: Session, s: ParkingSession, at: datetime) -> in
     return total
 
 
-def on_inner_entry(db: Session, site: ParkingSite, plate: str, at: datetime) -> bool:
+def on_inner_entry(db: Session, site: ParkingSite, plate: str, at: datetime,
+                   child: ParkingSession | None = None) -> bool:
     """Доторх зогсоолд ОРЛОО — гадна session-ий тоолуурыг зогсооно.
 
     Давхар уншилтад найдвартай: аль хэдийн зогссон бол дахин эхлүүлэхгүй.
     Гадна session олдохгүй бол (гадна орох уншилт алдагдсан) юу ч хийхгүй —
     хасах хугацаа байхгүй тул доторх зогсолт энгийнээр явна.
+    Яг дугаар олдохгүй бол OCR-ойролцоо ГАНЦ гадна сешн (модулийн docstring);
+    тохирвол `child` (энэ уншилтаар ШИНЭЭР үүссэн доторх сешн)-ийн дугаарыг засна.
+    Гадна сешн гарцад төлбөр хүлээж байсан бол OPEN болгоно (`_revert_refused_exit`).
     """
-    parent = _parent_session(db, site, plate)
+    parent, fuzzy = match_parent(db, site, plate, at, paused=False)
     if parent is None:
         log.info("[nested] %s: «%s»-д орлоо ч гадна зогсоолд идэвхтэй бүртгэл алга — "
                  "тоолуур зогсоохгүй", plate, site.name)
         return False
     if parent.paused_since:
         return False   # аль хэдийн зогссон (давхар уншилт)
+    if _lock_parent(db, parent) is None or parent.paused_since:
+        log.info("[nested] %s: гадна «%s» сешн түгжээтэй/өөрчлөгдсөн (төлбөр боловсруулагдаж "
+                 "буй) — тоолуур зогсоосонгүй", plate, parent.plate_number)
+        return False
+    if parent.status == "AWAITING_PAYMENT":
+        _revert_refused_exit(db, parent, at)
     # Гадна сешн эхлэхээс ӨМНӨХ цагаас зогсоохгүй: хуучин (гарах уншилтгүй
     # үлдсэн) доторх сешний entry_time энд ирж болно — хасалт гадна зогсолтоос
     # хэтэрч бүх гадна хугацаа үнэгүй болдог байв (8810УКР 2026-10-13).
     parent.paused_since = max(at, parent.entry_time) if parent.entry_time else at
+    if fuzzy:
+        _note_fuzzy(db, site, parent, plate, child, "inner_entry")
     log.info("[nested] %s: «%s»-д орлоо — гадна «%s»-ын тоолуур зогслоо",
              plate, site.name, getattr(parent.site, "name", parent.site_id))
     return True
 
 
-def on_inner_exit(db: Session, site: ParkingSite, plate: str, at: datetime) -> int:
-    """Доторх зогсоолоос ГАРЛАА — гадна session-ий тоолуурыг үргэлжлүүлнэ."""
-    parent = _parent_session(db, site, plate)
+def on_inner_exit(db: Session, site: ParkingSite, plate: str, at: datetime,
+                  parent: ParkingSession | None = None) -> int:
+    """Доторх зогсоолоос ГАРЛАА — гадна session-ий тоолуурыг үргэлжлүүлнэ.
+
+    `parent` өгөөгүй бол яг дугаараар, олдохгүй бол OCR-ойролцоо ГАНЦ ЗОГССОН
+    гадна сешнээр (доторх сешн гадныхаар засагдаагүй үлдсэн тохиолдол)."""
+    if parent is None:
+        parent, fuzzy = match_parent(db, site, plate, at, paused=True)
+        if fuzzy and parent is not None:
+            log.info("[nested] %s: «%s» гарах — OCR-ойролцоо гадна «%s» сешнийг үргэлжлүүлнэ",
+                     plate, site.name, parent.plate_number)
     if parent is None or not parent.paused_since:
         return 0
     if parent.paused_since > at:
@@ -273,6 +519,11 @@ def restore_parent_pause(db: Session, child_site: ParkingSite, child: ParkingSes
     if since is None or not _admitted(db, child_site, child.plate_number):
         return False
     parent = _parent_session(db, child_site, child.plate_number)
+    if parent is None and child.entry_time is not None:
+        # Доторх сешн OCR-ойролцоо дугаартай үлдсэн (засагдаагүй) — орох үеийнх нь
+        # ижил дүрмээр (ганц, зогсоогүй, гадна камерт 10 мин дотор харагдсан)
+        parent = _fuzzy_parent(db, child_site, child.plate_number, child.entry_time,
+                               paused=False, window=True)
     if (parent is None or parent.status != "OPEN" or parent.paused_since
             or parent.entry_time > since):
         return False
@@ -367,7 +618,8 @@ def reapply_child_pauses(db: Session, s: ParkingSession, since: datetime | None,
 
 
 def credit_backfilled_child(db: Session, child_site: ParkingSite, plate: str,
-                            start: datetime, end: datetime | None) -> int:
+                            start: datetime, end: datetime | None,
+                            child: ParkingSession | None = None) -> int:
     """camera_sync-аар НӨХӨЖ үүсгэсэн доторх сешн — live `on_inner_entry`
     дуудагдаагүй тул гадна тоолуур огт зогсоогүй (100 айл 10-07..10-12: 8333УАО,
     3016УНЕ, 5508УАТ — дотор 8–9ц, 68,000₮ нэхэмжилсэн, зөв дүн 0₮).
@@ -378,12 +630,16 @@ def credit_backfilled_child(db: Session, child_site: ParkingSite, plate: str,
         тохируулсан хязгаараар шууд нэмнэ.
     Гадна тоолуур аль хэдийн зогссон бол давхар тооцохгүй. Логт ОРОХ уншилт
     байгаа ч доторх хаалтаар нэвтрэх эрхгүй машинд (`_admitted`) хасалт өгөхгүй
-    — камер татгалзсан машиныг ч уншдаг."""
-    parent = _parent_session(db, child_site, plate)
+    — камер татгалзсан машиныг ч уншдаг.
+    Яг дугаар олдохгүй бол live-тай ижил OCR-ойролцоо дүрэм (`start`-аар цонх);
+    тохирвол `child`-ийн дугаарыг гадныхаар засна."""
+    parent, fuzzy = match_parent(db, child_site, plate, start, paused=False)
     if parent is None or parent.entry_time > start or parent.paused_since:
         return 0
     if not _admitted(db, child_site, plate):
         return 0
+    if fuzzy:
+        _note_fuzzy(db, child_site, parent, plate, child, "camera_sync")
     if end is None:
         parent.paused_since = start
         log.info("[nested] %s: «%s»-ийн нөхсөн бүртгэл — гадна тоолуурыг %s-аас зогсоов",
