@@ -72,6 +72,7 @@ def ctx(monkeypatch):
         app = FastAPI()
         for r in (I.router, SP.router, A.router):
             app.include_router(r)
+        SP.install_error_handlers(app)
         app.dependency_overrides[get_db] = lambda: db
         app.dependency_overrides[auth.get_current_user] = lambda: user
         with TestClient(app) as client:

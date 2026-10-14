@@ -13,11 +13,15 @@ Endpoint-ууд sync (def) — FastAPI threadpool-д ажиллуулна: DB х
 (хаалт/LPR) царцаахгүй. Бизнес логик: services/partner_vehicles.py.
 Баримт бичиг: docs/SOCIALPAY_INTEGRATION.md.
 """
+import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..config import settings
 from ..database import get_db
@@ -26,10 +30,61 @@ from ..ratelimit import throttle
 from ..services import partner_vehicles as PV
 from .integration_router import PartnerAuth, require_partner, site_catalog
 
-router = APIRouter(prefix="/api/v1/socialpay", tags=["socialpay"])
+PREFIX = "/api/v1/socialpay"
+log = logging.getLogger("parking.socialpay")
 
-_HTTP_CODES = {401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 429: "RATE_LIMITED",
-               503: "UNAVAILABLE"}
+_HTTP_CODES = {400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND",
+               405: "METHOD_NOT_ALLOWED", 422: "INVALID_REQUEST", 429: "RATE_LIMITED",
+               500: "INTERNAL_ERROR", 503: "UNAVAILABLE"}
+
+
+class _SocialPayRoute(APIRoute):
+    """Энэ router-ийн гэнэтийн алдааг (500) ч {"Success": false, …} хэлбэрээр буцаана
+    (хяналт m6). HTTPException/422-ыг доорх install_error_handlers хэлбэржүүлнэ."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def handler(request: Request):
+            try:
+                return await original(request)
+            except (StarletteHTTPException, RequestValidationError):
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("socialpay %s алдаа", request.url.path)
+                return _fail("INTERNAL_ERROR", "Дотоод алдаа — түр хүлээгээд дахин оролдоно уу", 500)
+        return handler
+
+
+router = APIRouter(prefix=PREFIX, tags=["socialpay"], route_class=_SocialPayRoute)
+
+
+def install_error_handlers(app):
+    """/api/v1/socialpay/* дээрх 404/405/422 (байхгүй зам, буруу method, validation)-ийг
+    Success/Message/Detail хэлбэрт оруулна. Бусад API-д FastAPI-ийн АНХДАГЧ handler
+    хэвээр (зан төлөв өөрчлөгдөхгүй) — зөвхөн замаар шүүнэ."""
+    from fastapi.exception_handlers import (http_exception_handler,
+                                            request_validation_exception_handler)
+
+    def _ours(request: Request) -> bool:
+        path = request.url.path
+        return path == PREFIX or path.startswith(PREFIX + "/")
+
+    async def on_http(request: Request, exc: StarletteHTTPException):
+        if not _ours(request):
+            return await http_exception_handler(request, exc)
+        resp = _fail(_HTTP_CODES.get(exc.status_code, "ERROR"), str(exc.detail), exc.status_code)
+        for k, v in (getattr(exc, "headers", None) or {}).items():
+            resp.headers[k] = v
+        return resp
+
+    async def on_validation(request: Request, exc: RequestValidationError):
+        if not _ours(request):
+            return await request_validation_exception_handler(request, exc)
+        return _fail("INVALID_REQUEST", "Хүсэлтийн бүтэц буруу", 422)
+
+    app.add_exception_handler(StarletteHTTPException, on_http)
+    app.add_exception_handler(RequestValidationError, on_validation)
 
 
 def _resp(success: bool, message: str, status: int = 200, **extra) -> JSONResponse:
@@ -123,17 +178,38 @@ def delete(request: Request, body=Depends(_json_body), partner=Depends(_partner)
 
 
 def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
+    from ..billing import is_free_minutes_reason
     from ..services.nested import effective_paused_minutes
-    from ..session_logic import amount_due, paid_total, session_fee_info
+    from ..session_logic import amount_due, exit_policy_block, paid_total, session_fee_info
+    from .payments_router import _pending_debts
     now = datetime.utcnow()
     fee = session_fee_info(db, s)           # ← хаалт/касс/wallet-тай ИЖИЛ тооцоо
     due = amount_due(db, s, fee)
     site = s.site
     free = PV.free_minutes_for(db, s)
     free_until = None
-    if free and s.entry_time:
+    reason = fee.get("reason") or None
+    # «Эхний N минут»-аас ӨӨР шалтгаанаар үнэгүй (гэрээт, төлбөргүй зогсоол, эмнэлгийн
+    # хөнгөлөлт, хөнгөлөлт) бол үнэгүй хугацааны дуусах цаг утгагүй — null (хяналт m7)
+    window_applies = not fee["is_free"] or is_free_minutes_reason(reason)
+    if free and s.entry_time and window_applies:
         # Доторх (nested) зогсоолд өнгөрүүлсэн хугацаа тоолуураас хасагддаг тул сунгана
         free_until = s.entry_time + timedelta(minutes=free + effective_paused_minutes(db, s, now))
+    # Өр (хяналт M2): өргүйгээр төлсөн машиныг «N+ өр» дүрэм гарцад БАРЬДАГ. Энэ
+    # түрээслэгчийн өрийг include_debts=true intent-ээр хамт төлж болно.
+    debts = _pending_debts(db, s.plate_number, site)
+    debt_amount = round(sum(float(c.amount) for c in debts), 2)
+    block = exit_policy_block(db, s, now)
+    block_with_debts = (exit_policy_block(db, s, now, exclude_debt_ids={c.id for c in debts})
+                        if debts else block)
+    # Онлайн төлөх боломж (хяналт m1): PAID сешний хэтрэлтийг гарах камер уншмагц л
+    # нэхэмжилдэг (AWAITING_PAYMENT) — тэр хүртэл POST /payments 400 өгнө (QR-тэй ижил)
+    if s.status not in ("OPEN", "AWAITING_PAYMENT"):
+        not_payable = "PAID_OVERSTAY" if due > 0 else "ALREADY_PAID"
+    elif due <= 0 and debt_amount <= 0:
+        not_payable = "NOTHING_DUE"
+    else:
+        not_payable = None
     intent = (db.query(Payment).filter(Payment.session_id == s.id, Payment.provider == partner,
                                        Payment.status == "PENDING")
               .order_by(Payment.created_at.desc()).first())
@@ -151,10 +227,17 @@ def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
         "freeRemainingMinutes": (max(0, int((free_until - now).total_seconds() // 60))
                                  if free_until else None),
         "isFree": bool(fee["is_free"]),
-        "freeReason": fee.get("reason") or None,
+        "freeReason": reason,
         "totalFee": fee["total_fee"],
         "paidAmount": paid_total(db, s),
         "amountDue": due,
+        "debtAmount": debt_amount,
+        "debtCount": len(debts),
+        "amountDueWithDebts": round(due + debt_amount, 2),
+        "exitBlockReason": block,
+        "exitBlockReasonWithDebts": block_with_debts,
+        "payableOnline": not_payable is None,
+        "notPayableReason": not_payable,
         "currency": "MNT",
         "exitDeadline": PV.iso_z(s.exit_deadline) if s.status == "PAID" else None,
         "paymentId": intent.id if intent else None,
@@ -178,7 +261,9 @@ def bill(body=Depends(_json_body), partner=Depends(_partner), db: Session = Depe
     q = (db.query(ParkingSession).join(ParkingSite, ParkingSite.id == ParkingSession.site_id)
          .filter(ParkingSession.plate_number == plate,
                  ParkingSession.status.in_(PV.ACTIVE),
-                 ParkingSite.parent_site_id.is_(None)))
+                 ParkingSite.parent_site_id.is_(None),
+                 # идэвхгүй болгосон зогсоолын үлдсэн OPEN сешн «одоо энд байна» биш (m12)
+                 ParkingSite.is_active.is_(True)))
     if partner.site_id:
         q = q.filter(ParkingSession.site_id == partner.site_id)
     s = q.order_by(ParkingSession.entry_time.desc()).first()

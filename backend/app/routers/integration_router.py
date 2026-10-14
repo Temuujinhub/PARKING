@@ -316,13 +316,22 @@ def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
 @router.post("/payments")
 def create_payment_intent(body: dict, db: Session = Depends(get_db),
                           partner: PartnerAuth = Depends(require_partner)):
-    """Төлбөрийн intent үүсгэнэ. body: {session_id}.
+    """Төлбөрийн intent үүсгэнэ. body: {session_id, include_debts?}.
     Буцаах amount-ыг wallet өөрийн талд хэрэглэгчээс нэхэмжилж, амжилттай
     болмогц /payments/{id}/confirm-ыг дуудна. Идэвхтэй PENDING intent
-    байвал (дүн зөрөөгүй бол) шинээр үүсгэлгүй түүнийгээ буцаана."""
-    from .payments_router import _create_payment
+    байвал (дүн зөрөөгүй бол) шинээр үүсгэлгүй түүнийгээ буцаана.
+
+    include_debts=true (заавал биш, анхдагч false — Easy Wallet-ийн зан төлөв
+    хэвээр): тухайн түрээслэгчийн зогсоолуудын төлөгдөөгүй өрийг QR-тэй ИЖИЛ
+    байдлаар нэг intent-д нийлүүлнэ; confirm нь өрүүдийг PAID болгож тус бүрд баримт
+    гаргана (_finalize_paid). Өргүйгээр төлсөн машиныг «3+ өр» дүрэм гарцад барьдаг
+    (SocialPay хяналт M2, прод 371 дугаар)."""
+    from .payments_router import _create_payment, _pending_debts
     from ..services.checkout import lock_session
     _require_pay(partner)
+    include_debts = body.get("include_debts", False)
+    if not isinstance(include_debts, bool):
+        raise HTTPException(422, "include_debts нь true/false байна")
     session = lock_session(db, body.get("session_id", ""))
     _check_site_scope(partner, session.site_id)
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
@@ -334,21 +343,30 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
     if existing:
         _check_payment_scope(db, partner, existing)
         current_due = amount_due(db, session, session_fee_info(db, session))
+        if include_debts:
+            current_due += sum(float(c.amount)
+                               for c in _pending_debts(db, session.plate_number, session.site))
         if abs(float(existing.amount) - current_due) > 0.01:
             raise HTTPException(409, "Үнэ өөрчлөгдсөн. Өмнөх wallet оролдлогыг баталгаажуулах эсвэл цуцална уу")
         return {"payment_id": existing.id, "amount": float(existing.amount),
                 "vat_amount": float(existing.vat_amount), "status": "PENDING"}
 
-    payment = _create_payment(db, session, partner, "WALLET")
+    payment = _create_payment(db, session, partner, "WALLET", include_debts=include_debts)
     payment.partner_key_id = partner.key_id
     payment.source = "WALLET"
+    debts = (payment.fee_snapshot or {}).get("debts") or []
+    debt_amount = round(sum(float(d["amount"]) for d in debts), 2)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_INTENT", entity="payment",
                     entity_id=payment.id,
-                    detail={"plate": session.plate_number, "amount": float(payment.amount)}))
+                    detail={"plate": session.plate_number, "amount": float(payment.amount),
+                            **({"debt_amount": debt_amount, "debt_count": len(debts)}
+                               if include_debts else {})}))
     db.commit()
     return {"payment_id": payment.id, "amount": float(payment.amount),
             "vat_amount": float(payment.vat_amount), "status": "PENDING",
-            "plate_number": session.plate_number}
+            "plate_number": session.plate_number,
+            "parking_amount": round(float(payment.amount) - debt_amount, 2),
+            "debt_amount": debt_amount, "debt_count": len(debts)}
 
 
 @router.post("/payments/{payment_id}/cancel")

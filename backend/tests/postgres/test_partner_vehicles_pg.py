@@ -126,3 +126,66 @@ def test_new_migration_statements_apply_on_existing_schema(engine):
         c.execute(text("DELETE FROM parking_schema_migrations"))
     migrations.run_migrations()
     assert migrations.check_ready()["database"] == "ok"
+
+
+def test_held_events_and_expiry_sql_on_postgres(engine, monkeypatch):
+    """URL хоосон үед мэдэгдэл хүлээгдэнэ (SKIPPED биш), 24ц-ийн дараа DEAD — correlated
+    NOT EXISTS UPDATE PG дээр зөв (хяналт m9)."""
+    site_id, kid = seed(engine)
+    monkeypatch.setattr(settings, "partner_vehicle_settle_sec", 0)
+    with Session(engine) as db:
+        PV.register_vehicle(db, kid, "socialpay", "7886УКР", "u1")
+        now = datetime.utcnow()
+        db.add(M.ParkingSession(site_id=site_id, plate_number="7886УКР", status="OPEN",
+                                entry_time=now - timedelta(minutes=3), created_at=now))
+        db.commit()
+        assert PV.scan_once(db, now)["entry"] == 1
+        db.get(M.PartnerKey, kid).vehicle_webhook_url = None
+        db.commit()
+        assert PV.claim_batch(db, now=now + timedelta(hours=1)) == []
+        ev = db.query(M.PartnerVehicleEvent).one()
+        assert ev.status == "PENDING"
+        PV.claim_batch(db, now=ev.created_at + timedelta(hours=25))
+        db.expire_all()
+        assert db.query(M.PartnerVehicleEvent).one().status == "DEAD"
+
+
+def test_partner_intent_include_debts_confirm_on_postgres(engine, monkeypatch):
+    """include_debts intent → confirm: өр PAID, сешн PAID — жинхэнэ FOR UPDATE NOWAIT-тай."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.database import get_db
+    from app.routers import integration_router as I
+    site_id, kid = seed(engine)
+    monkeypatch.setattr(settings, "partner_keys", "")
+    with Session(engine) as db:
+        key = db.get(M.PartnerKey, kid)
+        key.key_hash = hashlib.sha256(b"pg-key").hexdigest()
+        stay = M.ParkingSession(site_id=site_id, plate_number="7886УКР", status="OPEN",
+                                entry_time=datetime.utcnow() - timedelta(minutes=30))
+        db.add(stay); db.flush()
+        tariff = M.TariffTemplate(name="pg", free_minutes=0, extra_hour_price=1000)
+        db.add(tariff); db.flush()
+        db.get(M.ParkingSite, site_id).tariff_template_id = tariff.id
+        for _ in range(3):
+            db.add(M.Compensation(site_id=site_id, plate_number="7886УКР", amount=2000,
+                                  reason="unpaid_exit", status="PENDING"))
+        db.commit()
+        sid = stay.id
+    app = FastAPI(); app.include_router(I.router)
+
+    def _db():
+        with Session(engine, autoflush=False) as s:
+            yield s
+    app.dependency_overrides[get_db] = _db
+    hdr = {"X-API-Key": "pg-key"}
+    with TestClient(app) as c:
+        r = c.post("/api/v1/payments", json={"session_id": sid, "include_debts": True}, headers=hdr)
+        assert r.status_code == 200, r.text
+        assert r.json()["debt_amount"] == 6000.0 and r.json()["amount"] == 7000.0
+        ok = c.post(f"/api/v1/payments/{r.json()['payment_id']}/confirm",
+                    json={"transaction_id": 555, "amount": 7000}, headers=hdr)
+        assert ok.status_code == 200, ok.text
+    with Session(engine) as db:
+        assert {x.status for x in db.query(M.Compensation)} == {"PAID"}
+        assert db.get(M.ParkingSession, sid).status in ("PAID", "CLOSED")

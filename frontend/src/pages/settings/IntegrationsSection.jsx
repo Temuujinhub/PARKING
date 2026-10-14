@@ -1019,6 +1019,12 @@ function PartnerApiPanel() {
               <Plus size={14} /> Түлхүүр үүсгэх
             </button>
           </div>
+          {data && data.vehicle_notify_enabled === false && (
+            <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-2 text-xs text-amber-300">
+              Машины орох/гарах мэдэгдэл серверийн тохиргоогоор УНТРААЛТТАЙ
+              (<span className="font-mono">PARKING_PARTNER_VEHICLE_NOTIFY=false</span>) — түнш рүү юу ч илгээгдэхгүй.
+            </div>
+          )}
           <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Webhook (төлбөр + баримт)', 'Машин бүртгэл / орох-гарах мэдэгдэл', 'Сүүлд ашигласан', 'Төлөв', '']}
             empty={!data || (data.keys.length === 0 && data.env_partners.length === 0)}>
             {(data?.keys || []).map((k) => (

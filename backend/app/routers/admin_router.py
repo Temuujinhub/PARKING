@@ -1050,7 +1050,9 @@ def list_partner_keys(db: Session = Depends(get_db),
             "created_by": k.created_by,
             "created_at": k.created_at.isoformat() if k.created_at else None,
         })
-    return {"keys": keys, "env_partners": sorted(settings.partner_map().values())}
+    return {"keys": keys, "env_partners": sorted(settings.partner_map().values()),
+            # PARKING_PARTNER_VEHICLE_NOTIFY=false үед машин мэдэгдэл огт илгээгдэхгүй
+            "vehicle_notify_enabled": bool(settings.partner_vehicle_notify)}
 
 
 @router.post("/partner-keys")
@@ -1067,6 +1069,12 @@ def create_partner_key(body: dict, db: Session = Depends(get_db),
     if body.get("can_vehicles"):
         scopes += ",vehicles"   # SocialPay: машин бүртгэх/устгах/bill + орох/гарах мэдэгдэл
     site_id = (body.get("site_id") or "").strip() or None
+    # Хяналт m3: зогсоолоор хязгаарлагдсан ADMIN БҮХ зогсоолын (эсвэл машин бүртгэлийн —
+    # бусдын машины байршил харах) түлхүүр үүсгэж болохгүй; өөр зогсоолынхыг ч.
+    if body.get("can_vehicles") or not site_id:
+        enforce_global_settings(user)
+    else:
+        enforce_site(user, site_id)
     if site_id and not db.get(ParkingSite, site_id):
         raise HTTPException(404, "Зогсоол олдсонгүй")
     # Нэр давхардвал тайлан дээр хоёр өөр түлхүүрийн төлбөр нийлж харагдана — хориглоно
