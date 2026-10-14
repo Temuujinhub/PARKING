@@ -808,6 +808,9 @@ class PartnerVehicleEvent(Base):
         Index("ix_partner_vehicle_events_order", "partner_key_id", "plate_number", "event_time"),
         Index("ix_partner_vehicle_events_awaiting", "awaiting_exit",
               postgresql_where=text("awaiting_exit"), sqlite_where=text("awaiting_exit")),
+        # retention/хугацаа дуусгалт (created_at) + админы түүх (түлхүүр × огноо)
+        Index("ix_partner_vehicle_events_created", "created_at"),
+        Index("ix_partner_vehicle_events_key_created", "partner_key_id", "created_at"),
     )
 
 

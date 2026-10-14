@@ -2633,8 +2633,11 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     })
 
 
-def exit_policy_block(db, session, now):
-    """Apply the existing minimum-stay and debt-threshold rules to recovery/payment."""
+def exit_policy_block(db, session, now, exclude_debt_ids=None):
+    """Apply the existing minimum-stay and debt-threshold rules to recovery/payment.
+
+    exclude_debt_ids: уншилтын урьдчилсан тооцоо (SocialPay bill) — эдгээр өр нэг
+    төлбөрт багтаж барагдвал хаалт нээгдэх үү гэдгийг шалгана. Анхдагч None = хуучин."""
     from .models import Compensation
     from .services.app_settings import get_blacklist_rules
     registered = session.is_registered or find_registered(db, session.plate_number, session.site_id) is not None
@@ -2643,8 +2646,11 @@ def exit_policy_block(db, session, now):
         return 'minimum_stay'
     threshold = get_blacklist_rules(db, session.site_id)['block_exit_debt_count']
     if threshold and not registered:
-        count = db.query(Compensation.id).filter(Compensation.plate_number == session.plate_number,
-                                                Compensation.status == 'PENDING').count()
+        q = db.query(Compensation.id).filter(Compensation.plate_number == session.plate_number,
+                                            Compensation.status == 'PENDING')
+        if exclude_debt_ids:
+            q = q.filter(~Compensation.id.in_(list(exclude_debt_ids)))
+        count = q.count()
         if count >= threshold:
             return 'debt_rule'
     return None

@@ -423,6 +423,10 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_awaiting ON partner_vehicle_events (awaiting_exit) "
     "WHERE awaiting_exit",
     "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_session_id ON partner_vehicle_events (session_id)",
+    # 2026-10-14 хяналт m8: retention/хугацаа дуусгалт ба админы түүхийн индекс
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_created ON partner_vehicle_events (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_key_created ON partner_vehicle_events "
+    "(partner_key_id, created_at)",
 
 ]
 

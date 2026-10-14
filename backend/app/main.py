@@ -74,6 +74,8 @@ for r in (auth_router, lpr_router, admin_router, sessions_router, payments_route
           health_router, integration_router, legacy_router, dr_router, billing_router,
           ev_router, wallet_router, hospital_router, exit_review_router, socialpay_router):
     app.include_router(r.router)
+# /api/v1/socialpay/*-ийн 404/405/422-ыг {"Success": false, …} болгоно (бусад API хэвээр)
+socialpay_router.install_error_handlers(app)
 
 
 @app.get("/api/health")

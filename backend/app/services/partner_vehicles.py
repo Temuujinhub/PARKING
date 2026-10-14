@@ -62,8 +62,11 @@ CLOSED = ("CLOSED", "FREE", "MANUAL_CLOSED")
 IN_FLIGHT = ("PENDING", "RETRY", "SENDING")
 RETRY_DELAYS = (60, 300, 900, 3600, 7200, 14400)   # дараа нь 4ц тутам, retry_hours хүртэл
 LEASE = timedelta(minutes=2)
-# Хэрэглэгчийн ID: тоо эсвэл текст (UUID, утас, имэйл…) — хяналтын тэмдэгт/зай хориотой
-_USER_RE = re.compile(r"^[\w.:@+\-]{1,64}$")
+# Хэрэглэгчийн ID: тоо эсвэл текст (UUID, имэйл…) — ЗӨВХӨН ASCII (хяналт m10: `\w` нь
+# бүтэн өргөнтэй «１００２６４»-г зөвшөөрч, нэг хэрэглэгч хоёр өөр ID болж байв).
+_USER_RE = re.compile(r"^[A-Za-z0-9._:@+-]{1,64}$", re.ASCII)
+_MAX_CANDIDATES = 5000
+_IN_CHUNK = 500
 
 
 class VehicleInputError(ValueError):
@@ -104,7 +107,7 @@ def parse_user_id(value) -> str:
     value = value.strip()
     if not _USER_RE.match(value):
         raise VehicleInputError("INVALID_USER_ID",
-                                "userId 1–64 тэмдэгт (үсэг, цифр, . _ - : @ +) байх ёстой")
+                                "userId 1–64 тэмдэгт (латин үсэг, цифр, . _ - : @ +) байх ёстой")
     return value
 
 
@@ -253,27 +256,57 @@ def _configured_keys(db) -> dict:
     return {k.id: k for k in rows if has_scope(k.scopes)}
 
 
-def _candidates(db, key_ids, *conds) -> dict:
-    """{(key_id, session_id): (row, хамгийн эртний идэвхтэй бүртгэлийн created_at)}."""
+def _candidates(db, key_ids, *conds, active_sites: bool = True, skip_event: str | None = None) -> dict:
+    """{(key_id, session_id): (row, хамгийн эртний идэвхтэй бүртгэлийн created_at)}.
+
+    active_sites: идэвхгүй болгосон зогсоолын сешнийг алгасна (хяналт m12: RASH идэвхгүй
+    болсон ч 120 OPEN сешн үлдэж «ОРСОН → ОРСОН» үүсгэж байв). Хос гарцад л False."""
     S, PV = ParkingSession, PartnerVehicle
     q = (db.query(S.id, S.site_id, S.plate_number, S.entry_time, S.exit_time, S.created_at,
                   S.status, S.exit_confirmed, S.exit_device_id, S.is_registered,
-                  S.entry_device_id, S.fee_locked, ParkingSite.registered_only, PV.partner_key_id,
+                  S.entry_device_id, S.fee_locked, S.paid_at, S.exit_deadline,
+                  ParkingSite.registered_only, PV.partner_key_id,
                   PV.created_at.label("sub_created_at"))
          .join(PV, and_(PV.plate_number == S.plate_number, PV.deleted_at.is_(None),
                         PV.partner_key_id.in_(key_ids)))
          .join(ParkingSite, ParkingSite.id == S.site_id)
          .filter(ParkingSite.parent_site_id.is_(None), *conds))
+    if active_sites:
+        q = q.filter(ParkingSite.is_active.is_(True))
+    if skip_event:
+        # Аль хэдийн outbox-д орсныг SQL-д хасна — хязгаар зөвхөн ШИНЭ ажилд үйлчилнэ
+        # (хуучин мөрүүд хязгаарыг эзэлж шинийг өлсгөхгүй)
+        E = PartnerVehicleEvent
+        q = q.filter(~exists().where(E.session_id == S.id, E.partner_key_id == PV.partner_key_id,
+                                     E.event == skip_event))
+    # Тогтвортой дараалал: хязгаарт хүрвэл ч дараагийн scan ижил мөрүүдийг харна
+    rows = q.order_by(S.created_at, S.id, PV.partner_key_id).limit(_MAX_CANDIDATES).all()
+    if len(rows) >= _MAX_CANDIDATES:
+        log.warning("түншийн машины scan: %d мөрийн хязгаарт хүрлээ — зарим үйл явдал "
+                    "дараагийн scan-д хойшилно", _MAX_CANDIDATES)
     out = {}
-    for r in q.limit(5000).all():
+    for r in rows:
         k = (r.partner_key_id, r.id)
         if k not in out or r.sub_created_at < out[k][1]:
             out[k] = (r, r.sub_created_at)
     return out
 
 
+def _inferred_paid_exit(r) -> bool:
+    """Төлсөн ч гарах уншилтгүй хаалт (close_paid_as_inferred_exit, PAID сешний албадан
+    хаалт): exit_time = exit_deadline (эсвэл paid_at), exit_confirmed=False — ГЭХДЭЭ
+    exit_device_id нь төлбөр хүлээж байх үеийн гарах уншилтаас ҮЛДДЭГ (хяналт m2).
+    Бодит гарц (grace дотор) нь deadline-аас ӨМНӨ; POS эгнээний нээлт = төлсөн мөч."""
+    if r.exit_confirmed or r.paid_at is None or r.exit_time is None:
+        return False
+    if r.exit_deadline is not None:
+        return r.exit_time >= r.exit_deadline
+    return r.exit_time == r.paid_at
+
+
 def _real_exit(r) -> bool:
-    return r.exit_time is not None and bool(r.exit_confirmed or r.exit_device_id)
+    return (r.exit_time is not None and bool(r.exit_confirmed or r.exit_device_id)
+            and not _inferred_paid_exit(r))
 
 
 def _add_event(db, key: PartnerKey, sid: str, event: str, now: datetime,
@@ -315,7 +348,8 @@ def scan_once(db, now: datetime | None = None) -> dict:
      .update({"awaiting_exit": False}, synchronize_session=False))
 
     # ── ENTRY ──
-    entries = _candidates(db, key_ids, S.entry_time >= entry_since, S.created_at <= settle)
+    entries = _candidates(db, key_ids, S.entry_time >= entry_since, S.created_at <= settle,
+                          skip_event="ENTRY")
     want = {}
     for (kid, sid), (r, sub_created) in entries.items():
         key = keys[kid]
@@ -340,11 +374,13 @@ def scan_once(db, now: datetime | None = None) -> dict:
                 .filter(E.awaiting_exit.is_(True), E.event == "ENTRY",
                         E.partner_key_id.in_(key_ids)).all()}
     cands = _candidates(db, key_ids, S.status.in_(CLOSED), S.exit_time >= exit_since,
-                        S.exit_time <= settle)
+                        S.exit_time <= settle, skip_event="EXIT")
     if awaiting:
-        cands.update({k: v for k, v in _candidates(
-            db, key_ids, S.status.in_(CLOSED), S.exit_time <= settle,
-            S.id.in_([sid for _, sid in awaiting])).items() if k in awaiting})
+        sids = sorted({sid for _, sid in awaiting})
+        for i in range(0, len(sids), _IN_CHUNK):     # IN-жагсаалтыг хязгаарлана
+            cands.update({k: v for k, v in _candidates(
+                db, key_ids, S.status.in_(CLOSED), S.exit_time <= settle,
+                S.id.in_(sids[i:i + _IN_CHUNK]), active_sites=False).items() if k in awaiting})
     exit_keys = [_job_key(kid, sid, "EXIT") for kid, sid in cands]
     done = {k for (k,) in db.query(E.job_key).filter(E.job_key.in_(exit_keys))} if exit_keys else set()
     # Хос (ENTRY илгээгдсэн) эсэхийг awaiting-аас гадна бүх ENTRY мөрөөр шалгана.
@@ -392,6 +428,11 @@ def claim_batch(db, now: datetime | None = None, limit: int = 20) -> list[dict]:
     now = now or datetime.utcnow()
     E = PartnerVehicleEvent
     O = aliased(PartnerVehicleEvent)
+    # Түлхүүр идэвхгүй / «vehicles» эрхгүй / URL хоосон үед мэдэгдэл ХҮЛЭЭГДЭЖ үлдэнэ
+    # (хяналт m9: URL түр арилгахад бүгд SKIPPED болж алга болдог байв) — 24ц-ийн
+    # цонх дуусвал ердийнхөөрөө DEAD (доорх expire_held).
+    expire_held(db, now)
+    sendable = _sendable()
     earlier = exists().where(
         O.partner_key_id == E.partner_key_id, O.plate_number == E.plate_number, O.id != E.id,
         O.status.in_(IN_FLIGHT),
@@ -399,22 +440,18 @@ def claim_batch(db, now: datetime | None = None, limit: int = 20) -> list[dict]:
             and_(O.event_time == E.event_time, O.created_at < E.created_at)))
     due = or_(and_(E.status.in_(("PENDING", "RETRY")), E.next_attempt_at <= now),
               and_(E.status == "SENDING", E.lease_until <= now))
-    rows = (db.query(E).filter(due, ~earlier)
+    rows = (db.query(E).filter(due, sendable, ~earlier)
             .order_by(E.next_attempt_at, E.event_time, E.created_at)
             .limit(limit).with_for_update(skip_locked=True).all())
     out = []
     for ev in rows:
         key = db.get(PartnerKey, ev.partner_key_id)
         url = (key.vehicle_webhook_url or "").strip() if key else ""
-        reason = None
-        if key is None or not key.is_active or not has_scope(key.scopes):
-            reason = "Түлхүүр идэвхгүй/эрхгүй болсон"
-        elif not url:
-            reason = "Мэдэгдлийн URL тохируулаагүй"
-        elif not is_registered_by(db, ev.partner_key_id, ev.plate_number):
-            reason = "Машины бүртгэл устсан — илгээхгүй"
-        if reason:
-            ev.status, ev.last_error = "SKIPPED", reason
+        if key is None or not key.is_active or not has_scope(key.scopes) or not url:
+            continue          # LIKE-ийн ойролцоо шүүлтийг нарийвчилна — хүлээлгэнэ
+        if not is_registered_by(db, ev.partner_key_id, ev.plate_number):
+            # Зөвхөн хэрэглэгч бүртгэлээ УСТГАСАН үед л илгээхгүй болно
+            ev.status, ev.last_error = "SKIPPED", "Машины бүртгэл устсан — илгээхгүй"
             ev.lease_token = ev.lease_until = None
             ev.awaiting_exit = False
             continue
@@ -428,19 +465,92 @@ def claim_batch(db, now: datetime | None = None, limit: int = 20) -> list[dict]:
     return out
 
 
+def _sendable():
+    """Түлхүүр идэвхтэй, URL-тэй, «vehicles» эрхтэй эсэх (SQL; нарийн шалгалт Python-д)."""
+    E = PartnerVehicleEvent
+    return exists().where(PartnerKey.id == E.partner_key_id, PartnerKey.is_active.is_(True),
+                          PartnerKey.vehicle_webhook_url.isnot(None),
+                          PartnerKey.vehicle_webhook_url != "",
+                          PartnerKey.scopes.like(f"%{SCOPE}%"))
+
+
+def expire_held(db, now: datetime | None = None) -> int:
+    """Түлхүүр нь илгээх боломжгүй (URL хоосон/идэвхгүй) үед хүлээгдэж буй мэдэгдлийг
+    retry_hours-аас хойш DEAD болгоно (commit-гүй). Илгээх боломжтой түлхүүрийнх нь
+    record_result-ийн ердийн дүрмээр (админы «Дахин илгээх» нэг оролдлого авна)."""
+    now = now or datetime.utcnow()
+    E = PartnerVehicleEvent
+    return (db.query(E)
+            .filter(E.status.in_(("PENDING", "RETRY")), ~_sendable(),
+                    E.created_at < now - timedelta(hours=settings.partner_vehicle_retry_hours))
+            .update({"status": "DEAD", "awaiting_exit": False,
+                     "last_error": "Хүргэх хугацаа (24ц) дууссан — URL/эрх идэвхгүй байсан"},
+                    synchronize_session=False))
+
+
+# ── Нэг хуваалцсан HTTP клиент (хяналт M1) ──
+# Үйл явдал бүрд шинэ httpx.AsyncClient үүсгэхэд SSL context (certifi ачаалал) СИНХРОНООР
+# event loop дээр бүтдэг — 20-ийн багц хаалт/LPR-тай хуваалцсан loop-ыг 0.7–2.7с
+# царцааж байв. Одоо loop тутам НЭГ клиент: SSL context-ыг thread-д нэг удаа бүтээнэ,
+# зэрэгцээ хүсэлтийг семафороор (5) хязгаарлана.
+_HTTP: dict = {}
+_HTTP_CONCURRENCY = 5
+
+
+async def _http_client():
+    import httpx
+    loop = asyncio.get_running_loop()
+    st = _HTTP.get("state")
+    if st and st[0] is loop:
+        return st[1], st[2]
+
+    def _build():
+        ctx = httpx.create_ssl_context()
+        return httpx.AsyncClient(verify=ctx, follow_redirects=False,
+                                 timeout=httpx.Timeout(float(settings.partner_vehicle_http_timeout),
+                                                       connect=3.0),
+                                 limits=httpx.Limits(max_connections=10,
+                                                     max_keepalive_connections=5))
+    lk = _HTTP.get("lock")
+    if not lk or lk[0] is not loop:   # await-гүй шалгаад тавина — race-гүй
+        lk = _HTTP["lock"] = (loop, asyncio.Lock())
+    async with lk[1]:                 # gather-ийн 20 coroutine нэг л клиент бүтээнэ
+        st = _HTTP.get("state")
+        if st and st[0] is loop:
+            return st[1], st[2]
+        client = await asyncio.to_thread(_build)
+        _HTTP["state"] = (loop, client, asyncio.Semaphore(_HTTP_CONCURRENCY))
+        return client, _HTTP["state"][2]
+
+
+async def close_http_client():
+    st = _HTTP.pop("state", None)
+    if st and st[0] is asyncio.get_running_loop():
+        await st[1].aclose()
+
+
 async def post_event(url: str, payload: dict, event_id: str, event: str,
                      timeout: float | None = None, transport=None) -> dict:
     """Түншийн URL руу POST. Амжилт = 2xx БА body.Success is true. Хэзээ ч raise хийхгүй."""
     import httpx
+    if not settings.partner_vehicle_notify:
+        # PARKING_PARTNER_VEHICLE_NOTIFY=false — гадагш огт илгээхгүй (прод dump-аас
+        # сэргээсэн TEST сервер жинхэнэ SocialPay руу мэдэгдэл явуулахаас хамгаална)
+        return {"ok": False, "status_code": None, "success": None, "message": None,
+                "error": "DISABLED"}
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json",
                "Idempotency-Key": event_id, "X-Parking-Event-Id": event_id,
                "X-Parking-Event": f"vehicle.{event.lower()}"}
-    t = float(timeout or settings.partner_vehicle_http_timeout)
+    t = httpx.Timeout(float(timeout or settings.partner_vehicle_http_timeout), connect=3.0)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(t), follow_redirects=False,
-                                     transport=transport) as client:
-            resp = await client.post(url, content=body, headers=headers)
+        if transport is not None:     # тест: MockTransport
+            async with httpx.AsyncClient(transport=transport, follow_redirects=False) as client:
+                resp = await client.post(url, content=body, headers=headers, timeout=t)
+        else:
+            client, sem = await _http_client()
+            async with sem:
+                resp = await client.post(url, content=body, headers=headers, timeout=t)
     except Exception as exc:  # noqa: BLE001 — сүлжээ/timeout: зөвхөн төрөл (URL/нууц задлахгүй)
         return {"ok": False, "status_code": None, "success": None, "message": None,
                 "error": type(exc).__name__}
@@ -536,7 +646,6 @@ async def supervisor():
         log.info("түншийн машины мэдэгдэл унтраалттай (PARKING_PARTNER_VEHICLE_NOTIFY=false)")
         return
     await asyncio.sleep(20)
-    last_cleanup = 0.0
 
     def _scan():
         with SessionLocal() as db:
@@ -546,6 +655,17 @@ async def supervisor():
         with SessionLocal() as db:
             return cleanup(db)
 
+    try:
+        await _loop(_scan, _clean)
+    finally:
+        try:
+            await close_http_client()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _loop(_scan, _clean):
+    last_cleanup = 0.0
     while True:
         try:
             await asyncio.to_thread(_scan)

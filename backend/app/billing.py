@@ -22,6 +22,16 @@ from .models import Discount, TariffTemplate
 
 D = Decimal
 
+# calculate_fee-ийн «үнэгүй» шалтгааны тогтмолууд — гадны (SocialPay bill) уншигч
+# «хязгааргүй үнэгүй» (гэрээт/төлбөргүй зогсоол)-ийг «эхний N минут»-аас ялгана.
+REASON_NO_CHARGE = "Төлбөргүй зогсоол"
+REASON_REGISTERED = "Бүртгэлтэй жолооч"
+REASON_FREE_MINUTES_PREFIX = "Эхний "
+
+
+def is_free_minutes_reason(reason: str | None) -> bool:
+    return (reason or "").startswith(REASON_FREE_MINUTES_PREFIX)
+
 
 def _round(x: Decimal) -> Decimal:
     return x.quantize(D("1"), rounding=ROUND_HALF_UP)
@@ -126,10 +136,10 @@ def calculate_fee(
     }
 
     if no_charge:
-        result["reason"] = "Төлбөргүй зогсоол"
+        result["reason"] = REASON_NO_CHARGE
         return result
     if is_registered:
-        result["reason"] = "Бүртгэлтэй жолооч"
+        result["reason"] = REASON_REGISTERED
         return result
     if template is None:
         result["reason"] = "Тариф тохируулаагүй"
@@ -139,7 +149,7 @@ def calculate_fee(
     # Үнэгүй эхний минут — ДАМЖИН хугацааг хассаны ДАРАА шалгана. Тиймээс
     # доторх зогсоолд удаан байсан машин гадна талдаа үнэгүй хугацаандаа багтана.
     if template.free_minutes and billable <= template.free_minutes:
-        result["reason"] = (f"Эхний {template.free_minutes} минут үнэгүй"
+        result["reason"] = (f"{REASON_FREE_MINUTES_PREFIX}{template.free_minutes} минут үнэгүй"
                             + (f" (дамжин {paused} мин хасагдсан)" if paused else ""))
         return result
 

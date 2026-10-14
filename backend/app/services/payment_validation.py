@@ -24,6 +24,10 @@ def money(value, *, positive=True) -> Decimal:
 
 
 def transaction_reference(value) -> str:
+    # Банкны гүйлгээний дугаар JSON-д тоогоор ирж болно (SocialPay 2026-10-14 хяналт m5) —
+    # бүхэл тоог текст болгоно; bool/бутархай (1e5, 12.0) нь дугаар биш тул татгалзана.
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > 120:
         raise HTTPException(422, "Гүйлгээний баталгааны дугаар шаардлагатай (1–120 тэмдэгт)")
     reference = value.strip()
