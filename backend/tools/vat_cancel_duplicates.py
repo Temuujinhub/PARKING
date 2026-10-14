@@ -50,9 +50,12 @@ e-Barimt гаргадаг» УНТРААСАН бол (терминал нь х�
 ДДТД-гүй EXTERNAL («POS терминал гаргасан») мөр бүртгэнэ.
 
 --evidence (ТЕГ экспорт, олон удаа, урт хугацаа ч болно): файлын хамрах хүрээнд (хугацаа ×
-түрээслэгч) байгаа борлуулалтыг ЗӨВХӨН терминалын (манайх биш, QPay биш) мөр таарвал
-цуцална; хүрээнээс гадуурхыг дүрмээр. Хамралтын статистикийг хэвлэнэ. Ontime баримт
-хэвлэгдээгүй ч хүрээнээс гадуур цуцлагдсан борлуулалтыг tools/vat_reissue_missing.py нөхнө.
+файлын ТТД-ийн түрээслэгч, терминалын кассын цагийн бүсээр) байгаа борлуулалтыг ЗӨВХӨН
+терминалын (манайх биш, QPay биш) мөр таарвал цуцална (CSV basis=TEG); терминалын мөргүй,
+ТОДОРХОЙГҮЙ (ижил дүнтэй хосгүй терминалын мөр ойрхон) борлуулалтыг цуцлахгүй; хүрээнээс
+гадуурхыг АНХДАГЧААР ХАСНА (түрээслэгч × сараар хэвлэнэ) — дүрмээр цуцлах бол
+--outside-by-rule (basis=RULE). Хамралтын статистикийг хэвлэнэ. Ontime баримт хэвлэгдээгүй ч
+цуцлагдсан борлуулалтыг tools/vat_reissue_missing.py нөхнө.
 
     venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant ALL \
         --from 2026-08-25 --to 2026-09-19 --out /root/posapp.csv                           # харах
@@ -383,31 +386,56 @@ def main_pos_app(args):
         sel = VD.select_pos_app(db, sites=sites, lo=lo, hi=hi, scope=scope,
                                 include_company=args.include_company)
         total = print_pos_app_summary(sel)
-        rows = [{**r, "kind": "cancel"} for r in sel["selected"]]
+        rows = [{**r, "kind": "cancel", "basis": "RULE"} for r in sel["selected"]]
         if taxes:
-            # НЭМЭЛТ нотолгоо: ТЕГ экспортын хамрах хүрээнд терминалын мөргүй төлбөрийг ЦУЦЛАХГҮЙ.
+            # НЭМЭЛТ нотолгоо: ТЕГ экспортын хамрах хүрээнд (хугацаа × файлын ТТД-ийн түрээслэгч)
+            # ЗӨВХӨН терминалын мөртэй төлбөрийг цуцална (basis=TEG); хүрээнээс гадуурхыг
+            # --outside-by-rule-гүйгээр ХАСНА (хяналт 2, E: EasyParking-ийн файл + --tenant ALL
+            # нь Моннисын бүх борлуулалтыг чимээгүй дүрмээр цуцлах байв).
             # Тулгалт нь сонгосон түрээслэгч(ид)-ийн БҮХ зогсоолоор (ТЕГ файл ТТД-ийн бүх борлуулалт)
             ev_sites = VD.tenant_sites(db, tenants)
             shifts = [0.0, -float(settings.tz_offset_hours)]
-            ev = VD.terminal_evidence(db, taxes, sites=ev_sites, tol=args.tol, shifts=shifts)
+            ev = VD.terminal_evidence(db, taxes, sites=ev_sites, tol=args.tol, shifts=shifts,
+                                      pos_users=scope["users"])
             split = VD.evidence_split(rows, ev, {x.id: x.tenant_id for x in ev_sites})
             VD.print_evidence(ev, split, tenants=tcode)
             for r in split["missing"][:20]:
                 print(f"    терминалын мөргүй (ЦУЦЛАХГҮЙ): {r['paid_at_ub']} {r['site_code']} "
                       f"{r['plate'] or '—'} {r['method']} {r['amount']:,.0f}₮ ({r['cashier']})")
+            for r in split["with_terminal"]:
+                r["basis"] = "TEG"
             if split["covered"]:
-                print("  Хүрээнд — терминалын мөртэй (цуцална):")
+                print("  Хүрээнд — терминалын мөртэй (цуцална, basis=TEG):")
                 print_cells(split["with_terminal"])
-            if split["missing"]:
-                drop = {r["payment_id"] for r in split["missing"]}
-                rows = [r for r in rows if r["payment_id"] not in drop]
-                write_csv(f"{stem}_no_ontime.csv", split["missing"], POSAPP_FIELDS)
-                print(f"Терминалын мөргүй {len(drop)} төлбөрийг жагсаалтаас хасав → {stem}_no_ontime.csv"
-                      f" · цуцлах {len(rows)} ({sum(r['amount'] for r in rows):,.0f}₮)")
+            drop = {r["payment_id"] for r in split["missing"] + split["ambiguous"]}
+            if drop:
+                write_csv(f"{stem}_no_ontime.csv", split["missing"] + split["ambiguous"],
+                          POSAPP_FIELDS + ["basis"])
+                print(f"Терминалын мөргүй {len(split['missing'])} + ТОДОРХОЙГҮЙ {len(split['ambiguous'])} "
+                      f"төлбөрийг хасав (ЦУЦЛАХГҮЙ) → {stem}_no_ontime.csv")
+            outside = split["outside"]
+            if outside:
+                cnt: dict = {}
+                for r in outside:
+                    c = cnt.setdefault((r.get("tenant") or "?", r["month"]), [0, 0.0])
+                    c[0] += 1
+                    c[1] += r["amount"]
+                print(("Хүрээнээс гадуур (ТЕГ файл хамраагүй) — ДҮРМЭЭР цуцална (--outside-by-rule): "
+                       if args.outside_by_rule else
+                       "Хүрээнээс гадуур (ТЕГ файл хамраагүй) — ХАСАВ (нотолгоогүй; дүрмээр цуцлах бол "
+                       "--outside-by-rule): ")
+                      + " · ".join(f"{t} {m} {n} ({a:,.0f}₮)" for (t, m), (n, a) in sorted(cnt.items())))
+                if not args.outside_by_rule:
+                    drop |= {r["payment_id"] for r in outside}
+                    write_csv(f"{stem}_outside.csv", outside, POSAPP_FIELDS + ["basis"])
+            rows = [r for r in rows if r["payment_id"] not in drop]
+            by_basis = Counter(r["basis"] for r in rows)
+            print(f"ЦУЦЛАХ ЖАГСААЛТ: {len(rows)} ({sum(r['amount'] for r in rows):,.0f}₮) · "
+                  + " · ".join(f"basis={k} {v}" for k, v in sorted(by_basis.items())))
         # Цуцлах мөр ЭХЭНДЭЭ (--limit 1 туршилт msgbill цуцлалтыг шалгана), дараа нь
         # өмнө цуцлагдсан боловч терминалын мөр дутуу (msgbill дуудахгүй) нөхөлт
-        work = rows + [{**r, "kind": "complete_terminal"} for r in sel["complete"]]
-        write_csv(out, work, POSAPP_FIELDS)
+        work = rows + [{**r, "kind": "complete_terminal", "basis": "COMPLETE"} for r in sel["complete"]]
+        write_csv(out, work, POSAPP_FIELDS + ["basis"])
         write_csv(f"{stem}_company.csv", sel["company"], POSAPP_FIELDS)
         print(f"\nCSV: {out} ({len(work)}) · {stem}_company.csv ({len(sel['company'])})"
               f" · {time.monotonic() - t0:.1f}с")
@@ -467,12 +495,14 @@ def main_pos_app(args):
                                 "include_company": bool(args.include_company),
                                 "pos_users": sorted(scope["users"]),
                                 "evidence": [n for n, _t in taxes],
+                                "outside_by_rule": bool(args.outside_by_rule),
+                                "basis": dict(Counter(r.get("basis") for r in work)),
                                 "requested": len(work), "amount": amount, "note": note,
                                 "result": dict(cnt), "stopped": stopped}))
         db.commit()
     finally:
         db.close()
-    write_csv(f"{stem}_applied.csv", res_rows, POSAPP_FIELDS + ["outcome", "error", "key_scope"])
+    write_csv(f"{stem}_applied.csv", res_rows, POSAPP_FIELDS + ["basis", "outcome", "error", "key_scope"])
     print(f"\nДҮН: {dict(cnt)}" + (f"\nЗОГССОН: {stopped}" if stopped else "")
           + f"\nCSV: {stem}_applied.csv\nДахин ажиллуулахад цуцлагдсан нь алгасагдана (идемпотент).")
     return 0 if not cnt.get("failed") and not stopped else 1
@@ -515,12 +545,15 @@ def main(argv=None):
                     help="--pos-app: POS аппаар ≥N карт авсан хэрэглэгч = POS апп (20)")
     ap.add_argument("--evidence", action="append",
                     help="--pos-app: НЭМЭЛТ нотолгоо — ТЕГ экспорт (олон удаа, урт хугацаа болно); "
-                         "хамрах хүрээнд нь терминалын мөргүй төлбөрийг цуцлахгүй")
+                         "хамрах хүрээнд нь ЗӨВХӨН терминалын мөртэйг цуцална, хүрээнээс гадуурхыг хасна")
+    ap.add_argument("--outside-by-rule", action="store_true",
+                    help="--pos-app --evidence: ТЕГ файлын хүрээнээс гадуурх борлуулалтыг ДҮРМЭЭР цуцлах "
+                         "(анхдагч — хасна)")
     args = ap.parse_args(argv)
     if args.pos_app:
         return main_pos_app(args)
-    if args.include_company or args.pos_user or args.evidence:
-        ap.error("--include-company/--pos-user/--evidence зөвхөн --pos-app-тай")
+    if args.include_company or args.pos_user or args.evidence or args.outside_by_rule:
+        ap.error("--include-company/--pos-user/--evidence/--outside-by-rule зөвхөн --pos-app-тай")
 
     for f in args.file:
         if not os.path.isfile(f):

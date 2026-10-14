@@ -22,17 +22,28 @@ POS аппын төлбөр гэж (эхнийх нь таарвал):
      pos.bumbat, pos.khangarid, pos.oros, pos.sport, pos.ylalt, pos_100emneleg — 9-үүлээ
      101–2,261 карттай; веб касс (sogii, bamanna, nominerdene) POS картгүй, online
      «operator» 6 (босгоос доош), testpos 1.
-     ЭРСДЭЛ: POS аппын хэрэглэгч ВЕБ кассаар (толгойгүй) бэлэн авбал терминал хэвлэсэн
-     гэж үзнэ — AuditLog CASH_PAYMENT.pos_app_via-аар хянана.
+     Веб ХӨТЧИЙН хүсэлт (User-Agent «Mozilla/…» — веб касс) fallback-д ОРОХГҮЙ: POS аппын
+     хэрэглэгч веб кассаар бэлэн авбал систем msgbill баримт гаргана (payments_router.
+     _browser_request). CASH_PAYMENT аудитад толгойгүй үед user_agent хадгална.
+
+ТҮҮХЭН СОНГОЛТ (цуцлах/тулгах хэрэгсэл — pos_app_via): source тамга 2026-10-14 04:48 UTC
+(e7c5a8a deploy)-аас хойш НАЙДВАРТАЙ — түүнээс хойшхи төлбөрт ЗӨВХӨН source == "POSAPP";
+хэрэглэгчийн нэрээр (3) зөвхөн түүнээс ӨМНӨХ (тамгагүй) төлбөрийг таньна. Эс бөгөөс POS
+аппын хэрэглэгчийн веб кассын бэлэн (source NULL, msgbill нь цорын ганц баримт) дүрмээр
+цуцлагдах байв (хяналт 2, B).
 """
 from __future__ import annotations
 
 import re
 import time
+from datetime import datetime
 
 POS_APP_MIN_CARD = 20                     # POS аппаар ≥20 карт авсан хэрэглэгч = POS апп
 POS_APP_ROLE = "POS"
 POS_APP_METHODS = ("CARD", "CASH")        # терминал (Ontime) баримт хэвлэдэг аргууд
+# source=POSAPP тамга найдвартай болсон мөч (e7c5a8a deploy, UTC) — түүнээс хойш нэрээр таахгүй.
+# audit1014: тамгагүй сүүлийн POS аппын карт 04:47:28, тамгатай эхнийх 04:48:54 → 04:48:00
+SOURCE_STAMPED_SINCE = datetime(2026, 10, 14, 4, 48)
 
 _CACHE_SEC = 300.0
 _card_cache: dict[str, tuple[float, int]] = {}
@@ -50,9 +61,13 @@ def is_pos_app_payment(payment) -> bool:
 
 def pos_app_via(payment, username=None, users=()) -> str | None:
     """Энэ төлбөр POS аппынх уу — яаж танив (CLI/тайлан). users: POS аппын хэрэглэгчид
-    (жижиг үсгээр, `known_users()["users"]`). None = POS аппынх биш."""
+    (жижиг үсгээр, `known_users()["users"]`). None = POS аппынх биш.
+    SOURCE_STAMPED_SINCE-ээс хойш төлсөн бол ЗӨВХӨН source == "POSAPP" (тамга найдвартай)."""
     if getattr(payment, "source", None) == "POSAPP":
         return "source=POSAPP"
+    paid = getattr(payment, "paid_at", None)
+    if paid is not None and paid >= SOURCE_STAMPED_SINCE:
+        return None
     if (getattr(payment, "provider", None) == "POS"
             and (getattr(payment, "kind", None) or "PARKING") == "PARKING"):
         return "provider=POS"

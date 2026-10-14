@@ -19,7 +19,7 @@ from ..models import AuditLog, FinancialJob, Payment, VatReceipt
 from . import ebarimt, msgbill, qpay
 from .pos_app import is_pos_app_payment  # noqa: F401 — нэг тодорхойлолт (2026-10-14)
 from .receipts import (REISSUED_NO_TERMINAL, assign_ebarimt_id, is_duplicate_cancel,  # noqa: F401
-                       is_system_receipt)
+                       is_reissued_no_terminal, is_system_receipt)
 
 log = logging.getLogger("parking.financial_jobs")
 
@@ -114,7 +114,11 @@ _TEG_DDTD = re.compile(r"^\d{33}$")
 def duplicate_guarded(recs) -> bool:
     """POS-ийн давхардал гэж цуцалсан (тэмдэгтэй) баримттай, ТЭМДЭГГҮЙ ИЛГЭЭГДСЭН баримтгүй
     төлбөр — систем баримтыг ДАХИН гаргахгүй (retry 409, бөөн нөхөлт алгасна).
-    Нэг л дүрэм: financial_jobs.retry_payment_receipts ба vat-retry-failed хоёулаа үүгээр."""
+    Нэг л дүрэм: financial_jobs.retry_payment_receipts ба vat-retry-failed хоёулаа үүгээр.
+    Терминал хэвлээгүй нь батлагдаж ДАХИН гаргасан (REISSUED_NO_TERMINAL) идэвхтэй баримттай
+    бол хамгаалахгүй — тэр баримт FAILED болбол бөөн нөхөлт/retry дахин илгээнэ (хяналт 2, I)."""
+    if any(is_reissued_no_terminal(r) and r.status != "CANCELLED" for r in recs):
+        return False
     return (any(is_duplicate_cancel(r) for r in recs)
             and not any(r.status == "SENT" and r.ebarimt_id and not is_duplicate_cancel(r)
                         for r in recs))
@@ -369,8 +373,10 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
                                terminal=False if no_terminal_receipt else None)
                for rec in recs]
         if mark:
+            # Зөвхөн СИСТЕМИЙН баримтад (EXTERNAL бүртгэл — «дахин гаргасан баримт» биш)
             for r in new:
-                r.raw = {**(r.raw if isinstance(r.raw, dict) else {}), "reissue": dict(mark)}
+                if r.status != TERMINAL_STATUS:
+                    r.raw = {**(r.raw if isinstance(r.raw, dict) else {}), "reissue": dict(mark)}
         db.commit()
         if all(r.status == TERMINAL_STATUS for r in new):
             # Тохиргоо асаалттай — орлох баримтыг терминалынх гэж БҮРТГЭВ (commit
@@ -407,9 +413,10 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
         if job.status == "BLOCKED" and job.attempts == 0:
             if terminal_now is None:
                 terminal_now = not no_terminal_receipt and terminal_issues_receipt(db, payment)
-            if terminal_now and rec is not None:
+            if terminal_now and rec is not None and not is_reissued_no_terminal(rec):
                 # Сувагт ОГТ илгээгээгүй (attempts 0) ба «POS терминал өөрөө НӨАТ баримт
-                # гаргадаг» дүрэм үйлчилж байна — шинэ төлбөртэй ижил EXTERNAL болгоно;
+                # гаргадаг» дүрэм үйлчилж байна — шинэ төлбөртэй ижил EXTERNAL болгоно
+                # (терминал хэвлээгүй нь батлагдаж ДАХИН гаргасан баримтаас бусдыг);
                 # msgbill-ээр гаргавал терминалын баримттай давхардана (нэгтгэлийн хяналт)
                 _mark_terminal(rec, payment, payment_site(payment))
                 job.status, job.last_error = "DONE", "EXTERNAL: " + TERMINAL_NOTE[:150]

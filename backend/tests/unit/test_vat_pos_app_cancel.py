@@ -504,13 +504,17 @@ def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, m
     has = pay(db, w, "HANGARID", "pos.k", method="CASH", at=t0, amount=1000)
     lacks = pay(db, w, "HANGARID", "pos.k", at=t0 + timedelta(minutes=30), amount=2000)
     outside = pay(db, w, "HANGARID", "pos.k", at=t0 + timedelta(days=2), amount=3000)
+    # Веб кассын msgbill мөр файлын эхэнд ба төгсгөлд (терминалын нотолгооны хүрээ = эхний
+    # мөрөөс сүүлийн мөр − tol хүртэл)
+    web = pay(db, w, "HANGARID", "sogii", method="CASH", at=t0 + timedelta(minutes=90), amount=1500)
+    web0 = pay(db, w, "HANGARID", "sogii", method="CASH", at=t0 - timedelta(minutes=10), amount=1400)
     db.commit()
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(["Пос дугаар", "ДДТД", "Огноо", "Нийт дүн", "Систем нийлүүлэгч"])
     ws.append(["1", "015200020090000097260000110002990", (t0 + timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S"),
                1000, "Ontime"])
-    for i, p in enumerate((has, lacks)):                       # манай msgbill мөр (УБ локал)
+    for i, p in enumerate((has, lacks, web, web0)):            # манай msgbill мөр (УБ локал)
         ws.append(["2", "01520002009000109726000%02d10045952" % i,
                    (p.paid_at + timedelta(hours=8, seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
                    float(p.amount), "Онлайм нетворк"])
@@ -524,11 +528,26 @@ def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, m
     assert "ХАМРАЛТ: хүрээнд 2 төлбөр · терминалын мөртэй 1 (50.0%) · терминалын мөргүй 1" in text
     assert "терминалын касс: …10002990 1 мөр" in text and "түрээслэгч EASYPARKING" in text
     assert (tmp_path / "p_no_ontime.csv").read_text(encoding="utf-8-sig").count(lacks.id) == 1
+    # Хүрээнээс гадуур (ТЕГ файл хамраагүй) — анхдагчаар ХАСНА, түрээслэгч × сараар хэвлэнэ
+    assert "Хүрээнээс гадуур (ТЕГ файл хамраагүй) — ХАСАВ" in text and "EASYPARKING 2026-09 1 (3,000₮)" in text
+    assert "ЦУЦЛАХ ЖАГСААЛТ: 1 (1,000₮) · basis=TEG 1" in text
+    rows = (tmp_path / "p.csv").read_text(encoding="utf-8-sig")
+    assert rows.splitlines()[0].endswith(",basis") and has.id in rows and outside.id not in rows
+    assert (tmp_path / "p_outside.csv").read_text(encoding="utf-8-sig").count(outside.id) == 1
     assert cli.main(base + ["--apply", "--yes", "--user", "t"]) == 0
-    assert len(FakeHTTP.calls) == 2                                   # has + outside
+    assert len(FakeHTTP.calls) == 1                                   # зөвхөн нотолгоотой (has)
     assert [r.status for r in _recs(db, lacks.id)] == ["SENT"]        # нотолгоогүй — хөндөөгүй
-    for p in (has, outside):
-        assert sorted(r.status for r in _recs(db, p.id)) == ["CANCELLED", "EXTERNAL"]
+    assert [r.status for r in _recs(db, outside.id)] == ["SENT"]      # хүрээнээс гадуур — хөндөөгүй
+    assert sorted(r.status for r in _recs(db, has.id)) == ["CANCELLED", "EXTERNAL"]
+    summ = db.query(M.AuditLog).filter_by(action="EBARIMT_CANCEL_BULK_SUMMARY").one()
+    assert summ.detail["basis"] == {"TEG": 1} and summ.detail["outside_by_rule"] is False
+    # --outside-by-rule — хүрээнээс гадуурхыг ДҮРМЭЭР (basis=RULE)
+    capsys.readouterr()
+    assert cli.main(base + ["--outside-by-rule", "--apply", "--yes", "--user", "t"]) == 0
+    assert "ДҮРМЭЭР цуцална (--outside-by-rule)" in capsys.readouterr().out
+    assert len(FakeHTTP.calls) == 2
+    assert sorted(r.status for r in _recs(db, outside.id)) == ["CANCELLED", "EXTERNAL"]
+    assert [r.status for r in _recs(db, lacks.id)] == ["SENT"]
 
 
 # ───────────── нэгтгэлийн хяналтын засварууд ─────────────

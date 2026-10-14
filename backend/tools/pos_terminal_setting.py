@@ -10,7 +10,11 @@
     үйлчлэхгүй зогсоолыг ⚠ (Тохиргоо → Төлбөрийн дүрэм-ийн зөрчлийн шалгалттай нэг дүрэм);
   • --site CODE --set off     терминал нь баримт ХЭВЛЭДЭГГҮЙ зогсоолд тодорхой унтраах;
   • --site CODE --set on      тодорхой асаах (--methods CARD|CASH|CARD,CASH);
-  • --site CODE --set global  зогсоолын давхаргыг хасаж ерөнхий рүү буцаах.
+  • --site CODE --set global  зогсоолын давхаргыг хасаж ерөнхий рүү буцаах;
+  • --all --set global        10-13-нд зогсоол бүрд бичсэн ON мөрүүдийг (7 зогсоол) ерөнхий рүү
+    буцаана (өвлөнө): pos_terminal_issues ба (ерөнхийтэй ижил бол) pos_terminal_methods-ийг
+    хасч, зогсоолын «POS аппын хэрэглэгчид»-ийг ерөнхий жагсаалтад НЭГТГЭНЭ. Эс бөгөөс ерөнхийг
+    хожим унтраахад тэр 7 зогсоол ON-оор «гацна». Тодорхой OFF мөрийг хөндөхгүй. Өмнө/дараа хэвлэнэ.
 Ерөнхий утгыг UI-аас (Тохиргоо → Төлбөрийн дүрэм → Ерөнхий) өөрчилнө.
 
     cd /root/PARKING/backend
@@ -18,6 +22,7 @@
     venv/bin/python tools/pos_terminal_setting.py --tenant MONNIS                     # нэг түрээслэгч
     venv/bin/python tools/pos_terminal_setting.py --site HANGARID --set off \\
         --apply --user temuujin                                                       # унтраах
+    venv/bin/python tools/pos_terminal_setting.py --all --set global                  # ON мөр → ерөнхий (харах)
 
 Хамгаалалт: --set үед --site заавал (бөөнөөр өөрчлөхгүй); --apply зөвхөн ажиллаж буй
 «parking» DB + прод сервер дээр (vat_duplicates.server_problems — audit*/t_* хуулбар,
@@ -63,6 +68,96 @@ def plan_values(mode: str, methods: str) -> dict:
     return {"pos_terminal_issues": None, "pos_terminal_methods": None}
 
 
+def plan_all_global(db) -> dict:
+    """--all --set global: ON мөр бүрийг ерөнхий рүү — юу хасах, ерөнхий хэрэглэгчид (бичихгүй)."""
+    from app.models import ParkingSite
+    glob = A.get_rules(db, A.EBARIMT_KEY)
+    gmethods = PRULES.clamp_values(A.EBARIMT_KEY, {"pos_terminal_methods": glob["pos_terminal_methods"]}
+                                   )["pos_terminal_methods"]
+    users = [u for u in str(glob.get("pos_terminal_users") or "").split(",") if u.strip()]
+    seen = {u.lower() for u in users}
+    rows = []
+    overlay = A.get_site_overrides(db, A.EBARIMT_KEY) or {}
+    code = {sid: getattr(db.get(ParkingSite, sid), "site_code", None) or sid for sid in overlay}
+    for sid, ov in sorted(overlay.items(), key=lambda kv: code[kv[0]]):   # тогтвортой дараалал
+        on = A._coerce(True, ov.get("pos_terminal_issues")) if "pos_terminal_issues" in ov else None
+        if on is not True:
+            continue
+        site = db.get(ParkingSite, sid)
+        values = {"pos_terminal_issues": None, "pos_terminal_users": None}
+        keep = None
+        m = ov.get("pos_terminal_methods")
+        if m is not None:
+            mm = PRULES.clamp_values(A.EBARIMT_KEY, {"pos_terminal_methods": str(m)})["pos_terminal_methods"]
+            if mm == gmethods:
+                values["pos_terminal_methods"] = None
+            else:
+                keep = mm
+        for u in str(ov.get("pos_terminal_users") or "").split(","):
+            u = u.strip()
+            if u and u.lower() not in seen:
+                seen.add(u.lower())
+                users.append(u)
+        rows.append({"site_id": sid, "site_code": getattr(site, "site_code", sid), "before": dict(ov),
+                     "values": values, "keep_methods": keep})
+    return {"rows": rows, "users_before": glob.get("pos_terminal_users") or "",
+            "users_after": ",".join(users), "global_on": bool(glob.get("pos_terminal_issues"))}
+
+
+def main_all_global(args, username) -> int:
+    db = SessionLocal()
+    if not args.apply and db.bind.dialect.name == "postgresql":
+        db.execute(text("SET TRANSACTION READ ONLY"))
+    try:
+        plan = plan_all_global(db)
+        print(f"{TOOL} --all --set global: {'APPLY' if args.apply else 'DRY-RUN'} · DB {VD.db_name()}"
+              f" · ЕРӨНХИЙ: {'ON' if plan['global_on'] else 'OFF'}")
+        if not plan["global_on"]:
+            print("⚠ Ерөнхий утга УНТРААЛТТАЙ — ON мөрийг ерөнхий рүү буцаавал тэдгээр зогсоол УНТАРНА.")
+        for r in plan["rows"]:
+            print(f"  {r['site_code']:<26} ӨМНӨ {r['before']}")
+            print(f"  {'':<26} ДАРАА ерөнхийг өвлөнө"
+                  + (f" · арга ерөнхийгөөс ялгаатай тул үлдээв: {r['keep_methods']}" if r["keep_methods"] else ""))
+        print(f"  ерөнхий «POS аппын хэрэглэгчид»: «{plan['users_before'] or '—'}» → «{plan['users_after'] or '—'}»")
+        print(f"\nӨөрчлөх зогсоол: {len(plan['rows'])}")
+        if not plan["rows"]:
+            print("ON мөр алга — юу ч хийх шаардлагагүй.")
+            return 0
+        if not args.apply:
+            probs = VD.server_problems()
+            if probs:
+                print("⚠ --apply ОДООГООР ажиллахгүй: " + "; ".join(probs))
+            print("DRY-RUN — юу ч бичсэнгүй. Бичихийн тулд --apply --user <нэр>.")
+            return 0
+        probs = VD.server_problems()
+        if probs:
+            print("ЗОГСОВ: " + "; ".join(probs))
+            return 3
+        if plan["users_after"] != plan["users_before"]:
+            saved = A.set_rules(db, A.EBARIMT_KEY, {"pos_terminal_users": plan["users_after"]}, username)
+            db.add(AuditLog(username=username, action="UPDATE", entity="payment_rules", entity_id="global",
+                            detail={A.EBARIMT_KEY: {"pos_terminal_users": saved.get("pos_terminal_users")},
+                                    "_tool": TOOL, "_set": "all-global",
+                                    "_before": {"pos_terminal_users": plan["users_before"]}}))
+        for r in plan["rows"]:
+            saved = A.set_site_rules(db, A.EBARIMT_KEY, r["site_id"], r["values"], username)
+            db.add(AuditLog(username=username, action="UPDATE", entity="payment_rules",
+                            entity_id=str(r["site_id"]),
+                            detail={A.EBARIMT_KEY: saved, "_tool": TOOL, "_set": "all-global",
+                                    "_before": r["before"]}))
+        db.commit()
+        A.invalidate_cache()
+        print("\nБИЧЛЭЭ. Дараах байдал:")
+        for r in plan["rows"]:
+            st = site_state(db, r["site_id"])
+            print(f"  {r['site_code']}: {'ON ' + st['methods'] if st['issues'] else 'OFF'} ({st['source']})")
+        print(f"  ерөнхий хэрэглэгчид: {','.join(sorted(A.pos_app_users(db))) or '—'}")
+        return 0
+    finally:
+        db.rollback()
+        db.close()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -72,10 +167,16 @@ def main(argv=None):
                     help="on/off — зогсоолд тодорхой; global — ерөнхий рүү буцаах")
     ap.add_argument("--methods", default="CARD,CASH", choices=sorted(A.POS_TERMINAL_METHOD_CHOICES),
                     help="--set on үед: терминал аль төлбөрт баримт гаргадаг (анхдагч CARD,CASH)")
+    ap.add_argument("--all", action="store_true",
+                    help="--set global-той: БҮХ зогсоолын ON мөрийг ерөнхий рүү буцааж хэрэглэгчийг нэгтгэх")
     ap.add_argument("--apply", action="store_true", help="БОДИТООР бичих (анхдагч dry-run)")
     ap.add_argument("--user", default=None, help="AuditLog-д (анхдагч cli:<OS хэрэглэгч>)")
     args = ap.parse_args(argv)
     username = args.user or f"cli:{os.getenv('SUDO_USER') or getpass.getuser()}"
+    if args.all:
+        if args.mode != "global" or args.site:
+            raise SystemExit("--all зөвхөн --set global-той (--site-гүй)")
+        return main_all_global(args, username)
     if args.mode and not args.site:
         raise SystemExit("--set үед --site заавал (зогсоол бүрээр, бөөнөөр өөрчлөхгүй). "
                          "Бүх зогсоолын анхдагчийг UI-ийн «Ерөнхий»-өөс өөрчилнө.")

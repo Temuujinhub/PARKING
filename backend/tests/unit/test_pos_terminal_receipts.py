@@ -787,8 +787,10 @@ def test_vat_reconcile_confirms_and_lists_missing_terminal_receipts(db, monkeypa
     monkeypatch.setattr(D, 'SessionLocal', sessionmaker(bind=db.get_bind(), autoflush=False))
     s, u = parking(db), user(db)
     base = datetime(2026, 10, 12, 4, 0, 0)
+    # 5-р (сүүлийн) манай баримт — файлын сүүлийн мөрөөс tol-оор өмнөх хүртэл л терминалын
+    # нотолгооны хүрээ (хяналт 2: сүүлчийн борлуулалтын хожуу мөр файлд орохгүй байж болно)
     ours = [_paid(db, s, u, base + timedelta(minutes=10 * i), 1000 + 100 * i, external=False, seq=i)
-            for i in range(4)]
+            for i in range(5)]
     term = [_paid(db, s, u, base + timedelta(minutes=10 * i + 5), 3000 + 100 * i, external=True,
                   seq=10 + i) for i in range(4)]
     missing = _paid(db, s, u, base + timedelta(minutes=17), 4500, external=True, seq=20)
@@ -807,7 +809,7 @@ def test_vat_reconcile_confirms_and_lists_missing_terminal_receipts(db, monkeypa
             excel=excel, tenant_id=None, col_ddtd=None, col_dt=None, col_amount=None, db=db, user=u))
 
     res = run()
-    assert res['ours_total'] == 4 and res['matched'] == 4           # EXTERNAL «манайх»-т ороогүй
+    assert res['ours_total'] == 5 and res['matched'] == 5           # EXTERNAL «манайх»-т ороогүй
     assert res['unmatched_ours_total'] == 0
     assert res['terminal_issued'] == 5 and res['terminal_confirmed'] == 4
     assert res['terminal_missing_total'] == 1

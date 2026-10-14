@@ -1443,7 +1443,7 @@ async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
 
 async def retry_ebarimt(db: Session, payment: Payment, *, reissue_external: bool = False,
                         allow_duplicate: bool = False, no_terminal_receipt: bool = False,
-                        username: str = "system") -> dict:
+                        username: str = "system", mark: dict | None = None) -> dict:
     """Resume a saved receipt job; never issue an untracked second receipt.
     EXTERNAL (POS терминал гаргасан) баримтыг зөвхөн reissue_external=True үед,
     дүрэм үйлчлэхгүй эсвэл терминал хэвлээгүйг баталгаажуулсан (no_terminal_receipt)
@@ -1455,7 +1455,8 @@ async def retry_ebarimt(db: Session, payment: Payment, *, reissue_external: bool
     from ..services.financial_jobs import retry_payment_receipts
     return retry_payment_receipts(db, payment, reissue_external=reissue_external,
                                   allow_duplicate=allow_duplicate,
-                                  no_terminal_receipt=no_terminal_receipt, username=username)
+                                  no_terminal_receipt=no_terminal_receipt, username=username,
+                                  mark=mark)
 
 
 def _mark_cancel(rec: VatReceipt, state: str, key_scope: str | None, note: str,
@@ -1890,9 +1891,18 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
         db.flush()
     allow_dup = bool(body.get("allow_duplicate"))
     no_terminal = bool(body.get("no_terminal_receipt"))
+    # Админ «терминал хэвлээгүй»/«давхардлыг зөвшөөрөх»-ийг ил тодоор баталсан дахин гаргалт —
+    # REISSUED_NO_TERMINAL тэмдэг: дараагийн `vat_cancel_duplicates --pos-app` (08-19 → одоо)
+    # үүнийг ДАХИН цуцалж борлуулалтыг баримтгүй болгохгүй (хяналт 2, A)
+    mark = None
+    if no_terminal or allow_dup:
+        from ..services.receipts import REISSUED_NO_TERMINAL
+        mark = {"reason": REISSUED_NO_TERMINAL, "by": user.username, "source": "ui",
+                "no_terminal_receipt": no_terminal, "allow_duplicate": allow_dup,
+                "at": datetime.utcnow().isoformat(timespec="seconds")}
     res = await retry_ebarimt(db, payment, reissue_external=reissue and has_external,
                               allow_duplicate=allow_dup, no_terminal_receipt=no_terminal,
-                              username=user.username)
+                              username=user.username, mark=mark)
     if res.get("duplicate_of_pos"):
         # Юу ч үүсгээгүй — POS терминалын давхардал гэж цуцалсан баримтыг дахин
         # гаргавал ТЕГ-т нэг борлуулалт дахиад 2 баримттай болно (2026-10-13)

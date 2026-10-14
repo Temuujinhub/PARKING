@@ -14,7 +14,11 @@ UTC), нэг-нэгээр, ±tol; файлын түрээслэгчийг ман
   • өөр идэвхтэй баримтгүй (системийн SENT/PENDING/REVIEW/FAILED, ДДТД-тэй терминалын),
   • цуцлалт/терминалын мөр нь ТЕГ файлын Ontime мөрөөр хийгдээгүй (--file горимын
     teg_ddtd = терминал хэвлэсний нотолгоо — ХӨНДӨХГҮЙ)
-төлбөрүүдээс ТЕГ-т терминалын мөр ТААРААГҮЙ-г олно.
+төлбөрүүдээс ТЕГ-т терминалын мөр ТААРААГҮЙ-г олно. Хамрах хүрээ нь ТЕРМИНАЛЫН кассын өөрийн
+цагийн бүсээр (экспорт касс бүрийг харагдах огноогоор нь шүүдэг — файлын эхний өдрийн УБ
+00:00–08:00 нь Ontime-д хамрагдаагүй). Ижил дүнтэй ХОСГҮЙ терминалын мөр −10 мин…+2 цагийн
+дотор байвал (терминалын цаг зөрсөн/хожуу илгээсэн байж магадгүй) ТОДОРХОЙГҮЙ (AMBIGUOUS) —
+--include-ambiguous-гүйгээр дахин гаргахгүй; өдөр бүрийн терминалын мөр/хосолсон/хосгүйг хэвлэнэ.
 
 АНХДАГЧ = DRY-RUN (READ ONLY): зогсоол × өдрөөр тоо/₮, CSV. --apply үед дараалан:
 financial_jobs.retry_payment_receipts (reissue_external + allow_duplicate +
@@ -63,6 +67,8 @@ FIELDS = ["payment_id", "verdict", "tenant", "site_code", "site_name", "plate", 
           "receiver_type", "customer_tin"]
 VERDICT_MN = {"REISSUE": "ТЕГ-т терминалын мөр алга — ДАХИН ГАРГАНА",
               "TERMINAL_OK": "терминалын мөр ТЕГ-т бий — хөндөхгүй",
+              "AMBIGUOUS": "ТОДОРХОЙГҮЙ — ижил дүнтэй ХОСГҮЙ терминалын мөр −10 мин…+2 цагт бий "
+                           "(терминалын цаг зөрсөн байж магадгүй) — --include-ambiguous-гүйгээр гаргахгүй",
               "OUTSIDE": "ТЕГ файлын хүрээнээс гадуур — дүгнэхгүй"}
 
 
@@ -114,6 +120,8 @@ def main(argv=None):
     ap.add_argument("--delay", type=float, default=0.2, help="төлбөр хоорондын завсар (сек)")
     ap.add_argument("--accept-no-terminal-file", action="store_true",
                     help="терминалын (Ontime) мөр ОГТ алга файлыг нотолгоо болгож --apply хийх")
+    ap.add_argument("--include-ambiguous", action="store_true",
+                    help="ТОДОРХОЙГҮЙ (ойролцоо хосгүй терминалын мөртэй) борлуулалтыг ч дахин гаргах")
     args = ap.parse_args(argv)
     for f in args.file:
         if not os.path.isfile(f):
@@ -154,11 +162,13 @@ def main(argv=None):
         no_term = [st["file"] for st in ev["files"] if st["usable"] and not st["terminal_registers"]]
         for r in split["missing"]:
             r["verdict"] = "REISSUE"
+        for r in split["ambiguous"]:
+            r["verdict"] = "AMBIGUOUS"
         for r in split["with_terminal"]:
             r["verdict"] = "TERMINAL_OK"
         for r in split["outside"]:
             r["verdict"] = "OUTSIDE"
-        miss = split["missing"]
+        miss = split["missing"] + (split["ambiguous"] if args.include_ambiguous else [])
         total = sum(r["amount"] for r in miss)
         print(f"\nНЭР ДЭВШИГЧ (EXTERNAL / POS-ийн давхардал гэж цуцалсан, өөр баримтгүй): "
               f"{len(sel['candidates'])} · хасагдсан: "
@@ -166,9 +176,16 @@ def main(argv=None):
                  or "—"))
         print(f"  {VERDICT_MN['TERMINAL_OK']}: {len(split['with_terminal'])}"
               f" · {VERDICT_MN['OUTSIDE']}: {len(split['outside'])}")
-        print(f"\nДАХИН ГАРГАХ (ТЕГ-т терминалын мөр алга): {len(miss)} төлбөр · {total:,.0f}₮")
+        if split["ambiguous"]:
+            print(f"  ⚠ {VERDICT_MN['AMBIGUOUS']}: {len(split['ambiguous'])} "
+                  f"({sum(r['amount'] for r in split['ambiguous']):,.0f}₮)"
+                  + (" — --include-ambiguous: ДАХИН ГАРГАНА" if args.include_ambiguous else ""))
+            print_by_site_day(split["ambiguous"])
+        print(f"\nДАХИН ГАРГАХ (ТЕГ-т терминалын мөр алга"
+              + (" + ТОДОРХОЙГҮЙ" if args.include_ambiguous else "") + f"): {len(miss)} төлбөр · {total:,.0f}₮")
         print_by_site_day(miss)
-        allrows = miss + split["with_terminal"] + split["outside"]
+        allrows = (split["missing"] + split["ambiguous"] + split["with_terminal"]
+                   + split["outside"])
         write_csv(out, miss, FIELDS)
         write_csv(f"{stem}_all.csv", allrows, FIELDS)
         print(f"\nCSV: {out} ({len(miss)}) · {stem}_all.csv ({len(allrows)}) · "
@@ -240,6 +257,7 @@ def main(argv=None):
                         entity_id=REISSUED_NO_TERMINAL,
                         detail={"tool": TOOL, "tenants": [t.code for t in tenants],
                                 "sites": [s_.site_code for s_ in sites], "files": files,
+                                "include_ambiguous": bool(args.include_ambiguous),
                                 "requested": len(work), "amount": amount, "result": dict(cnt)}))
         db.commit()
     finally:
