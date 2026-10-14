@@ -491,15 +491,54 @@ def test_valid_inner_read_keeps_its_plate_registered_only(c):
     assert p.paused_since == since
 
 
-def test_valid_read_with_own_history_is_a_different_car(c):
-    """Хяналт N1: уншсан ЗӨВ дугаар эцэг зогсоолд сүүлийн 14 хоногт өөрийн сешнтэй →
-    тусдаа машин (гадна орох уншилт нь алдагдсан) — ойролцоо машиныг зогсоохгүй."""
-    hist = outer(c, "1357УАБ", ago=timedelta(days=3), status="CLOSED")
-    hist.exit_time = hist.entry_time + timedelta(hours=2)
+def _hist(c, plate, days_ago, hours=2):
+    """Өмнөх (хаагдсан) айлчлал. Postgres-ийн uq_active_session нь зөвхөн идэвхтэй
+    сешнд (partial) — SQLite-д бүтэн unique болж үүсдэг тул энд хасна."""
+    from sqlalchemy import text
+    c.db.execute(text("DROP INDEX IF EXISTS uq_active_session"))
+    h = outer(c, plate, ago=timedelta(days=days_ago), status="CLOSED")
+    h.exit_time = h.entry_time + timedelta(hours=hours)
     c.db.commit()
+    return h
+
+
+def test_regular_car_outer_misread_still_matches(c):
+    """N1 (эзний шийдвэр): 8810УКР хэв маяг — байнгын машин (7 өмнөх сешн) доторх камерт
+    ЗӨВ, гадна камерт нэг удаа буруу (1357УАБ, өөр түүхгүй) уншигдсан → тохирно."""
+    for d in range(1, 8):
+        _hist(c, "1357УАА", d)
+    b = outer(c, "1357УАБ", ago=timedelta(seconds=40))   # гадна буруу уншилт
+    res = enter_inner(c, PLATE)
+    assert b.paused_since is not None
+    assert c.db.get(M.ParkingSession, res["session_id"]).plate_number == PLATE   # зөв → хэвээр
+    (a,) = audits(c, "NESTED_OCR_MATCH")
+    assert a.entity_id == b.id
+
+
+def test_two_known_distinct_cars_are_not_matched(c):
+    """N1: уншсан 1357УАБ ба гадна 1357УАА хоёулаа өөрийн түүхтэй — хоёр мэдэгдэх машин
+    (1357УАБ-ийн гадна орох уншилт алдагдсан) → 1357УАА-г зогсоохгүй."""
+    _hist(c, "1357УАБ", 3)
+    _hist(c, "1357УАА", 5)
     b = outer(c, ago=timedelta(minutes=1))               # 1357УАА гадна талбайд
     enter_inner(c, "1357УАБ")
     assert b.paused_since is None and not audits(c, "NESTED_OCR_MATCH")
+
+
+def test_two_known_cars_also_blocks_inner_exit_fallback(c):
+    _hist(c, "1357УАБ", 3)
+    _hist(c, "1357УАА", 5)
+    p = paused_parent(c, hours=2)
+    res = exit_inner(c, "1357УАБ")
+    assert res["action"] == "review_required" and p.paused_since is not None
+
+
+def test_read_history_alone_does_not_block(c):
+    """Зөвхөн уншсан дугаар түүхтэй, гадна сешний дугаар анх удаа → тохирно."""
+    _hist(c, "1357УАБ", 3)
+    b = outer(c, ago=timedelta(minutes=1))
+    enter_inner(c, "1357УАБ")
+    assert b.paused_since is not None
 
 
 def test_junk_read_with_own_junk_history_still_matches(c):

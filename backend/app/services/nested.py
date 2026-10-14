@@ -79,8 +79,8 @@ OCR-ойролцоо тохирол (2026-10-14; `match_parent`, `inner_plate_si
       ТААМАГЛАХГҮЙ (дутуу нэхэмжлэхээс илүү ихээр нэхэх нь аюулгүй тал).
   Зөвхөн OPEN гадна сешнд — AWAITING_PAYMENT/PAID сешнд яг дугаар л (машин гарсан
   байж болох тул буцаалт/зогсолт нь өрийг бүхэлд нь хасах эрсдэлтэй). Уншсан ЗӨВ
-  дугаар эцэг зогсоолд сүүлийн 14 хоногт өөрийн сешнтэй бол тусдаа машин —
-  тохируулахгүй (`_OWN_HISTORY`).
+  дугаар БА нэр дэвшигч гадна сешний дугаар ХОЁУЛАА эцэг зогсоолд сүүлийн 14 хоногт
+  өөр сешнтэй бол хоёр мэдэгдэх тусдаа машин — тохируулахгүй (`_two_known_cars`).
   Доторх уншилт формат буруу/тайрагдсан бол доторх сешний дугаарыг гадныхаар засна
   (тэмдэглэлтэй) — дараагийн доторх гарах уншилт тэр сешнтэй таарна. Зөв форматтай
   уншилт өөрийн дугаараа хадгална (гадна камер буруу уншсан байж болно). Засагдаагүй үлдсэн доторх сешн
@@ -134,8 +134,7 @@ _DIGITS_LETTERS = re.compile(r"^(\d{4})(\D+)$")
 # (`_revert_refused_exit`). Түүнээс хожуу бол 2 цагийн AWAITING → unpaid_exit өрийн
 # дүрмийг тойрох эрсдэлтэй (хаалт дагаж гарсан машин 72ц дараа өргүй хаагдана).
 _REVERT_WINDOW = timedelta(minutes=15)
-# Уншсан ЗӨВ дугаар өөрөө эцэг зогсоолд сүүлийн N хоногт бүртгэлтэй бол тэр нь
-# тусдаа (жинхэнэ) машин — ойролцоо тохирол хийхгүй (хяналт N1, 2026-10-14).
+# Хоёр мэдэгдэх машины шалгалтын түүхийн цонх (`_two_known_cars`, хяналт N1).
 _OWN_HISTORY = timedelta(days=14)
 
 
@@ -195,17 +194,6 @@ def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
     өмнө зогссон. window: гадна орох уншилт `_FUZZY_WINDOW` дотор."""
     if not site or not site.parent_site_id or not plate:
         return None
-    from ..session_logic import is_valid_plate
-    if is_valid_plate(plate) and db.query(ParkingSession.id).filter(
-            ParkingSession.site_id == site.parent_site_id,
-            ParkingSession.plate_number == plate,
-            ParkingSession.entry_time >= at - _OWN_HISTORY).first() is not None:
-        # Зөв форматтай уншилт эцэг зогсоолд өөрийн түүхтэй — жинхэнэ өөр машин
-        # (гадна орох уншилт нь энэ удаа алдагдсан байж болно). Формат буруу/
-        # тайрагдсан уншилтад хамаарахгүй: давтагддаг хог уншилт машин биш.
-        log.info("[nested] %s: «%s» — энэ дугаар эцэг зогсоолд өөрийн бүртгэлтэй (тусдаа "
-                 "машин), ойролцоо тохирол хийсэнгүй", plate, site.name)
-        return None
     cands = [s for s in (db.query(ParkingSession)
                          .filter(ParkingSession.site_id == site.parent_site_id,
                                  ParkingSession.status.in_(_ACTIVE)).all())
@@ -224,7 +212,38 @@ def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
         return None
     if window and not _seen_outside(c, at):
         return None
+    if _two_known_cars(db, site.parent_site_id, plate, c, at):
+        log.info("[nested] %s: «%s» — уншсан дугаар ба гадна «%s» хоёулаа эцэг зогсоолд "
+                 "өөрийн түүхтэй (хоёр тусдаа машин), ойролцоо тохирол хийсэнгүй",
+                 plate, site.name, c.plate_number)
+        return None
     return c
+
+
+def _two_known_cars(db: Session, parent_site_id: str, read: str, cand: ParkingSession,
+                    at: datetime) -> bool:
+    """Хяналт N1 (эзний шийдвэр 2026-10-14): уншсан ЗӨВ дугаар БА нэр дэвшигчийн дугаар
+    ХОЁУЛАА эцэг зогсоолд сүүлийн `_OWN_HISTORY`-д өөр сешнтэй — хоёр мэдэгдэх тусдаа
+    машин (нэгнийх нь гадна орох уншилт энэ удаа алдагдсан) → тохируулахгүй.
+
+    Зөвхөн уншсан дугаарын түүхээр хаахгүй: байнгын машиныг гадна камер буруу уншиж
+    (прод 8810УКР — 10-09..14-нд 7 сешн, 10-08-нд гадна «8810УБР»), доторх камер зөв
+    уншдаг — нэр дэвшигчийн дугаар нэг удаагийн буруу уншилт (өөр түүхгүй) тул тохирно
+    (ажилтан/өвчтөнд дотор байх хугацааг нэхэхгүй байх нь эзний тэргүүлэх зорилт).
+    Формат буруу/тайрагдсан уншилт хамаарахгүй — давтагддаг хог уншилт машин биш."""
+    from ..session_logic import is_valid_plate
+    if not is_valid_plate(read):
+        return False
+    since = at - _OWN_HISTORY
+
+    def known(p, exclude=None):
+        q = db.query(ParkingSession.id).filter(ParkingSession.site_id == parent_site_id,
+                                               ParkingSession.plate_number == p,
+                                               ParkingSession.entry_time >= since)
+        if exclude is not None:
+            q = q.filter(ParkingSession.id != exclude)
+        return q.first() is not None
+    return known(read) and known(cand.plate_number, cand.id)
 
 
 def match_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
