@@ -5,8 +5,9 @@
 // систем баримт үүсгэхгүй (EXTERNAL) — тэр мөр «манайх»-аас хасагддаг тул терминал
 // баримт ХЭВЛЭЭГҮЙ (унтарсан, цаасгүй, Ontime салгасан) үед борлуулалт огт баримтгүй
 // үлдсэнийг юу ч харуулдаггүй байв. Энд тэдгээрийг жагсааж, баталгаажсан бол
-// «Систем баримт гаргах»-аар msgbill-ээр нөхнө (сервер тохиргоо асаалттай бол 409 —
-// эхлээд зогсоолын тохиргоог түр унтраана).
+// «Систем баримт гаргах»-аар msgbill-ээр нөхнө (2026-10-14: дүрэм ерөнхийдөө асаалттай
+// тул тохиргоо унтраахгүй — «терминал хэвлээгүй» баталгаажуулалтыг (no_terminal_receipt)
+// илгээнэ; олноор нь бол tools/vat_reissue_missing.py).
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
@@ -21,12 +22,11 @@ export default function TerminalMissing({ recon, toast }) {
     if (!window.confirm(`${r.plate || ''} — ${fmt(r.amount)}₮\n`
       + 'POS терминал баримт гаргасан гэж бүртгэгдсэн ч ТЕГ-ийн файлд баримт алга.\n'
       + 'Терминал баримт ГАРГААГҮЙ нь батлагдсан уу? Систем msgbill-ээр шинэ баримт гаргана.\n\n'
-      + 'Анхаар: энэ зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» тохиргоо асаалттай бол '
-      + 'сервер татгалзана — түр унтрааж, нөхөөд, буцааж асаана уу.')) return
+      + 'Анхаар: терминал баримт хэвлэсэн бол ТЕГ-т нэг борлуулалт 2 баримттай болно.')) return
     setBusy(r.payment_id)
     try {
       const res = await api(`/api/payments/${r.payment_id}/retry-ebarimt`,
-        { method: 'POST', body: { reissue_external: true } })
+        { method: 'POST', body: { reissue_external: true, no_terminal_receipt: true } })
       setDone((d) => ({ ...d, [r.payment_id]: res.error || 'Баримтын ажил хадгалагдлаа' }))
       toast(res.error || 'Баримтын ажил хадгалагдлаа', res.pending ? 'success' : 'error')
     } catch (e) { toast(e.message, 'error') } finally { setBusy(null) }

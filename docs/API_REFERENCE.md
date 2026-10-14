@@ -193,15 +193,17 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 ```
 Хариунд ижил `ebarimt_id/lottery_code/qr_data` буцна; Ибаримт хуудсанд суваг = тухайн нэр.
 
-**POS терминал өөрөө баримт гаргадаг зогсоол (2026-10-13):** Тохиргоо → Төлбөрийн дүрэм →
-«e-Barimt» бүлэг (`ebarimt_rules.pos_terminal_issues` + `pos_terminal_methods`, зогсоол
-бүрээр, анхдагч УНТРААЛТТАЙ). Асаалттай зогсоолд POS аппын төлбөр (`pos/confirm` — үргэлж;
-`cash` болон `compensations/{id}/pay` — `X-App-Version` толгойтой эсвэл зогсоолын
-`pos_terminal_users` жагсаалтын хэрэглэгч бол, `payments.source=POSAPP`)
+**POS терминал (PAX апп) өөрөө баримт гаргадаг (2026-10-13; 10-14 бүх зогсоолд):** Тохиргоо →
+Төлбөрийн дүрэм → «e-Barimt» бүлэг (`ebarimt_rules.pos_terminal_issues` + `pos_terminal_methods`;
+ЕРӨНХИЙ анхдагч АСААЛТТАЙ — эзний 10-14-ний шийдвэр, терминал нь хэвлэдэггүй зогсоолд л
+зогсоолоор унтраана). POS аппын төлбөр (`pos/confirm` — үргэлж; `cash` болон
+`compensations/{id}/pay` — `X-App-Version` толгойтой, эсвэл кассчин нь POS аппын хэрэглэгч: role
+POS / `pos_terminal_users` / POS аппаар ≥20 карт — зогсоолоос үл хамааран; `payments.source=POSAPP`)
 ДДТД-гүй ирвэл систем msgbill баримт ГАРГАХГҮЙ: `vat_receipts.status=EXTERNAL`,
-`provider=POS-TERMINAL`, FinancialJob үүсэхгүй. EXTERNAL-ийг retry/бөөн нөхөлт/цуцлалт
-хөндөхгүй (retry → 409); тохиргоог унтраасны дараа `retry-ebarimt {"reissue_external": true}`
-л системийн баримт болгоно. `{payment_id}/ebarimt` (холбох) EXTERNAL мөрийг SENT болгоно.
+`provider=POS-TERMINAL`, FinancialJob үүсэхгүй. ААН/ТТД-тэй баримтыг систем гаргасаар.
+EXTERNAL-ийг retry/бөөн нөхөлт/цуцлалт хөндөхгүй (retry → 409);
+`retry-ebarimt {"reissue_external": true, "no_terminal_receipt": true}` (терминал хэвлээгүй нь
+батлагдсан) л системийн баримт болгоно. `{payment_id}/ebarimt` (холбох) EXTERNAL мөрийг SENT болгоно.
 
 ### POST /api/payments/{payment_id}/ebarimt  (OPERATOR+ / vat)
 Төлөгдсөн төлбөрт **гадна системд үүссэн баримтыг ДАРАА нь холбох** (систем баримт
@@ -217,7 +219,8 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 ### POST /api/payments/{payment_id}/retry-ebarimt  (vat/reports)
 Амжилтгүй/цуцалсан баримтыг системээр дахин үүсгэнэ (мөнгө дахин авахгүй). EXTERNAL
 (POS терминал гаргасан) баримттай төлбөрт **409**; `{"reissue_external": true}` +
-зогсоолын тохиргоо унтраалттай үед л системийн баримт болгоно. POS терминалын давхардал
+(дүрэм энэ төлбөрт үйлчлэхгүй ЭСВЭЛ `"no_terminal_receipt": true` — терминал баримт
+хэвлээгүйг баталгаажуулсан) үед л системийн баримт болгоно (AuditLog-д тэмдэглэнэ). POS терминалын давхардал
 гэж ТЕГ тулгалтаар цуцалсан (`DUPLICATE_OF_POS_TERMINAL`) баримтыг **409**-өөр хамгаална —
 `{"allow_duplicate": true}` ил зөвшөөрлөөр л. Бүгд цуцлагдсан төлбөрийн орлох мөр тохиргоо
 асаалттай тул EXTERNAL болж бүртгэгдвэл `200 {created: true, external: true}`.

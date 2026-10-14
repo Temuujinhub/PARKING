@@ -1,11 +1,11 @@
-"""POS аппын ДҮРМЭЭР (ТЕГ файлгүй) msgbill давхардлыг цуцлах — 2026-10-13 эзний шийдвэр.
+"""POS аппын ДҮРМЭЭР (ТЕГ файлгүй) msgbill давхардлыг цуцлах — 2026-10-13; 10-14 эцсийн.
 
-ИйзиПаркинг ХХК-ийн POS терминалтай бүх зогсоолд PAX терминал POS аппын карт/бэлэн
-борлуулалт бүрд Ontime e-Barimt хэвлэдэг → тэдгээрийн манай msgbill баримтыг цуцална.
-Сонголтын дүрэм (`vat_duplicates.select_pos_app` / `pos_app_exclusion`), CLI
-(`tools/vat_cancel_duplicates.py --pos-app`) ба тохиргооны хэрэгсэл
-(`tools/pos_terminal_setting.py`)-ийг шалгана. msgbill HTTP хуурамч — гадагш хүсэлт 0.
-DB нь санах ойн SQLite.
+PAX терминал (Ontime) POS аппын карт/бэлэн борлуулалт бүрд e-Barimt хэвлэдэг — БҮХ зогсоол,
+БҮХ түрээслэгч (ИйзиПаркинг, Моннис, …) → тэдгээрийн манай msgbill баримтыг цуцална.
+Сонголтын дүрэм (`vat_duplicates.select_pos_app` / `pos_app_exclusion`), POS аппын
+хэрэглэгч (систем даяар — `services/pos_app`), CLI (`tools/vat_cancel_duplicates.py
+--pos-app`, --tenant ALL, --evidence) ба тохиргооны хэрэгсэл (`tools/pos_terminal_setting.py`)
+-ийг шалгана. msgbill HTTP хуурамч — гадагш хүсэлт 0. DB нь санах ойн SQLite.
 """
 import asyncio
 import importlib.util
@@ -21,8 +21,9 @@ from sqlalchemy.pool import StaticPool
 from app import models as M
 from app.config import settings
 from app.database import Base
-from app.services import app_settings as A, financial_jobs as J, msgbill, vat_duplicates as VD
-from app.services.receipts import DUPLICATE_OF_POS, is_duplicate_cancel
+from app.services import app_settings as A, financial_jobs as J, msgbill, pos_app as PA
+from app.services import vat_duplicates as VD
+from app.services.receipts import DUPLICATE_OF_POS, REISSUED_NO_TERMINAL, is_duplicate_cancel
 
 BASE = datetime(2026, 9, 10, 4, 0, 0)          # UTC (УБ 12:00)
 
@@ -40,6 +41,7 @@ class FakeResp:
 class FakeHTTP:
     script: list = []
     calls: list = []
+    keys: list = []
 
     def __init__(self, *a, **k):
         pass
@@ -52,6 +54,7 @@ class FakeHTTP:
 
     async def post(self, url, json=None, headers=None):
         FakeHTTP.calls.append(("POST", url))
+        FakeHTTP.keys.append((headers or {}).get("X-Api-Key"))
         return FakeResp(*(FakeHTTP.script.pop(0) if FakeHTTP.script else (200, {"state": "CANCELLED"})))
 
     async def get(self, url, headers=None):
@@ -71,7 +74,8 @@ def fake_http(monkeypatch):
     monkeypatch.delenv("PARKING_DEPLOY_ROLE", raising=False)
     msgbill.invalidate_cache()
     A.invalidate_cache()
-    FakeHTTP.script, FakeHTTP.calls = [], []
+    PA.invalidate_cache()
+    FakeHTTP.script, FakeHTTP.calls, FakeHTTP.keys = [], [], []
     yield
     msgbill.invalidate_cache()
     A.invalidate_cache()
@@ -151,12 +155,12 @@ def bulk_cards(db, w, site, user, n):
         pay(db, w, site, user, rec=None)
 
 
-def select(db, w, codes=None, include_company=False, override=None):
-    sites = VD.pos_app_sites(db, w.ep, codes)
-    su = VD.pos_users_for_sites(db, sites, override=override)
+def select(db, w, codes=None, include_company=False, override=None, tenants=None):
+    sites = VD.pos_app_sites(db, tenants or w.ep, codes)
+    scope = VD.pos_app_scope(db, sites, override=override)
     lo, hi = VD.ub_window(None, "2026-10-13")
-    return VD.select_pos_app(db, sites=sites, lo=lo, hi=hi, site_users=su,
-                             include_company=include_company), su
+    return VD.select_pos_app(db, sites=sites, lo=lo, hi=hi, scope=scope,
+                             include_company=include_company), scope
 
 
 # ───────────────────────── сонголтын дүрэм ─────────────────────────────
@@ -190,8 +194,8 @@ def test_selection_rule(db):
     sel, su = select(db, w)
     ids = {r["payment_id"] for r in sel["selected"]}
     assert ids == {ok_card.id, ok_cash.id, ok_src.id, pending.id, y_card.id}
-    assert su[w.sites["HANGARID"].id]["users"] == {"pos.k"}
-    assert su[w.sites["YLALT1"].id]["users"] == set()                          # 19 карт < 20
+    # Систем даяар (2026-10-14): pos.k, pos.m (Моннис) ≥20; pos.y 19 карт < 20 — босгоос доош
+    assert su["users"] == {"pos.k", "pos.m"} and su["below"]["pos.y"] == 19
     assert {r["payment_id"] for r in sel["company"]} == {comp.id, cit_reg.id}
     assert {r["payment_id"] for r in sel["complete"]} == {done.id}
     ex = sel["excluded"]
@@ -212,39 +216,52 @@ def test_selection_rule(db):
     assert {r["payment_id"] for r in sel3["selected"]} == {kh.id}
     with pytest.raises(ValueError):
         VD.pos_app_sites(db, w.ep, ["MONNIS"])
+    # 2026-10-14: Моннис (Monnis Building) ч хамаарна — --tenant ALL
+    sel4, _ = select(db, w, tenants=VD.resolve_tenants(db, "ALL"))
+    ids4 = {r["payment_id"] for r in sel4["selected"]}
+    assert ids4 == ids | {mon.id}
+    assert {r["tenant"] for r in sel4["selected"]} == {"EASYPARKING", "MONNIS"}
+    assert [t.code for t in VD.resolve_tenants(db, "all")] == ["EASYPARKING", "MONNIS"]
 
 
-def test_users_setting_and_override_take_precedence(db):
+def test_users_are_global_union_and_override(db):
+    """POS аппын хэрэглэгч = role POS ∪ тохиргооны жагсаалт (ерөнхий + бүх зогсоол) ∪ POS аппаар
+    ≥20 карт — систем даяар; --pos-user өгвөл ЗӨВХӨН тэд."""
     w = build(db)
-    bulk_cards(db, w, "HANGARID", "pos.k", 25)
+    bulk_cards(db, w, "YLALT1", "pos.k", 25)                 # картын түүх ӨӨР зогсоолд
     cash_k = pay(db, w, "HANGARID", "pos.k", method="CASH")
     cash_s = pay(db, w, "HANGARID", "sogii", method="CASH")
+    w.users["operator"].role = "POS"                         # role POS — картын түүхгүй ч
+    cash_o = pay(db, w, "HANGARID", "operator", method="CASH")
     db.commit()
-    hid = w.sites["HANGARID"].id
-    # Тохиргоо (pos_terminal_users) таамгийг дарна
-    A.set_site_rules(db, A.EBARIMT_KEY, hid, {"pos_terminal_users": "sogii"}, "t")
+    sel, su = select(db, w)
+    assert su["users"] == {"pos.k", "operator"} and su["roles"] == {"operator"}
+    assert {r["payment_id"] for r in sel["selected"]} == {cash_k.id, cash_o.id}
+    via = {r["payment_id"]: r["via"] for r in sel["selected"]}
+    assert via[cash_k.id] == "user=pos.k"
+    # Тохиргооны жагсаалт (өөр зогсоол дээр бичсэн ч) нэмэгдэнэ
+    A.set_site_rules(db, A.EBARIMT_KEY, w.sites["YLALT1"].id, {"pos_terminal_users": "sogii"}, "t")
     db.commit()
     A.invalidate_cache()
     sel, su = select(db, w)
-    assert su[hid]["source"] == "тохиргоо" and su[hid]["users"] == {"sogii"}
-    assert {r["payment_id"] for r in sel["selected"]} == {cash_s.id}
-    # --pos-user бүгдийг дарна (зогсоолоор эсвэл бүх зогсоолд)
+    assert su["configured"] == {"sogii"}
+    assert {r["payment_id"] for r in sel["selected"]} == {cash_k.id, cash_s.id, cash_o.id}
+    # --pos-user бүгдийг дарна (хуучин «HANGARID=pos.k» хэлбэр ч)
     for ov in (["HANGARID=pos.k"], ["pos.k"]):
         sel, su = select(db, w, override=VD.parse_pos_user_override(ov))
-        assert su[hid]["source"] == "--pos-user"
+        assert su["source"] == "--pos-user"
         assert {r["payment_id"] for r in sel["selected"]} == {cash_k.id}
 
 
-def test_derive_threshold_and_window(db):
+def test_card_history_threshold(db):
     w = build(db)
     bulk_cards(db, w, "HANGARID", "pos.k", 19)
-    pay(db, w, "HANGARID", "pos.k", rec=None, at=datetime(2026, 8, 1))      # go-live-аас өмнө — тоолохгүй
     db.commit()
-    hid = w.sites["HANGARID"].id
-    assert VD.derive_pos_users(db, [hid]) == {hid: {}}
-    pay(db, w, "HANGARID", "pos.k", rec=None)
+    assert "pos.k" not in PA.known_users(db)["users"] and PA.known_users(db)["below"] == {"pos.k": 19}
+    pay(db, w, "HANGARID", "pos.k", rec=None, at=datetime(2026, 8, 1))   # go-live-аас өмнө ч тоологдоно
     db.commit()
-    assert VD.derive_pos_users(db, [hid]) == {hid: {"pos.k": 20}}
+    assert PA.known_users(db)["derived"] == {"pos.k": 20}
+    assert PA.card_counts(db, min_card=20) == {"pos.k": 20}
     lo, hi = VD.ub_window("2026-09-01", "2026-09-30")
     assert lo == datetime(2026, 8, 31, 16, 0) and hi == datetime(2026, 9, 30, 16, 0)
 
@@ -303,9 +320,14 @@ def test_cli_pos_app_dry_run_apply_resume(db, engine, tmp_path, monkeypatch, cap
     assert "ЦУЦЛАХ (POS аппын дүрэм): 3 төлбөр" in text and "e-Barimt-ГҮЙ" in text
     assert "ААН/ТТД-тэй баримт: 1" in text and "HANGARID" in text and "2026-09" in text
     assert FakeHTTP.calls == [] and db.query(M.AuditLog).count() == 0
-    # Моннис түрээслэгч — эзний шийдвэрт хамаарахгүй
+    # --tenant ALL (2026-10-14): Моннис ч хамаарна — түрээслэгч × зогсоол × сар × арга
+    assert cli.main(base + ["--tenant", "ALL"]) == 0
+    text = capsys.readouterr().out
+    assert "ЦУЦЛАХ (POS аппын дүрэм): 4 төлбөр" in text
+    assert "Түрээслэгчээр: EASYPARKING 3 (3,000₮) · MONNIS 1 (1,000₮)" in text
+    assert "MONNIS      MONNIS" in text and "2026-09 CARD 1 (1,000₮)" in text
+    assert FakeHTTP.calls == [] and db.query(M.AuditLog).count() == 0
     apply = ["--apply", "--yes", "--user", "temuujin", "--note", "эзний шийдвэр"]
-    assert cli.main(base + ["--tenant", "MONNIS"] + apply) == 6 and FakeHTTP.calls == []
     # Хуулбар DB дээр татгалзана
     monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/audit1013")
     assert cli.main(base + ["--tenant", "EASYPARKING"] + apply) == 3 and FakeHTTP.calls == []
@@ -338,6 +360,15 @@ def test_cli_pos_app_dry_run_apply_resume(db, engine, tmp_path, monkeypatch, cap
     assert cli.main(base + ["--tenant", "EASYPARKING"] + apply) == 0 and FakeHTTP.calls == []
     res = J.retry_payment_receipts(db, db.get(M.Payment, b.id))
     assert res.get("duplicate_of_pos") and len(_recs(db, b.id)) == 2
+    # Моннис (2026-10-14): түрээслэгчийн түлхүүрээр цуцална, тайлан/аудитад түрээслэгчтэй
+    FakeHTTP.calls, FakeHTTP.keys = [], []
+    assert cli.main(base + ["--tenant", "MONNIS"] + apply) == 0
+    assert FakeHTTP.keys == ["bsk_live_MON"]
+    assert sorted((r.provider, r.status) for r in _recs(db, mon.id)) == [("MSGBILL", "CANCELLED"),
+                                                                         ("POS-TERMINAL", "EXTERNAL")]
+    [summ] = [x for x in db.query(M.AuditLog).filter_by(action="EBARIMT_CANCEL_BULK_SUMMARY").all()
+              if x.detail["tenants"] == ["MONNIS"]]
+    assert summ.detail["pos_users"] == ["pos.k"] and summ.detail["result"]["cancelled"] == 1
 
 
 def test_guard_rechecks_after_selection(db):
@@ -355,6 +386,36 @@ def test_guard_rechecks_after_selection(db):
                                     mark_extra={"rule": VD.POS_APP_RULE}))
     assert out["ok"] is False and "ААН" in out["error"] and FakeHTTP.calls == []
     assert [r.status for r in _recs(db, p.id)] == ["SENT"]
+    # Сонголтоос хойш зогсоолд «терминал e-Barimt гаргадаг»-ийг УНТРААСАН — цуцлахгүй
+    p.customer_tin, p.ebarimt_receiver_type = None, None
+    A.set_site_rules(db, A.EBARIMT_KEY, w.sites["HANGARID"].id, {"pos_terminal_issues": False}, "t")
+    db.commit()
+    A.invalidate_cache()
+    out = asyncio.run(VD.cancel_one(db, p.id, note="x", username="t", guard=guard,
+                                    mark_extra={"rule": VD.POS_APP_RULE}))
+    assert out["ok"] is False and "УНТРААЛТТАЙ" in out["error"] and FakeHTTP.calls == []
+
+
+def test_site_off_and_reissued_are_never_cancelled(db):
+    """TAX: (1) зогсоолд тодорхой УНТРААСАН (терминал нь хэвлэдэггүй) бол тэр зогсоолын
+    msgbill баримтыг дүрмээр цуцлахгүй — цорын ганц баримт; (2) терминал хэвлээгүй нь ТЕГ-ээр
+    батлагдаж ДАХИН гаргасан баримтыг дахин цуцлахгүй."""
+    w = build(db)
+    bulk_cards(db, w, "HANGARID", "pos.k", 20)
+    off_card = pay(db, w, "YLALT1", "pos.k")
+    re_card = pay(db, w, "HANGARID", "pos.k")
+    db.flush()
+    rec = db.query(M.VatReceipt).filter_by(payment_id=re_card.id).one()
+    rec.raw = {"reissue": {"reason": REISSUED_NO_TERMINAL, "by": "t"}}
+    ok = pay(db, w, "HANGARID", "pos.k", method="CASH")
+    A.set_site_rules(db, A.EBARIMT_KEY, w.sites["YLALT1"].id, {"pos_terminal_issues": False}, "t")
+    db.commit()
+    A.invalidate_cache()
+    sel, scope = select(db, w)
+    assert scope["methods"][w.sites["YLALT1"].id] == set()
+    assert {r["payment_id"] for r in sel["selected"]} == {ok.id}
+    assert sel["excluded"]["SITE_OFF"] == 1 and sel["excluded"]["REISSUED"] == 1
+    assert sel["site_off"] == {"YLALT1": 1} and off_card.id
 
 
 def test_pos_app_external_then_teg_file_upgrades_terminal_row(db):
@@ -374,44 +435,60 @@ def test_pos_app_external_then_teg_file_upgrades_terminal_row(db):
 
 # ───────────────────────── тохиргооны хэрэгсэл ─────────────────────────────
 
-def test_setting_tool_dry_run_apply_and_guards(db, engine, monkeypatch, capsys):
+def test_setting_tool_report_override_and_guards(db, engine, monkeypatch, capsys):
+    """2026-10-14: дүрэм ерөнхий анхдагчаар ON — хэрэгсэл нь тайлан + зогсоолоор ДАРАХ
+    (off/on/global). Бөөнөөр өөрчлөхгүй (--site заавал), хуулбар/staging дээр бичихгүй."""
     tool = _tool("pos_terminal_setting.py")
     monkeypatch.setattr(tool, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     w = build(db)
-    bulk_cards(db, w, "HANGARID", "pos.k", 21)
-    bulk_cards(db, w, "YLALT1", "pos.y", 5)                 # терминалгүй гэж үзнэ (< 20)
-    bulk_cards(db, w, "KH", "operator", 30)                 # тест зогсоол — нэрлээгүй
+    now = datetime.utcnow() - timedelta(hours=1)
+    pay(db, w, "HANGARID", "pos.k", rec=None, at=now)                     # POS аппын карт (30 хоногт)
+    pay(db, w, "HANGARID", "pos.k", method="CASH", source="POSAPP", rec=None, at=now)
     db.commit()
     hid = w.sites["HANGARID"].id
-    assert tool.main(["--tenant", "EASYPARKING"]) == 0       # dry-run
+    assert tool.main([]) == 0                                               # тайлан
     text = capsys.readouterr().out
-    assert "ДАРАА: асаалт=ON · аргууд=CARD,CASH · хэрэглэгчид=pos.k" in text
-    assert "Өөрчлөх зогсоол: 1" in text
+    assert "ЕРӨНХИЙ: ON CARD,CASH" in text
+    assert [ln for ln in text.splitlines() if " HANGARID " in ln][0].split()[2:6] == \
+        ["ON", "CARD,CASH", "ерөнхий", "CARD"]
+    with pytest.raises(SystemExit):
+        tool.main(["--apply", "--user", "t"])                               # --set-гүй apply
+    with pytest.raises(SystemExit):
+        tool.main(["--set", "off"])                                         # --site-гүй
+    with pytest.raises(SystemExit):
+        tool.main(["--tenant", "MONNIS", "--site", "HANGARID", "--set", "off"])
+    assert tool.main(["--site", "HANGARID", "--set", "off"]) == 0          # dry-run
     A.invalidate_cache()
-    assert A.pos_terminal_receipt_methods(db, hid) == set() and db.query(M.AuditLog).count() == 0
-    assert tool.main(["--tenant", "MONNIS", "--apply"]) == 6
+    assert A.pos_terminal_receipt_methods(db, hid) == {"CARD", "CASH"} and db.query(M.AuditLog).count() == 0
     monkeypatch.setenv("PARKING_DEPLOY_ROLE", "staging")
-    assert tool.main(["--tenant", "EASYPARKING", "--apply"]) == 3
+    assert tool.main(["--site", "HANGARID", "--set", "off", "--apply"]) == 3
     monkeypatch.delenv("PARKING_DEPLOY_ROLE")
-    assert tool.main(["--tenant", "EASYPARKING", "--apply", "--user", "temuujin"]) == 0
-    db.expire_all()
-    A.invalidate_cache()
-    assert A.pos_terminal_receipt_methods(db, hid) == {"CARD", "CASH"}
-    assert A.pos_app_users(db, hid) == {"pos.k"}
-    for code in ("YLALT1", "KH"):
-        assert A.pos_terminal_receipt_methods(db, w.sites[code].id) == set()
-    [log] = db.query(M.AuditLog).filter_by(action="UPDATE", entity="payment_rules").all()
-    assert log.entity_id == hid and log.username == "temuujin"
-    assert log.detail["ebarimt_rules"] == {"pos_terminal_issues": True, "pos_terminal_methods": "CARD,CASH",
-                                           "pos_terminal_users": "pos.k"}
-    # Дахин — өөрчлөлтгүй (идемпотент), шинэ аудит үгүй
-    assert tool.main(["--tenant", "EASYPARKING", "--apply", "--user", "temuujin"]) == 0
-    assert db.query(M.AuditLog).filter_by(action="UPDATE").count() == 1
-    # Унтраах
-    assert tool.main(["--tenant", "EASYPARKING", "--site", "HANGARID", "--off", "--apply"]) == 0
+    capsys.readouterr()
+    assert tool.main(["--site", "HANGARID", "--set", "off", "--apply", "--user", "temuujin"]) == 0
     db.expire_all()
     A.invalidate_cache()
     assert A.pos_terminal_receipt_methods(db, hid) == set()
+    assert A.pos_terminal_receipt_methods(db, w.sites["YLALT1"].id) == {"CARD", "CASH"}
+    [log] = db.query(M.AuditLog).filter_by(action="UPDATE", entity="payment_rules").all()
+    assert log.entity_id == hid and log.username == "temuujin" and log.detail["_set"] == "off"
+    assert log.detail["ebarimt_rules"] == {"pos_terminal_issues": False}
+    # Тайлан ⚠: POS аппын төлбөртэй ч унтраалттай
+    capsys.readouterr()
+    assert tool.main([]) == 0
+    assert "⚠ POS аппын төлбөртэй ч дүрэм үйлчлэхгүй" in capsys.readouterr().out
+    # Дахин — өөрчлөлтгүй (идемпотент)
+    assert tool.main(["--site", "HANGARID", "--set", "off", "--apply", "--user", "temuujin"]) == 0
+    assert db.query(M.AuditLog).filter_by(action="UPDATE").count() == 1
+    # Ерөнхий рүү буцаах
+    assert tool.main(["--site", "HANGARID", "--set", "global", "--apply", "--user", "temuujin"]) == 0
+    db.expire_all()
+    A.invalidate_cache()
+    assert A.pos_terminal_receipt_methods(db, hid) == {"CARD", "CASH"}
+    assert (A.get_site_overrides(db, A.EBARIMT_KEY).get(hid) or {}) == {}
+    # Зөвхөн карт
+    assert tool.main(["--site", "HANGARID", "--set", "on", "--methods", "CARD", "--apply", "--user", "t"]) == 0
+    A.invalidate_cache()
+    assert A.pos_terminal_receipt_methods(db, hid) == {"CARD"}
 
 
 def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, monkeypatch, capsys):
@@ -444,7 +521,8 @@ def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, m
             "--evidence", f, "--delay", "0"]
     assert cli.main(base) == 0
     text = capsys.readouterr().out
-    assert "хугацаанд 2 төлбөр · Ontime мөртэй 1 (50.0%) · Ontime мөргүй 1" in text
+    assert "ХАМРАЛТ: хүрээнд 2 төлбөр · терминалын мөртэй 1 (50.0%) · терминалын мөргүй 1" in text
+    assert "терминалын касс: …10002990 1 мөр" in text and "түрээслэгч EASYPARKING" in text
     assert (tmp_path / "p_no_ontime.csv").read_text(encoding="utf-8-sig").count(lacks.id) == 1
     assert cli.main(base + ["--apply", "--yes", "--user", "t"]) == 0
     assert len(FakeHTTP.calls) == 2                                   # has + outside
@@ -466,10 +544,11 @@ def test_debt_card_by_web_cashier_is_not_pos_app(db):
     debt_card = pay(db, w, "HANGARID", "sogii")
     debt_card.kind = "DEBT"
     db.commit()
-    hid = w.sites["HANGARID"].id
-    assert VD.derive_pos_users(db, [hid]) == {hid: {}}
+    assert PA.card_counts(db) == {} and "sogii" not in PA.known_users(db)["users"]
     sel, _ = select(db, w)
     assert not {web_cash.id, debt_card.id} & {r["payment_id"] for r in sel["selected"]}
+    assert PA.is_pos_app_payment(debt_card) is False
+    assert J.terminal_issues_receipt(db, debt_card) is False          # веб кассын картын өр — систем
 
 
 def test_site_methods_setting_limits_pos_app_selection(db):
@@ -484,9 +563,9 @@ def test_site_methods_setting_limits_pos_app_selection(db):
     db.commit()
     A.invalidate_cache()
     sel, su = select(db, w)
-    assert su[hid]["methods"] == {"CARD"}
+    assert su["methods"][hid] == {"CARD"}
     assert {r["payment_id"] for r in sel["selected"]} == {card.id}
-    assert sel["excluded"]["METHOD"] == 1 and cash.id
+    assert sel["excluded"]["METHOD_OFF"] == 1 and cash.id
 
 
 def test_server_guards_prod_copy_names_and_test_keys(db, monkeypatch):

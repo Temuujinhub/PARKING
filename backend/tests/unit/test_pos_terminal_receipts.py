@@ -1,10 +1,10 @@
-"""POS терминал өөрөө НӨАТ баримт гаргадаг зогсоол — давхар e-Barimt (2026-10-13).
+"""POS терминал (PAX апп) өөрөө НӨАТ баримт гаргадаг — давхар e-Barimt (2026-10-13; 10-14).
 
 ТЕГ тулгалт (прод хуулбар): систем карт/бэлэн/дансаар төлбөр бүрд msgbill-ээр ЯГ НЭГ
 баримт гаргадаг; давхардал нь PAX терминал Ontime-ийн (касс …10002990) баримтыг
 ӨӨРӨӨ хэвлэдэг ч апп тэр ДДТД-г /pos/confirm, /cash-д илгээдэггүйгээс үүсдэг —
-2026-08-24 Хангарьд 63 (39 бэлэн + 24 карт, pos.khangarid). Аль зогсоолын
-терминал хэвлэдэг нь тодорхойгүй тул зогсоол бүрээр, анхдагч УНТРААЛТТАЙ.
+2026-08-24 Хангарьд 63 (39 бэлэн + 24 карт, pos.khangarid). 2026-10-14 эзний эцсийн
+шийдвэр: терминал БҮХ зогсоолд хэвлэдэг → ерөнхий анхдагч АСААЛТТАЙ, зогсоолоор унтраана.
 
 Сүлжээ/банк/msgbill огт дуудахгүй — бүх суваг stub.
 """
@@ -47,6 +47,14 @@ def offline(monkeypatch):
     monkeypatch.setattr(J.msgbill, 'api_key_for', lambda *a: ACC)
 
 
+@pytest.fixture(autouse=True)
+def fresh_pos_app_cache():
+    from app.services import pos_app as PA
+    PA.invalidate_cache()
+    yield
+    PA.invalidate_cache()
+
+
 @pytest.fixture
 def db():
     engine = create_engine('sqlite://', poolclass=StaticPool, connect_args={'check_same_thread': False})
@@ -77,8 +85,10 @@ def user(db, name='pos.khangarid'):
     return u
 
 
-def req(app_version=None):
+def req(app_version=None, ua=None):
     headers = [(b'x-app-version', app_version.encode())] if app_version else []
+    if ua:
+        headers.append((b'user-agent', ua.encode()))
     return Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': headers,
                     'client': ('pos', 1)})
 
@@ -94,8 +104,8 @@ def card(db, s, u, txn='bank-1'):
                                       req(), db, u))
 
 
-def cash(db, s, u, app_version=None):
-    return asyncio.run(PR.cash_payment({'session_id': s.id}, db, u, req(app_version)))
+def cash(db, s, u, app_version=None, ua=None):
+    return asyncio.run(PR.cash_payment({'session_id': s.id}, db, u, req(app_version, ua)))
 
 
 def receipts(db, payment_id):
@@ -106,9 +116,10 @@ def jobs(db, payment_id):
     return db.query(M.FinancialJob).filter_by(payment_id=payment_id, kind='RECEIPT').all()
 
 
-# ── 1. Тохиргоо УНТРААЛТТАЙ — хуучин зан: msgbill баримт + ажил ──────────────
+# ── 1. Зогсоолд УНТРААСАН — хуучин зан: msgbill баримт + ажил ────────────────
 def test_setting_off_keeps_msgbill_receipt_and_job(db):
     s, u = parking(db), user(db)
+    enable(db, s.site_id, on=False)                   # терминал нь хэвлэдэггүй зогсоол
     out = card(db, s, u)
     p = db.get(M.Payment, out['payment_id'])
     assert p.source == 'POSAPP'                       # /pos/confirm = үргэлж POS апп
@@ -121,9 +132,23 @@ def test_setting_off_keeps_msgbill_receipt_and_job(db):
     assert 'ДДТД: хүлээгдэж байна' in out['print_data']['lines']
 
 
-def test_default_is_off_for_every_site(db):
-    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is False
-    assert A.pos_terminal_receipt_methods(db, 'any-site') == set()
+def test_default_is_on_for_every_site(db):
+    """2026-10-14: ерөнхий анхдагч АСААЛТТАЙ — тохиргоо огт бичээгүй зогсоолд ч, зогсоол
+    тодорхойгүй төлбөрт ч (ерөнхий утга)."""
+    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is True
+    assert A.pos_terminal_receipt_methods(db, 'any-site') == {'CARD', 'CASH'}
+    assert A.pos_terminal_receipt_methods(db, None) == {'CARD', 'CASH'}
+
+
+def test_default_on_pos_card_and_header_cash_are_external_without_any_setting(db):
+    s, u = parking(db), user(db)
+    out = card(db, s, u)                                # тохиргоо БИЧЭЭГҮЙ зогсоол
+    [r] = receipts(db, out['payment_id'])
+    assert (r.provider, r.status) == ('POS-TERMINAL', 'EXTERNAL') and jobs(db, out['payment_id']) == []
+    s2 = another_session(db, s.site_id, '4444УБА')
+    out2 = cash(db, s2, u, app_version='1.5.3')
+    assert receipts(db, out2['payment_id'])[0].status == 'EXTERNAL'
+    assert db.query(M.FinancialJob).count() == 0
 
 
 # ── 2. Асаалттай + POS карт → EXTERNAL, ажилгүй ────────────────────────────
@@ -183,13 +208,17 @@ def test_setting_on_pos_app_cash_with_header_is_external(db):
     assert db.query(M.AuditLog).filter_by(action='CASH_PAYMENT').one().detail['source'] == 'POSAPP'
 
 
-def test_other_site_unaffected(db):
+def test_site_off_override_does_not_affect_other_sites(db):
+    """Терминал нь хэвлэдэггүй НЭГ зогсоолд унтраавал зөвхөн тэр зогсоолд систем баримт
+    гаргана; бусад (ерөнхий ON) хэвээр EXTERNAL."""
     s, u = parking(db), user(db)
     other = parking(db, code='MONNIS', plate='5678УБА')
-    enable(db, other.site_id)                 # зөвхөн Моннист асаав
+    enable(db, s.site_id, on=False)           # зөвхөн Хангарьдад унтраав
     out = cash(db, s, u, app_version='1.4.0')
     [r] = receipts(db, out['payment_id'])
-    assert r.provider == 'MSGBILL'
+    assert r.provider == 'MSGBILL' and len(jobs(db, out['payment_id'])) == 1
+    out2 = cash(db, other, u, app_version='1.4.0')
+    assert receipts(db, out2['payment_id'])[0].status == 'EXTERNAL'
 
 
 # ── 5. Аргын шүүлтүүр ──────────────────────────────────────────────────────
@@ -230,7 +259,12 @@ def test_settings_endpoint_is_per_site_and_audited(db):
     assert row['pos_terminal_methods']['choices']
     log = db.query(M.AuditLog).filter_by(entity='payment_rules', entity_id=s.site_id).one()
     assert log.detail['ebarimt_rules']['pos_terminal_issues'] is True
-    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is False   # ерөнхий хөндөгдөөгүй
+    # Зогсоолд УНТРААХ — ерөнхий (анхдагч ON) хөндөгдөхгүй
+    out = AR.payment_rules_site_save(s.site_id, {'ebarimt_rules': {'pos_terminal_issues': False}}, db, u)
+    row = {r['key']: r for r in out['rules'] if r['group'] == A.EBARIMT_KEY}
+    assert row['pos_terminal_issues']['value'] is False and row['pos_terminal_issues']['global_value'] is True
+    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is True
+    assert A.pos_terminal_receipt_methods(db, s.site_id) == set()
 
 
 # ── 6. Retry/бөөн нөхөлт/ажил EXTERNAL-ийг хөндөхгүй ───────────────────────
@@ -247,14 +281,32 @@ def test_retry_refuses_external_with_409(db):
         asyncio.run(PR.retry_ebarimt_endpoint(p.id, {}, db, u))
     assert e.value.status_code == 409 and 'POS терминал' in e.value.detail
     db.rollback()
-    # Тохиргоо асаалттай байхад «Систем баримт гаргах» ч татгалзана
+    # Дүрэм үйлчилж байхад «Систем баримт гаргах» нь «терминал хэвлээгүй» баталгаажуулалтгүй
+    # бол татгалзана (хуучин клиент/скрипт санамсаргүй гаргахгүй)
     with pytest.raises(HTTPException) as e:
         asyncio.run(PR.retry_ebarimt_endpoint(p.id, {'reissue_external': True}, db, u))
-    assert e.value.status_code == 409 and 'асаалттай' in e.value.detail
+    assert e.value.status_code == 409 and 'no_terminal_receipt' in e.value.detail
     db.rollback()
     assert receipts(db, p.id)[0].status == 'EXTERNAL' and db.query(M.FinancialJob).count() == 0
     assert J.retry_payment_receipts(db, p)['external'] is True
     db.rollback()
+
+
+def test_reissue_with_no_terminal_confirmation_while_rule_on(db):
+    """2026-10-14: дүрэм ерөнхийдөө асаалттай — нэг борлуулалтын төлөө зогсоолын тохиргоог
+    унтраахгүй. «Терминал хэвлээгүй» баталгаажуулалттай бол систем баримт гаргана."""
+    p, u, s = external_payment(db)
+    res = asyncio.run(PR.retry_ebarimt_endpoint(p.id, {'reissue_external': True,
+                                                       'no_terminal_receipt': True}, db, u))
+    assert res['pending'] is True
+    [r] = receipts(db, p.id)
+    assert (r.provider, r.status) == ('MSGBILL', 'PENDING')
+    [j] = jobs(db, p.id)
+    assert j.payload['idempotency_key'] == f'external-{r.id}'
+    assert A.pos_terminal_receipt_methods(db, s.site_id) == {'CARD', 'CASH'}     # тохиргоо хөндөгдөөгүй
+    log = db.query(M.AuditLog).filter_by(action='EBARIMT_RETRY', entity_id=p.id).one()
+    assert log.detail['no_terminal_receipt'] is True
+    assert db.query(M.AuditLog).filter_by(action='EBARIMT_EXTERNAL_REISSUE').one().detail['no_terminal_receipt']
 
 
 def test_reissue_only_after_setting_off_and_explicit_request(db):
@@ -373,9 +425,10 @@ def test_print_payload_and_pos_receipts_for_external(db):
 
 
 def test_print_returns_ddtd_once_outbox_delivers(db):
-    """Тохиргоо унтраалттай: confirm-ийн мөчид PENDING, outbox дууссаны дараа /print
+    """Зогсоолд унтраалттай: confirm-ийн мөчид PENDING, outbox дууссаны дараа /print
     болон /pos/receipts ДДТД-тэй (блоклох хүлээлтгүй — апп дахин татна)."""
     s, u = parking(db), user(db)
+    enable(db, s.site_id, on=False)
     out = card(db, s, u)
     assert out['receipt']['ebarimt_status'] == 'PENDING' and out['ebarimt_id'] is None
     [r] = receipts(db, out['payment_id'])
@@ -505,38 +558,75 @@ def test_user_list_marks_headerless_cash_as_pos_app(db):
     assert db.get(M.Payment, out3['payment_id']).source == 'POSAPP'
 
 
-def test_user_list_is_per_site(db):
+def test_user_list_is_global(db):
+    """2026-10-14: POS аппын хэрэглэгчийг зогсоолоос ҮЛ хамааран таньна — A зогсоолын
+    жагсаалтад бичсэн хэрэглэгч B зогсоолд толгойгүй бэлэн авсан ч POS апп."""
     s1, u = parking(db), user(db, 'pos.khangarid')
     s2 = parking(db, code='OTHER', plate='7777УБА')
     A.set_site_rules(db, A.EBARIMT_KEY, s1.site_id, {'pos_terminal_users': 'pos.khangarid'}, 'admin')
-    enable(db, s2.site_id)                         # s2 асаалттай ч жагсаалтгүй
+    db.commit()
     out = cash(db, s2, u)
     p = db.get(M.Payment, out['payment_id'])
-    assert p.source is None and receipts(db, p.id)[0].provider == 'MSGBILL'
+    assert p.source == 'POSAPP' and p.raw_payload['pos_app_via'] == 'user_list'
+    assert receipts(db, p.id)[0].status == 'EXTERNAL'
 
 
-# ── #5: «терминал баримт гаргадаг» нь ЗӨВХӨН зогсоолоор ────────────────────
-def test_terminal_setting_is_site_only(db):
+# ── #5 (2026-10-14): «терминал баримт гаргадаг» ЕРӨНХИЙ анхдагч + зогсоолын давхарга ──
+def test_terminal_setting_is_global_with_site_override(db):
     from app.routers import admin_router as AR
     s, admin = parking(db), user(db, 'admin')
+    other = parking(db, code='OTHER', plate='7777УБА')
+    rows = {r['key']: r for r in PRULES.global_report(db)['rules'] if r['group'] == A.EBARIMT_KEY}
+    assert rows['pos_terminal_issues']['value'] is True and not rows['pos_terminal_issues'].get('site_only')
+    assert rows['pos_terminal_issues']['per_site'] is True
+    # Ерөнхийг УНТРААВАЛ тохиргоогүй зогсоолд үйлчилнэ; зогсоолд тодорхой ON хэвээр
+    A.set_site_rules(db, A.EBARIMT_KEY, s.site_id, {'pos_terminal_issues': True}, 'admin'); db.commit()
     out = AR.payment_rules_site_save('global', {'ebarimt_rules': {
-        'pos_terminal_issues': True, 'pos_terminal_users': 'pos.khangarid',
+        'pos_terminal_issues': False, 'pos_terminal_users': 'pos.khangarid',
         'pos_terminal_methods': 'card'}}, db, admin)
     rows = {r['key']: r for r in out['rules'] if r['group'] == A.EBARIMT_KEY}
-    assert rows['pos_terminal_issues']['value'] is False and rows['pos_terminal_issues']['site_only']
-    assert rows['pos_terminal_users']['value'] == '' and rows['pos_terminal_users']['site_only']
-    assert rows['pos_terminal_methods']['value'] == 'CARD'          # аргын анхдагч ерөнхийд болно
-    assert not rows['pos_terminal_methods'].get('site_only')
-    assert A.pos_terminal_receipt_methods(db, s.site_id) == set()
-    # SQL-ээр ерөнхийд бичсэн ON ч үл тоогдоно
-    row = db.get(M.AppSetting, A.EBARIMT_KEY)
-    row.value = {**row.value, 'pos_terminal_issues': True}
-    db.commit(); A.invalidate_cache()
-    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is False
-    assert A.pos_terminal_receipt_methods(db, s.site_id) == set()
-    # Зогсоолд асаавал ерөнхий аргын анхдагчийг (CARD) өвлөнө
-    A.set_site_rules(db, A.EBARIMT_KEY, s.site_id, {'pos_terminal_issues': True}, 'admin'); db.commit()
-    assert A.pos_terminal_receipt_methods(db, s.site_id) == {'CARD'}
+    assert rows['pos_terminal_issues']['value'] is False
+    assert rows['pos_terminal_users']['value'] == 'pos.khangarid'
+    assert rows['pos_terminal_methods']['value'] == 'CARD'
+    assert A.pos_terminal_receipt_methods(db, other.site_id) == set()          # ерөнхийг өвлөв
+    assert A.pos_terminal_receipt_methods(db, s.site_id) == {'CARD'}           # зогсоолд ON, арга ерөнхийгөөс
+    assert A.pos_app_users(db) == {'pos.khangarid'}
+    # Ерөнхийг буцааж асаавал зогсоолын OFF давхарга дарна
+    AR.payment_rules_site_save('global', {'ebarimt_rules': {'pos_terminal_issues': True,
+                                                             'pos_terminal_methods': 'CARD,CASH'}}, db, admin)
+    AR.payment_rules_site_save(other.site_id, {'ebarimt_rules': {'pos_terminal_issues': False}}, db, admin)
+    assert A.pos_terminal_receipt_methods(db, other.site_id) == set()
+    assert A.pos_terminal_receipt_methods(db, s.site_id) == {'CARD', 'CASH'}
+    # «Ерөнхий рүү буцаах» (null) — давхаргаас хасна
+    AR.payment_rules_site_save(other.site_id, {'ebarimt_rules': {'pos_terminal_issues': None}}, db, admin)
+    assert A.pos_terminal_receipt_methods(db, other.site_id) == {'CARD', 'CASH'}
+
+
+def test_existing_per_site_on_rows_stay_valid(db):
+    """Продын 7 зогсоолын ON мөр (users-тай) — шинэ ерөнхий ON-той зөрчилгүй, хүчинтэй."""
+    s, u = parking(db), user(db, 'pos.khangarid')
+    A.set_site_rules(db, A.EBARIMT_KEY, s.site_id, {'pos_terminal_issues': True,
+                                                    'pos_terminal_methods': 'CARD,CASH',
+                                                    'pos_terminal_users': 'pos.khangarid'}, 'admin')
+    db.commit()
+    assert A.pos_terminal_receipt_methods(db, s.site_id) == {'CARD', 'CASH'}
+    out = cash(db, s, u)                                            # толгойгүй — жагсаалтаар
+    assert receipts(db, out['payment_id'])[0].status == 'EXTERNAL'
+
+
+def test_conflict_warns_when_site_with_pos_traffic_is_off(db):
+    """Зөрчлийн шалгалт: POS аппын төлбөртэй зогсоолд дүрэм унтраалттай бол анхааруулна."""
+    s, u = parking(db), user(db)
+    site = db.get(M.ParkingSite, s.site_id)
+    titles = lambda: [c['title'] for c in PRULES.check_conflicts(db, site)]   # noqa: E731
+    enable(db, s.site_id, on=False)
+    assert not any('POS аппын төлбөртэй' in t for t in titles())          # POS аппын төлбөр алга
+    card(db, s, u)
+    assert any('POS аппын төлбөртэй' in t for t in titles())
+    enable(db, s.site_id, methods='CASH')                                   # карт хасагдсан
+    assert any('POS аппын төлбөртэй' in t for t in titles())
+    enable(db, s.site_id)
+    assert not any('POS аппын төлбөртэй' in t for t in titles())
 
 
 # ── #2: давхардал гэж цуцалсны дараа «Дахин үүсгэх» давхардлыг сэргээхгүй ───
@@ -623,8 +713,15 @@ def test_duplicate_cancel_with_untrusted_ddtd_records_external(db, monkeypatch):
     assert e.value.status_code == 409 and 'ДАВХАРДСАН' in e.value.detail
     db.rollback()
     assert db.query(M.AuditLog).filter_by(action='EBARIMT_RETRY_REFUSED').count() == 1
-    out = asyncio.run(PR.retry_ebarimt_endpoint(p.id, {'reissue_external': True,
-                                                       'allow_duplicate': True}, db, u))
+    # Давхардлыг зөвшөөрсөн ч POS терминалын дүрэм (ерөнхий ON) үйлчилж байгаа тул
+    # «терминал хэвлээгүй» баталгаажуулалтгүйгээр гаргахгүй
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(PR.retry_ebarimt_endpoint(p.id, {'reissue_external': True,
+                                                     'allow_duplicate': True}, db, u))
+    assert e.value.status_code == 409 and 'no_terminal_receipt' in e.value.detail
+    db.rollback()
+    out = asyncio.run(PR.retry_ebarimt_endpoint(p.id, {'reissue_external': True, 'allow_duplicate': True,
+                                                       'no_terminal_receipt': True}, db, u))
     assert out['pending'] is True
     assert {x.provider for x in receipts(db, p.id) if x.status == 'PENDING'} == {'MSGBILL'}
 
@@ -735,3 +832,80 @@ def test_transactions_report_shows_terminal_receipt_state(db):
     col = values[0].index('Баримтын төлөв')
     assert values[1][col] == 'POS терминал гаргасан (Ontime)'
     assert len(values[0]) == len(values[1])
+
+
+# ══ 2026-10-14: толгойгүй хуучин апп — POS аппын хэрэглэгч (role / ≥20 карт), веб хөтөч биш ══
+CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141.0 Safari/537.36'
+
+
+def _card_history(db, s, u, n):
+    for i in range(n):
+        db.add(M.Payment(session_id=s.id, site_id=s.site_id, provider='POS', payment_method='CARD',
+                         sender_invoice_no=f'hist-card-{u.username}-{i}', amount=Decimal('1000'),
+                         vat_amount=Decimal('0'), status='PAID', paid_at=datetime.utcnow(),
+                         cashier_id=u.id))
+    db.commit()
+
+
+def test_headerless_fallback_role_and_card_history_but_not_browser(db):
+    """Толгой илгээдэггүй хуучин build: кассчин нь role POS эсвэл POS аппаар ≥20 карт авсан бол
+    POS апп (зогсоолоос үл хамааран); веб хөтчийн (Mozilla UA) хүсэлт — веб касс → систем баримт;
+    картын түүх 19 → POS апп биш."""
+    s, u = parking(db), user(db, 'pos.ylalt')
+    other = parking(db, code='YLALT1', plate='3333УБА')
+    _card_history(db, other, u, 20)                                    # түүх ӨӨР зогсоолд
+    out = cash(db, s, u, ua='Dart/3.5 (dart:io)')
+    p = db.get(M.Payment, out['payment_id'])
+    assert p.source == 'POSAPP' and p.raw_payload['pos_app_via'] == 'card_history'
+    assert receipts(db, p.id)[0].status == 'EXTERNAL'
+    log = db.query(M.AuditLog).filter_by(action='CASH_PAYMENT', entity_id=p.id).one()
+    assert log.detail['pos_app_via'] == 'card_history' and log.detail['user_agent'] == 'Dart/3.5 (dart:io)'
+    s2 = another_session(db, s.site_id, '5151УБА')
+    out = cash(db, s2, u, ua=CHROME)                                   # тэр хэрэглэгч ВЕБ кассаар
+    p2 = db.get(M.Payment, out['payment_id'])
+    assert p2.source is None and receipts(db, p2.id)[0].provider == 'MSGBILL' and len(jobs(db, p2.id)) == 1
+    # role POS — картын түүхгүй ч
+    r = user(db, 'pos.new')
+    r.role = 'POS'
+    db.commit()
+    s3 = another_session(db, s.site_id, '5252УБА')
+    p3 = db.get(M.Payment, cash(db, s3, r)['payment_id'])
+    assert p3.raw_payload['pos_app_via'] == 'role' and receipts(db, p3.id)[0].status == 'EXTERNAL'
+    # 19 карт — босгоос доош
+    k = user(db, 'pos.few')
+    _card_history(db, other, k, 19)
+    s4 = another_session(db, s.site_id, '5353УБА')
+    p4 = db.get(M.Payment, cash(db, s4, k)['payment_id'])
+    assert p4.source is None and receipts(db, p4.id)[0].provider == 'MSGBILL'
+
+
+def test_header_wins_even_from_browser_and_company_stays_system(db):
+    s, u = parking(db), user(db, 'sogii')
+    out = cash(db, s, u, app_version='1.5.3', ua=CHROME)
+    assert receipts(db, out['payment_id'])[0].status == 'EXTERNAL'
+    s2 = another_session(db, s.site_id, '6161УБА')
+    out = asyncio.run(PR.cash_payment({'session_id': s2.id, 'customer_tin': '5317878'}, db, u,
+                                      req('1.5.3')))
+    [r] = receipts(db, out['payment_id'])
+    assert (r.provider, r.status) == ('MSGBILL', 'PENDING')           # ААН — систем гаргана
+
+
+def test_monnis_site_pos_card_is_external_by_default(db):
+    """Моннис (өөр түрээслэгч) — эзний 10-14-ний шийдвэрээр ч мөн терминал гаргана."""
+    t = M.Tenant(name='Моннис пропэрти', code='MONNIS')
+    db.add(t); db.flush()
+    s, u = parking(db, code='MONNIS', plate='7070УБА'), user(db, 'Building')
+    db.get(M.ParkingSite, s.site_id).tenant_id = t.id
+    db.commit()
+    out = card(db, s, u)
+    assert receipts(db, out['payment_id'])[0].status == 'EXTERNAL'
+
+
+def test_file_mode_never_cancels_reissued_receipt():
+    p = {'method': 'CARD', 'company': False, 'reissued': True,
+         'active': [{'id': 'r', 'provider': 'MSGBILL', 'provider_ref': 'x', 'status': 'SENT',
+                     'ebarimt_id': '0' * 25 + '10045952', 'amount': 1000}],
+         'primary': {'id': 'r'}, 'amount': 1000}
+    assert 'ДАХИН гаргасан' in V.cancel_block_reason(p)
+    p['reissued'] = False
+    assert V.cancel_block_reason(p) is None
