@@ -979,7 +979,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
         # (7224УБС) эсвэл гадна гарц (батлагдаагүй хязгаар) барагдуулна.
         # Нотолгоогүй салаанд (дээрх create_comp=False, OPEN) хүрэхгүй.
         from .services.nested import on_inner_exit
-        on_inner_exit(db, _csite, s.plate_number, at)
+        on_inner_exit(db, _csite, s.plate_number, at, child=s)
     close_open_pause(db, s, at)
     s.exit_time = at
     # Аль хэдийн баримтжсаныг бүү бууруул (camsync логоос цагийг нь оруулсан байж болно) —
@@ -2484,7 +2484,7 @@ async def _close_and_open(db: Session, exit_device: Device, session: ParkingSess
     _site = session.site
     if _site and _site.parent_site_id:
         # ДОТОРХ зогсоолоос гарлаа — ГАДНА зогсоолын тоолуур үргэлжилнэ
-        on_inner_exit(db, _site, session.plate_number, now)
+        on_inner_exit(db, _site, session.plate_number, now, child=session)
     else:
         # ГАДНА зогсоолоос гарлаа — доторх гарах уншилт алдагдсан ч зогсолт
         # энд хаагдана (эс бол тоолуур мөнхөд зогсож 0₮ болно). ЧУХАЛ: fee нь

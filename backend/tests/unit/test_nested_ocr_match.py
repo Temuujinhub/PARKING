@@ -233,6 +233,22 @@ def test_blacklist_block_does_not_pause(c):
     assert p.paused_since is None and not bar_cmds(c, "in_entry_bar")
 
 
+def test_two_cars_with_crossed_variant_reads_pair_correctly(c):
+    """Хоёр машин зэрэг: доторх уншилт бүр зөвхөн өөрийн гадна сешнтэй хосолно."""
+    a = outer(c, ago=timedelta(seconds=50))
+    b = outer(c, "2468УББ", ago=timedelta(seconds=40))
+    rb = enter_inner(c, "2468УБ")
+    for e in c.db.query(M.LprEvent).all():   # burst/dedup цонхноос гадуур
+        e.created_at -= timedelta(seconds=40)
+    c.db.commit()
+    ra = enter_inner(c, "1357УАО")
+    assert a.paused_since and b.paused_since
+    assert c.db.get(M.ParkingSession, rb["session_id"]).plate_number == "2468УББ"
+    assert c.db.get(M.ParkingSession, ra["session_id"]).plate_number == PLATE
+    pairs = {(x.detail["read_plate"], x.entity_id) for x in audits(c, "NESTED_OCR_MATCH")}
+    assert pairs == {("2468УБ", b.id), ("1357УАО", a.id)}
+
+
 # ── Гарцад татгалзсан машин дотогш буцсан ───────────────────────────────────
 
 def awaiting(c, minutes_ago=0.5, **kw):
@@ -263,10 +279,32 @@ def test_refused_exit_then_back_inside_reverts_to_open_and_pauses(c):
     assert SL.session_fee_info(c.db, p)["total_fee"] == fee_before["total_fee"]
 
 
-def test_revert_also_for_truncated_read_seen_at_exit(c):
+def test_refused_exit_with_running_pause_settles_and_restarts(c):
+    """Доторх гарах уншилт алдагдаж (зогсолт явсаар) гарцад татгалзсан машин буцаж
+    орлоо: гадна гарах уншилт хүртэлх зогсолт (батлагдаагүй хязгаар) барагдаж,
+    шинэ зогсолт энэ уншилтаас; сешн OPEN."""
+    p = awaiting(c, minutes_ago=1)
+    p.paused_since = datetime.utcnow() - timedelta(hours=3)
+    c.db.commit()
+    enter_inner(c, PLATE)
+    assert p.status == "OPEN" and 178 <= p.paused_minutes <= 180
+    assert p.paused_since is not None and p.paused_since >= datetime.utcnow() - timedelta(seconds=5)
+
+
+def test_fuzzy_read_never_touches_awaiting_parent(c):
+    """Гарцад төлбөр хүлээж буй сешн — машин аль хэдийн гарсан (хаалт гараар/дагаж)
+    байж болно; ойролцоо уншилт (өөр машин) түүнийг OPEN болгож зогсоовол өрийг нь
+    бүхэлд нь хасна. Зөвхөн ЯГ дугаар."""
     p = awaiting(c)
-    enter_inner(c, "1357УА")                  # гадна ГАРАХ уншилт 30с өмнө = цонхонд
-    assert p.status == "OPEN" and p.paused_since is not None
+    enter_inner(c, "1357УА")
+    assert p.status == "AWAITING_PAYMENT" and p.paused_since is None
+    assert p.total_fee == 23000 and not audits(c, "NESTED_EXIT_REVERT")
+
+
+def test_fuzzy_read_never_touches_paid_parent(c):
+    p = outer(c, status="PAID", paid_at=datetime.utcnow() - timedelta(seconds=30))
+    enter_inner(c, "1357УА")
+    assert p.paused_since is None and p.status == "PAID"
 
 
 @pytest.mark.parametrize("status", ["PENDING", "CREATING", "UNKNOWN", "REVIEW"])
@@ -391,6 +429,17 @@ def test_child_session_with_variant_plate_resumes_unique_paused_parent(c):
     assert p.paused_since is None and 119 <= p.paused_minutes <= 120
 
 
+def test_other_cars_inner_session_does_not_resume_similar_paused_parent(c):
+    """Гадна орох уншилт нь алдагдсан ӨӨР машины (1357УАО) доторх сешн 2ц дараа
+    хаагдахад ойролцоо дугаартай, дотор байгаа 1357УАА-гийн зогсолт тасрахгүй —
+    тэр доторх сешн 1357УАА-гийн гадна орох уншилтын цонхонд ороогүй."""
+    p = paused_parent(c, hours=4)
+    other_kid = inner(c, "1357УАО", ago=timedelta(hours=2))
+    res = exit_inner(c, "1357УАО")
+    assert res["action"] == "exit_completed" and other_kid.status == "FREE"
+    assert p.paused_since is not None and not p.paused_minutes
+
+
 # ── Итгэл багатай гарах уншилт ──────────────────────────────────────────────
 
 def test_low_confidence_override_not_applied_at_child_site(c):
@@ -478,3 +527,17 @@ def test_backfilled_variant_child_credits_and_renames(c):
     outer(c, "2468ӨМК", ago=timedelta(hours=2))
     t = datetime.utcnow() - timedelta(hours=2) + timedelta(seconds=30)
     assert N.credit_backfilled_child(c.db, c.child, "2468ӨМ", t, t + timedelta(hours=1)) == 0
+
+
+def test_rules_catalog_and_conflict_text_show_per_parent_cap(c):
+    from app.services import payment_rules as PRU
+    keys = {(r["group"], r["key"]) for r in PRU.catalog()}
+    assert (A.EXITRULES_KEY, "inner_unverified_cap_hours") in keys
+    row = next(r for r in PRU.catalog() if r["key"] == "inner_unverified_cap_hours")
+    assert row["per_site"] and row["unit"] == "hour"
+    A.set_site_rules(c.db, A.EXITRULES_KEY, c.parent.id, {"inner_unverified_cap_hours": 24}, "t")
+    c.db.commit()
+    texts = " ".join(x.get("detail", "") or "" for x in PRU.check_conflicts(c.db, c.child))
+    assert "24 цагаар" in texts
+    texts = " ".join(x.get("detail", "") or "" for x in PRU.check_conflicts(c.db, c.parent))
+    assert "24 цагаар" in texts

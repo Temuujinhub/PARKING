@@ -77,11 +77,13 @@ OCR-ойролцоо тохирол (2026-10-14; `match_parent`, `inner_plate_si
       шороо медиан 44с, max 571с. 10 мин нь max-ыг багтаана; түүнээс урт
       хоцрогдол бол гадна талбайд зогсоод хожим орсон машин — ойролцоо уншилтаар
       ТААМАГЛАХГҮЙ (дутуу нэхэмжлэхээс илүү ихээр нэхэх нь аюулгүй тал).
+  Зөвхөн OPEN гадна сешнд — AWAITING_PAYMENT/PAID сешнд яг дугаар л (машин гарсан
+  байж болох тул буцаалт/зогсолт нь өрийг бүхэлд нь хасах эрсдэлтэй).
   Тохирвол доторх сешний дугаарыг гадныхаар засна (тэмдэглэлтэй) — дараагийн
-  доторх гарах уншилт тэр сешнтэй таарна. Доторх гарах уншилтад (`on_inner_exit`)
-  нөхцөл нь «ЗОГССОН ганц нэр дэвшигч» (цонхгүй — машин хэдэн цаг дотор байж
-  болно). `reapply_child_pauses` яг дугаараар хэвээр (хоёр уншилт хоёулаа
-  алдагдсан тохиолдол — нотолгоо сул).
+  доторх гарах уншилт тэр сешнтэй таарна. Засагдаагүй үлдсэн доторх сешн
+  хаагдахад (`on_inner_exit`) — «ЗОГССОН ганц нэр дэвшигч» + тэр доторх сешн
+  орохдоо цонхонд багтсан байх. `reapply_child_pauses` яг дугаараар хэвээр (хоёр
+  уншилт хоёулаа алдагдсан тохиолдол — нотолгоо сул).
 
 Доторх гарах уншилтын нөхөлт (`match_paused_parent`, session_logic.handle_exit):
   төлбөргүй (no_charge) доторх зогсоолын гарах камер доторх сешнгүй машин уншвал
@@ -90,11 +92,13 @@ OCR-ойролцоо тохирол (2026-10-14; `match_parent`, `inner_plate_si
   10-14 өглөө 100 айлын доторх гарах 26 уншилтын 25 нь review болж хаалт нээгдээгүй.
 
 Гарцад татгалзсан машин дотогш буцвал (`_revert_refused_exit`): гадна сешн
-  AWAITING_PAYMENT (төлбөргүй, төлбөрийн оролдлогогүй) байхад доторх ОРОХ уншилт
-  ирвэл гадна сешнийг OPEN болгож тоолуурыг зогсооно — дараагийн жинхэнэ гарцад
-  ердийнхөөрөө бодогдоно. Өмнө нь гарах уншилтын үеийн дүн царцаж (6238ӨМҮ
-  10-14 06:44 → 25,000₮), 2 цагийн дараа өр болж, жинхэнэ гарцад нэмж 2,000₮
-  «орох уншилтгүй» хураамж үүсдэг байв.
+  AWAITING_PAYMENT (төлбөргүй, төлбөрийн оролдлогогүй, мөр түгжээгүй) байхад доторх
+  ОРОХ уншилт (ЯГ дугаар) ирвэл гадна сешнийг OPEN болгож тоолуурыг зогсооно —
+  дараагийн жинхэнэ гарцад ердийнхөөрөө бодогдоно. Зогсолт явж байсан бол (доторх
+  гарах уншилт алдагдсан) гадна гарах уншилт хүртэлх нь батлагдаагүй хязгаараар
+  барагдаж, шинэ зогсолт энэ уншилтаас. Өмнө нь гарах уншилтын үеийн дүн царцаж
+  (6238ӨМҮ 10-14 06:44 → 25,000₮), 2 цагийн дараа өр болж, жинхэнэ гарцад нэмж
+  2,000₮ «орох уншилтгүй» хураамж үүсдэг байв.
 
 Хязгаар (2026-10-14 эзэн): 100 айлд доторх гарах уншилт алдагдвал 24 цаг хүртэл
   хасна — Тохиргоо → Төлбөрийн дүрэм → «Доторх гарах уншилт алдагдсан зогсолтын
@@ -160,12 +164,11 @@ def inner_plate_similar(read: str, outer: str) -> bool:
 
 
 def _seen_outside(s: ParkingSession, at: datetime) -> bool:
-    """Гадна камерт (орох эсвэл татгалзсан гарах уншилт) `at`-аас өмнө
-    `_FUZZY_WINDOW` дотор харагдсан уу."""
-    for t in (s.entry_time, getattr(s, "last_exit_seen_at", None)):
-        if t is not None and at - _FUZZY_WINDOW <= t <= at + _STALE_TOLERANCE:
-            return True
-    return False
+    """Гадна ОРОХ уншилт (`entry_time`) `at`-аас өмнө `_FUZZY_WINDOW` дотор уу.
+    Ойролцоо тохирол зөвхөн OPEN гадна сешнд (`_fuzzy_parent`) тул «сүүлд гадна
+    камерт харагдсан» = орох уншилт."""
+    t = s.entry_time
+    return t is not None and at - _FUZZY_WINDOW <= t <= at + _STALE_TOLERANCE
 
 
 def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
@@ -174,8 +177,11 @@ def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
 
     Эцэг зогсоолын БҮХ идэвхтэй сешнээс ойролцоо нь ЯГ НЭГ байх (2+ = хоёрдмол,
     буруу машиныг зогсоож дутуу нэхэмжлэх эрсдэл — тохируулахгүй).
-    paused=False (орох): тэр нь зогсоогүй; paused=True (гарах): `at`-аас өмнө
-    зогссон. window: гадна камерт `_FUZZY_WINDOW` дотор харагдсан."""
+    paused=False (орох): тэр нь OPEN, зогсоогүй — гарцад төлбөр хүлээж буй /
+    төлсөн (AWAITING_PAYMENT/PAID) сешнийг ойролцоо уншилтаар ХӨНДӨХГҮЙ: машин аль
+    хэдийн гарсан байж болох ба зогсолт (+OPEN болгох буцаалт) нь өрийг нь бүхэлд
+    нь хасах эрсдэлтэй — тэдэнд зөвхөн ЯГ дугаар. paused=True (гарах): `at`-аас
+    өмнө зогссон. window: гадна орох уншилт `_FUZZY_WINDOW` дотор."""
     if not site or not site.parent_site_id or not plate:
         return None
     cands = [s for s in (db.query(ParkingSession)
@@ -192,7 +198,7 @@ def _fuzzy_parent(db: Session, site: ParkingSite, plate: str, at: datetime, *,
     if paused:
         if not c.paused_since or c.paused_since > at:
             return None
-    elif c.paused_since:
+    elif c.paused_since or c.status != "OPEN":
         return None
     if window and not _seen_outside(c, at):
         return None
@@ -457,14 +463,24 @@ def on_inner_entry(db: Session, site: ParkingSite, plate: str, at: datetime,
         log.info("[nested] %s: «%s»-д орлоо ч гадна зогсоолд идэвхтэй бүртгэл алга — "
                  "тоолуур зогсоохгүй", plate, site.name)
         return False
-    if parent.paused_since:
+    # Гарцад татгалзсан (AWAITING_PAYMENT) машин зогсолттой байсан ч (доторх гарах
+    # уншилт нь алдагдаж гарц руу очсон) буцаалтыг шалгана — эс бол царцсан дүн
+    # 2 цагийн дараа өр болж, жинхэнэ гарцад «орох уншилтгүй» хураамж нэмэгдэнэ.
+    if parent.paused_since and parent.status != "AWAITING_PAYMENT":
         return False   # аль хэдийн зогссон (давхар уншилт)
-    if _lock_parent(db, parent) is None or parent.paused_since:
-        log.info("[nested] %s: гадна «%s» сешн түгжээтэй/өөрчлөгдсөн (төлбөр боловсруулагдаж "
-                 "буй) — тоолуур зогсоосонгүй", plate, parent.plate_number)
+    if _lock_parent(db, parent) is None:
+        log.info("[nested] %s: гадна «%s» сешн түгжээтэй (төлбөр боловсруулагдаж буй) — "
+                 "тоолуур зогсоосонгүй", plate, parent.plate_number)
         return False
     if parent.status == "AWAITING_PAYMENT":
-        _revert_refused_exit(db, parent, at)
+        seen = parent.last_exit_seen_at or parent.payment_wait_started_at
+        if _revert_refused_exit(db, parent, at) and parent.paused_since and seen:
+            # Гадна гарах уншилт = машин тэр үед доторх зогсоолоос ГАРСАН байсны
+            # нотолгоо (доторх гарах уншилтгүй → батлагдаагүй хязгаар); шинэ зогсолт
+            # энэ уншилтаас.
+            settle_pause(parent, seen, unverified_cap_minutes(db, parent.site_id))
+    if parent.paused_since:
+        return False   # аль хэдийн зогссон (давхар уншилт / буцаалт хийгдээгүй)
     # Гадна сешн эхлэхээс ӨМНӨХ цагаас зогсоохгүй: хуучин (гарах уншилтгүй
     # үлдсэн) доторх сешний entry_time энд ирж болно — хасалт гадна зогсолтоос
     # хэтэрч бүх гадна хугацаа үнэгүй болдог байв (8810УКР 2026-10-13).
@@ -477,14 +493,22 @@ def on_inner_entry(db: Session, site: ParkingSite, plate: str, at: datetime,
 
 
 def on_inner_exit(db: Session, site: ParkingSite, plate: str, at: datetime,
-                  parent: ParkingSession | None = None) -> int:
+                  parent: ParkingSession | None = None,
+                  child: ParkingSession | None = None) -> int:
     """Доторх зогсоолоос ГАРЛАА — гадна session-ий тоолуурыг үргэлжлүүлнэ.
 
-    `parent` өгөөгүй бол яг дугаараар, олдохгүй бол OCR-ойролцоо ГАНЦ ЗОГССОН
-    гадна сешнээр (доторх сешн гадныхаар засагдаагүй үлдсэн тохиолдол)."""
+    `parent` өгөөгүй бол яг дугаараар. Олдохгүй бол хаагдаж буй доторх сешн
+    (`child`) нь орохдоо тохирох байсан OCR-ойролцоо ГАНЦ ЗОГССОН гадна сешн —
+    доторх сешний орсон цаг гадна орсноос `_FUZZY_WINDOW` дотор (дугаар нь
+    засагдаагүй үлдсэн тохиолдол: тэр дугаартай идэвхтэй доторх сешн байсан г.м).
+    Ингэж хатуу байх шалтгаан: гадна орох уншилт нь алдагдсан ӨӨР машины доторх
+    сешн хаагдахад ойролцоо дугаартай машины зогсолтыг тасалж илүү нэхэхгүй."""
     if parent is None:
         parent, fuzzy = match_parent(db, site, plate, at, paused=True)
-        if fuzzy and parent is not None:
+        if fuzzy and (child is None or child.entry_time is None
+                      or not _seen_outside(parent, child.entry_time)):
+            parent = None
+        elif fuzzy:
             log.info("[nested] %s: «%s» гарах — OCR-ойролцоо гадна «%s» сешнийг үргэлжлүүлнэ",
                      plate, site.name, parent.plate_number)
     if parent is None or not parent.paused_since:
