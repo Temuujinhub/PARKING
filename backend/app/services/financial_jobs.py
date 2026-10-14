@@ -17,7 +17,9 @@ from ..config import settings
 from ..database import SessionLocal
 from ..models import AuditLog, FinancialJob, Payment, VatReceipt
 from . import ebarimt, msgbill, qpay
-from .receipts import assign_ebarimt_id, is_duplicate_cancel, is_system_receipt  # noqa: F401
+from .pos_app import is_pos_app_payment  # noqa: F401 — нэг тодорхойлолт (2026-10-14)
+from .receipts import (REISSUED_NO_TERMINAL, assign_ebarimt_id, is_duplicate_cancel,  # noqa: F401
+                       is_reissued_no_terminal, is_system_receipt)
 
 log = logging.getLogger("parking.financial_jobs")
 
@@ -39,47 +41,45 @@ def _account(provider, site):
     return acc, hashlib.sha256(identity.encode()).hexdigest()
 
 
-# ── POS ТЕРМИНАЛЫН ӨӨРИЙН БАРИМТ (2026-10-13) ────────────────────────────────
+# ── POS ТЕРМИНАЛЫН ӨӨРИЙН БАРИМТ (2026-10-13; 10-14 бүх зогсоолд) ───────────────
 # PAX терминал POS аппаар авсан карт/бэлэн төлбөрт Ontime-ийн e-Barimt-ыг өөрөө
-# хэвлэдэг зогсоолд систем msgbill-ээр ДАХИН баримт гаргаж ТЕГ-т давхардал үүсгэж
-# байв (2026-08-24 Хангарьд 63: 39 бэлэн + 24 карт). Апп тэр ДДТД-г илгээдэггүй
-# тул бид дугаарыг нь мэдэхгүй — зөвхөн «терминал гаргасан» гэсэн EXTERNAL мөр
-# үлдээж, FinancialJob ҮҮСГЭХГҮЙ. Тохиргоо: app_settings.EBARIMT_KEY (зогсоолоор).
+# хэвлэдэг — систем msgbill-ээр ДАХИН баримт гаргаж ТЕГ-т давхардал үүсгэж байв
+# (2026-08-24 Хангарьд 63: 39 бэлэн + 24 карт; 9-р сард ~13 сая₮ илүү борлуулалт).
+# Апп тэр ДДТД-г илгээдэггүй тул бид дугаарыг нь мэдэхгүй — зөвхөн «терминал
+# гаргасан» гэсэн EXTERNAL мөр үлдээж, FinancialJob ҮҮСГЭХГҮЙ. Тохиргоо:
+# app_settings.EBARIMT_KEY — ерөнхий анхдагч АСААЛТТАЙ, зогсоолоор унтрааж болно.
 TERMINAL_PROVIDER = "POS-TERMINAL"
 TERMINAL_STATUS = "EXTERNAL"
 TERMINAL_NOTE = "Баримтыг POS терминал (Ontime) гаргасан — систем давхар үүсгээгүй"
 # Хэрэглэгчид харагдах тайлбар — retry/цуцлалт EXTERNAL дээр яагаад татгалздаг вэ
 EXTERNAL_REFUSAL = ("Энэ төлбөрийн НӨАТ баримтыг POS терминал (Ontime) гаргасан тул систем "
                     "давхар баримт үүсгэхгүй. Терминалын ДДТД-г «баримт холбох»-оор бүртгэнэ үү. "
-                    "Терминал баримт гаргаагүй нь батлагдвал эхлээд Тохиргоо → Төлбөрийн дүрэм → "
-                    "«POS терминал өөрөө НӨАТ баримт гаргадаг»-ийг энэ зогсоолд унтрааж, дараа нь "
-                    "«Систем баримт гаргах»-ыг дарна уу.")
+                    "Терминал баримт ГАРГААГҮЙ нь батлагдвал «Систем баримт гаргах»-ыг дарж "
+                    "баталгаажуулна уу.")
 DUPLICATE_REFUSAL = {
     "ok": False, "duplicate_of_pos": True,
     "error": "Энэ төлбөрийн баримтыг POS терминалын (касс дээр хэвлэсэн) баримттай "
              "ДАВХАРДСАН гэж ТЕГ тулгалтаар цуцалсан — дахин үүсгэвэл ТЕГ-т нэг "
              "борлуулалт 2 баримттай болно. Үнэхээр шаардлагатай бол давхардлыг "
              "зөвшөөрч (allow_duplicate) дахин дарна уу."}
-EXTERNAL_SETTING_ON = ("Энэ зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» тохиргоо асаалттай "
-                       "байна — систем баримт гаргахгүй. Терминал баримт гаргаагүй нь батлагдвал "
-                       "тохиргоог унтрааж байж дахин оролдоно уу.")
-
-
-def is_pos_app_payment(payment) -> bool:
-    """POS аппаар авсан төлбөр: /pos/confirm-ын карт (provider POS) эсвэл
-    X-App-Version толгойтой хүсэлтээр бүртгэгдсэн (source=POSAPP)."""
-    return getattr(payment, "source", None) == "POSAPP" or getattr(payment, "provider", None) == "POS"
+EXTERNAL_SETTING_ON = ("«POS терминал (PAX апп) өөрөө e-Barimt гаргадаг» дүрэм энэ төлбөрт "
+                       "үйлчилж байна — систем баримт гаргахгүй. Терминал баримт ГАРГААГҮЙ нь "
+                       "батлагдсан бол «терминал баримт гаргаагүй» гэж баталгаажуулж "
+                       "(no_terminal_receipt) дахин илгээнэ үү.")
 
 
 def terminal_issues_receipt(db, payment) -> bool:
-    """Энэ төлбөрийн НӨАТ баримтыг зогсоолын POS терминал ӨӨРӨӨ гаргасан гэж үзэх үү.
+    """Энэ төлбөрийн НӨАТ баримтыг POS терминал (PAX апп / Ontime) ӨӨРӨӨ гаргасан гэж үзэх үү.
 
-    Дөрвөн нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр, (2) арга CARD/CASH, (3) тухайн
-    зогсоолд тохиргоо асаалттай ба энэ арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт
-    БИШ — терминал (Ontime) ИРГЭНИЙ баримт хэвлэдэг тул байгууллагын НӨАТ-ын баримтыг
-    систем гаргасаар байна (түүхэн цуцлалт `vat_cancel_duplicates --pos-app` ч ААН-ийг
-    хөндөхгүй — 2026-10-13 нэгтгэл, нэг бодлого). Тохиргоо уншигдахгүй бол False —
-    хуучин зан (систем баримт гаргана): баримтгүй үлдэхээс давхардал дээр."""
+    Дөрвөн нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр (services/pos_app — source POSAPP эсвэл
+    /pos/confirm-ын карт; толгойгүй хуучин аппын хэрэглэгчийг _mark_pos_app POSAPP болгож
+    тэмдэглэдэг), (2) арга CARD/CASH, (3) тохиргоо — ерөнхий анхдагч АСААЛТТАЙ (2026-10-14
+    эзний шийдвэр: бүх зогсоол, бүх түрээслэгч), зогсоолд тодорхой унтраагаагүй ба энэ
+    арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт БИШ — терминал (Ontime) ИРГЭНИЙ баримт
+    хэвлэдэг тул байгууллагын НӨАТ-ын баримтыг систем гаргасаар байна (түүхэн цуцлалт
+    `vat_cancel_duplicates --pos-app` ч ААН-ийг хөндөхгүй — нэг бодлого). Зогсоол
+    тодорхойгүй бол ерөнхий утга. Тохиргоо уншигдахгүй бол False — систем баримт
+    гаргана: баримтгүй үлдэхээс давхардал дээр."""
     method = (payment.payment_method or "").upper()
     if method not in ("CARD", "CASH") or not is_pos_app_payment(payment):
         return False
@@ -87,11 +87,9 @@ def terminal_issues_receipt(db, payment) -> bool:
             or (getattr(payment, "customer_tin", None) or "").strip()):
         return False
     site = payment_site(payment)
-    if site is None:
-        return False
     try:
         from .app_settings import pos_terminal_receipt_methods
-        return method in pos_terminal_receipt_methods(db, site.id)
+        return method in pos_terminal_receipt_methods(db, getattr(site, "id", None))
     except Exception:  # noqa: BLE001
         log.exception("POS терминалын баримтын тохиргоо уншигдсангүй (payment=%s)", payment.id)
         return False
@@ -116,7 +114,11 @@ _TEG_DDTD = re.compile(r"^\d{33}$")
 def duplicate_guarded(recs) -> bool:
     """POS-ийн давхардал гэж цуцалсан (тэмдэгтэй) баримттай, ТЭМДЭГГҮЙ ИЛГЭЭГДСЭН баримтгүй
     төлбөр — систем баримтыг ДАХИН гаргахгүй (retry 409, бөөн нөхөлт алгасна).
-    Нэг л дүрэм: financial_jobs.retry_payment_receipts ба vat-retry-failed хоёулаа үүгээр."""
+    Нэг л дүрэм: financial_jobs.retry_payment_receipts ба vat-retry-failed хоёулаа үүгээр.
+    Терминал хэвлээгүй нь батлагдаж ДАХИН гаргасан (REISSUED_NO_TERMINAL) идэвхтэй баримттай
+    бол хамгаалахгүй — тэр баримт FAILED болбол бөөн нөхөлт/retry дахин илгээнэ (хяналт 2, I)."""
+    if any(is_reissued_no_terminal(r) and r.status != "CANCELLED" for r in recs):
+        return False
     return (any(is_duplicate_cancel(r) for r in recs)
             and not any(r.status == "SENT" and r.ebarimt_id and not is_duplicate_cancel(r)
                         for r in recs))
@@ -268,9 +270,9 @@ def enqueue_receipt_ready(db, payment, receipt):
         payload={"url": original.payload["url"], "partner": original.payload["partner"], "event": event}))
 
 
-def _reissue_external(db, payment, rec):
-    """EXTERNAL мөрийг СИСТЕМИЙН баримт болгоно (тохиргоо унтарсны дараа админ
-    тодорхой хүссэн үед л). Мөр нь хэвээр (id тогтвортой) — шинэ PENDING ажил."""
+def _reissue_external(db, payment, rec, mark=None):
+    """EXTERNAL мөрийг СИСТЕМИЙН баримт болгоно (админ тодорхой хүссэн/терминал хэвлээгүй
+    нь батлагдсан үед л). Мөр нь хэвээр (id тогтвортой) — шинэ PENDING ажил."""
     site = payment_site(payment)
     provider = receipt_provider(payment)
     _, fingerprint = _account(provider, site)
@@ -280,6 +282,8 @@ def _reissue_external(db, payment, rec):
     rec.customer_tin = payment.customer_tin
     raw = dict(rec.raw) if isinstance(rec.raw, dict) else {}
     raw["reissued_from_external"] = {"at": datetime.utcnow().isoformat(timespec="seconds")}
+    if mark:
+        raw["reissue"] = dict(mark)
     rec.raw = raw
     from ..routers.payments_router import _receipt_desc
     if (payment.kind or "") == "DEBT":
@@ -307,11 +311,18 @@ def _reissue_external(db, payment, rec):
 
 
 def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplicate=False,
-                           username="system"):
-    """reissue_external=True — ЗӨВХӨН нэг төлбөрийн «Систем баримт гаргах» товч
-    (админ тохиргоог унтраасны дараа). Бөөн нөхөлт EXTERNAL-ийг ХЭЗЭЭ Ч хөндөхгүй.
+                           no_terminal_receipt=False, username="system", mark=None):
+    """reissue_external=True — ЗӨВХӨН нэг төлбөрийн «Систем баримт гаргах» товч эсвэл
+    tools/vat_reissue_missing. Бөөн нөхөлт EXTERNAL-ийг ХЭЗЭЭ Ч хөндөхгүй.
     allow_duplicate=True — POS-ийн давхардал гэж цуцалсан баримтыг ил тод зөвшөөрлөөр
-    дахин гаргах (эс бөгөөс татгалзана). username — аудитын мөрөнд (товч дарсан админ)."""
+    дахин гаргах (эс бөгөөс татгалзана). username — аудитын мөрөнд (товч дарсан админ).
+    no_terminal_receipt=True — терминал (Ontime) баримт ХЭВЛЭЭГҮЙ нь батлагдсан (админ
+    баталгаажуулсан эсвэл ТЕГ экспортод терминалын мөр алга): «POS терминал баримт
+    гаргадаг» дүрэм үйлчилж байсан ч систем msgbill баримт гаргана — EXTERNAL-ийг системийн
+    баримт болгох, цуцлагдсаныг ОРЛОХ мөрийг EXTERNAL биш системийнхээр, BLOCKED ажлыг
+    EXTERNAL болгохгүй. 2026-10-14: дүрэм ерөнхийдөө асаалттай тул нэг борлуулалтын
+    төлөө зогсоолын тохиргоог унтраах шаардлагагүй болгов (бусад төлбөрт нөлөөлөхгүй).
+    mark: шинэ/хөрвүүлсэн баримтын raw["reissue"] (ж: REISSUED_NO_TERMINAL тэмдэг)."""
     # Also serializes adoption of historical receipts by concurrent operators.
     db.query(Payment).enable_eagerloads(False).filter_by(id=payment.id).with_for_update().one()
     jobs = (db.query(FinancialJob).filter(FinancialJob.payment_id == payment.id,
@@ -335,16 +346,19 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
         # Терминал баримтаа гаргасан — msgbill-ээр дахин гаргавал ТЕГ-т давхар.
         if not reissue_external:
             return {"ok": False, "external": True, "error": EXTERNAL_REFUSAL}
-        if terminal_issues_receipt(db, payment):
+        if not no_terminal_receipt and terminal_issues_receipt(db, payment):
             return {"ok": False, "external": True, "error": EXTERNAL_SETTING_ON}
         try:
             for rec in external:
-                _reissue_external(db, payment, rec)
+                _reissue_external(db, payment, rec, mark)
         except Exception as exc:  # noqa: BLE001 — суваггүй бол EXTERNAL хэвээр үлдэнэ
             db.rollback()
             return {"ok": False, "error": str(exc)[:200]}
         db.add(AuditLog(username=username, action="EBARIMT_EXTERNAL_REISSUE", entity="payment",
-                        entity_id=payment.id, detail={"receipts": [r.id for r in external]}))
+                        entity_id=payment.id,
+                        detail={"receipts": [r.id for r in external],
+                                "no_terminal_receipt": bool(no_terminal_receipt),
+                                **({"reason": mark.get("reason")} if mark else {})}))
         db.commit()
         return {"ok": False, "pending": True,
                 "error": "Терминалын тэмдэглэгээг системийн баримт болгож ажил хадгаллаа"}
@@ -355,15 +369,21 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
         # Cancellation is already confirmed. Explicit operator request creates
         # replacement rows with new stable keys, preserving every old receipt.
         new = [enqueue_receipt(db, payment, amount=rec.amount, vat=rec.vat_amount,
-                               session_id=rec.session_id, key=f"replace-{rec.id}")
+                               session_id=rec.session_id, key=f"replace-{rec.id}",
+                               terminal=False if no_terminal_receipt else None)
                for rec in recs]
+        if mark:
+            # Зөвхөн СИСТЕМИЙН баримтад (EXTERNAL бүртгэл — «дахин гаргасан баримт» биш)
+            for r in new:
+                if r.status != TERMINAL_STATUS:
+                    r.raw = {**(r.raw if isinstance(r.raw, dict) else {}), "reissue": dict(mark)}
         db.commit()
         if all(r.status == TERMINAL_STATUS for r in new):
             # Тохиргоо асаалттай — орлох баримтыг терминалынх гэж БҮРТГЭВ (commit
             # хийгдсэн), msgbill-гүй. created=True: endpoint 409 биш 200 буцаана.
             return {"ok": False, "external": True, "created": True,
                     "error": "Терминалын (Ontime) баримт гэж бүртгэлээ — систем баримт үүсгээгүй "
-                             "(зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» асаалттай)"}
+                             "(«POS терминал (PAX апп) өөрөө e-Barimt гаргадаг» дүрэм)"}
         return {"ok": False, "pending": True, "error": "Шинэ баримтын ажил хадгалагдлаа"}
     if active and all(r.ebarimt_id for r in active):
         return {"ok": True, "ebarimt_id": active[0].ebarimt_id, "lottery": active[0].lottery_code}
@@ -392,10 +412,11 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
                     "error": "Баримт өмнө үүссэн байж болно. Сувгаар тулгаж ДДТД-г батална уу; дахин илгээгээгүй"}
         if job.status == "BLOCKED" and job.attempts == 0:
             if terminal_now is None:
-                terminal_now = terminal_issues_receipt(db, payment)
-            if terminal_now and rec is not None:
-                # Сувагт ОГТ илгээгээгүй (attempts 0) ба зогсоолд «POS терминал өөрөө НӨАТ
-                # баримт гаргадаг» асаалттай болсон — шинэ төлбөртэй ижил EXTERNAL болгоно;
+                terminal_now = not no_terminal_receipt and terminal_issues_receipt(db, payment)
+            if terminal_now and rec is not None and not is_reissued_no_terminal(rec):
+                # Сувагт ОГТ илгээгээгүй (attempts 0) ба «POS терминал өөрөө НӨАТ баримт
+                # гаргадаг» дүрэм үйлчилж байна — шинэ төлбөртэй ижил EXTERNAL болгоно
+                # (терминал хэвлээгүй нь батлагдаж ДАХИН гаргасан баримтаас бусдыг);
                 # msgbill-ээр гаргавал терминалын баримттай давхардана (нэгтгэлийн хяналт)
                 _mark_terminal(rec, payment, payment_site(payment))
                 job.status, job.last_error = "DONE", "EXTERNAL: " + TERMINAL_NOTE[:150]
@@ -419,7 +440,7 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
     if converted and not any(j.status in ("PENDING", "RETRY") for j in jobs):
         return {"ok": False, "external": True, "created": True,
                 "error": "Терминалын (Ontime) баримт гэж бүртгэлээ — систем баримт үүсгээгүй "
-                         "(зогсоолд «POS терминал өөрөө НӨАТ баримт гаргадаг» асаалттай)"}
+                         "(«POS терминал (PAX апп) өөрөө e-Barimt гаргадаг» дүрэм)"}
     return {"ok": False, "pending": True, "error": "Баримтын хадгалсан ажлыг боловсруулж байна; дахин төлөхгүй"}
 
 

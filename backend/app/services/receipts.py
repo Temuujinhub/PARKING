@@ -51,6 +51,19 @@ def is_duplicate_cancel(rec) -> bool:
     return isinstance(cancel, dict) and cancel.get("reason") == DUPLICATE_OF_POS
 
 
+# Дахин гаргалтын тэмдэг (2026-10-14): терминал (Ontime) баримт ХЭВЛЭЭГҮЙ нь ТЕГ
+# экспортоор батлагдсан тул (tools/vat_reissue_missing.py) манай msgbill баримтыг
+# ДАХИН гаргасан. Ийм баримтыг POS аппын дүрмээр (--pos-app) ДАХИН цуцлахгүй — тэр
+# борлуулалтын цорын ганц e-Barimt.
+REISSUED_NO_TERMINAL = "REISSUED_NO_TERMINAL_RECEIPT"
+
+
+def is_reissued_no_terminal(rec) -> bool:
+    raw = getattr(rec, "raw", None)
+    mark = raw.get("reissue") if isinstance(raw, dict) else None
+    return isinstance(mark, dict) and mark.get("reason") == REISSUED_NO_TERMINAL
+
+
 # Баримтыг ХЭН гаргасан (2026-10-13): манай СИСТЕМИЙН сувгууд (None = хуучин PosAPI/
 # QPay мөр; UNCONFIGURED = суваг тохируулаагүй үеийн манай оролдлого). Бусад нь
 # (EXTERNAL төлөв, ONTIME/TERMINAL/POS-TERMINAL/EXT-* provider) — POS терминал/гадны

@@ -709,6 +709,10 @@ def cancel_block_reason(p: dict, *, allow_company: bool = False) -> str | None:
         return f"{m} төлбөр — POS терминал зөвхөн бэлэн/картын баримт хэвлэдэг тул давхардал гэж үзэхгүй"
     if p.get("company") and not allow_company:
         return "ААН/ТТД-тэй баримт — терминал иргэний баримт хэвлэдэг тул цуцлахгүй (гараар шалгана)"
+    if p.get("reissued"):
+        # 2026-10-14: терминал хэвлээгүй нь ТЕГ экспортоор батлагдаж ДАХИН гаргасан баримт
+        # (tools/vat_reissue_missing) — тэр борлуулалтын цорын ганц e-Barimt; автоматаар бус
+        return "терминал баримт хэвлээгүй нь батлагдаж ДАХИН гаргасан баримт — цуцлахгүй (гараар шалгана)"
     act = p.get("active") or []
     if not act:
         return "Цуцлах идэвхтэй (SENT) баримт алга"
@@ -821,9 +825,15 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
         return (register_sites.get(t.get("group") or "") or {}).get("site_id")
 
     def f_cost(pr):
+        # POS аппын борлуулалт ТҮРҮҮНД, дараа нь кассын зогсоол (2026-10-14): олон зогсоолын
+        # терминал НЭГ Ontime кассаар (…10002990) ажиллах үед «кассын зогсоол» (тааралтын
+        # олонх) нь зөвхөн олонхын зогсоол — түүнийг түрүүлбэл тэр зогсоолын ижил дүнтэй ВЕБ
+        # КАССЫН бэлэн нөгөө зогсоолын POS аппын борлуулалтаас Ontime мөрийг булааж «DUPLICATE»
+        # болон хууль ёсны цорын ганц баримт нь цуцлагдах байв. Ontime зөвхөн POS аппын
+        # борлуулалтад хэвлэдэг; өөр зогсоолынх бол доор «өөр зогсоол» гэж цуцлахгүй.
         _d, a, j = pr
         sid = reg_site(left[fi[a]])
-        return (0 if sid is None or probe[j].get("site_id") == sid else 1, _pos_tier(probe[j]))
+        return (_pos_tier(probe[j]), 0 if sid is None or probe[j].get("site_id") == sid else 1)
 
     times = [_when(t, shift) for t in left]
     hit = {}

@@ -35,23 +35,34 @@ EBARIMT_CANCEL_BULK + commit. Мөнгө буцаахгүй — зөвхөн т�
 төлбөр «ДАВХАРДАЛ ЦУЦЛАГДСАН» гэж гарна). Цуцалсны дараа терминалын баримтыг бүртгэнэ
 (ТЕГ-ийн Ontime ДДТД-тэй ONTIME/SENT мөр) — «Дахин үүсгэх» давхардлыг сэргээхгүй.
 
-──── --pos-app: ДҮРМЭЭР (ТЕГ файлгүй) — 2026-10-13 эзний шийдвэр ────
-ИйзиПаркинг ХХК-ийн POS терминалтай БҮХ зогсоолд PAX терминал POS аппын КАРТ, БЭЛЭН
-борлуулалт бүрд Ontime e-Barimt өөрөө хэвлэдэг → тэдгээрийн манай msgbill баримтыг
-цуцална (--file-тай хамт өгөхгүй). Сонголт: PAID, CARD/CASH, --tenant-ийн зогсоол
-(--site-аар нарийсгана; тест KH, SITE10 зөвхөн нэрлэсэн үед), төлсөн огноо --from/--to
-(УБ, анхдагч 2026-08-19 → одоо); POS аппынх = provider POS, эсвэл source POSAPP, эсвэл
-кассчин нь зогсоолын «POS аппын хэрэглэгчид» (pos_terminal_users) тохиргоонд, тохиргоо
-хоосон бол тэр зогсоолд POS-оор ≥20 карт авсан хэрэглэгч (--pos-user дарна); идэвхтэй
-msgbill баримттай (provider_ref), өөр сувгийн тэмдэггүй SENT баримтгүй; ААН/ТТД-тэй
-баримтыг (--include-company-гүй бол) ХӨНДӨХГҮЙ. Цуцалсны дараа ДДТД-гүй EXTERNAL
-(«POS терминал гаргасан») мөр бүртгэнэ. Ontime баримт хэвлэгдээгүй борлуулалт байвал
-e-Barimt-гүй үлдэнэ.
+──── --pos-app: ДҮРМЭЭР (ТЕГ файлгүй) — 2026-10-13; 10-14 эзний ЭЦСИЙН шийдвэр ────
+PAX терминал (Ontime) POS аппын КАРТ, БЭЛЭН борлуулалт бүрд e-Barimt өөрөө хэвлэдэг — БҮХ
+зогсоол, БҮХ түрээслэгч (ИйзиПаркинг, Моннис пропэрти/Monnis Building, Моннисмоторс…) →
+тэдгээрийн манай msgbill баримтыг цуцална (--file-тай хамт өгөхгүй). Сонголт: PAID,
+CARD/CASH, --tenant-ийн (эсвэл ALL — бүх түрээслэгч) зогсоол (--site-аар нарийсгана; тест
+KH, SITE10 зөвхөн нэрлэсэн үед), төлсөн огноо --from/--to (УБ, анхдагч 2026-08-19 → одоо);
+POS аппынх = source POSAPP, эсвэл provider POS (/pos/confirm), эсвэл кассчин нь POS аппын
+хэрэглэгч (СИСТЕМ ДАЯАР: role POS + тохиргооны жагсаалт + POS аппаар ≥20 карт; --pos-user
+дарна); идэвхтэй msgbill баримттай (provider_ref), өөр сувгийн тэмдэггүй SENT баримтгүй;
+ААН/ТТД-тэй баримтыг (--include-company-гүй бол) ХӨНДӨХГҮЙ; зогсоолд «POS терминал
+e-Barimt гаргадаг» УНТРААСАН бол (терминал нь хэвлэдэггүй) тэр зогсоолыг ХӨНДӨХГҮЙ;
+терминал хэвлээгүй нь батлагдаж ДАХИН гаргасан баримтыг ХӨНДӨХГҮЙ. Цуцалсны дараа
+ДДТД-гүй EXTERNAL («POS терминал гаргасан») мөр бүртгэнэ.
 
-    venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant EASYPARKING \
-        --out /root/posapp.csv                                                         # харах
-    venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant EASYPARKING \
-        --apply --limit 1 --user temuujin --note "Эзний шийдвэр 10-13: POS терминал Ontime"  # туршилт
+--evidence (ТЕГ экспорт, олон удаа, урт хугацаа ч болно): файлын хамрах хүрээнд (хугацаа ×
+файлын ТТД-ийн түрээслэгч, терминалын кассын цагийн бүсээр) байгаа борлуулалтыг ЗӨВХӨН
+терминалын (манайх биш, QPay биш) мөр таарвал цуцална (CSV basis=TEG); терминалын мөргүй,
+ТОДОРХОЙГҮЙ (ижил дүнтэй хосгүй терминалын мөр ойрхон) борлуулалтыг цуцлахгүй; хүрээнээс
+гадуурхыг АНХДАГЧААР ХАСНА (түрээслэгч × сараар хэвлэнэ) — дүрмээр цуцлах бол
+--outside-by-rule (basis=RULE). Хамралтын статистикийг хэвлэнэ. Ontime баримт хэвлэгдээгүй ч
+цуцлагдсан борлуулалтыг tools/vat_reissue_missing.py нөхнө.
+
+    venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant ALL \
+        --from 2026-08-25 --to 2026-09-19 --out /root/posapp.csv                           # харах
+    venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant MONNIS \
+        --evidence /root/teg_monnis_sep.xlsx --out /root/posapp_mon.csv                    # нотолгоотой
+    venv/bin/python tools/vat_cancel_duplicates.py --pos-app --tenant ALL \
+        --apply --limit 1 --user temuujin --note "Эзний шийдвэр 10-14: POS терминал Ontime"  # туршилт
 """
 import argparse
 import asyncio
@@ -79,11 +90,11 @@ DUP_FIELDS = ["payment_id", "site_code", "site_name", "plate", "method", "amount
               "teg_vendor", "teg_time_ub", "gap_s", "ours_in_file", "file"]
 LEFT_FIELDS = ["file", "dt", "dt_utc", "amount", "ddtd", "register", "foreign", "src", "verdict",
                "note", "payment_id", "site_name", "plate", "method", "our_ddtd", "gap_s"]
-POSAPP_FIELDS = ["payment_id", "site_code", "site_name", "plate", "method", "amount", "paid_at_ub",
-                 "paid_at", "month", "cashier", "via", "our_ddtd", "our_provider_ref", "our_status",
-                 "receiver_type", "customer_tin", "kind"]
-POSAPP_NOTE = ("Эзний шийдвэр 2026-10-13: POS терминал (PAX/Ontime) карт/бэлэн борлуулалт бүрд "
-               "e-Barimt хэвлэдэг — msgbill дэх давхардлыг цуцлав")
+POSAPP_FIELDS = ["payment_id", "tenant", "site_code", "site_name", "plate", "method", "amount",
+                 "paid_at_ub", "paid_at", "month", "cashier", "via", "our_ddtd", "our_provider_ref",
+                 "our_status", "receiver_type", "customer_tin", "kind"]
+POSAPP_NOTE = ("Эзний шийдвэр 2026-10-14: POS терминал (PAX/Ontime) карт/бэлэн борлуулалт бүрд "
+               "e-Barimt хэвлэдэг (бүх зогсоол) — msgbill дэх давхардлыг цуцлав")
 
 
 def _read_only(db):
@@ -93,7 +104,7 @@ def _read_only(db):
 
 
 def resolve_tenant(db, value):
-    if not value:
+    if not value or value.strip().upper() == VD.ALL_TENANTS:
         return None
     try:
         return VD.resolve_tenant(db, value)
@@ -249,10 +260,10 @@ async def apply_cancel(db, dups, *, note, username, delay=0.5, log=print, source
 
 
 def _breakdown(rows):
-    """{(зогсоол, сар, арга): [тоо, ₮]} + зогсоолын нийт — YES асуулт ба dry-run-д."""
+    """{(түрээслэгч, зогсоол, сар, арга): [тоо, ₮]} — YES асуулт ба dry-run-д."""
     cells: dict = {}
     for r in rows:
-        k = (r["site_code"] or r["site_name"] or "?", r["month"], r["method"])
+        k = (r.get("tenant") or "?", r["site_code"] or r["site_name"] or "?", r["month"], r["method"])
         c = cells.setdefault(k, [0, 0.0])
         c[0] += 1
         c[1] += r["amount"]
@@ -263,15 +274,7 @@ def print_pos_app_summary(sel, log=print):
     rows = sel["selected"]
     total = sum(r["amount"] for r in rows)
     log(f"\nЦУЦЛАХ (POS аппын дүрэм): {len(rows)} төлбөр · {total:,.0f}₮")
-    by_site: dict = {}
-    for (site, month, method), (n, amt) in _breakdown(rows).items():
-        by_site.setdefault(site, []).append(f"{month} {method} {n} ({amt:,.0f}₮)")
-    for site, parts in by_site.items():
-        n = sum(1 for r in rows if (r["site_code"] or r["site_name"]) == site)
-        amt = sum(r["amount"] for r in rows if (r["site_code"] or r["site_name"]) == site)
-        log(f"  {site}: {n} ({amt:,.0f}₮) — " + " · ".join(parts))
-    by_m = Counter(r["method"] for r in rows)
-    log("  Аргаар: " + " · ".join(f"{k} {v}" for k, v in sorted(by_m.items())))
+    print_cells(rows, log)
     comp = sel["company"]
     if comp:
         cs = Counter(r["site_code"] for r in comp)
@@ -279,6 +282,9 @@ def print_pos_app_summary(sel, log=print):
             + " · ".join(f"{k} {v}" for k, v in sorted(cs.items()))
             + " — терминал иргэний баримт хэвлэдэг тул байгууллагын баримтыг ХӨНДӨХГҮЙ"
               " (--include-company-оор л)")
+    if sel.get("site_off"):
+        log("ХАСАГДСАН — зогсоолд «POS терминал e-Barimt гаргадаг» УНТРААЛТТАЙ/арга хасагдсан: "
+            + " · ".join(f"{k} {v}" for k, v in sorted(sel["site_off"].items())))
     ex = {k: v for k, v in sel["excluded"].items() if k not in ("COMPANY",)}
     if ex:
         log("Бусад хасагдсан: " + " · ".join(f"{VD.POS_APP_EXCLUSION_MN.get(k, k)} {v}"
@@ -288,87 +294,148 @@ def print_pos_app_summary(sel, log=print):
     log("\n⚠ АНХААР: эдгээр борлуулалтад Ontime (POS терминал) баримт ҮНЭХЭЭР хэвлэгдсэн гэж үзэж "
         "манай msgbill баримтыг ЦУЦАЛНА. Терминал баримт хэвлээгүй (унтарсан, цаасгүй, Ontime "
         "салгасан) борлуулалт байвал цуцалсны дараа тэр нь e-Barimt-ГҮЙ үлдэнэ — ТЕГ экспортоор "
-        "(Ибаримт → ТЕГ тулгалт → terminal_missing) шалгаж, «Систем баримт гаргах»-аар нөхнө.")
+        "(--evidence, эсвэл дараа нь tools/vat_reissue_missing.py) шалгаж нөхнө.")
     return total
+
+
+def print_cells(rows, log=print):
+    """Түрээслэгч × зогсоол × сар × арга — тоо ба ₮ (dry-run, YES асуулт)."""
+    by_site: dict = {}
+    for (ten, site, month, method), (n, amt) in _breakdown(rows).items():
+        by_site.setdefault((ten, site), []).append(f"{month} {method} {n} ({amt:,.0f}₮)")
+    for (ten, site), parts in by_site.items():
+        sel = [r for r in rows if (r.get("tenant") or "?") == ten
+               and (r["site_code"] or r["site_name"] or "?") == site]
+        log(f"  {ten:<11} {site:<14} {len(sel):5d} ({sum(r['amount'] for r in sel):,.0f}₮) — "
+            + " · ".join(parts))
+    by_t = Counter()
+    amt_t: dict = {}
+    for r in rows:
+        by_t[r.get("tenant") or "?"] += 1
+        amt_t[r.get("tenant") or "?"] = amt_t.get(r.get("tenant") or "?", 0) + r["amount"]
+    if len(by_t) > 1:
+        log("  Түрээслэгчээр: " + " · ".join(f"{k} {v} ({amt_t[k]:,.0f}₮)" for k, v in sorted(by_t.items())))
+    by_m = Counter(r["method"] for r in rows)
+    log("  Аргаар: " + " · ".join(f"{k} {v}" for k, v in sorted(by_m.items())))
+
+
+def print_pos_users(info, log=print):
+    """POS аппын хэрэглэгчид — систем даяар (2026-10-14: зогсоолоор БИШ)."""
+    log(f"POS аппын хэрэглэгчид [{info['source']}]: {', '.join(sorted(info['users'])) or '—'}")
+    der = ", ".join(f"{u} {n}" for u, n in sorted(info["derived"].items(), key=lambda kv: -kv[1]))
+    log(f"  POS аппын карт (≥босго): {der or '—'}")
+    if info["roles"]:
+        log(f"  role POS: {', '.join(sorted(info['roles']))}")
+    if info["configured"]:
+        log(f"  тохиргооны жагсаалт: {', '.join(sorted(info['configured']))}")
+    if info["below"]:
+        log("  ⚠ босгоос доош POS карттай (POS аппынх гэж ТООЦООГҮЙ — хэрэгтэй бол --pos-user): "
+            + ", ".join(f"{u} {n}" for u, n in sorted(info["below"].items(), key=lambda kv: -kv[1])))
+
+
+def load_evidence(files):
+    out = []
+    for f in files or []:
+        if not os.path.isfile(f):
+            raise SystemExit(f"Файл олдсонгүй: {f}")
+        tax, _diag = VR.parse_tax_export(os.path.basename(f), open(f, "rb").read())
+        out.append((os.path.basename(f), tax))
+    return out
 
 
 def main_pos_app(args):
     """--pos-app: ТЕГ файлгүй, эзний шийдвэрийн дүрмээр сонгож цуцлах."""
     if not args.tenant:
-        raise SystemExit("--pos-app үед --tenant заавал (ж: EASYPARKING — ИйзиПаркинг ХХК)")
+        raise SystemExit("--pos-app үед --tenant заавал (ж: EASYPARKING, MONNIS эсвэл ALL — бүх түрээслэгч)")
     username = args.user or f"cli:{os.getenv('SUDO_USER') or getpass.getuser()}"
     out = args.out or f"vat_posapp_{datetime.now():%Y%m%d_%H%M%S}.csv"
     stem = out[:-4] if out.lower().endswith(".csv") else out
     note = args.note if args.note != NOTE_DEFAULT else POSAPP_NOTE
+    taxes = load_evidence(args.evidence)
     db = SessionLocal()
     _read_only(db)
     try:
-        tenant = resolve_tenant(db, args.tenant)
         try:
-            sites = VD.pos_app_sites(db, tenant, args.site)
+            tenants = VD.resolve_tenants(db, args.tenant)
+            sites = VD.pos_app_sites(db, tenants, args.site)
         except ValueError as e:
             raise SystemExit(str(e))
-        site_users = VD.pos_users_for_sites(db, sites, override=VD.parse_pos_user_override(args.pos_user),
-                                            min_card=args.min_card)
+        if not tenants:
+            raise SystemExit("Түрээслэгч алга")
+        tcode = {t.id: t.code for t in tenants}
+        scope = VD.pos_app_scope(db, sites, override=VD.parse_pos_user_override(args.pos_user),
+                                 min_card=args.min_card)
         lo, hi = VD.ub_window(args.date_from, args.date_to)
         loc = timedelta(hours=settings.tz_offset_hours)
         print(f"{TOOL} --pos-app: {'APPLY' if args.apply else 'DRY-RUN'} · DB "
-              f"{settings.database_url.rsplit('/', 1)[-1]} · түрээслэгч {tenant.code} ({tenant.name})"
-              f" · төлсөн {(lo + loc):%Y-%m-%d} → {(hi + loc):%Y-%m-%d %H:%M} (УБ)"
+              f"{settings.database_url.rsplit('/', 1)[-1]} · түрээслэгч {VD.tenant_label(tenants)}"
+              f" · {len(sites)} зогсоол · төлсөн {(lo + loc):%Y-%m-%d} → {(hi + loc):%Y-%m-%d %H:%M} (УБ)"
               + (" · ААН/ТТД-тэй ОРНО" if args.include_company else ""))
-        if tenant.code not in VD.POS_APP_TENANTS:
-            print(f"⚠ «{tenant.code}» эзний шийдвэрт (ИйзиПаркинг ХХК) хамаарахгүй — --apply татгалзана")
-        print("POS аппын хэрэглэгчид (зогсоол бүрээр):")
-        for s_ in sites:
-            info = site_users[s_.id]
-            if not info["users"] and not info["derived"]:
-                continue
-            der = ", ".join(f"{u} {n}" for u, n in sorted(info["derived"].items(), key=lambda kv: -kv[1]))
-            print(f"  {s_.site_code:<12} [{info['source']}] {', '.join(sorted(info['users'])) or '—'}"
-                  + (f"  (POS карт: {der})" if der else "")
-                  + ("" if info["methods"] == set(VD.POS_APP_METHODS)
-                     else f"  · тохиргоо: зөвхөн {','.join(sorted(info['methods']))}"))
-        low = {s_.site_code: info["below"] for s_ in sites
-               for info in [site_users[s_.id]] if info["below"]}
-        if low:
-            print("  ⚠ босгоос доош POS карттай хэрэглэгч (POS аппынх гэж ТООЦООГҮЙ — "
-                  "хэрэгтэй бол --pos-user): " + " · ".join(
-                      f"{k}: " + ", ".join(f"{u} {n}" for u, n in v.items()) for k, v in sorted(low.items())))
+        print_pos_users(scope)
+        off = sorted(s_.site_code for s_ in sites if not scope["methods"].get(s_.id))
+        part = sorted(f"{s_.site_code}={','.join(sorted(scope['methods'][s_.id]))}" for s_ in sites
+                      if scope["methods"].get(s_.id) and scope["methods"][s_.id] != set(VD.POS_APP_METHODS))
+        if off or part:
+            print("  Зогсоолын тохиргоо: " + (f"УНТРААЛТТАЙ (хөндөхгүй): {', '.join(off)}" if off else "")
+                  + (" · " if off and part else "") + (f"зөвхөн: {', '.join(part)}" if part else ""))
         skipped_test = sorted(c for c in VD.POS_APP_TEST_SITES
                               if c not in {(x.site_code or '').upper() for x in sites})
         if skipped_test:
             print(f"  (тест зогсоол алгасав: {', '.join(skipped_test)} — --site-аар нэрлэвэл орно)")
         t0 = time.monotonic()
-        sel = VD.select_pos_app(db, sites=sites, lo=lo, hi=hi, site_users=site_users,
+        sel = VD.select_pos_app(db, sites=sites, lo=lo, hi=hi, scope=scope,
                                 include_company=args.include_company)
         total = print_pos_app_summary(sel)
-        rows = [{**r, "kind": "cancel"} for r in sel["selected"]]
-        no_ontime = []
-        for f in args.evidence or []:
-            # НЭМЭЛТ нотолгоо: ТЕГ экспортын хугацаанд Ontime мөргүй төлбөрийг ЦУЦЛАХГҮЙ
-            tax, _diag = VR.parse_tax_export(os.path.basename(f), open(f, "rb").read())
+        rows = [{**r, "kind": "cancel", "basis": "RULE"} for r in sel["selected"]]
+        if taxes:
+            # НЭМЭЛТ нотолгоо: ТЕГ экспортын хамрах хүрээнд (хугацаа × файлын ТТД-ийн түрээслэгч)
+            # ЗӨВХӨН терминалын мөртэй төлбөрийг цуцална (basis=TEG); хүрээнээс гадуурхыг
+            # --outside-by-rule-гүйгээр ХАСНА (хяналт 2, E: EasyParking-ийн файл + --tenant ALL
+            # нь Моннисын бүх борлуулалтыг чимээгүй дүрмээр цуцлах байв).
+            # Тулгалт нь сонгосон түрээслэгч(ид)-ийн БҮХ зогсоолоор (ТЕГ файл ТТД-ийн бүх борлуулалт)
+            ev_sites = VD.tenant_sites(db, tenants)
             shifts = [0.0, -float(settings.tz_offset_hours)]
-            ev = VD.pos_app_evidence(db, tax, rows, tol=args.tol, shifts=shifts,
-                                     site_ids={s_.id for s_ in sites})
-            pct = (len(ev["with_ontime"]) / ev["inside"]) if ev["inside"] else 0
-            print(f"\nНОТОЛГОО {os.path.basename(f)}: хугацаанд {ev['inside']} төлбөр · Ontime мөртэй "
-                  f"{len(ev['with_ontime'])} ({pct:.1%}) · Ontime мөргүй {len(ev['missing'])} — ЦУЦЛАХГҮЙ"
-                  + (f" · өөр кассууд {', '.join(ev['foreign_registers'])}" if ev["foreign_registers"] else
-                     " · ⚠ файлд өөр систем (Ontime) касс АЛГА"))
-            for r in ev["missing"][:20]:
-                print(f"    баримтгүй үлдэх байсан: {r['paid_at_ub']} {r['site_code']} {r['plate'] or '—'} "
-                      f"{r['method']} {r['amount']:,.0f}₮ ({r['cashier']})")
-            no_ontime += ev["missing"]
-        if no_ontime:
-            drop = {r["payment_id"] for r in no_ontime}
+            ev = VD.terminal_evidence(db, taxes, sites=ev_sites, tol=args.tol, shifts=shifts,
+                                      pos_users=scope["users"])
+            split = VD.evidence_split(rows, ev, {x.id: x.tenant_id for x in ev_sites})
+            VD.print_evidence(ev, split, tenants=tcode)
+            for r in split["missing"][:20]:
+                print(f"    терминалын мөргүй (ЦУЦЛАХГҮЙ): {r['paid_at_ub']} {r['site_code']} "
+                      f"{r['plate'] or '—'} {r['method']} {r['amount']:,.0f}₮ ({r['cashier']})")
+            for r in split["with_terminal"]:
+                r["basis"] = "TEG"
+            if split["covered"]:
+                print("  Хүрээнд — терминалын мөртэй (цуцална, basis=TEG):")
+                print_cells(split["with_terminal"])
+            drop = {r["payment_id"] for r in split["missing"] + split["ambiguous"]}
+            if drop:
+                write_csv(f"{stem}_no_ontime.csv", split["missing"] + split["ambiguous"],
+                          POSAPP_FIELDS + ["basis"])
+                print(f"Терминалын мөргүй {len(split['missing'])} + ТОДОРХОЙГҮЙ {len(split['ambiguous'])} "
+                      f"төлбөрийг хасав (ЦУЦЛАХГҮЙ) → {stem}_no_ontime.csv")
+            outside = split["outside"]
+            if outside:
+                cnt: dict = {}
+                for r in outside:
+                    c = cnt.setdefault((r.get("tenant") or "?", r["month"]), [0, 0.0])
+                    c[0] += 1
+                    c[1] += r["amount"]
+                print(("Хүрээнээс гадуур (ТЕГ файл хамраагүй) — ДҮРМЭЭР цуцална (--outside-by-rule): "
+                       if args.outside_by_rule else
+                       "Хүрээнээс гадуур (ТЕГ файл хамраагүй) — ХАСАВ (нотолгоогүй; дүрмээр цуцлах бол "
+                       "--outside-by-rule): ")
+                      + " · ".join(f"{t} {m} {n} ({a:,.0f}₮)" for (t, m), (n, a) in sorted(cnt.items())))
+                if not args.outside_by_rule:
+                    drop |= {r["payment_id"] for r in outside}
+                    write_csv(f"{stem}_outside.csv", outside, POSAPP_FIELDS + ["basis"])
             rows = [r for r in rows if r["payment_id"] not in drop]
-            write_csv(f"{stem}_no_ontime.csv", no_ontime, POSAPP_FIELDS)
-            print(f"Ontime нотолгоогүй {len(drop)} төлбөрийг жагсаалтаас хасав → {stem}_no_ontime.csv"
-                  f" · цуцлах {len(rows)} ({sum(r['amount'] for r in rows):,.0f}₮)")
+            by_basis = Counter(r["basis"] for r in rows)
+            print(f"ЦУЦЛАХ ЖАГСААЛТ: {len(rows)} ({sum(r['amount'] for r in rows):,.0f}₮) · "
+                  + " · ".join(f"basis={k} {v}" for k, v in sorted(by_basis.items())))
         # Цуцлах мөр ЭХЭНДЭЭ (--limit 1 туршилт msgbill цуцлалтыг шалгана), дараа нь
         # өмнө цуцлагдсан боловч терминалын мөр дутуу (msgbill дуудахгүй) нөхөлт
-        work = rows + [{**r, "kind": "complete_terminal"} for r in sel["complete"]]
-        write_csv(out, work, POSAPP_FIELDS)
+        work = rows + [{**r, "kind": "complete_terminal", "basis": "COMPLETE"} for r in sel["complete"]]
+        write_csv(out, work, POSAPP_FIELDS + ["basis"])
         write_csv(f"{stem}_company.csv", sel["company"], POSAPP_FIELDS)
         print(f"\nCSV: {out} ({len(work)}) · {stem}_company.csv ({len(sel['company'])})"
               f" · {time.monotonic() - t0:.1f}с")
@@ -380,9 +447,6 @@ def main_pos_app(args):
             print("\nDRY-RUN — юу ч өөрчлөгдсөнгүй. Цуцлахын тулд ижил командыг --apply --user <нэр> "
                   "(--max <тоо>) -тэй ажиллуулна.")
             return 0
-        if tenant.code not in VD.POS_APP_TENANTS:
-            print(f"\nЗОГСОВ: --pos-app зөвхөн {', '.join(sorted(VD.POS_APP_TENANTS))} (эзний шийдвэр)")
-            return 6
         if args.limit is not None:
             work = work[:max(0, args.limit)]
         # --max нь ЭНЭ УДАА бодитоор цуцлах тоонд (--limit 1 туршилт 8,000+ сонголттой ч болно)
@@ -400,14 +464,13 @@ def main_pos_app(args):
     finally:
         db.rollback()
     amount = sum(r["amount"] for r in work)
-    cells = _breakdown(work)
     print(f"\nЦУЦЛАХ ГЭЖ БАЙНА (POS аппын дүрэм): DB {VD.db_name()} · сервер {settings.public_base_url}"
-          f" · түрээслэгч {tenant.code} · {len(work)} төлбөр ({amount:,.0f}₮)")
-    for (site, month, method), (n, amt) in cells.items():
-        print(f"  {site:<12} {month} {method:<4} {n:6d}  {amt:12,.0f}₮")
+          f" · түрээслэгч {VD.tenant_label(tenants)} · {len(work)} төлбөр ({amount:,.0f}₮)")
+    for (ten, site, month, method), (n, amt) in _breakdown(work).items():
+        print(f"  {ten:<11} {site:<14} {month} {method:<4} {n:6d}  {amt:12,.0f}₮")
     print("  msgbill түлхүүр (оролдох дараалал): "
           + " · ".join(f"{k}: {' → '.join(v) or '—'}" for k, v in scopes.items()))
-    print("  Ontime баримт хэвлэгдээгүй борлуулалт байвал e-Barimt-ГҮЙ үлдэнэ.")
+    print("  Ontime баримт хэвлэгдээгүй борлуулалт байвал e-Barimt-ГҮЙ үлдэнэ (vat_reissue_missing.py нөхнө).")
     if not args.yes:
         if not sys.stdin.isatty():
             print("\nЗОГСОВ: баталгаажуулах терминал алга — --yes өгнө үү.")
@@ -418,7 +481,7 @@ def main_pos_app(args):
             print("Цуцалсангүй.")
             return 5
     print(f"\nЦуцалж байна ({len(work)}, {amount:,.0f}₮) — хэрэглэгч {username}, шалтгаан «{note}»")
-    guard = VD.pos_app_guard(site_users, {s_.id for s_ in sites}, args.include_company)
+    guard = VD.pos_app_guard(scope, {s_.id for s_ in sites}, args.include_company)
     res_rows, cnt, stopped = asyncio.run(apply_cancel(
         db, work, note=note, username=username, delay=args.delay, source="cli-pos-app",
         mark_extra={"rule": VD.POS_APP_RULE}, guard=guard, allow_company=bool(args.include_company)))
@@ -426,16 +489,20 @@ def main_pos_app(args):
         db.add(AuditLog(username=username, action="EBARIMT_CANCEL_BULK_SUMMARY", entity="vat",
                         entity_id="DUPLICATE_OF_POS_TERMINAL",
                         detail={"tool": TOOL, "mode": "pos-app", "rule": VD.POS_APP_RULE,
-                                "tenant": tenant.code, "sites": [s_.site_code for s_ in sites],
+                                "tenants": [t.code for t in tenants],
+                                "sites": [s_.site_code for s_ in sites],
                                 "from": args.date_from, "to": args.date_to,
                                 "include_company": bool(args.include_company),
-                                "evidence": [os.path.basename(f) for f in args.evidence or []],
+                                "pos_users": sorted(scope["users"]),
+                                "evidence": [n for n, _t in taxes],
+                                "outside_by_rule": bool(args.outside_by_rule),
+                                "basis": dict(Counter(r.get("basis") for r in work)),
                                 "requested": len(work), "amount": amount, "note": note,
                                 "result": dict(cnt), "stopped": stopped}))
         db.commit()
     finally:
         db.close()
-    write_csv(f"{stem}_applied.csv", res_rows, POSAPP_FIELDS + ["outcome", "error", "key_scope"])
+    write_csv(f"{stem}_applied.csv", res_rows, POSAPP_FIELDS + ["basis", "outcome", "error", "key_scope"])
     print(f"\nДҮН: {dict(cnt)}" + (f"\nЗОГССОН: {stopped}" if stopped else "")
           + f"\nCSV: {stem}_applied.csv\nДахин ажиллуулахад цуцлагдсан нь алгасагдана (идемпотент).")
     return 0 if not cnt.get("failed") and not stopped else 1
@@ -452,8 +519,9 @@ def main(argv=None):
     mode.add_argument("--file", action="append", help="ТЕГ экспорт (.xlsx/.csv); олон удаа өгч болно")
     mode.add_argument("--pos-app", action="store_true",
                       help="ТЕГ файлгүй, ДҮРМЭЭР: POS аппын карт/бэлэн борлуулалтын msgbill баримт "
-                           "(2026-10-13 эзний шийдвэр; --tenant заавал)")
-    ap.add_argument("--tenant", help="түрээслэгч (id эсвэл code) — тэр ТТД-ийн экспорт бол")
+                           "(2026-10-14 эзний шийдвэр — бүх түрээслэгч; --tenant заавал, ALL болно)")
+    ap.add_argument("--tenant", help="түрээслэгч (id эсвэл code) — тэр ТТД-ийн экспорт бол; "
+                                     "--pos-app үед ALL = бүх түрээслэгч")
     ap.add_argument("--site", action="append", help="зөвхөн энэ зогсоол(ууд)-ын давхардал (site_code)")
     ap.add_argument("--from", dest="date_from", help="төлсөн огноо (УБ) ≥ YYYY-MM-DD")
     ap.add_argument("--to", dest="date_to", help="төлсөн огноо (УБ) ≤ YYYY-MM-DD")
@@ -471,26 +539,30 @@ def main(argv=None):
     ap.add_argument("--include-company", action="store_true",
                     help="--pos-app: ААН/ТТД-тэй баримтыг ч цуцлах (анхдагч ХӨНДӨХГҮЙ)")
     ap.add_argument("--pos-user", action="append",
-                    help="--pos-app: POS аппын хэрэглэгч(ид) — «pos.a,pos.b» (бүх зогсоолд) эсвэл "
-                         "«HANGARID=pos.khangarid»; тохиргоо/≥20 картын таамгийг дарна")
+                    help="--pos-app: POS аппын хэрэглэгч(ид) «pos.a,pos.b» (систем даяар) — "
+                         "role POS/тохиргоо/≥20 картын таамгийг БҮХЭЛД нь дарна")
     ap.add_argument("--min-card", type=int, default=VD.POS_APP_MIN_CARD,
-                    help="--pos-app: тохиргоо хоосон зогсоолд POS-оор ≥N карт авсан хэрэглэгч (20)")
+                    help="--pos-app: POS аппаар ≥N карт авсан хэрэглэгч = POS апп (20)")
     ap.add_argument("--evidence", action="append",
-                    help="--pos-app: НЭМЭЛТ нотолгоо — ТЕГ экспорт (олон удаа); түүний хугацаанд "
-                         "Ontime мөргүй төлбөрийг цуцлахгүй (терминал хэвлээгүй нь батлагдсан)")
+                    help="--pos-app: НЭМЭЛТ нотолгоо — ТЕГ экспорт (олон удаа, урт хугацаа болно); "
+                         "хамрах хүрээнд нь ЗӨВХӨН терминалын мөртэйг цуцална, хүрээнээс гадуурхыг хасна")
+    ap.add_argument("--outside-by-rule", action="store_true",
+                    help="--pos-app --evidence: ТЕГ файлын хүрээнээс гадуурх борлуулалтыг ДҮРМЭЭР цуцлах "
+                         "(анхдагч — хасна)")
     args = ap.parse_args(argv)
     if args.pos_app:
         return main_pos_app(args)
-    if args.include_company or args.pos_user or args.evidence:
-        ap.error("--include-company/--pos-user/--evidence зөвхөн --pos-app-тай")
+    if args.include_company or args.pos_user or args.evidence or args.outside_by_rule:
+        ap.error("--include-company/--pos-user/--evidence/--outside-by-rule зөвхөн --pos-app-тай")
 
     for f in args.file:
         if not os.path.isfile(f):
             raise SystemExit(f"Файл олдсонгүй: {f}")
-    if args.apply and not args.tenant:
-        # ТЕГ экспорт ТТД-ээр гардаг — түрээслэгчгүй бол бусад ТТД-ийн төлбөр ч нэр
+    if args.apply and (not args.tenant or args.tenant.strip().upper() == VD.ALL_TENANTS):
+        # ТЕГ экспорт ТТД-ээр гардаг — түрээслэгчгүй (ALL) бол бусад ТТД-ийн төлбөр ч нэр
         # дэвшигч болно (2026-10-13 хяналт)
-        raise SystemExit("--apply үед --tenant заавал (ТЕГ файлын ТТД-ийн түрээслэгч, ж: EASYPARKING)")
+        raise SystemExit("--file --apply үед --tenant заавал, ALL биш (ТЕГ файлын ТТД-ийн түрээслэгч, "
+                         "ж: EASYPARKING)")
     shifts = [0.0, -float(settings.tz_offset_hours)] if args.tz_shift is None else [args.tz_shift]
     username = args.user or f"cli:{os.getenv('SUDO_USER') or getpass.getuser()}"
     out = args.out or f"vat_duplicates_{datetime.now():%Y%m%d_%H%M%S}.csv"

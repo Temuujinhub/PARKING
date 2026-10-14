@@ -262,37 +262,42 @@ CATALOG: list[dict] = [
      "applies": "Шөнийн хаалт", "not_applied": "—"},
 
     # ── e-Barimt (НӨАТ баримт) ──────────────────────────────────────────────
+    # 2026-10-14 эзний эцсийн шийдвэр: PAX терминал (Ontime) POS аппын карт/бэлэн
+    # борлуулалт бүрд баримт хэвлэдэг — БҮХ зогсоол, бүх түрээслэгч → ерөнхий анхдагч
+    # АСААЛТТАЙ, терминал нь хэвлэдэггүй зогсоолд л унтраана (зогсоолын давхарга).
     {"group": A.EBARIMT_KEY, "key": "pos_terminal_issues", "unit": "bool",
-     "name": "POS терминал өөрөө НӨАТ баримт гаргадаг",
-     "desc": "Энэ зогсоолын PAX терминал POS аппаар авсан төлбөрт Ontime-ийн "
-             "e-Barimt-ыг ӨӨРӨӨ хэвлэдэг бол асаана — систем msgbill-ээр ДАВХАР "
-             "баримт гаргахгүй, «POS терминал гаргасан» гэж бүртгэнэ (ДДТД-гүй). "
-             "2026-08-24 Хангарьд: 63 төлбөрт хоёр баримт (Ontime + msgbill). "
-             "Терминал хэвлэдэггүй зогсоолд АСААВАЛ жолооч баримтгүй үлдэнэ.",
-     "applies": "POS аппын карт (/pos/confirm) ба X-App-Version толгойтой эсвэл доорх "
-                "жагсаалтын хэрэглэгчийн бэлэн/өрийн төлөлт, бүртгэлтэй терминалын картын "
-                "өрийн төлөлт · апп ДДТД илгээгээгүй үед · ЗӨВХӨН зогсоолоор (ерөнхийд асаахгүй)",
-     "not_applied": "QPay QR, дансаар, веб касс (толгойгүй бэлэн), апп ebarimt_id "
-                    "илгээсэн төлбөр"},
+     "name": "POS терминал (PAX апп) өөрөө e-Barimt гаргадаг",
+     "desc": "POS терминалаар (PAX апп) авсан карт/бэлэн төлбөрийн e-Barimt-ыг терминал "
+             "(Ontime) өөрөө гаргадаг — систем давхар гаргахгүй. «POS терминал гаргасан» "
+             "(EXTERNAL, ДДТД-гүй) гэж бүртгэнэ. Анхдагч АСААЛТТАЙ — бүх зогсоол, бүх "
+             "түрээслэгч (2026-10-14 эзний шийдвэр; 9-р сард Ontime + msgbill давхардлаас "
+             "~13 сая₮ илүү НӨАТ-ын борлуулалт). Терминал нь баримт хэвлэдэггүй зогсоолд "
+             "ЗӨВХӨН тэр зогсоолд унтраана — эс бөгөөс жолооч баримтгүй үлдэнэ.",
+     "applies": "POS аппын карт (/pos/confirm) ба бэлэн/өрийн төлөлт (X-App-Version толгой, "
+                "эсвэл кассчин нь POS аппын хэрэглэгч) · апп ДДТД илгээгээгүй үед",
+     "not_applied": "ААН/ТТД-тэй баримт (терминал иргэний баримт хэвлэдэг — систем гаргана), "
+                    "QPay QR, дансаар, хэтэвч, веб касс (толгойгүй, POS аппын хэрэглэгч биш), "
+                    "апп ebarimt_id илгээсэн төлбөр"},
     {"group": A.EBARIMT_KEY, "key": "pos_terminal_methods", "unit": "choice",
      "name": "Терминал аль төлбөрт баримт гаргадаг",
      "desc": "Дээрх асаалттай үед л үйлчилнэ. Терминал зөвхөн картын гүйлгээнд "
              "баримт хэвлэдэг бол «Зөвхөн карт» — бэлэн төлбөрийн баримтыг систем "
              "msgbill-ээр гаргасаар байна.",
-     "applies": "POS аппын төлбөр · асаалттай зогсоол",
+     "applies": "POS аппын төлбөр · асаалттай үед",
      "not_applied": "Унтраалттай зогсоол",
      "choices": [{"value": "CARD,CASH", "label": "Карт ба бэлэн"},
                  {"value": "CARD", "label": "Зөвхөн карт"},
                  {"value": "CASH", "label": "Зөвхөн бэлэн"}]},
     {"group": A.EBARIMT_KEY, "key": "pos_terminal_users", "unit": "text",
-     "name": "POS аппын хэрэглэгчид (толгойгүй үед танихад)",
-     "desc": "POS апп X-App-Version толгой илгээдэг нь прод-д батлагдаагүй — энд бичсэн "
-             "хэрэглэгчийн (ж: pos.khangarid) энэ зогсоолд авсан бэлэн/өрийн төлбөрийг "
-             "толгойгүй ч POS аппынх гэж тооцно (08-24-ний давхардлын 62% нь бэлэн). "
-             "Таслалаар салгана. Веб кассын ажилтныг БҮҮ нэм — тэдний бэлэн төлбөрт "
-             "терминал баримт хэвлэдэггүй тул систем баримт гаргах ёстой.",
-     "applies": "/cash, /compensations/{id}/pay · энэ зогсоол · жагсаалтын хэрэглэгч",
-     "not_applied": "Жагсаалтад ороогүй хэрэглэгч (веб касс), бусад зогсоол"},
+     "name": "POS аппын хэрэглэгчид (сонголттой — толгойгүй хуучин апп-д)",
+     "desc": "СОНГОЛТТОЙ. POS апп хүсэлт бүрд X-App-Version толгой илгээдэг (10-14: 20/20). "
+             "Толгой илгээдэггүй хуучин build-ийн төлбөрийг танихын тулд кассчин нь "
+             "role «POS» эсвэл POS аппаар ≥20 карт авсан бол АВТОМАТААР POS аппынх гэж "
+             "тооцно; энд бичсэн хэрэглэгч (ж: pos.khangarid) мөн тооцогдоно. Ерөнхий ба "
+             "бүх зогсоолын жагсаалт нэгтгэгдэнэ. Веб кассын ажилтныг БҮҮ нэм — тэдний "
+             "бэлэн төлбөрт терминал баримт хэвлэдэггүй.",
+     "applies": "/cash, /compensations/{id}/pay · толгойгүй хүсэлт · жагсаалтын хэрэглэгч",
+     "not_applied": "Толгойтой хүсэлт (апп өөрөө танигдана), веб касс"},
 ]
 
 # ЗӨВХӨН зогсоолоор тохируулагдах дүрмүүд (A.SITE_ONLY) — «Ерөнхий» табд хадгалагдахгүй
@@ -336,7 +341,7 @@ _GROUP_NAMES = {
     A.ENTRYPLATE_KEY: "Орох дугаарын шалгалт",
     A.BLACKLIST_KEY: "Өр ба хар жагсаалт",
     A.AUTOCLOSE_KEY: "Авто цэвэрлэгээ ба өр үүсгэх",
-    A.EBARIMT_KEY: "e-Barimt (НӨАТ баримт) — POS терминал",
+    A.EBARIMT_KEY: "e-Barimt (НӨАТ баримт) — POS терминал (PAX апп)",
 }
 
 # Тоон дүрмийн ЗӨВШӨӨРӨГДӨХ ДЭЭД хязгаар — өмнө нь зөвхөн UI (AutoCloseSection
@@ -672,4 +677,53 @@ def check_conflicts(db, site, eff: dict | None = None, tariff: dict | None = Non
                 f"орхисон доторх зогсоол ({', '.join(_heirs)}) үүнийг өвлөж, доторх "
                 f"гарах уншилтаар батлагдсан бүх хугацаа хасагдана. {_miss}",
                 "Зориуд биш бол энд эсвэл доторх зогсоол дээр 4-8 цагийн хязгаар тавина уу.")
+
+    # 10. POS аппын төлбөртэй зогсоолд терминалын баримтын дүрэм УНТРААЛТТАЙ (2026-10-14)
+    try:
+        off = pos_terminal_off_traffic(db, site.id)
+    except Exception:  # noqa: BLE001 — шалгалт тохиргооны хуудсыг унагаахгүй
+        off = None
+    if off:
+        add("warn", "POS аппын төлбөртэй зогсоолд «POS терминал e-Barimt гаргадаг» унтраалттай",
+            f"Сүүлийн {POS_TRAFFIC_DAYS} хоногт POS аппаар {off['count']} "
+            f"{'/'.join({'CARD': 'карт', 'CASH': 'бэлэн'}[m] for m in off['methods'])} "
+            "төлбөр авсан — эдгээрт систем msgbill-ээр баримт гаргаж байна. Терминал (Ontime) "
+            "мөн хэвлэдэг бол ТЕГ-т нэг борлуулалт ХОЁР баримттай болно.",
+            "Терминал баримт хэвлэдэг бол энэ зогсоолын «POS терминал (PAX апп) өөрөө e-Barimt "
+            "гаргадаг»-ийг ерөнхий рүү буцаана (асаана); хэвлэдэггүй нь батлагдсан бол хэвээр.")
     return out
+
+
+POS_TRAFFIC_DAYS = 30
+
+
+def pos_app_traffic(db, site_id: str, days: int = POS_TRAFFIC_DAYS) -> dict[str, int]:
+    """Сүүлийн N хоногт энэ зогсоолд POS аппаар авсан PAID карт/бэлэн төлбөрийн тоо
+    {арга: тоо} (services/pos_app: source POSAPP эсвэл /pos/confirm-ын карт)."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, or_
+
+    from ..models import ParkingSession, Payment
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (db.query(Payment.payment_method, func.count(Payment.id))
+            .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+            .filter(func.coalesce(Payment.site_id, ParkingSession.site_id) == site_id,
+                    Payment.status == "PAID", Payment.paid_at >= since,
+                    Payment.payment_method.in_(("CARD", "CASH")),
+                    or_(Payment.source == "POSAPP",
+                        (Payment.provider == "POS")
+                        & (func.coalesce(Payment.kind, "PARKING") == "PARKING")))
+            .group_by(Payment.payment_method).all())
+    return {m: int(n) for m, n in rows}
+
+
+def pos_terminal_off_traffic(db, site_id: str) -> dict | None:
+    """Энэ зогсоолд терминалын дүрэм хамаарахгүй (унтраасан/аргаас хассан) аргаар сүүлийн
+    30 хоногт POS аппын төлбөр авсан уу. {"count", "methods"} эсвэл None."""
+    missing = sorted({"CARD", "CASH"} - A.pos_terminal_receipt_methods(db, site_id))
+    if not missing:
+        return None
+    traffic = pos_app_traffic(db, site_id)
+    n = sum(traffic.get(m, 0) for m in missing)
+    return {"count": n, "methods": missing} if n else None

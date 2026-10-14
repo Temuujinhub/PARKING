@@ -177,15 +177,15 @@ export default function Vat() {
     retry(r, { receiver_type: 'CITIZEN' })
   }
   // EXTERNAL — терминал (Ontime) баримтаа гаргасан гэж бүртгэгдсэн. Систем баримтыг
-  // зөвхөн терминал ГАРГААГҮЙ нь батлагдвал, зогсоолын тохиргоог унтраасны дараа л
-  // гаргана (эс бөгөөс ТЕГ-т давхар баримт) — сервер тохиргоо асаалттай бол 409.
+  // зөвхөн терминал ГАРГААГҮЙ нь батлагдвал гаргана (эс бөгөөс ТЕГ-т давхар баримт).
+  // 2026-10-14: дүрэм ерөнхийдөө асаалттай — зогсоолын тохиргоо унтраахгүй, харин
+  // «терминал хэвлээгүй» баталгаажуулалт (no_terminal_receipt) илгээнэ.
   const reissueExternal = (r) => {
     if (!window.confirm(`${r.plate_number || ''} — ${fmt(r.amount)}₮\n`
       + 'Энэ төлбөрийн НӨАТ баримтыг POS терминал (Ontime) гаргасан гэж бүртгэгдсэн.\n'
       + 'Терминал баримт ГАРГААГҮЙ нь батлагдсан уу? Систем msgbill-ээр шинэ баримт гаргана.\n\n'
-      + 'Анхаар: Тохиргоо → Төлбөрийн дүрэм → «POS терминал өөрөө НӨАТ баримт гаргадаг» '
-      + 'энэ зогсоолд УНТРААЛТТАЙ байх ёстой.')) return
-    retry(r, { reissue_external: true })
+      + 'Анхаар: терминал баримт хэвлэсэн бол ТЕГ-т нэг борлуулалт 2 баримттай болно.')) return
+    retry(r, { reissue_external: true, no_terminal_receipt: true })
   }
   const retryWithTin = (r) => {
     const v = prompt(`${r.plate_number || ''} — зөв дугаар оруул (ААН регистр 7 орон / ТТД 11–14 орон / иргэний регистр АА00112233):`,
@@ -431,7 +431,7 @@ export default function Vat() {
                 {r.status === 'EXTERNAL' && (
                   <button className="btn-secondary py-1 px-2 text-xs text-slate-300" disabled={retrying === r.id}
                     onClick={() => reissueExternal(r)}
-                    title="Терминал баримт ГАРГААГҮЙ нь батлагдсан үед л — зогсоолын тохиргоог эхлээд унтраана">
+                    title="Терминал баримт ГАРГААГҮЙ нь батлагдсан үед л">
                     <RefreshCw size={12} className={retrying === r.id ? 'animate-spin' : ''} />
                     {retrying === r.id ? '…' : 'Систем баримт гаргах'}
                   </button>

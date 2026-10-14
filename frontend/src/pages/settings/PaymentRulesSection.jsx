@@ -33,6 +33,14 @@ const LEVEL_STYLE = {
   info: { box: 'border-slate-500/30 bg-slate-500/5', text: 'text-slate-300', Icon: Info },
 }
 
+// Бүлгийн тайлбар — дүрмүүдийн дээр (2026-10-14: e-Barimt-ын POS терминалын дүрэм ерөнхий
+// анхдагчаар асаалттай болсон тул «Ерөнхий»-д юу гэсэн үг болохыг тодорхой харуулна)
+const GROUP_NOTE = {
+  ebarimt_rules: 'POS терминалаар (PAX апп) авсан карт/бэлэн төлбөрийн e-Barimt-ыг терминал (Ontime) '
+    + 'өөрөө гаргадаг — систем давхар гаргахгүй. Анхдагчаар бүх зогсоолд асаалттай; терминал нь '
+    + 'баримт хэвлэдэггүй зогсоолыг сонгож ЗӨВХӨН тэнд унтраана. ААН/ТТД-тэй баримтыг систем гаргасаар.',
+}
+
 const SOURCE_BADGE = {
   site: ['Энэ зогсоолд', 'bg-accent/15 text-accent border-accent/30'],
   global: ['Ерөнхий', 'bg-slate-500/10 text-slate-400 border-slate-600/40'],
@@ -43,9 +51,9 @@ const SOURCE_BADGE = {
 function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
   const edited = draft !== undefined
   const shown = edited ? draft : row.value
-  // site_only (2026-10-13): «POS терминал өөрөө НӨАТ баримт гаргадаг» г.м зогсоолын
-  // төхөөрөмжийн шинж — ерөнхийд асаавал терминал хэвлэдэггүй зогсоолын жолооч баримтгүй
-  // үлдэнэ; сервер ч ерөнхий утгыг хадгалахгүй тул энд зөвхөн харуулна
+  // site_only: ЗӨВХӨН зогсоолоор тохируулагдах дүрэм (сервер ерөнхий утгыг хадгалахгүй)
+  // — энд зөвхөн харуулна. 2026-10-14-өөс POS терминалын e-Barimt дүрэм ердийн
+  // ерөнхий+зогсоолын тохиргоо болсон (механизм хэвээр, одоогоор ийм дүрэм алга)
   const siteOnly = isGlobal && row.site_only
   const locked = row.source === 'site_column' || siteOnly
   const [badgeText, badgeCls] = SOURCE_BADGE[edited && !isGlobal ? 'site' : row.source] || SOURCE_BADGE.global
@@ -306,6 +314,11 @@ export default function PaymentRulesSection({ onGotoDevices }) {
       {groups.map(([g, name, rows]) => rows.length > 0 && (
         <fieldset key={g} disabled={busy || readOnly} className="card disabled:opacity-70">
           <h3 className="font-semibold text-sm mb-1">{name}</h3>
+          {GROUP_NOTE[g] && (
+            <p className="text-xs text-cyan-300/90 border border-cyan-500/30 bg-cyan-500/5 rounded-lg px-3 py-2 mb-2">
+              {GROUP_NOTE[g]}
+            </p>
+          )}
           {rows.map((r) => (
             <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal}
               draft={draft[r.group]?.[r.key] === undefined ? undefined

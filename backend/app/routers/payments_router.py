@@ -415,29 +415,41 @@ def _pos_app_version(request: Request | None) -> str | None:
     return v or None
 
 
+def _browser_request(request: Request | None) -> bool:
+    """Веб хөтчийн хүсэлт үү (веб касс — api.js). POS апп (Android, Flutter/OkHttp) хөтчийн
+    «Mozilla/…» User-Agent илгээдэггүй. Толгойгүй хүсэлтийн POS аппын хэрэглэгчийн
+    fallback-ийг зөвхөн хөтөч БИШ клиентэд хэрэглэнэ (2026-10-14 хяналт)."""
+    if request is None:
+        return False
+    return "mozilla/" in (request.headers.get("User-Agent") or "").lower()
+
+
 def _mark_pos_app(payment: Payment, request: Request | None, *, always: bool = False,
                   user: User | None = None, db: Session | None = None,
                   site_id: str | None = None) -> None:
-    """POS аппаар авсан төлбөрийг source=POSAPP гэж тэмдэглэнэ (2026-10-13).
+    """POS аппаар авсан төлбөрийг source=POSAPP гэж тэмдэглэнэ (2026-10-13; 10-14).
 
-    Яагаад: зарим зогсоолын PAX терминал карт/бэлэн төлбөрт Ontime-ийн e-Barimt-ыг
-    өөрөө хэвлэдэг — тэр зогсоолд систем ДАВХАР баримт гаргахгүйн тулд (Тохиргоо →
-    Төлбөрийн дүрэм → e-Barimt) аль төлбөр POS аппынх болохыг мэдэх ёстой.
+    Яагаад: PAX терминал (Ontime) POS аппын карт/бэлэн төлбөрт e-Barimt-ыг өөрөө
+    хэвлэдэг — БҮХ зогсоолд (2026-10-14 эзний шийдвэр) систем ДАВХАР баримт гаргахгүйн
+    тулд аль төлбөр POS аппынх болохыг мэдэх ёстой (services/pos_app — нэг тодорхойлолт).
     always=True — /pos/confirm (зөвхөн POS апп дууддаг картын баталгаажуулалт).
 
-    Толгойгүй үед (апп X-App-Version илгээдэг нь прод-д БАТЛАГДААГҮЙ — 08-24-ний
-    давхардлын 62% нь бэлэн) зогсоолын «POS аппын хэрэглэгчид» жагсаалтад (ж:
-    pos.khangarid) байгаа хэрэглэгчийн төлбөрийг POS аппынх гэж тооцно — апп шинэчлэх
-    шаардлагагүй, серверийн талаас. Веб кассын ажилтан жагсаалтад байхгүй тул хуучин зан."""
+    X-App-Version толгой: 10-14-ний deploy-оос хойш POS аппын бэлэн төлбөр 20/20 толгойтой
+    (1.5.1/1.5.3). Толгойгүй (хуучин build) үед кассчин нь POS АППЫН ХЭРЭГЛЭГЧ бол (role
+    «POS», тохиргооны жагсаалт, эсвэл POS аппаар ≥20 карт авсан) — ЗОГСООЛООС ҮЛ ХАМААРАН
+    POS аппынх гэж тооцно (pos_app_via-д шалтгаан). Веб кассын ажилтан эдгээрийн аль нь ч
+    биш тул хуучин зан (систем баримт гаргана). ХӨТӨЧИЙН хүсэлт (User-Agent «Mozilla/…» —
+    веб касс) fallback-д ОРОХГҮЙ: POS аппын хэрэглэгч веб кассаар бэлэн авбал терминал
+    хэвлээгүй тул систем баримт гаргана (баримтгүй үлдэхээс сэргийлнэ). site_id — хуучин
+    дуудлагатай нийцүүлэх."""
     v = _pos_app_version(request)
     via = "header" if v else ("confirm" if always else None)
-    if via is None and user is not None and db is not None and site_id:
-        from ..services.app_settings import pos_app_users
-        if (user.username or "").lower() in pos_app_users(db, site_id):
-            via = "user_list"
+    if via is None and user is not None and db is not None and not _browser_request(request):
+        from ..services.pos_app import user_pos_app_via
+        via = user_pos_app_via(db, user)
     if via:
         payment.source = "POSAPP"
-    if v or via == "user_list":
+    if v or via not in (None, "confirm"):
         payment.raw_payload = {**(payment.raw_payload or {}),
                                **({"app_version": v} if v else {"pos_app_via": via})}
 
@@ -977,7 +989,12 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
                     entity_id=payment.id, detail={"amount": float(payment.amount),
                                                   "source": payment.source,
                                                   "app_version": _pos_app_version(request),
-                                                  "pos_app_via": (payment.raw_payload or {}).get("pos_app_via")}))
+                                                  "pos_app_via": (payment.raw_payload or {}).get("pos_app_via"),
+                                                  # толгойгүй үед клиентийг таних (POS аппын UA-г
+                                                  # прод дээр батлах — fallback хөтчийг хасдаг)
+                                                  **({} if _pos_app_version(request) or request is None
+                                                     else {"user_agent": (request.headers.get("User-Agent")
+                                                                          or "")[:80]})}))
     db.commit()
     return {"ok": True, "status": payment.status, "payment_id": payment.id,
             "amount": float(payment.amount), **payment_outcome(db, payment)}
@@ -1425,17 +1442,21 @@ async def _qpay_receiver(payment: Payment, receiver_type: str) -> str | None:
 
 
 async def retry_ebarimt(db: Session, payment: Payment, *, reissue_external: bool = False,
-                        allow_duplicate: bool = False, username: str = "system") -> dict:
+                        allow_duplicate: bool = False, no_terminal_receipt: bool = False,
+                        username: str = "system", mark: dict | None = None) -> dict:
     """Resume a saved receipt job; never issue an untracked second receipt.
     EXTERNAL (POS терминал гаргасан) баримтыг зөвхөн reissue_external=True үед,
-    тохиргоо унтраалттай бол л системийн баримт болгоно (financial_jobs).
+    дүрэм үйлчлэхгүй эсвэл терминал хэвлээгүйг баталгаажуулсан (no_terminal_receipt)
+    бол л системийн баримт болгоно (financial_jobs).
     allow_duplicate: POS терминалын давхардал гэж цуцлагдсан баримтыг ДАХИН
     үүсгэхийг ил тодоор зөвшөөрөх (UI-д баталгаажуулалттай) — эс бөгөөс 409."""
     if payment.status != "PAID":
         return {"ok": False, "error": "Төлбөр PAID биш"}
     from ..services.financial_jobs import retry_payment_receipts
     return retry_payment_receipts(db, payment, reissue_external=reissue_external,
-                                  allow_duplicate=allow_duplicate, username=username)
+                                  allow_duplicate=allow_duplicate,
+                                  no_terminal_receipt=no_terminal_receipt, username=username,
+                                  mark=mark)
 
 
 def _mark_cancel(rec: VatReceipt, state: str, key_scope: str | None, note: str,
@@ -1830,7 +1851,10 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
         raise HTTPException(409, "Баримт үүсгэх ажиллагаа явагдаж байна — түр хүлээнэ үү")
     body = body or {}
     # POS терминал (Ontime) гаргасан баримт — msgbill-ээр ДАХИН гаргавал ТЕГ-т давхар.
-    # Зөвхөн «Систем баримт гаргах» (reissue_external=true) + тохиргоо унтраалттай үед.
+    # Зөвхөн «Систем баримт гаргах» (reissue_external=true) + «POS терминал баримт
+    # гаргадаг» дүрэм үйлчлэхгүй, ЭСВЭЛ терминал хэвлээгүйг баталгаажуулсан
+    # (no_terminal_receipt=true — 2026-10-14: дүрэм ерөнхийдөө асаалттай тул нэг
+    # борлуулалтын төлөө зогсоолын тохиргоог унтраахгүй).
     from ..services.financial_jobs import EXTERNAL_REFUSAL
     reissue = bool(body.get("reissue_external"))
     has_external = db.query(VatReceipt.id).filter(VatReceipt.payment_id == payment.id,
@@ -1866,8 +1890,19 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
                 receipt.customer_tin = payment.customer_tin
         db.flush()
     allow_dup = bool(body.get("allow_duplicate"))
+    no_terminal = bool(body.get("no_terminal_receipt"))
+    # Админ «терминал хэвлээгүй»/«давхардлыг зөвшөөрөх»-ийг ил тодоор баталсан дахин гаргалт —
+    # REISSUED_NO_TERMINAL тэмдэг: дараагийн `vat_cancel_duplicates --pos-app` (08-19 → одоо)
+    # үүнийг ДАХИН цуцалж борлуулалтыг баримтгүй болгохгүй (хяналт 2, A)
+    mark = None
+    if no_terminal or allow_dup:
+        from ..services.receipts import REISSUED_NO_TERMINAL
+        mark = {"reason": REISSUED_NO_TERMINAL, "by": user.username, "source": "ui",
+                "no_terminal_receipt": no_terminal, "allow_duplicate": allow_dup,
+                "at": datetime.utcnow().isoformat(timespec="seconds")}
     res = await retry_ebarimt(db, payment, reissue_external=reissue and has_external,
-                              allow_duplicate=allow_dup, username=user.username)
+                              allow_duplicate=allow_dup, no_terminal_receipt=no_terminal,
+                              username=user.username, mark=mark)
     if res.get("duplicate_of_pos"):
         # Юу ч үүсгээгүй — POS терминалын давхардал гэж цуцалсан баримтыг дахин
         # гаргавал ТЕГ-т нэг борлуулалт дахиад 2 баримттай болно (2026-10-13)
@@ -1885,7 +1920,8 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
     db.add(AuditLog(username=user.username, action="EBARIMT_RETRY", entity="payment",
                     entity_id=payment_id, detail={**res, **({"changed": changed} if changed else {}),
                                                   **({"reissue_external": True} if reissue else {}),
-                                                  **({"allow_duplicate": True} if allow_dup else {})}))
+                                                  **({"allow_duplicate": True} if allow_dup else {}),
+                                                  **({"no_terminal_receipt": True} if no_terminal else {})}))
     db.commit()
     if refused:
         raise HTTPException(409, res.get("error"))
