@@ -26,6 +26,18 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-14 — SocialPay (Голомт): машин бүртгэл/устгал, орох/гарах мэдэгдэл, bill, байршил
+
+Голомтын spec «[SP4.0][1.0.0][2026.10.09] Easy Parking» 4.1–4.3 + имэйлийн 5 хүсэлт («энэ долоо
+хоногт launch»). Баримт: `docs/SOCIALPAY_INTEGRATION.md` (хэрэгжилтийн хүснэгт, операторын алхам).
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | **`POST /api/v1/socialpay/register` · `/delete`** (`{plateNo, userId}` → `{"Success","Message"}`; алдаа ч ижил хэлбэр + HTTP код). `vehicles` эрхтэй X-API-Key; кирилл PLATE_RE (латиныг таамаглахгүй — өөр машин бүртгэгдэж байршил задрахаас); идемпотент (`ALREADY_REGISTERED` / `NOT_FOUND` = Success), хэрэглэгч тутам 10 машин (PG advisory lock), soft delete + AuditLog. Шинэ хүснэгт `partner_vehicles` (идэвхтэй мөрийн partial unique) | (энэ commit) | ⏳ | ⏳ |
+| feat | **Орох/гарах мэдэгдэл (spec 4.3)**: 10с тутмын scanner (hook биш — сешн 10+ замаар үүсч/хаагддаг, хаалт/LPR замд хүрэхгүй) → `partner_vehicle_events` outbox → `{SP_URL}/parking/notification` яг spec JSON (UTC мс + Z), 2xx+Success=true, 1м…4ц 24ц давталт → DEAD, нэг машины дараалал, `Idempotency-Key`. Зөвхөн гадна зогсоол; 30с тогтох; 2ц-аас хуучин camera_sync оролт илгээхгүй; гарах уншилтгүй албадан хаалт илгээхгүй (`extended` форматад `exitConfirmed:false`); ОРСОН илгээгдсэн бол хожуу гарцыг 7 хоног хүртэл; устгасан бүртгэл → SKIPPED | (энэ commit) | ⏳ | ⏳ |
+| feat | **`POST /api/v1/socialpay/bill`** — бүртгүүлсэн хэрэглэгчид л: одоогийн зогсолт, `freeMinutes`/`freeUntil`, `amountDue` (`session_fee_info`-той ижил), хүлээгдэж буй intent; **`/socialpay/parkings`** — `/sites`-ийн camelCase хувилбар (доторх зогсоолгүй, тарифын үнэгүй минут) | (энэ commit) | ⏳ | ⏳ |
+| feat | Админ: Тохиргоо → Холболт → Гадаад API — «Машин бүртгэл» багана (эрх, мэдэгдлийн URL, формат, Турших, тоо, «Түүх» + «Дахин илгээх»); `partner_keys.vehicle_webhook_url/format`; бүртгэл/мэдэгдлийн жагсаалт зөвхөн бүх зогсоолын админд | (энэ commit) | ⏳ | ⏳ |
+
 ## 2026-10-14 — GitHub main (6e4b307) прод салбарт нийлэв: Түүхийн санхүү, авто-хаалтын аудит (PR #19)
 
 main-ийн 5 commit-оос зөвхөн PR #19 (`5e3e81d`) шинэ агуулга; PR #21 (`5678758`) нь манай `3217240`-тай

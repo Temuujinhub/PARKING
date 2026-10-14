@@ -132,6 +132,12 @@ Body: `{"transaction_id": "TX123", "amount": 2000}` — `amount` **заавал 
 алдвал `GET /payments/{id}`-ээр нөхнө. «Турших» товч `payment.paid.test` event-ийг
 (`"test": true`) сүүлийн бодит төлбөрийн өгөгдлөөр илгээж HTTP код/хариуг харуулна.
 
+### 7. SocialPay: машин бүртгэл, bill, байршил, орох/гарах мэдэгдэл (2026-10-14)
+
+`vehicles` эрхтэй түлхүүрээр `POST /api/v1/socialpay/register|delete|bill`,
+`GET|POST /api/v1/socialpay/parkings`; бүртгэлтэй машин орох/гарах бүрд түншийн URL руу
+`{"data":{"plateNo","enteredDate","exitedDate"?}}`. Дэлгэрэнгүй: `docs/SOCIALPAY_INTEGRATION.md`.
+
 ## Жишээ урсгал (curl)
 
 ```bash

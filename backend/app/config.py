@@ -615,6 +615,19 @@ class Settings(BaseSettings):
                     out[key.strip()] = name.strip().upper()
         return out
 
+    # ── Түншийн машин бүртгэл + орох/гарах мэдэгдэл (SocialPay, 2026-10-14) ──
+    # services/partner_vehicles.py; түншийн тохиргоо Тохиргоо → Холболт → Гадаад API.
+    partner_vehicle_notify: bool = True        # мэдэгдлийн ажилтан (scan + илгээлт) асаалттай эсэх
+    partner_vehicle_scan_sec: int = 10         # шинэ орох/гарах шалгах давтамж
+    partner_vehicle_settle_sec: int = 30       # burst autocorrect/reread дуусахыг хүлээх
+    partner_vehicle_entry_max_age_min: int = 120   # үүнээс хуучин ОРОЛТ (camera_sync нөхөлт) илгээхгүй
+    partner_vehicle_exit_max_age_min: int = 120    # хослолгүй ГАРАЛТЫН дээд нас (орох мэдэгдэлтэй бол хамаарахгүй)
+    partner_vehicle_pair_days: int = 7         # орох мэдэгдсэн машины гарцыг хэдэн хоног хянах
+    partner_vehicle_max_per_user: int = 10     # нэг хэрэглэгчийн идэвхтэй машины дээд тоо (түнш тус бүрд)
+    partner_vehicle_rate_per_min: int = 600    # register/delete/bill — түлхүүр тутам минутад (nginx /api/ ч IP тутам 600/мин)
+    partner_vehicle_http_timeout: float = 5.0  # түншийн webhook-ийн хугацаа (сек)
+    partner_vehicle_retry_hours: int = 24      # амжилтгүй мэдэгдлийг давтах нийт хугацаа → DEAD
+
 
     # ── EV Hub (тусдаа WSS сервер, EVrepo) ─────────────────────────────────
     # Hub нь OCPP терминаци хийдэг; core (энэ систем) данс/тооцоог хийнэ.

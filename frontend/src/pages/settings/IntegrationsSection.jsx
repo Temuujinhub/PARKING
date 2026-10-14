@@ -748,6 +748,13 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"session_id": "SESSION_ID", "amount": 3000}' \\\n  ${base}/api/v1/payments`],
   ['Төлөгдсөнийг батлах → хаалт нээгдэж, e-Barimt үүснэ',
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"transaction_id": "ТАНЫ_ГҮЙЛГЭЭНИЙ_ДУГААР"}' \\\n  ${base}/api/v1/payments/PAYMENT_ID/confirm`],
+  ['SocialPay: машин бүртгэх / устгах («vehicles» эрхтэй түлхүүр)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/register
+# → {"Success": true, "Message": "OK"}  (давтан бол "ALREADY_REGISTERED")
+curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/delete`],
+  ['SocialPay: одоогийн зогсолт, үнэгүй хугацаа, төлөх дүн (bill)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/bill
+# → {"Success": true, "Message": "OK", "data": {"sessionId": "…", "enteredDate": "…Z", "freeMinutes": 15, "freeUntil": "…Z", "amountDue": 2000, …}}`],
   ['Төлбөрийн төлөв + e-Barimt (ДДТД, сугалаа, QR) шалгах',
     `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/payments/PAYMENT_ID"
 # → {"status":"PAID", ..., "ebarimt": {"ddtd": "0301…", "lottery": "SO 1234…", "amount": 2000, "vat_amount": 182, "status": "SENT", "qr_data": "…"}}`],
@@ -756,9 +763,9 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
 // Түлхүүр үүсгэх модал — үүссэн түлхүүр НЭГ УДАА л ил гарна
 function KeyCreateModal({ open, sites, onClose, onDone }) {
   const toast = useToast()
-  const [f, setF] = useState({ name: '', can_pay: true, site_id: '' })
+  const [f, setF] = useState({ name: '', can_pay: true, can_vehicles: false, site_id: '' })
   const [created, setCreated] = useState(null)
-  useEffect(() => { if (open) { setF({ name: '', can_pay: true, site_id: '' }); setCreated(null) } }, [open])
+  useEffect(() => { if (open) { setF({ name: '', can_pay: true, can_vehicles: false, site_id: '' }); setCreated(null) } }, [open])
   if (!open) return null
   const copy = (text) => navigator.clipboard.writeText(text)
     .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
@@ -784,6 +791,11 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
             <input type="checkbox" checked={f.can_pay}
               onChange={(e) => setF({ ...f, can_pay: e.target.checked })} />
             Төлбөр батлах эрхтэй (унтраавал зөвхөн лавлана)
+          </label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={f.can_vehicles}
+              onChange={(e) => setF({ ...f, can_vehicles: e.target.checked })} />
+            Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay)
           </label>
           <Field label="Зогсоолын хязгаар">
             <select className="input" value={f.site_id}
@@ -811,6 +823,132 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
   )
 }
 
+// SocialPay (2026-10-14): «vehicles» эрх + бүртгэлтэй машины орох/гарах мэдэгдлийн URL.
+// URL = түншийн {SP_URL}/parking/notification; хоосон бол мэдэгдэл явахгүй (бүртгэл ажиллана).
+// «socialpay» формат = spec-ийн яг JSON; «extended» = нэмэлт талбартай (docs/SOCIALPAY_INTEGRATION.md).
+function VehiclesCell({ k, onChanged, onHistory }) {
+  const toast = useToast()
+  const [url, setUrl] = useState(k.vehicle_webhook_url || '')
+  const [fmt, setFmt] = useState(k.vehicle_webhook_format || 'socialpay')
+  const [res, setRes] = useState(null)
+  useEffect(() => { setUrl(k.vehicle_webhook_url || ''); setFmt(k.vehicle_webhook_format || 'socialpay') },
+    [k.vehicle_webhook_url, k.vehicle_webhook_format])
+  const save = async (enabled) => {
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/vehicles`, { method: 'POST', body: { enabled, url, format: fmt } })
+      toast('Хадгалагдлаа'); onChanged()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const test = async () => {
+    try {
+      const r = await api(`/api/admin/partner-keys/${k.id}/vehicles/test`, { method: 'POST', body: { url } })
+      setRes(r)
+      toast(r.ok ? `Хүлээж авлаа (HTTP ${r.status_code}, ${r.message || 'OK'})` : `Амжилтгүй: ${r.error}${r.message ? ' — ' + r.message : ''}`,
+        r.ok ? 'success' : 'error')
+    } catch (err) { toast(err.message, 'error') }
+  }
+  if (!k.vehicles_enabled) {
+    return (
+      <button className="btn-secondary py-0.5 text-[11px]" onClick={() => save(true)}
+        title="SocialPay зэрэг түнш хэрэглэгчийн машиныг бүртгүүлж, орох/гарах мэдэгдэл авна">
+        Машин бүртгэл идэвхжүүлэх
+      </button>
+    )
+  }
+  return (
+    <div className="space-y-1 min-w-[280px]">
+      <input className="input py-1 text-xs font-mono w-full" placeholder="https://…/api/parking/notification"
+        value={url} onChange={(e) => setUrl(e.target.value)} />
+      <div className="flex gap-1.5 items-center flex-wrap">
+        <select className="input py-0.5 text-[11px] w-auto" value={fmt} onChange={(e) => setFmt(e.target.value)}
+          title="socialpay = spec-ийн яг JSON; extended = нэмэлт талбартай">
+          <option value="socialpay">socialpay (spec)</option>
+          <option value="extended">extended</option>
+        </select>
+        <button className="btn-secondary py-0.5 text-[11px]" onClick={() => save(true)}>Хадгалах</button>
+        <button className="btn-secondary py-0.5 text-[11px]" onClick={test} disabled={!url}>Турших</button>
+        <button className="btn-secondary py-0.5 text-[11px]" onClick={onHistory}>Түүх</button>
+        <button className="btn-secondary py-0.5 text-[11px] text-red-400" onClick={() => {
+          if (confirm(`«${k.name}»-ийн машин бүртгэлийн эрхийг хаах уу? Бүртгэлүүд хадгалагдана, мэдэгдэл зогсоно.`)) save(false)
+        }}>Унтраах</button>
+      </div>
+      <div className="text-[11px] text-slate-400">
+        {k.vehicle_count} машин
+        {k.vehicle_events_pending > 0 && <span className="text-amber-400"> · хүлээгдэж буй {k.vehicle_events_pending}</span>}
+        {k.vehicle_events_dead > 0 && <span className="text-red-400"> · илгээгдээгүй (DEAD) {k.vehicle_events_dead}</span>}
+        {!k.vehicle_webhook_url && <span className="text-amber-400"> · URL хоосон — мэдэгдэл явахгүй</span>}
+        {res && <span className={res.ok ? 'text-accent' : 'text-red-400'}>
+          {' · '}{res.ok ? `✓ HTTP ${res.status_code}` : `✗ ${res.error}`}</span>}
+      </div>
+    </div>
+  )
+}
+
+const EVENT_STATUS_CLS = {
+  DONE: 'text-accent', PENDING: 'text-slate-300', SENDING: 'text-slate-300', RETRY: 'text-amber-400',
+  DEAD: 'text-red-400', SKIPPED: 'text-slate-500',
+}
+
+function VehicleEventsModal({ k, onClose }) {
+  const toast = useToast()
+  const [status, setStatus] = useState('')
+  const [rows, setRows] = useState(null)
+  const load = () => {
+    if (!k) return
+    api(`/api/admin/partner-keys/${k.id}/vehicle-events?limit=100${status ? '&status=' + status : ''}`)
+      .then((d) => setRows(d.events)).catch((e) => { setRows([]); toast(e.message, 'error') })
+  }
+  useEffect(() => { setRows(null); load() }, [k?.id, status])
+  if (!k) return null
+  const retry = async (e) => {
+    try {
+      await api(`/api/admin/partner-vehicle-events/${e.id}/retry`, { method: 'POST' })
+      toast('Дахин илгээх дараалалд орлоо'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  const local = (iso) => (iso ? new Date(iso + 'Z').toLocaleString() : '—')
+  return (
+    <Modal open title={`«${k.name}» — орох/гарах мэдэгдэл`} onClose={onClose} wide>
+      <div className="space-y-2">
+        <div className="flex gap-2 items-center text-xs">
+          <span className="text-slate-400">Төлөв:</span>
+          <select className="input py-0.5 text-xs w-auto" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="">Бүгд</option>
+            {['DEAD', 'RETRY', 'PENDING', 'DONE', 'SKIPPED'].map((x) => <option key={x} value={x}>{x}</option>)}
+          </select>
+          <button className="btn-secondary py-0.5 text-xs" onClick={load}>Шинэчлэх</button>
+        </div>
+        <Table headers={['Үүссэн', 'Үйл явдал', 'Дугаар', 'Орсон/гарсан', 'Төлөв', 'Оролдлого', 'Хариу / алдаа', '']}
+          empty={rows !== null && rows.length === 0}>
+          {(rows || []).map((e) => (
+            <tr key={e.id}>
+              <td className="td text-xs">{local(e.created_at)}</td>
+              <td className="td text-xs">{e.event === 'ENTRY' ? 'Орсон' : 'Гарсан'}</td>
+              <td className="td font-mono text-xs">{e.plate}</td>
+              <td className="td text-xs">{local(e.event_time)}</td>
+              <td className={`td text-xs ${EVENT_STATUS_CLS[e.status] || ''}`}>{e.status}</td>
+              <td className="td text-xs">{e.attempts}</td>
+              <td className="td text-xs max-w-[260px] break-words">
+                {e.last_http_status ? `HTTP ${e.last_http_status} ` : ''}{e.response_message || ''}
+                {e.last_error && <span className="text-red-400"> {e.last_error}</span>}
+              </td>
+              <td className="td text-right">
+                {['DEAD', 'RETRY', 'SKIPPED'].includes(e.status) && (
+                  <button className="btn-secondary py-0.5 text-[11px]" onClick={() => retry(e)}>Дахин илгээх</button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </Table>
+        <p className="text-[11px] text-slate-500">
+          Амжилтгүй мэдэгдлийг 1м, 5м, 15м, 1ц, 2ц, 4ц… давтамжаар 24 цаг давтана; дараа нь DEAD.
+          Гарах уншилтгүй албадан хаалт (auto-close) spec форматад илгээгдэхгүй.
+        </p>
+      </div>
+    </Modal>
+  )
+}
+
 function PartnerApiPanel() {
   const toast = useToast()
   const { user } = useAuth()
@@ -820,6 +958,7 @@ function PartnerApiPanel() {
   const [partners, setPartners] = useState(null)  // энгийн админ: зөвхөн нэрс
   const [sites, setSites] = useState([])
   const [createOpen, setCreateOpen] = useState(false)
+  const [eventsKey, setEventsKey] = useState(null)   // SocialPay мэдэгдлийн түүх
   const load = () => {
     if (isSuper) {
       api('/api/admin/partner-keys').then(setData).catch((e) => toast(e.message, 'error'))
@@ -880,13 +1019,14 @@ function PartnerApiPanel() {
               <Plus size={14} /> Түлхүүр үүсгэх
             </button>
           </div>
-          <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Webhook (төлбөр + баримт)', 'Сүүлд ашигласан', 'Төлөв', '']}
+          <Table headers={['Партнер', 'Түлхүүр', 'Эрх', 'Зогсоолын хязгаар', 'Webhook (төлбөр + баримт)', 'Машин бүртгэл / орох-гарах мэдэгдэл', 'Сүүлд ашигласан', 'Төлөв', '']}
             empty={!data || (data.keys.length === 0 && data.env_partners.length === 0)}>
             {(data?.keys || []).map((k) => (
               <tr key={k.id} className={k.is_active ? '' : 'opacity-50'}>
                 <td className="td font-mono text-sm">{k.name}</td>
                 <td className="td font-mono text-xs text-slate-500">{k.key_prefix}…</td>
-                <td className="td text-xs">{k.scopes.includes('pay') ? 'Лавлах + Төлбөр' : 'Зөвхөн лавлах'}</td>
+                <td className="td text-xs">{k.scopes.includes('pay') ? 'Лавлах + Төлбөр' : 'Зөвхөн лавлах'}
+                  {k.vehicles_enabled && <span className="block text-accent">+ Машин бүртгэл</span>}</td>
                 <td className="td text-xs">{k.site_code
                   ? <span>{k.site_name} <span className="font-mono text-slate-500">({k.site_code})</span></span>
                   : 'Бүх зогсоол'}</td>
@@ -907,6 +1047,10 @@ function PartnerApiPanel() {
                       </div>
                     </div>
                   ) : <span className="text-slate-500">—</span>}
+                </td>
+                <td className="td text-xs">
+                  {k.is_active ? <VehiclesCell k={k} onChanged={load} onHistory={() => setEventsKey(k)} />
+                    : <span className="text-slate-500">—</span>}
                 </td>
                 <td className="td text-xs">{k.last_used_at
                   ? new Date(k.last_used_at + 'Z').toLocaleString()
@@ -932,6 +1076,7 @@ function PartnerApiPanel() {
                 <td className="td font-mono text-xs text-slate-500">—</td>
                 <td className="td text-xs">Лавлах + Төлбөр</td>
                 <td className="td text-xs">Бүх зогсоол</td>
+                <td className="td text-xs text-slate-500">—</td>
                 <td className="td text-xs text-slate-500">—</td>
                 <td className="td text-xs text-slate-500">—</td>
                 <td className="td"><span className="text-accent text-xs">Идэвхтэй</span>
@@ -967,6 +1112,7 @@ function PartnerApiPanel() {
 
       <KeyCreateModal open={createOpen} sites={sites}
         onClose={() => setCreateOpen(false)} onDone={load} />
+      <VehicleEventsModal k={eventsKey} onClose={() => { setEventsKey(null); load() }} />
 
       <div className="card space-y-3">
         <div className="flex items-center justify-between">

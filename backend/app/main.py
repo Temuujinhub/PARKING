@@ -31,7 +31,7 @@ from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     dr_router, ev_router, health_router, integration_router, legacy_router, lpr_router,
     payments_router, public_router, reports_router, sessions_router, billing_router,
-    wallet_router, hospital_router, exit_review_router,
+    wallet_router, hospital_router, exit_review_router, socialpay_router,
 )
 from .ws import manager
 
@@ -72,7 +72,7 @@ app.add_middleware(
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
           health_router, integration_router, legacy_router, dr_router, billing_router,
-          ev_router, wallet_router, hospital_router, exit_review_router):
+          ev_router, wallet_router, hospital_router, exit_review_router, socialpay_router):
     app.include_router(r.router)
 
 
@@ -269,6 +269,11 @@ async def start_vat_auto_send():
     _bg_task(qpay_recheck_supervisor(), "qpay-recheck")
     from .services.financial_jobs import supervisor as financial_jobs_supervisor
     _bg_task(financial_jobs_supervisor(), "financial-jobs")
+
+    # Түншийн (SocialPay) бүртгэлтэй машины орох/гарах мэдэгдэл — scan + outbox
+    # (хаалт/LPR замаас тусдаа; түнш тохируулаагүй бол 10с тутам нэг хөнгөн query)
+    from .services.partner_vehicles import supervisor as partner_vehicles_supervisor
+    _bg_task(partner_vehicles_supervisor(), "partner-vehicles")
 
     # EV: RemoteStart-аас хойш 90с-д эхлээгүй цэнэглэлтийн hold-ыг буцаана (§6.4)
     if settings.evhub_url:

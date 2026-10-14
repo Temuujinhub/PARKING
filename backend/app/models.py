@@ -734,11 +734,81 @@ class PartnerKey(Base):
     # Түншийн сервер рүү төлбөр/баримтын мэдэгдэл (POST) илгээх URL — Easy Wallet
     # апп жолоочид ДДТД/сугалаа харуулахад (2026-09-13). Хоосон = илгээхгүй.
     webhook_url = Column(String(300), nullable=True)
+    # 2026-10-14 SocialPay: бүртгэлтэй машин орох/гарах мэдэгдлийн URL (төлбөрийн
+    # webhook_url-аас ТУСДАА — өөр формат, өөр сервер байж болно). Хоосон = илгээхгүй.
+    # Формат: NULL/'socialpay' = {"data":{plateNo,enteredDate,exitedDate?}} яг
+    # spec-ээр; 'extended' = нэмэлт талбартай (services/partner_vehicles.py).
+    vehicle_webhook_url = Column(String(300), nullable=True)
+    vehicle_webhook_format = Column(String(20), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     created_by = Column(String(60), default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PartnerVehicle(Base):
+    """Түншийн хэрэглэгчийн бүртгүүлсэн машин (SocialPay «Машин бүртгэх», 2026-10-14).
+
+    Түнш (partner_key) тус бүрийн хүрээнд: нэг хэрэглэгч олон машин, нэг машиныг
+    олон хэрэглэгч бүртгүүлж болно. Устгахад мөрийг ХАДГАЛЖ deleted_at тавина
+    (хэн хэзээ бүртгүүлж/устгасан нь мөшгөгдөнө); идэвхтэй мөрийн давхардлыг
+    partial unique индекс хориглоно. plate_number = normalize_plate хэлбэр."""
+    __tablename__ = "partner_vehicles"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=False)
+    plate_number = Column(String(20), nullable=False)
+    external_user_id = Column(String(64), nullable=False)
+    created_via = Column(String(30), nullable=False, default="api")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+    __table_args__ = (
+        Index("uq_partner_vehicle_active", "partner_key_id", "plate_number", "external_user_id",
+              unique=True, postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+        Index("ix_partner_vehicles_plate_active", "plate_number",
+              postgresql_where=text("deleted_at IS NULL"), sqlite_where=text("deleted_at IS NULL")),
+        Index("ix_partner_vehicles_user", "partner_key_id", "external_user_id"),
+    )
+
+
+class PartnerVehicleEvent(Base):
+    """Бүртгэлтэй машины орох/гарах мэдэгдлийн OUTBOX (түнш рүү POST).
+
+    financial_jobs-ийн загвар (job_key, lease, attempts, next_attempt_at) — гэхдээ
+    тэр хүснэгт payment_id NOT NULL + «Payment PAID биш бол BLOCKED» дүрэмтэй тул
+    мөнгөний замыг хөндөхгүйн тулд тусдаа. session_id-д FK ЗОРИУД тавиагүй (зогсоол
+    устгахад сешн устдаг — мэдэгдлийн түүх саад болохгүй).
+    job_key = veh:{partner_key_id}:{session_id}:{ENTRY|EXIT} — идемпотент."""
+    __tablename__ = "partner_vehicle_events"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    job_key = Column(String(160), nullable=False, unique=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=False)
+    session_id = Column(UUID(as_uuid=False), nullable=False, index=True)
+    plate_number = Column(String(20), nullable=False)
+    event = Column(String(10), nullable=False)            # ENTRY | EXIT
+    event_time = Column(DateTime, nullable=False)         # орсон/гарсан цаг (UTC) — дараалал
+    # PENDING → SENDING → DONE; алдаа → RETRY … → DEAD (24ц); SKIPPED = илгээх шаардлагагүй болсон
+    status = Column(String(20), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    lease_until = Column(DateTime, nullable=True)
+    lease_token = Column(String(36), nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    # ENTRY мөр: гарах мэдэгдэл хараахан шийдэгдээгүй (хос гарцыг хянах жагсаалт)
+    awaiting_exit = Column(Boolean, nullable=False, default=False)
+    last_error = Column(Text, nullable=True)
+    last_http_status = Column(Integer, nullable=True)
+    response_message = Column(String(300), nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        Index("ix_partner_vehicle_events_due", "status", "next_attempt_at"),
+        Index("ix_partner_vehicle_events_order", "partner_key_id", "plate_number", "event_time"),
+        Index("ix_partner_vehicle_events_awaiting", "awaiting_exit",
+              postgresql_where=text("awaiting_exit"), sqlite_where=text("awaiting_exit")),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
