@@ -159,7 +159,15 @@ def analyze(tax: list, ours: list, probe: list, *, shifts: list[float], tol: int
     explained = VR.explain_unmatched_tax(left, probe, r["shift"], tol, matched_pay_ids, scope_ids,
                                          register_sites=reg_sites)
     dups = VR.duplicate_list(explained, probe, matched_pay_ids, settings.tz_offset_hours)
-    term = VR.terminal_check(tax, explained, probe, tol, r["shift"], scope_ids)
+    # «Терминал гаргасан» гэж бүртгэсэн төлбөр ТЕГ-т баримттай юу — CLI-ийн нотолгоотой (--evidence,
+    # vat_reissue_missing) НЭГ хосолт (terminal_pairs): UI-ийн «ТЕГ-т баримт алга» жагсаалт ба
+    # «Систем баримт гаргах» нь хэрэгсэлтэй зөрөхгүй. VR.terminal_check-ийн explain-ийн хос нь
+    # «кассын зогсоол» олонхоор эрэмбэлдэг тул олон зогсоолын нэг Ontime кассанд худал «алга» гаргана.
+    regs, _qr = terminal_registers(tax, r, probe, tol)
+    pos = [p for p in probe if scope_ids is None or p.get("site_id") in scope_ids]
+    term = terminal_summary(tax, probe, terminal_pairs([t for t in tax if t.get("group") in regs],
+                                                       pos, tol),
+                            tol, r["shift"], scope_ids)
     return {"r": r, "left": left, "explained": explained, "matched_pay_ids": matched_pay_ids,
             "register_sites": reg_sites, "duplicates": dups, "terminal": term}
 
@@ -765,38 +773,74 @@ def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
         return st
     st["window"] = VR.file_window(core, tol, r["shift"])
     st["usable"], st["tenant"] = True, top
-    term_regs = {}
-    for reg in r.get("foreign_registers") or []:
-        n_hit, qr = _register_qr_share(tax, reg, a["probe"], tol)
-        if n_hit and qr / n_hit > QR_REGISTER_SHARE:
-            st["qr_registers"].add(reg)
-            continue
-        term_regs[reg] = r["group_shifts"].get(reg, 0)
+    term_regs, qrs = terminal_registers(tax, r, a["probe"], tol)
+    st["qr_registers"] = set(qrs)
     rows_by_reg = Counter(t.get("group") for t in core if t.get("group") in term_regs)
     st["terminal_registers"] = {k: {"rows": rows_by_reg.get(k, 0), "shifts": {v}}
                                 for k, v in term_regs.items()}
-    # Терминалын мөрийг ЗӨВХӨН POS аппын бэлэн/карт төлбөртэй (терминал өөр төлбөрт хэвлэдэггүй)
-    # нэг-нэгээр, хамгийн ойроор хосолно (vat_recon._pairs/_assign — касс бүрийн шилжилттэй).
-    # explain_unmatched_tax-ийн «кассын зогсоол» (тааралтын олонх) давуу эрэмбийг ЭНД
-    # хэрэглэхгүй: 2026-10-14-өөс олон зогсоолын терминал нэг Ontime кассаар (…10002990)
-    # ажилладаг тул олонхын зогсоолын QR/веб кассын ижил дүнтэй төлбөр бусад зогсоолын POS
-    # аппын борлуулалтаас Ontime мөрийг булааж (синтетик 10 хоног: 35/1118) жинхэнэ
-    # борлуулалт «терминалын баримтгүй» → ДАХИН гаргах → давхардал болж байв.
     lo, hi = st["window"]
-    pos = [p for p in a["probe"] if p.get("pos_app") and (p.get("method") or "").upper() in POS_APP_METHODS
-           and tenant_of.get(p.get("site_id")) == top]
-    rows = [t for t in tax if t.get("group") in term_regs]
+    pos = [p for p in a["probe"] if tenant_of.get(p.get("site_id")) == top]
+    paired = terminal_pairs([t for t in tax if t.get("group") in term_regs], pos, tol)
+    by_id = {p["id"]: p for p in pos}
+    hits = {pid for pid in paired if lo <= by_id[pid]["paid_at"] <= hi}
+    st["hits"] = hits
+    st["terminal_matched"] = len(hits)
+    return st
+
+
+def terminal_registers(tax: list, r: dict, probe: list, tol: int) -> tuple[dict, list]:
+    """Терминалын (Ontime г.м) касс: «өөр систем» (манай баримтын касс биш) бөгөөд манай
+    төлбөртэй таарсан мөрийн олонх нь QR БИШ. {касс: шилжилт}, [QPay гэж хассан касс]."""
+    regs, qrs = {}, []
+    for reg in r.get("foreign_registers") or []:
+        n_hit, qr = _register_qr_share(tax, reg, probe, tol)
+        if n_hit and qr / n_hit > QR_REGISTER_SHARE:
+            qrs.append(reg)
+            continue
+        regs[reg] = r["group_shifts"].get(reg, 0)
+    return regs, qrs
+
+
+def terminal_pairs(rows: list, probe: list, tol: int) -> dict:
+    """Терминалын мөрийг ЗӨВХӨН POS аппын бэлэн/карт төлбөртэй (терминал өөр төлбөрт
+    хэвлэдэггүй) нэг-нэгээр, хамгийн ойроор хосолно (vat_recon._pairs/_assign — мөр бүр
+    өөрийн кассын шилжилттэй), мөр төлбөрөөс TERMINAL_LAG_SLACK-аас ӨМНӨ биш.
+    explain_unmatched_tax-ийн «кассын зогсоол» (тааралтын олонх) давуу эрэмбийг ЭНД
+    хэрэглэхгүй: 2026-10-14-өөс олон зогсоолын терминал нэг Ontime кассаар (…10002990)
+    ажилладаг тул олонхын зогсоолын QR/веб кассын ижил дүнтэй төлбөр бусад зогсоолын POS
+    аппын борлуулалтаас Ontime мөрийг булааж (synthetic 10 хоног: 35/1118) жинхэнэ
+    борлуулалт «терминалын баримтгүй» → ДАХИН гаргах → давхардал болж байв.
+    Буцаах {payment_id: мөр}."""
+    pos = [p for p in probe if p.get("pos_app") and (p.get("method") or "").upper() in POS_APP_METHODS
+           and p.get("paid_at") is not None]
     times = [VR._when(t) for t in rows]
     pairs = VR._pairs(times, [t["amount"] for t in rows], [p["paid_at"] for p in pos],
                       [p["amount"] for p in pos], tol,
                       ok=lambda i, j: times[i] >= pos[j]["paid_at"] - TERMINAL_LAG_SLACK)
-    hits = set()
-    for _i, j, _d in VR._assign(pairs):
-        if lo <= pos[j]["paid_at"] <= hi:
-            hits.add(pos[j]["id"])
-    st["hits"] = hits
-    st["terminal_matched"] = len(hits)
-    return st
+    return {pos[j]["id"]: rows[i] for i, j, _d in VR._assign(pairs)}
+
+
+def terminal_summary(tax: list, probe: list, paired: dict, tol: int, shift: float,
+                     scope_ids: set | None) -> dict:
+    """UI-ийн «POS терминал гаргасан ч ТЕГ-т баримт алга» (vat_recon.terminal_check-ийн
+    хэлбэр): файлын хүрээнд байгаа терминалын мөртэй (EXTERNAL/ONTIME) төлбөрөөс хосгүй нь."""
+    terminal = [p for p in probe if p.get("terminal")
+                and (scope_ids is None or p.get("site_id") in scope_ids)]
+    if not tax or not terminal:
+        return {"matched": 0, "missing": [], "inside": 0}
+    lo, hi = VR.file_window(tax, tol, shift)
+    inside = [p for p in terminal if p.get("paid_at") is not None and lo <= p["paid_at"] <= hi]
+    missing = []
+    for p in inside:
+        if p["id"] in paired:
+            continue
+        t = p["terminal"][0]
+        missing.append({"paid_at": p["paid_at"].isoformat(), "plate": p.get("plate"),
+                        "site_name": p.get("site_name"), "amount": float(p["amount"]),
+                        "status": t.get("status"), "provider": t.get("provider"),
+                        "ebarimt_id": t.get("ebarimt_id"), "mock": False,
+                        "payment_id": p["id"], "method": p.get("method")})
+    return {"matched": len(inside) - len(missing), "missing": missing, "inside": len(inside)}
 
 
 def terminal_evidence(db, taxes: list, *, sites: list, tol: int, shifts: list[float],

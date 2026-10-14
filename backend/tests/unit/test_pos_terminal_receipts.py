@@ -909,3 +909,26 @@ def test_file_mode_never_cancels_reissued_receipt():
     assert 'ДАХИН гаргасан' in V.cancel_block_reason(p)
     p['reissued'] = False
     assert V.cancel_block_reason(p) is None
+
+
+def test_pos_confirm_company_payer_keeps_system_receipt_by_default(db):
+    """ААН регистртэй картын төлбөр (POS апп) — терминал иргэний баримт хэвлэдэг тул ерөнхий
+    ON үед ч систем ААН-ийн баримтыг msgbill-ээр гаргана (нэг бодлого)."""
+    s, u = parking(db), user(db)
+    out = asyncio.run(PR.pos_confirm({'session_id': s.id, 'amount': 1000, 'transaction_id': 'bank-co',
+                                      'payer_reg_no': '5317878'}, req('1.5.3'), db, u))
+    p = db.get(M.Payment, out['payment_id'])
+    assert p.source == 'POSAPP' and p.ebarimt_receiver_type == 'COMPANY'
+    [r] = receipts(db, p.id)
+    assert (r.provider, r.status) == ('MSGBILL', 'PENDING') and len(jobs(db, p.id)) == 1
+
+
+def test_transfer_and_qr_from_pos_app_are_unchanged(db):
+    """Дансаар/QR — POS аппаас ирсэн ч терминал хэвлэдэггүй (карт/бэлэн биш) → систем."""
+    s = parking(db)
+    for method, provider in (('TRANSFER', 'TRANSFER'), ('QR', 'QPAY')):
+        p = M.Payment(session_id=s.id, site_id=s.site_id, provider=provider, payment_method=method,
+                      source='POSAPP', sender_invoice_no=f'x-{method}', amount=Decimal('1000'),
+                      vat_amount=Decimal('0'), status='PAID', paid_at=datetime.utcnow())
+        db.add(p); db.flush()
+        assert J.terminal_issues_receipt(db, p) is False

@@ -606,3 +606,38 @@ def test_blocked_job_becomes_external_when_setting_on(db):
     job = db.query(M.FinancialJob).filter_by(receipt_id=rec.id).one()
     assert (rec.status, rec.provider, job.status) == ("EXTERNAL", "POS-TERMINAL", "DONE")
     assert FakeHTTP.calls == []
+
+
+def test_file_mode_apply_refuses_tenant_all(db, engine, tmp_path, monkeypatch):
+    """ТЕГ файл нэг ТТД-ийнх — --file --apply үед --tenant ALL татгалзана (dry-run болно)."""
+    cli = _tool("vat_cancel_duplicates.py")
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    build(db)
+    f = tmp_path / "teg.csv"
+    f.write_text("ТТД,ДДТД,Огноо,Нийт дүн\n7524322,015200020090000097260000110002990,2026-09-10 12:00:00,1000\n",
+                 encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--file", str(f), "--tenant", "ALL", "--apply", "--yes", "--out", str(tmp_path / "o.csv")])
+    assert "ALL биш" in str(e.value)
+    assert cli.main(["--file", str(f), "--tenant", "ALL", "--out", str(tmp_path / "o.csv")]) == 0
+    assert FakeHTTP.calls == []
+
+
+def test_monnis_cancel_falls_back_to_global_key(db):
+    """Моннисын 08-20…09-06-ны баримт түрээслэгчийн түлхүүр тавигдахаас өмнө ГЛОБАЛ түлхүүрээр
+    гарсан — түрээслэгчийн түлхүүр «олдсонгүй» гэвэл глобалаар цуцална (POS аппын дүрмээр)."""
+    w = build(db)
+    p = pay(db, w, "MONNIS", "pos.m", method="CASH", source="POSAPP")
+    db.commit()
+    sites = VD.pos_app_sites(db, w.mon)
+    scope = VD.pos_app_scope(db, sites)
+    FakeHTTP.script = [(404, {"code": "RECEIPT_NOT_FOUND", "message": "not found"}),
+                       (200, {"state": "CANCELLED"})]
+    out = asyncio.run(VD.cancel_one(db, p.id, note="x", username="t", source="cli-pos-app",
+                                    guard=VD.pos_app_guard(scope, {s.id for s in sites}),
+                                    mark_extra={"rule": VD.POS_APP_RULE}))
+    assert out["ok"] is True and FakeHTTP.keys == ["bsk_live_MON", "bsk_live_GLOBAL"]
+    rs = _recs(db, p.id)
+    msg = [r for r in rs if r.provider == "MSGBILL"][0]
+    assert msg.status == "CANCELLED" and msg.raw["cancel"]["key_scope"] == "global"
+    assert sorted(r.status for r in rs) == ["CANCELLED", "EXTERNAL"]

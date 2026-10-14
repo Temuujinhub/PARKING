@@ -406,3 +406,72 @@ def test_cli_guards_no_terminal_file_and_wrong_tenant(db, engine, tmp_path, monk
     capsys.readouterr()
     assert cli.main(["--file", f2, "--tenant", "ALL", "--out", str(tmp_path / "a.csv")]) == 0
     assert "түрээслэгч EASYPARKING" in capsys.readouterr().out
+
+
+def test_ui_terminal_missing_not_fooled_by_shared_ontime_register(db):
+    """UI-ийн «POS терминал гаргасан ч ТЕГ-т баримт алга» (reconcile_db → terminal) нь CLI-тэй нэг
+    хосолт: олон зогсоол НЭГ Ontime кассаар (…10002990) ажиллах үед олонхын зогсоолын QR
+    төлбөр нөгөө зогсоолын POS аппын борлуулалтаас Ontime мөрийг булааж «алга» гэж худал
+    харуулахгүй (хуучин vat_recon.terminal_check-ийн «кассын зогсоол» эрэмбэ булаадаг)."""
+    from app.routers import vat_recon as VR
+    w = world(db)
+    s = scenario(db, w)
+    yl = M.ParkingSite(name="ялалт", site_code="YLALT1", tenant_id=w.ep.id)
+    db.add(yl)
+    db.flush()
+    t = T0 + timedelta(minutes=45)
+    rows = export(s, terminal=())
+    for i in range(3):                                   # олонх — Ялалтын POS аппын борлуулалт
+        p = payment(db, w, t + timedelta(minutes=2 + i), 1700 + i, site=yl, receipts=[EXT])
+        rows.append({"dt": p.paid_at + timedelta(seconds=3), "amount": float(p.amount),
+                     "ddtd": ddtd(310 + i, ONT), "src": "Ontime"})
+    h = payment(db, w, t, 2500, receipts=[EXT])           # Хангарьд — терминал хэвлэсэн
+    rows.append({"dt": t + timedelta(seconds=4), "amount": 2500.0, "ddtd": ddtd(320, ONT), "src": "Ontime"})
+    payment(db, w, t + timedelta(seconds=2), 2500, method="QR", user=w.web, site=yl)   # Ялалтын QR
+    db.commit()
+    scope = {w.site.id, yl.id}
+    a = VD.reconcile_db(db, rows, shifts=[0.0, -8.0], tol=60, ours_sites=list(scope),
+                        probe_sites=list(scope), scope_ids=scope)
+    missing = {m["payment_id"] for m in a["terminal"]["missing"]}
+    assert h.id not in missing
+    assert {s["ext_miss"].id, s["dup_ok"].id} <= missing            # Ontime мөргүй — жинхэнэ «алга»
+    # explain-ийн хос ч (POS апп түрүүлж) Ялалтын QR биш Хангарьдын борлуулалт руу
+    [row] = [x for x in a["explained"] if x["foreign"] and x["amount"] == 2500.0]
+    assert row["payment_id"] == h.id
+    assert h.id not in {m["payment_id"] for m in VR.terminal_check(
+        rows, a["explained"], a["probe"], 60, a["r"]["shift"], scope)["missing"]}
+
+
+def test_file_mode_never_cancels_web_cash_of_majority_site(db):
+    """--file/UI-ийн давхардлын илрүүлэлт: нэг Ontime кассаар олон зогсоол ажиллах үед олонхын
+    зогсоолын ижил дүнтэй ВЕБ КАССЫН бэлэн (msgbill-ийн цорын ганц баримт) нөгөө зогсоолын POS
+    аппын борлуулалтаас Ontime мөрийг булааж «DUPLICATE» болохгүй (2026-10-14: POS апп түрүүнд)."""
+    w = world(db)
+    s = scenario(db, w)
+    yl = M.ParkingSite(name="ялалт", site_code="YLALT1", tenant_id=w.ep.id)
+    db.add(yl)
+    db.flush()
+    t = T0 + timedelta(minutes=45)
+    rows = export(s, terminal=())
+    for i in range(3):                                   # олонх — Ялалтын POS аппын борлуулалт
+        p = payment(db, w, t + timedelta(minutes=2 + i), 1700 + i, site=yl, receipts=[sent(330 + i)])
+        rows.append({"dt": p.paid_at + timedelta(seconds=3), "amount": float(p.amount),
+                     "ddtd": ddtd(310 + i, ONT), "src": "Ontime"})
+        rows.append({"dt": p.paid_at + timedelta(hours=8, seconds=2), "amount": float(p.amount),
+                     "ddtd": ddtd(330 + i, MSG), "src": "msgbill"})
+    h = payment(db, w, t, 2500, receipts=[sent(340)])                   # Хангарьд POS апп (давхар)
+    rows.append({"dt": t + timedelta(seconds=4), "amount": 2500.0, "ddtd": ddtd(320, ONT), "src": "Ontime"})
+    rows.append({"dt": t + timedelta(hours=8, seconds=2), "amount": 2500.0, "ddtd": ddtd(340, MSG),
+                 "src": "msgbill"})
+    web = payment(db, w, t + timedelta(seconds=2), 2500, method="CASH", user=w.web, site=yl,
+                  receipts=[sent(341)])                                 # Ялалтын веб касс — ганц баримт
+    rows.append({"dt": web.paid_at + timedelta(hours=8, seconds=2), "amount": 2500.0,
+                 "ddtd": ddtd(341, MSG), "src": "msgbill"})
+    db.commit()
+    scope = {w.site.id, yl.id}
+    a = VD.reconcile_db(db, rows, shifts=[0.0, -8.0], tol=60, ours_sites=list(scope),
+                        probe_sites=list(scope), scope_ids=scope)
+    dup_ids = {d["payment_id"] for d in a["duplicates"]}
+    assert web.id not in dup_ids
+    [row] = [x for x in a["explained"] if x["foreign"] and x["amount"] == 2500.0]
+    assert row["payment_id"] == h.id and row["verdict"] == "DUPLICATE_NOT_CANCELLABLE"   # өөр зогсоол
