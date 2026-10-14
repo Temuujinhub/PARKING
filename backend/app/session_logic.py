@@ -1906,10 +1906,6 @@ async def _inner_exit_fallback(db: Session, device: Device, parent: ParkingSessi
     db.commit()
     log.info("[nested] %s: «%s» доторх гарах — доторх сешнгүй ч гадна «%s» зогссон байсан: "
              "батлагдсан гарц (%d мин), хаалт нээнэ", plate, site.name, parent.plate_number, mins)
-    opened = False
-    if allow_open:
-        opened = await ensure_inner_barrier(db, device, closed[0].id if closed else None,
-                                            parent.plate_number, "inner_exit")
     _hm = (now + timedelta(hours=settings.tz_offset_hours)).strftime("%H:%M")
     _lines = _site_screen_lines(db, site.id, "exit")
     _stay = int((now - paused_from).total_seconds() // 60)
@@ -1917,6 +1913,15 @@ async def _inner_exit_fallback(db: Session, device: Device, parent: ParkingSessi
                                     duration_minutes=_stay, reason="Үнэгүй")
             if _lines else render_screen_text(settings.screen_bye_free_text,
                                               plate=parent.plate_number, duration_minutes=_stay))
+    # Хаалт `_close_and_open`-той ЯГ ижил (ensure_inner_barrier БИШ): түүний 5с-ийн
+    # cooldown өөр машины саяхны амжилттай нээлтийг үзээд энэ машинд команд
+    # илгээхгүй (barrier_opened False) байв — хяналт F5.
+    barrier = _find_barrier(db, site.id, device)
+    opened = False
+    if barrier and allow_open:
+        cmd = await open_barrier(db, barrier, closed[0].id if closed else None, "auto_exit",
+                                 plate=parent.plate_number, screen_text=_bye)
+        opened = cmd.status == "SUCCESS"
     notify(site.id, "EXIT_COMPLETED", {
         "session_id": closed[0].id if closed else None, "plate": parent.plate_number,
         "status": "FREE", "barrier_opened": opened, "total_fee": 0.0,

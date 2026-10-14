@@ -17,6 +17,9 @@ audit1014-ийн нотолгоог хиймэл дугаараар (98xxЖЖА)
      дахин тооцохгүй; үл мэдэгдэх машин review, хаалт 0.
   f. 100 айлын 24ц: эцэг дээр inner_unverified_cap_hours=24 — доторх гарах уншилтгүй
      30ц зогсолтоос 1,440 мин хасна (тест дуусахад тохиргоог буцаана).
+  g. Хяналт F1 (шүүмжлэгчийн zz_rev3_skiplock_probe): OPEN гадна мөрийг өөр транзакц
+     0.3с түгжсэн үед доторх орох уншилт — зогсолт АЛДАГДАХГҮЙ (e7c5a8a шиг хүлээнэ;
+     өмнөх засвар skip_locked-оор чимээгүй алгасаж 0₮ → 3,000₮ болгож байв).
 """
 import asyncio
 import os
@@ -289,6 +292,42 @@ try:
     check("доторх гарах уншилтгүй 30ц → 1440 мин хасагдав",
           close_open_pause(db, po, datetime.utcnow()) == 1440, po.paused_minutes)
     db.rollback()
+
+    print("\ng. OPEN гадна мөр түр түгжээтэй үед доторх орох уншилт (хяналт F1)")
+    outer, inner, d = mk_pair()
+    P = "9861ЖЖА"
+    run(handle_entry(db, d["oentry"], P, 94, raw(P)))
+    shift(0.01, [outer, inner])
+    po, = sessions(outer)
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_short(pid, secs):
+        s2 = SessionLocal()
+        try:
+            s2.execute(text("select id from parking_sessions where id=:i for update"), {"i": pid})
+            locked.set()
+            release.wait(secs)
+            s2.rollback()
+        finally:
+            s2.close()
+    th = threading.Thread(target=hold_short, args=(po.id, 0.3))
+    th.start()
+    locked.wait(10)
+    try:
+        r = run(handle_entry(db, d["ientry"], P, 82, raw(P)))
+    finally:
+        th.join(30)
+    po, = sessions(outer)
+    check("зогсолт түр түгжээг даван хадгалагдав", po.paused_since is not None,
+          (r, po.paused_since))
+    check("доторх орох хаалт нээгдэв", r.get("barrier_opened"), r)
+    shift(3, [outer, inner])
+    run(handle_exit(db, d["iexit"], P, 90, raw(P)))
+    po, = sessions(outer)
+    check("3ц дараах доторх гарц ~180 мин хасав", 179 <= int(po.paused_minutes or 0) <= 181,
+          po.paused_minutes)
+    check("гадна дүн 0₮ (e7c5a8a-тай ижил)", session_fee_info(db, po)["total_fee"] == 0,
+          session_fee_info(db, po))
 finally:
     db.rollback()
     for sid in overlay_sites:

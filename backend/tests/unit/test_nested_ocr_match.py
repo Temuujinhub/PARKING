@@ -243,8 +243,8 @@ def test_two_cars_with_crossed_variant_reads_pair_correctly(c):
     c.db.commit()
     ra = enter_inner(c, "1357УАО")
     assert a.paused_since and b.paused_since
-    assert c.db.get(M.ParkingSession, rb["session_id"]).plate_number == "2468УББ"
-    assert c.db.get(M.ParkingSession, ra["session_id"]).plate_number == PLATE
+    assert c.db.get(M.ParkingSession, rb["session_id"]).plate_number == "2468УББ"  # junk → засна
+    assert c.db.get(M.ParkingSession, ra["session_id"]).plate_number == "1357УАО"  # зөв → хэвээр
     pairs = {(x.detail["read_plate"], x.entity_id) for x in audits(c, "NESTED_OCR_MATCH")}
     assert pairs == {("2468УБ", b.id), ("1357УАО", a.id)}
 
@@ -289,6 +289,23 @@ def test_refused_exit_with_running_pause_settles_and_restarts(c):
     enter_inner(c, PLATE)
     assert p.status == "OPEN" and 178 <= p.paused_minutes <= 180
     assert p.paused_since is not None and p.paused_since >= datetime.utcnow() - timedelta(seconds=5)
+
+
+@pytest.mark.parametrize("minutes", [20, 115])
+def test_no_revert_long_after_refusal(c, minutes):
+    """Хяналт F2: татгалзсанаас 15 мин-аас хойш — 2ц-ийн unpaid_exit өрийн дүрэм хэвээр."""
+    p = awaiting(c, minutes_ago=minutes)
+    enter_inner(c, PLATE)
+    assert p.status == "AWAITING_PAYMENT" and p.total_fee == 23000
+    assert not audits(c, "NESTED_EXIT_REVERT")
+
+
+def test_revert_frees_exit_snapshot_slot_and_keeps_evidence(c):
+    p = awaiting(c, exit_snapshot="20261014/REFUSED_exit.jpg", exit_snapshot_source="comet")
+    enter_inner(c, PLATE)
+    assert p.status == "OPEN" and p.exit_snapshot is None and p.exit_snapshot_source is None
+    (a,) = audits(c, "NESTED_EXIT_REVERT")
+    assert a.detail["refused_exit_snapshot"] == "20261014/REFUSED_exit.jpg"
 
 
 def test_fuzzy_read_never_touches_awaiting_parent(c):
@@ -347,7 +364,7 @@ def test_inner_exit_without_inner_session_resumes_paused_parent_and_opens(c):
     assert res["action"] == "inner_exit_fallback" and res["barrier_opened"]
     assert p.paused_since is None and 299 <= p.paused_minutes <= 300
     assert junk.status == "FREE" and junk.exit_confirmed and junk.exit_time is not None
-    assert bar_cmds(c, "in_exit_bar") == [(c.dev["in_exit_bar"].id, junk.id, "inner_exit")]
+    assert bar_cmds(c, "in_exit_bar") == [(c.dev["in_exit_bar"].id, junk.id, "auto_exit")]
     assert not bar_cmds(c, "out_exit_bar") and not bar_cmds(c, "out_entry_bar")
     ev = c.db.query(M.LprEvent).filter_by(device_id=c.dev["in_exit"].id).one()
     assert ev.accepted and ev.plate_number == PLATE
@@ -440,6 +457,60 @@ def test_other_cars_inner_session_does_not_resume_similar_paused_parent(c):
     assert p.paused_since is not None and not p.paused_minutes
 
 
+def test_inner_exit_fallback_opens_despite_other_cars_recent_open(c):
+    """Хяналт F5: өөр машинд 1с өмнө амжилттай нээсэн ч (cooldown) энэ машинд команд."""
+    p = paused_parent(c, hours=2)
+    c.db.add(M.BarrierCommand(device_id=c.dev["in_exit_bar"].id, session_id=None, command="open",
+                              command_source="auto_exit", status="SUCCESS"))
+    c.db.commit()
+    res = exit_inner(c, PLATE)
+    assert res["action"] == "inner_exit_fallback" and res["barrier_opened"]
+    assert p.paused_since is None and bar_cmds(c, "in_exit_bar")
+
+
+def test_valid_inner_read_keeps_its_plate_registered_only(c):
+    """Хяналт F4: бүртгэлтэй машиныг доторх камер ЗӨВ уншсан, гадна буруу (1357УАО).
+    Доторх сешн өөрийн зөв дугаараа хадгална — `_admitted` үнэн хэвээр, cross-read-ийн
+    дараах сэргээлт эцгийг дахин зогсооно."""
+    c.child.registered_only = True
+    c.db.add(M.RegisteredDriver(plate_number=PLATE, site_id=c.child.id, is_active=True,
+                                valid_from=datetime.utcnow() - timedelta(days=1),
+                                valid_to=datetime.utcnow() + timedelta(days=30)))
+    c.db.commit()
+    p = outer(c, "1357УАО", ago=timedelta(seconds=30))
+    res = enter_inner(c, PLATE)
+    kid = c.db.get(M.ParkingSession, res["session_id"])
+    assert p.paused_since is not None and kid.plate_number == PLATE
+    assert N._admitted(c.db, c.child, kid.plate_number)
+    (a,) = audits(c, "NESTED_OCR_MATCH")
+    assert a.detail["child_renamed"] is False
+    since = datetime.utcnow()
+    assert N.on_inner_exit(c.db, c.child, kid.plate_number, since, child=kid) >= 0
+    assert p.paused_since is None                       # cross-read «гарц»
+    assert N.restore_parent_pause(c.db, c.child, kid, since)
+    assert p.paused_since == since
+
+
+def test_valid_read_with_own_history_is_a_different_car(c):
+    """Хяналт N1: уншсан ЗӨВ дугаар эцэг зогсоолд сүүлийн 14 хоногт өөрийн сешнтэй →
+    тусдаа машин (гадна орох уншилт нь алдагдсан) — ойролцоо машиныг зогсоохгүй."""
+    hist = outer(c, "1357УАБ", ago=timedelta(days=3), status="CLOSED")
+    hist.exit_time = hist.entry_time + timedelta(hours=2)
+    c.db.commit()
+    b = outer(c, ago=timedelta(minutes=1))               # 1357УАА гадна талбайд
+    enter_inner(c, "1357УАБ")
+    assert b.paused_since is None and not audits(c, "NESTED_OCR_MATCH")
+
+
+def test_junk_read_with_own_junk_history_still_matches(c):
+    junk = outer(c, "1357УА", ago=timedelta(days=2), status="FREE")
+    junk.exit_time = junk.entry_time + timedelta(hours=2)
+    c.db.commit()
+    p = outer(c)
+    enter_inner(c, "1357УА")
+    assert p.paused_since is not None
+
+
 # ── Итгэл багатай гарах уншилт ──────────────────────────────────────────────
 
 def test_low_confidence_override_not_applied_at_child_site(c):
@@ -489,6 +560,36 @@ def test_manual_entry_at_child_pauses_parent(c, monkeypatch):
     p = outer(c, ago=timedelta(minutes=30))
     asyncio.run(SR.manual_entry({"site_id": c.child.id, "plate_number": PLATE}, c.db, user))
     assert p.paused_since is not None
+    (a,) = audits(c, "NESTED_MANUAL_PAUSE")
+    assert a.username == "op" and a.entity_id == p.id
+
+
+def test_manual_entry_backdated_pauses_from_now_not_parent_entry(c, monkeypatch):
+    """Хяналт F3: кассчин орсон цагийг 6ц хойш тавьж гадна дүнг тасалж болохгүй."""
+    from app.routers import sessions_router as SR
+    monkeypatch.setattr(SR.manager, "broadcast", lambda *a, **kw: asyncio.sleep(0))
+    user = M.User(username="op", password_hash="x", role="SUPER_ADMIN")
+    c.db.add(user)
+    c.db.commit()
+    p = outer(c, ago=timedelta(hours=5))
+    fee0 = SL.session_fee_info(c.db, p)["total_fee"]
+    back = (datetime.utcnow() - timedelta(hours=6)).isoformat()
+    asyncio.run(SR.manual_entry({"site_id": c.child.id, "plate_number": PLATE,
+                                 "entry_time": back}, c.db, user))
+    assert p.paused_since >= datetime.utcnow() - timedelta(seconds=10)
+    assert SL.session_fee_info(c.db, p)["total_fee"] == fee0
+    assert audits(c, "NESTED_MANUAL_PAUSE")
+
+
+def test_manual_entry_variant_plate_does_not_fuzzy_match(c, monkeypatch):
+    from app.routers import sessions_router as SR
+    monkeypatch.setattr(SR.manager, "broadcast", lambda *a, **kw: asyncio.sleep(0))
+    user = M.User(username="op", password_hash="x", role="SUPER_ADMIN")
+    c.db.add(user)
+    c.db.commit()
+    p = outer(c, ago=timedelta(minutes=2))
+    asyncio.run(SR.manual_entry({"site_id": c.child.id, "plate_number": "1357УАО"}, c.db, user))
+    assert p.paused_since is None and not audits(c, "NESTED_MANUAL_PAUSE")
 
 
 def test_manual_entry_refused_registered_only_child_does_not_pause(c, monkeypatch):
