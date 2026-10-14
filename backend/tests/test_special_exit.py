@@ -126,7 +126,9 @@ def main():
         check("аудит SPECIAL_EXIT kind=hbi, зурагтай, reason_code=hbi",
               a is not None and a.detail.get("kind") == "hbi" and a.detail.get("snapshot") == s.verify_snapshot
               and a.detail.get("reason_code") == "hbi", str(a.detail if a else None))
-        rows = sr._attach_close_info(db, [sr._session_out(db, s)])
+        # PR #19: хэрэглэгчийн хүрээгээр төлбөр/өр шүүнэ — хүрээгүй SUPER_ADMIN
+        rows = sr._attach_close_info(db, [sr._session_out(db, s)],
+                                     User(username="zz-special-exit", role="SUPER_ADMIN"))
         check("Түүхийн шошиг «Онцгой гаргалт (зурагтай)»",
               rows[0]["closed_by"] and rows[0]["closed_by"]["label"] == "Онцгой гаргалт (зурагтай)", str(rows[0].get("closed_by")))
         e = call(sr.special_exit, s_hbi.id, {"kind": "hbi"}, db=db, user=op)

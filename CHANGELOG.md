@@ -26,6 +26,17 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-14 — GitHub main (6e4b307) прод салбарт нийлэв: Түүхийн санхүү, авто-хаалтын аудит (PR #19)
+
+main-ийн 5 commit-оос зөвхөн PR #19 (`5e3e81d`) шинэ агуулга; PR #21 (`5678758`) нь манай `3217240`-тай
+ижил, `8eadd41` (pyjwt 2.14.0)-ийг манай 2.15.1 давна. **Deploy-оор Түүх хуудас өөрчлөгдөнө**: «Гарах
+уншилтгүй» шошго → «Хаасан», гарах уншилтын төлөв, сешний өр/төлбөрийн задаргаа тусдаа багана болно.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | Түүх: сешн бүрийн төлбөр + нэхэмжлэлийн задаргаа (зогсолт / өмнөх өр), ЭНЭ зогсолтын өр (төлсөн өр → төлсөн сешн рүү холбоос, `?session_id=`), гарах уншилтын төлөв (`exit_read_status`), хаалтын шалтгаан/босго/цаг; `AUTO_CLOSE`/`AUTO_FREE_CLOSE` аудитад `trigger`, `threshold_hours`, `wait_started_at`, `closed_at` | 91cb6ad (merge) | ⏳ | ⏳ |
+| fix | `test_close_labels.py`, `test_special_exit.py` скрипт тестүүд `_attach_close_info(db, rows, user)` шинэ гарын үсгээр (PR #19 main дээр ч эвдэрсэн байсан) | (энэ commit) | — | — |
+
 ## 2026-10-14 — Түншийн API: `/api/v1/payments/{id}/confirm`-д `amount` заавал биш
 
 SocialPay (Голомт) 10-13: `{"transaction_id"}` л илгээхэд 422 «Төлбөрийн дүн зөв…» авч байв.

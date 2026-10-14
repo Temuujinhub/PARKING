@@ -26,11 +26,14 @@ settings.screen_enabled = False
 
 from app.database import SessionLocal  # noqa: E402
 from app.models import (AuditLog, ParkingSession, ParkingSite, Payment,  # noqa: E402
-                        TariffTemplate, TariffTier)
+                        TariffTemplate, TariffTier, User)
 from app.routers.sessions_router import _CLOSE_LABEL, _attach_close_info  # noqa: E402
 from app.session_logic import close_session_forced  # noqa: E402
 
 PASS = FAIL = 0
+# PR #19: _attach_close_info нь хэрэглэгчийн зогсоолын хүрээгээр төлбөр/өр шүүдэг
+# болсон (attach_history_financials) — хүрээгүй SUPER_ADMIN-аар дуудна.
+ADMIN = User(username="zz-close-labels", role="SUPER_ADMIN")
 
 
 def check(name, cond, extra=""):
@@ -109,7 +112,7 @@ def main():
                        sender_invoice_no=f"ZZ{tag}"))
         db.commit()
         out = _attach_close_info(db, [{"id": s4.id, "plate_number": s4.plate_number},
-                                      {"id": s5.id, "plate_number": s5.plate_number}])
+                                      {"id": s5.id, "plate_number": s5.plate_number}], ADMIN)
         check("төлбөр авсан нь ялгагдсан",
               out[0]["closed_by"]["label"] == "Оператор төлбөртэй гаргасан",
               out[0]["closed_by"]["label"])
@@ -122,7 +125,7 @@ def main():
         db.add(AuditLog(username="system", action="CAMERA_SYNC_EXIT", entity="session",
                         entity_id=s6.id, detail={}))
         db.commit()
-        out2 = _attach_close_info(db, [{"id": s6.id, "plate_number": s6.plate_number}])
+        out2 = _attach_close_info(db, [{"id": s6.id, "plate_number": s6.plate_number}], ADMIN)
         check("шошиг гарч ирсэн", (out2[0]["closed_by"] or {}).get("label")
               == "Логийн гарах уншилт", str(out2[0]["closed_by"]))
         check("«Систем» гэж тэмдэглэгдсэн", (out2[0]["closed_by"] or {}).get("auto") is True)
