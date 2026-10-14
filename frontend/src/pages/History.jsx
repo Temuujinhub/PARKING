@@ -1,42 +1,18 @@
 // Түүх — бүх session-ийн жагсаалт, шүүлтүүр
 import { FileSpreadsheet, RotateCcw } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, fmt, fmtDate, fmtDur } from '../api'
 import { useAuth } from '../auth'
 import { useDownload } from '../hooks/useDownload'
 import { useFetch } from '../hooks/useFetch'
 import { SnapshotButton } from '../components/Snapshot'
+import { ExitReadCell, HistoryPaymentCell, SessionDebtCell } from '../components/HistoryFinancials'
 import { Badge, DateRange, Table, useToast } from '../components/ui'
 import { normalizePlate } from '../validation'
 
 // Хаагдсан бүртгэлийг буцаан зогсоолд оруулж болох төлвүүд (төлбөргүй хаагдсан)
 const REOPENABLE = new Set(['MANUAL_CLOSED', 'FREE', 'CLOSED'])
-
-// Төлбөрийн хэрэгслийн богино шошго — «Гарсан» гэдэг төлөв ЮУГААР төлөгдснийг
-// хэлдэггүй тул түүхэн дээр тусад нь харуулна (provider → payment_method).
-const PAY_LABEL = {
-  QPAY: 'QPay QR', POS: 'Карт (ПОС)', CASH: 'Бэлэн', TRANSFER: 'Дансаар',
-}
-
-function PaymentCell({ s }) {
-  const pays = s.payments || []
-  if (pays.length) {
-    return (
-      <div className="space-y-0.5">
-        {pays.map((p, i) => (
-          <div key={i} className="text-[11px] whitespace-nowrap">
-            <span className="text-emerald-400">{PAY_LABEL[p.provider] || p.provider}</span>
-            {p.cashier && <span className="text-slate-500"> · {p.cashier}</span>}
-            {pays.length > 1 && <span className="text-slate-500"> {fmt(p.amount)}₮</span>}
-          </div>
-        ))}
-      </div>
-    )
-  }
-  // Төлбөргүй хаагдсан — яагаад гэдгийг төлөв нь аль хэдийн хэлнэ (Үнэгүй/Гарах уншилтгүй)
-  if (s.status === 'FREE') return <span className="text-cyan-400 text-[11px]">Үнэгүй</span>
-  return <span className="text-slate-600">-</span>
-}
 
 function ClosedByCell({ s }) {
   const c = s.closed_by
@@ -49,22 +25,23 @@ function ClosedByCell({ s }) {
   )
 }
 
-// Шалтгаан — оператор ГАРААР гаргахдаа (эсвэл админ хасахдаа) сонгосон/бичсэн.
-// Систем хаасан мөрөнд шалтгаан байхгүй; тэнд «Хаасан» багана хангалттай.
+// Хаалтын шалтгааныг камерын уншилт болон өрийн төлвөөс тусад нь харуулна.
 function ReasonCell({ s }) {
   const c = s.closed_by
-  if (!c?.reason) return <span className="text-slate-600">-</span>
+  if (!c) return <span className="text-slate-300">-</span>
   return (
-    <span className={`text-[11px] ${c.auto ? 'text-slate-400' : 'text-amber-200'}`}
+    <span className="text-xs text-slate-200"
       title={`${c.label} — ${c.by}${c.reason_code ? ` (код: ${c.reason_code})` : ''}`}>
-      {c.reason}
+      {c.reason_label || c.reason || c.label}
+      {c.threshold_hours != null && <span className="block text-slate-300">Босго: {c.threshold_hours} цаг</span>}
+      <span className="block text-slate-300">Хаасан: {fmtDate(c.closed_at || c.at)}</span>
     </span>
   )
 }
 
 const STATUSES = [
   ['', 'Бүгд'], ['OPEN', 'Зогсож буй'], ['AWAITING_PAYMENT', 'Төлбөр хүлээж буй'],
-  ['PAID', 'Төлсөн'], ['CLOSED', 'Гарсан'], ['FREE', 'Үнэгүй'], ['MANUAL_CLOSED', 'Гарах уншилтгүй'],
+  ['PAID', 'Төлсөн'], ['CLOSED', 'Гарсан'], ['FREE', 'Үнэгүй'], ['MANUAL_CLOSED', 'Хаасан'],
   // Nested зогсоолтой газарт (Рашбулаг ЭТТ): доторх зогсоолд орж, төлбөрийн
   // тоолуур нь зогссон машинууд. Төлбөр яагаад бага байсныг тайлбарлана.
   ['INNER', 'Дотор зогссон'],
@@ -77,6 +54,8 @@ export default function History() {
   const toast = useToast()
   const dl = useDownload()
   const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(user?.role)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const linkedSession = searchParams.get('session_id')
   const [filters, setFilters] = useState({ site_id: '', status: '', plate: '', date_from: '', date_to: '' })
   const [page, setPage] = useState(0)
   const limit = 50
@@ -91,6 +70,12 @@ export default function History() {
     else if (k === 'status' && v === 'DEBT') params.set('debt', '1')
     else params.set(k, v)
   })
+  if (linkedSession) {
+    // A debt link opens the exact permitted stay, independently of prior filters/page.
+    for (const key of ['site_id', 'status', 'plate', 'date_from', 'date_to', 'debt', 'inner']) params.delete(key)
+    params.set('session_id', linkedSession)
+    params.set('offset', '0')
+  }
   const { data, reload } = useFetch(`/api/sessions?${params}`, { initial: { total: 0, rows: [] } })
 
   // Андуурч хаасан бүртгэлийг буцаан зогсоолд оруулах (status→OPEN, цаг үргэлжилнэ)
@@ -108,13 +93,9 @@ export default function History() {
 
   // Шүүлтүүрийн ҮР ДҮНГ БҮХЭЛД НЬ (хуудаслалтгүй) Excel болгож татна
   const exportExcel = () => {
-    const p = new URLSearchParams()
-    Object.entries(filters).forEach(([k, v]) => {
-      if (!v) return
-      if (k === 'status' && v === 'INNER') p.set('inner', 'ever')
-      else if (k === 'status' && v === 'DEBT') p.set('debt', '1')
-      else p.set(k, v)
-    })
+    const p = new URLSearchParams(params)
+    p.delete('limit')
+    p.delete('offset')
     const day = new Date().toISOString().slice(0, 10)
     dl(`/api/sessions/excel?${p}`, `tuuh_${day}.xlsx`)
   }
@@ -128,7 +109,12 @@ export default function History() {
           <FileSpreadsheet size={16} /> Excel татах
         </button>
       </div>
-      <div className={`card grid grid-cols-2 gap-3 ${sites.length > 1 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'}`}>
+      <p className="text-sm text-slate-300">Гарах камерын уншилт, зогсолтын хаалт, өрийн төлөв тусдаа. Камерт уншигдсан нь хаалт давж гарсны баталгаа биш.</p>
+      {linkedSession && <div className="card flex flex-wrap items-center gap-3 text-sm" role="status">
+        <span>Өр төлсөн гүйлгээний зогсолтыг харуулж байна.</span>
+        <button type="button" className="btn-secondary" onClick={() => { setSearchParams({}); setPage(0) }}>Бүх түүх рүү</button>
+      </div>}
+      {!linkedSession && <div className={`card grid grid-cols-2 gap-3 ${sites.length > 1 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'}`}>
         {sites.length > 1 && (
           <select className="input" value={filters.site_id} onChange={(e) => setFilters({ ...filters, site_id: e.target.value })} aria-label="Зогсоол">
             <option value="">Бүх зогсоол</option>
@@ -143,9 +129,9 @@ export default function History() {
         <DateRange className="" from={filters.date_from} to={filters.date_to}
           setFrom={(v) => setFilters({ ...filters, date_from: v })}
           setTo={(v) => setFilters({ ...filters, date_to: v })} />
-      </div>
+      </div>}
 
-      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Дүн', 'Төлбөр', 'Хөнгөлөлт',
+      <Table headers={['Дугаар', 'Зогсоол', 'Орсон', 'Гарах цаг / уншилт', 'Хугацаа', 'Зогсолтын дүн', 'Төлбөрийн задаргаа', 'Энэ зогсолтын өр', 'Хөнгөлөлт',
         'Төлөв', 'Хаасан', 'Шалтгаан', 'Зураг', ...(isAdmin ? [''] : [])]}
         empty={data.rows.length === 0}>
         {data.rows.map((s) => (
@@ -181,6 +167,7 @@ export default function History() {
             <td className="td font-mono text-xs">
               {fmtDate(s.exit_time)}
               {s.exit_device_name && <div className="text-[10px] font-sans text-sky-300/80">{s.exit_device_name}</div>}
+              <ExitReadCell session={s} />
             </td>
             <td className="td font-mono">
               {fmtDur(s.duration_minutes)}
@@ -197,16 +184,9 @@ export default function History() {
             </td>
             <td className="td font-mono font-semibold">{s.total_fee !== null ? `${fmt(s.total_fee)}₮` : '-'}</td>
             <td className="td">
-              <PaymentCell s={s} />
-              {/* Дугаарын ард төлөгдөөгүй нөхөн төлбөр (аль ч зогсоолын) —
-                  «Өртэй машин» шүүлтүүрт хэдээр өртэйг нь шууд харна */}
-              {s.debt && (
-                <div className="text-[10px] text-red-400"
-                  title={`Төлөгдөөгүй нөхөн төлбөр ${s.debt.count} ширхэг — Нэхэмжлэл хуудаснаас дэлгэрэнгүй`}>
-                  өр {fmt(s.debt.amount)}₮{s.debt.count > 1 ? ` (${s.debt.count})` : ''}
-                </div>
-              )}
+              <HistoryPaymentCell session={s} selectedPaymentId={searchParams.get('payment_id')} />
             </td>
+            <td className="td"><SessionDebtCell session={s} /></td>
             <td className="td text-xs">{s.discount_name || '-'}</td>
             <td className="td"><Badge value={s.status} /></td>
             <td className="td"><ClosedByCell s={s} /></td>
@@ -229,9 +209,9 @@ export default function History() {
       <div className="flex items-center justify-between text-sm text-slate-400">
         <span>Нийт: {fmt(data.total)} мөр</span>
         <div className="flex gap-2">
-          <button className="btn-secondary py-1" disabled={page === 0}
+          <button className="btn-secondary py-1" disabled={!!linkedSession || page === 0}
             onClick={() => setPage(page - 1)}>Өмнөх</button>
-          <button className="btn-secondary py-1" disabled={(page + 1) * limit >= data.total}
+          <button className="btn-secondary py-1" disabled={!!linkedSession || (page + 1) * limit >= data.total}
             onClick={() => setPage(page + 1)}>Дараах</button>
         </div>
       </div>
