@@ -371,8 +371,10 @@ def cancel_payment_intent(payment_id: str, body: dict, db: Session = Depends(get
 async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get_db),
                           partner: PartnerAuth = Depends(require_partner)):
     """Wallet өөрийн талд төлбөрийг амжилттай авсныг баталгаажуулна.
-    body: {transaction_id, amount}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
-    нээгдэхгүй). Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
+    body: {transaction_id, amount?}. Дүн зөрвөл татгалзана (буруу дүнгээр хаалт
+    нээгдэхгүй). `amount` талбар ОГТ байхгүй бол intent-ийн дүнгээр баталгаажуулна
+    (SocialPay 2026-10-13: зөвхөн transaction_id илгээж 422 авч байв); `amount`
+    ирсэн ч буруу/null бол 422 хэвээр. Idempotent — давхар дуудахад алдаа өгөхгүй PAID буцаана."""
     from .payments_router import _finalize_paid, _lock_payment, payment_outcome
     _require_pay(partner)
     payment = db.get(Payment, payment_id)
@@ -380,12 +382,15 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
         raise HTTPException(404, "Payment олдсонгүй")
     _check_payment_scope(db, partner, payment)
     from ..services.payment_validation import money, transaction_reference, claim_reference
-    paid_amount = money(body.get("amount"))
+    amount_defaulted = "amount" not in body
+    paid_amount = None if amount_defaulted else money(body.get("amount"))
     reference = transaction_reference(body.get("transaction_id"))
     # Мөрийг түгжинэ — wallet-ийн давхар confirm/retry зэрэг ирвэл нэг нь л finalize хийнэ
     payment = _lock_payment(db, payment.id)
     if payment is None:
         raise HTTPException(409, "Төлбөр боловсруулагдаж байна — дахин оролдоно уу")
+    if amount_defaulted:
+        paid_amount = money(payment.amount)
     if payment.status == "PAID":
         if payment.provider_payment_id != reference or paid_amount != money(payment.amount):
             raise HTTPException(409, "Өмнөх баталгаажуулалтын дугаар эсвэл дүн зөрлөө")
@@ -398,11 +403,13 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     claim_reference(db, payment, partner.key_id or f"legacy:{partner}", reference)
     hook = _webhook_url_for(db, partner)
     await _finalize_paid(db, payment, raw={"partner": partner, **{
-        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")}},
+        k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")},
+        **({"amount_defaulted": True} if amount_defaulted else {})},
         partner_notification=(hook, partner) if hook else None)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_PAID", entity="payment",
                     entity_id=payment.id, detail={"transaction_id": payment.provider_payment_id,
-                                                  "amount": float(payment.amount)}))
+                                                  "amount": float(payment.amount),
+                                                  **({"amount_defaulted": True} if amount_defaulted else {})}))
     db.commit()
     # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":

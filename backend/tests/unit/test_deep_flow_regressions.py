@@ -437,3 +437,26 @@ def test_partner_name_cannot_impersonate_internal_payment_instrument(db,provider
     db.add(existing);db.commit()
     with pytest.raises(HTTPException): IR.payment_status(existing.id,db,p)
 
+
+def test_partner_confirm_without_amount_uses_intent_amount(db):
+    # SocialPay (2026-10-13): зөвхөн {"transaction_id"} илгээж 422 авч байв — amount
+    # талбар ОГТ байхгүй бол intent-ийн дүнгээр баталгаажна; давтан дуудалт idempotent.
+    s=parking(db)
+    intent=IR.create_payment_intent({'session_id':s.id},db,partner())
+    out=asyncio.run(IR.confirm_payment(intent['payment_id'],{'transaction_id':'sp-tx-1'},db,partner()))
+    assert out['status']=='PAID'
+    p=db.get(M.Payment,intent['payment_id'])
+    assert float(p.amount)==float(intent['amount'])
+    again=asyncio.run(IR.confirm_payment(intent['payment_id'],{'transaction_id':'sp-tx-1'},db,partner()))
+    assert again['status']=='PAID'
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(IR.confirm_payment(intent['payment_id'],{'transaction_id':'sp-tx-2'},db,partner()))
+    assert error.value.status_code==409
+
+def test_partner_confirm_wrong_amount_still_rejected(db):
+    s=parking(db)
+    intent=IR.create_payment_intent({'session_id':s.id},db,partner())
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(IR.confirm_payment(intent['payment_id'],{'transaction_id':'sp-tx-3','amount':float(intent['amount'])+500},db,partner()))
+    assert error.value.status_code==400
+    assert db.query(M.Payment).filter_by(status='PAID').count()==0

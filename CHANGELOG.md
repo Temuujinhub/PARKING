@@ -26,6 +26,14 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-14 — Түншийн API: `/api/v1/payments/{id}/confirm`-д `amount` заавал биш
+
+SocialPay (Голомт) 10-13: `{"transaction_id"}` л илгээхэд 422 «Төлбөрийн дүн зөв…» авч байв.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | `amount` талбар байхгүй бол intent-ийн дүнгээр баталгаажна (raw/аудитад `amount_defaulted`); буруу/null `amount` → 422 хэвээр, зөрүүтэй дүн → 400 хэвээр | (энэ commit) | ⏳ | ⏳ |
+
 ## 2026-10-14 — e-Barimt: PAX POS терминал баримтаа өөрөө гаргана (бүх зогсоол, бүх түрээслэгч)
 
 Эзний эцсийн шийдвэр (10-14): PAX терминал (Ontime) POS аппаар авсан КАРТ, БЭЛЭН борлуулалт бүрд e-Barimt
