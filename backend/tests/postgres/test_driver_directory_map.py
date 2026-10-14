@@ -17,8 +17,9 @@ pytestmark = pytest.mark.skipif(not URL, reason='Disposable PostgreSQL DSN requi
 
 def test_location_upgrade_preserves_rows_and_paginates_tied_sort_keys(engine, monkeypatch):
     current=migrations.MIGRATIONS
-    assert 'google_maps_url' in current[-5]
-    monkeypatch.setattr(migrations,'MIGRATIONS',current[:-5])
+    # Байрлалаар биш агуулгаар — дараа нэмэгдсэн migration (2026-10-14 SocialPay) индексийг шилжүүлнэ
+    first=next(i for i,stmt in enumerate(current) if 'google_maps_url' in stmt)
+    monkeypatch.setattr(migrations,'MIGRATIONS',current[:first])
     migrations.run_migrations()
     with Session(engine) as db:
         user=M.User(username='synthetic',password_hash='unused',role='SUPER_ADMIN')

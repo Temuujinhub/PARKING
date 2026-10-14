@@ -1014,11 +1014,24 @@ def list_partner_keys(db: Session = Depends(get_db),
                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """DB-ийн түлхүүрүүд + .env-ийн хуучин партнерууд (зөвхөн нэрс).
     Түлхүүр өөрөө хэзээ ч буцаагдахгүй — үүсгэх мөчид л нэг удаа ил гарна."""
-    from ..models import PartnerKey
+    from sqlalchemy import func as _f
+    from ..models import PartnerKey, PartnerVehicle, PartnerVehicleEvent
+    from ..services.partner_vehicles import has_scope
     site_names = {s.id: s for s in db.query(ParkingSite).all()}
+    # SocialPay: идэвхтэй бүртгэлтэй машин + мэдэгдлийн төлөв (түлхүүр тутам)
+    vehicles = dict(db.query(PartnerVehicle.partner_key_id, _f.count(PartnerVehicle.id))
+                    .filter(PartnerVehicle.deleted_at.is_(None))
+                    .group_by(PartnerVehicle.partner_key_id).all())
+    ev_counts: dict = {}
+    for kid, status, n in (db.query(PartnerVehicleEvent.partner_key_id, PartnerVehicleEvent.status,
+                                    _f.count(PartnerVehicleEvent.id))
+                           .filter(PartnerVehicleEvent.status.in_(("PENDING", "RETRY", "SENDING", "DEAD")))
+                           .group_by(PartnerVehicleEvent.partner_key_id, PartnerVehicleEvent.status)):
+        ev_counts.setdefault(kid, {})[status] = n
     keys = []
     for k in db.query(PartnerKey).order_by(PartnerKey.created_at).all():
         site = site_names.get(k.site_id)
+        evc = ev_counts.get(k.id, {})
         keys.append({
             "id": k.id, "name": k.name, "key_prefix": k.key_prefix,
             "scopes": k.scopes, "site_id": k.site_id,
@@ -1026,6 +1039,12 @@ def list_partner_keys(db: Session = Depends(get_db),
             "site_name": site.name if site else None,
             "is_active": k.is_active,
             "webhook_url": k.webhook_url,
+            "vehicles_enabled": has_scope(k.scopes),
+            "vehicle_webhook_url": k.vehicle_webhook_url,
+            "vehicle_webhook_format": k.vehicle_webhook_format or "socialpay",
+            "vehicle_count": int(vehicles.get(k.id, 0)),
+            "vehicle_events_pending": int(sum(evc.get(x, 0) for x in ("PENDING", "RETRY", "SENDING"))),
+            "vehicle_events_dead": int(evc.get("DEAD", 0)),
             "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
             "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
             "created_by": k.created_by,
@@ -1045,6 +1064,8 @@ def create_partner_key(body: dict, db: Session = Depends(get_db),
     if not name or not name.replace("-", "").replace("_", "").isalnum():
         raise HTTPException(400, "Нэр латин үсэг/цифр/зураас байна (тайланд provider болно)")
     scopes = "read,pay" if body.get("can_pay", True) else "read"
+    if body.get("can_vehicles"):
+        scopes += ",vehicles"   # SocialPay: машин бүртгэх/устгах/bill + орох/гарах мэдэгдэл
     site_id = (body.get("site_id") or "").strip() or None
     if site_id and not db.get(ParkingSite, site_id):
         raise HTTPException(404, "Зогсоол олдсонгүй")
@@ -1111,6 +1132,135 @@ async def test_partner_webhook(key_id: str, body: dict | None = None, db: Sessio
            {"url": url, "ok": res["ok"], "status": res["status_code"], "error": res["error"]})
     db.commit()
     return {**res, "url": url, "sample_payment_id": pay.id if pay else None}
+
+
+# ─── Түншийн машин бүртгэл + орох/гарах мэдэгдэл (SocialPay, 2026-10-14) ───
+@router.post("/partner-keys/{key_id}/vehicles")
+def set_partner_vehicles(key_id: str, body: dict, db: Session = Depends(get_db),
+                         user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """«vehicles» эрх + мэдэгдлийн URL/формат. body: {enabled, url, format}.
+    url = түншийн {SP_URL}/parking/notification (хоосон = мэдэгдэл илгээхгүй, бүртгэл ажиллана).
+    format: 'socialpay' (spec-ийн яг JSON, анхдагч) | 'extended' (нэмэлт талбартай)."""
+    from ..models import PartnerKey
+    from ..services.partner_vehicles import FORMATS, SCOPE
+    enforce_global_settings(user)   # бүх зогсоолын түнш — site-ийн админ биш
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    scopes = [x.strip() for x in (k.scopes or "").split(",") if x.strip()]
+    if "enabled" in body:
+        scopes = [x for x in scopes if x != SCOPE] + ([SCOPE] if body.get("enabled") else [])
+    if "url" in body:
+        url = str(body.get("url") or "").strip()
+        if url and not url.lower().startswith(("https://", "http://")):
+            raise HTTPException(400, "URL http(s)://-ээр эхлэх ёстой")
+        if len(url) > 300 or any(ch.isspace() for ch in url):
+            raise HTTPException(400, "URL буруу (300 тэмдэгт хүртэл, зайгүй)")
+        k.vehicle_webhook_url = url or None
+    if "format" in body:
+        fmt = str(body.get("format") or "socialpay").strip().lower()
+        if fmt not in FORMATS:
+            raise HTTPException(400, f"format: {', '.join(FORMATS)}")
+        k.vehicle_webhook_format = fmt
+    k.scopes = ",".join(dict.fromkeys(scopes)) or "read"
+    _audit(db, user, "PARTNER_VEHICLES_SET", "partner_key", k.id,
+           {"name": k.name, "scopes": k.scopes, "url": k.vehicle_webhook_url,
+            "format": k.vehicle_webhook_format})
+    db.commit()
+    return {"ok": True, "scopes": k.scopes, "vehicle_webhook_url": k.vehicle_webhook_url,
+            "vehicle_webhook_format": k.vehicle_webhook_format or "socialpay"}
+
+
+@router.post("/partner-keys/{key_id}/vehicles/test")
+async def test_partner_vehicles_webhook(key_id: str, body: dict | None = None,
+                                        db: Session = Depends(get_db),
+                                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Мэдэгдлийн URL-ийг ТУРШИНА: жишээ ENTRY ({"data":{"plateNo":"0000ТЕС",…}})
+    илгээж HTTP код, Success/Message-ийг буцаана (IP whitelist шалгахад)."""
+    import uuid as _uuid
+    from ..models import PartnerKey
+    from ..services.partner_vehicles import iso_z, post_event
+    enforce_global_settings(user)
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    url = ((body or {}).get("url") or k.vehicle_webhook_url or "").strip()
+    if not url.lower().startswith(("https://", "http://")):
+        raise HTTPException(400, "Мэдэгдлийн URL тохируулаагүй")
+    plate = str((body or {}).get("plate") or "0000ТЕС")[:20]
+    payload = {"data": {"plateNo": plate, "enteredDate": iso_z(datetime.utcnow())}}
+    res = await post_event(url, payload, f"test-{_uuid.uuid4()}", "ENTRY")
+    _audit(db, user, "PARTNER_VEHICLES_TEST", "partner_key", k.id,
+           {"url": url, "ok": res["ok"], "status": res["status_code"], "error": res["error"],
+            "message": res["message"]})
+    db.commit()
+    return {**res, "url": url, "payload": payload}
+
+
+@router.get("/partner-keys/{key_id}/vehicle-events")
+def list_partner_vehicle_events(key_id: str, status: str = "", plate: str = "", limit: int = 50,
+                                db: Session = Depends(get_db),
+                                user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Мэдэгдлийн outbox (шинээс хуучин руу) — DEAD/RETRY-г харж, дахин илгээх."""
+    from ..models import PartnerVehicleEvent as E
+    from ..session_logic import normalize_plate
+    enforce_global_settings(user)   # бусад түрээслэгчийн машины дугаар/хөдөлгөөн
+    q = db.query(E).filter(E.partner_key_id == key_id)
+    if status:
+        q = q.filter(E.status == status.strip().upper())
+    if plate:
+        q = q.filter(E.plate_number == normalize_plate(plate))
+    rows = q.order_by(E.created_at.desc()).limit(max(1, min(int(limit or 50), 200))).all()
+    return {"events": [{
+        "id": e.id, "event": e.event, "plate": e.plate_number, "session_id": e.session_id,
+        "event_time": e.event_time.isoformat() if e.event_time else None,
+        "status": e.status, "attempts": e.attempts, "payload": e.payload,
+        "last_error": e.last_error, "last_http_status": e.last_http_status,
+        "response_message": e.response_message,
+        "next_attempt_at": e.next_attempt_at.isoformat() if e.next_attempt_at else None,
+        "delivered_at": e.delivered_at.isoformat() if e.delivered_at else None,
+        "created_at": e.created_at.isoformat() if e.created_at else None} for e in rows]}
+
+
+@router.post("/partner-vehicle-events/{event_id}/retry")
+def retry_partner_vehicle_event(event_id: str, db: Session = Depends(get_db),
+                                user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """DEAD/SKIPPED/RETRY мэдэгдлийг ОДОО дахин илгээх дараалалд оруулна (нэг оролдлого;
+    24ц-ийн цонх өнгөрсөн бол дахин бүтэлгүйтвэл шууд DEAD)."""
+    from ..models import PartnerVehicleEvent as E
+    enforce_global_settings(user)
+    ev = db.query(E).filter(E.id == event_id).with_for_update().first()
+    if not ev:
+        raise HTTPException(404, "Мэдэгдэл олдсонгүй")
+    if ev.status in ("DONE", "SENDING"):
+        raise HTTPException(409, f"Төлөв {ev.status} — дахин илгээх шаардлагагүй")
+    prev = ev.status
+    ev.status, ev.next_attempt_at, ev.lease_token, ev.lease_until = (
+        "PENDING", datetime.utcnow(), None, None)
+    _audit(db, user, "PARTNER_VEHICLE_EVENT_RETRY", "partner_vehicle_event", ev.id,
+           {"from": prev, "plate": ev.plate_number, "event": ev.event})
+    db.commit()
+    return {"ok": True, "status": ev.status}
+
+
+@router.get("/partner-keys/{key_id}/vehicles")
+def list_partner_vehicles(key_id: str, plate: str = "", user_id: str = "", limit: int = 100,
+                          db: Session = Depends(get_db),
+                          user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Түншээр бүртгүүлсэн машинууд (устгасныг ч) — дэмжлэгийн асуултад."""
+    from ..models import PartnerVehicle as V
+    from ..session_logic import normalize_plate
+    enforce_global_settings(user)   # хэрэглэгчийн ID + дугаар — хувийн мэдээлэл
+    q = db.query(V).filter(V.partner_key_id == key_id)
+    if plate:
+        q = q.filter(V.plate_number == normalize_plate(plate))
+    if user_id:
+        q = q.filter(V.external_user_id == user_id.strip())
+    rows = q.order_by(V.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
+    return {"vehicles": [{
+        "id": v.id, "plate": v.plate_number, "user_id": v.external_user_id, "via": v.created_via,
+        "created_at": v.created_at.isoformat() if v.created_at else None,
+        "deleted_at": v.deleted_at.isoformat() if v.deleted_at else None} for v in rows]}
 
 
 @router.post("/partner-keys/{key_id}/revoke")

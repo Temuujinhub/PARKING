@@ -104,7 +104,10 @@ class PartnerAuth(str):
     key_id: str | None = None
 
     def can_pay(self) -> bool:
-        return "pay" in {scope.strip() for scope in self.scopes.split(",")}
+        return self.has_scope("pay")
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in {s.strip() for s in (self.scopes or "").split(",")}
 
 
 def _auth_fail(request: Request):
@@ -191,9 +194,8 @@ def _session_payload(db: Session, s: ParkingSession) -> dict:
     }
 
 
-@router.get("/sites")
-def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
-    """Authenticated map catalogue. Occupancy is a session estimate, not a sensor reading."""
+def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict], str]:
+    """/sites ба /socialpay/parkings-ийн нэг эх: (ORM site-ууд, мөрүүд, sampled_at)."""
     from ..services.site_location import occupancy_counts, occupied_count
     q = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
     if partner.site_id:
@@ -219,6 +221,13 @@ def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(req
             "occupancy_source": "open_sessions", "occupancy_is_estimate": True,
             "sampled_at": sampled_at,
         })
+    return sites, out, sampled_at
+
+
+@router.get("/sites")
+def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
+    """Authenticated map catalogue. Occupancy is a session estimate, not a sensor reading."""
+    _, out, sampled_at = site_catalog(db, partner)
     return {"sites": out, "sampled_at": sampled_at}
 
 

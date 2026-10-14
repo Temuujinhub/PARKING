@@ -395,6 +395,35 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_driver_directory_cursor ON registered_drivers ((coalesce(company, '')), plate_number, id)",
     "CREATE INDEX IF NOT EXISTS ix_driver_directory_site ON registered_drivers (site_id, (coalesce(company, '')), plate_number, id)",
 
+    # 2026-10-14 SocialPay: түншийн бүртгүүлсэн машин + орох/гарах мэдэгдлийн outbox.
+    # Хоёр хүснэгт ШИНЭ (create_all дээр үүснэ, хоосон) — энд ledger-д бүртгэнэ;
+    # partner_keys (2 мөр)-д nullable багана нэмнэ. Хуучин мөр/мөнгөн өгөгдөл хөндөхгүй.
+    "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS vehicle_webhook_url VARCHAR(300)",
+    "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS vehicle_webhook_format VARCHAR(20)",
+    "CREATE TABLE IF NOT EXISTS partner_vehicles (id UUID PRIMARY KEY, "
+    "partner_key_id UUID NOT NULL REFERENCES partner_keys(id), plate_number VARCHAR(20) NOT NULL, "
+    "external_user_id VARCHAR(64) NOT NULL, created_via VARCHAR(30) NOT NULL, "
+    "created_at TIMESTAMP NOT NULL, deleted_at TIMESTAMP)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_partner_vehicle_active ON partner_vehicles "
+    "(partner_key_id, plate_number, external_user_id) WHERE deleted_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicles_plate_active ON partner_vehicles (plate_number) "
+    "WHERE deleted_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicles_user ON partner_vehicles (partner_key_id, external_user_id)",
+    "CREATE TABLE IF NOT EXISTS partner_vehicle_events (id UUID PRIMARY KEY, "
+    "job_key VARCHAR(160) NOT NULL UNIQUE, partner_key_id UUID NOT NULL REFERENCES partner_keys(id), "
+    "session_id UUID NOT NULL, plate_number VARCHAR(20) NOT NULL, event VARCHAR(10) NOT NULL, "
+    "event_time TIMESTAMP NOT NULL, status VARCHAR(20) NOT NULL, attempts INTEGER NOT NULL, "
+    "next_attempt_at TIMESTAMP NOT NULL, lease_until TIMESTAMP, lease_token VARCHAR(36), "
+    "payload JSON NOT NULL, awaiting_exit BOOLEAN NOT NULL, last_error TEXT, last_http_status INTEGER, "
+    "response_message VARCHAR(300), delivered_at TIMESTAMP, created_at TIMESTAMP NOT NULL, "
+    "updated_at TIMESTAMP NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_due ON partner_vehicle_events (status, next_attempt_at)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_order ON partner_vehicle_events "
+    "(partner_key_id, plate_number, event_time)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_awaiting ON partner_vehicle_events (awaiting_exit) "
+    "WHERE awaiting_exit",
+    "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_session_id ON partner_vehicle_events (session_id)",
+
 ]
 
 
@@ -463,6 +492,8 @@ def check_ready():
         conn.execute(text("SELECT hospital_grant_id, hospital_allowance_minutes, hospital_used_minutes, "
                           "hospital_fee_snapshot FROM parking_sessions LIMIT 0"))
         conn.execute(text("SELECT benefit_date, daily_minutes FROM hospital_daily_grants LIMIT 0"))
+        conn.execute(text("SELECT vehicle_webhook_url, vehicle_webhook_format FROM partner_keys LIMIT 0"))
+        conn.execute(text("SELECT job_key, status, awaiting_exit FROM partner_vehicle_events LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'
