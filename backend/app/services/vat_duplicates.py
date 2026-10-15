@@ -18,6 +18,7 @@ msgbill-ээр (…10045952) ДАХИН баримт гаргасан. Нэг б
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
@@ -156,24 +157,45 @@ def analyze(tax: list, ours: list, probe: list, *, shifts: list[float], tol: int
     r = VR.best_shift(tax, ours, shifts, tol, probe=probe)
     left = [t for t in tax if not t["used"]]
     # Цуцлагдсан манай баримттай холбогдсон мөрийн төлбөр ч «манай баримт файлд бий»
-    matched_pay_ids = {t["ours"][1].id for t in tax if t.get("ours")}
-    reg_sites = VR.foreign_register_sites(left, probe, tol, r["shift"])
-    explained = VR.explain_unmatched_tax(left, probe, r["shift"], tol, matched_pay_ids, scope_ids,
-                                         register_sites=reg_sites)
-    dups = VR.duplicate_list(explained, probe, matched_pay_ids, settings.tz_offset_hours)
+    matched_pay_ids = ours_in_file(tax, ours)
     # «Терминал гаргасан» гэж бүртгэсэн төлбөр ТЕГ-т баримттай юу — CLI-ийн нотолгоотой (--evidence,
     # vat_reissue_missing) НЭГ хосолт (terminal_pairs): UI-ийн «ТЕГ-т баримт алга» жагсаалт ба
     # «Систем баримт гаргах» нь хэрэгсэлтэй зөрөхгүй. VR.terminal_check-ийн explain-ийн хос нь
     # «кассын зогсоол» олонхоор эрэмбэлдэг тул олон зогсоолын нэг Ontime кассанд худал «алга» гаргана.
     regs, _qr = terminal_registers(tax, r, probe, tol)
     pos = [p for p in probe if scope_ids is None or p.get("site_id") in scope_ids]
+    paired, stats, _contested = site_aware_pairs([t for t in tax if t.get("group") in regs], pos, tol)
+    # Терминалын касс аль зогсоолынх вэ — ЗОГСООЛ × ӨДРӨӨР (2026-10-15): 10-14-өөс нэг Ontime касс
+    # (…10002990) 5 зогсоолд үйлчилдэг тул «олонхын нэг зогсоол» (foreign_register_sites) олдохгүй →
+    # БҮХ мөр «зогсоол тодорхойгүй — цуцлахгүй» болж жинхэнэ давхардал ч илрэхгүй байв. POS аппын
+    # борлуулалттай огт хосолоогүй касс (хуучин веб кассын үе) — олонхын дүрмээрээ
+    reg_sites = VR.foreign_register_sites(left, probe, tol, r["shift"])
+    reg_sites.update(register_attribution(regs, paired, stats, pos))
+    explained = VR.explain_unmatched_tax(left, probe, r["shift"], tol, matched_pay_ids, scope_ids,
+                                         register_sites=reg_sites)
+    dups = VR.duplicate_list(explained, probe, matched_pay_ids, settings.tz_offset_hours)
     d0, d1 = file_days(tax)
-    term = terminal_summary(tax, probe, terminal_pairs([t for t in tax if t.get("group") in regs],
-                                                       pos, tol),
-                            tol, r["shift"], scope_ids,
+    term = terminal_summary(tax, probe, paired, tol, r["shift"], scope_ids,
                             window=terminal_window(tax, d0, d1, regs, shifts, tol, r["shift"]))
     return {"r": r, "left": left, "explained": explained, "matched_pay_ids": matched_pay_ids,
             "register_sites": reg_sites, "duplicates": dups, "terminal": term}
+
+
+def ours_in_file(tax: list, ours: list) -> set:
+    """«Манай баримт ч ЭНЭ ТЕГ файлд бий» төлбөрүүд — давхардлын ШУУД нотолгоо (2026-10-15).
+    ДДТД нь файлын дугаарлалттай (ижил угтвар, ж: 0152…) манай баримтыг ЗӨВХӨН ДДТД-ээр: цаг+дүнгийн
+    тааралт (match_pass) нь өөр борлуулалтын/давхар мөр байж болно (audit1014 × 10-15-ны экспорт:
+    --file-ийн 41 «давхардлын» 25-д манай баримт экспортод огт алга байв — цуцалбал цорын ганц
+    баримт нь болох байсан). 09-07-ноос өмнөх 0291… багцын дугаартай (ДДТД-ээр шалгах боломжгүй)
+    баримтыг цаг+дүнгээр (хуучнаараа)."""
+    file_ddtds = {t["ddtd"] for t in tax}
+    prefixes = {d[:4] for d in file_ddtds if VR.is_teg_ddtd(d)}
+    out = {o[1].id for o in ours if receipt_numbers(o[0]) & file_ddtds}
+    for t in tax:
+        o = t.get("ours")
+        if o is not None and not any(n[:4] in prefixes for n in receipt_numbers(o[0])):
+            out.add(o[1].id)
+    return out
 
 
 def reconcile_db(db, tax: list, *, shifts: list[float], tol: int, ours_sites=None,
@@ -715,7 +737,24 @@ NEAR_MISS_AFTER = timedelta(hours=2)
 TERMINAL_LAG_SLACK = timedelta(seconds=10)
 OWN_MATCH_SHARE = 0.5       # файлын МАНАЙ кассын мөрийн ≥50% манай баримттай таарвал л тэр
                             # түрээслэгчийн экспорт гэж үзнэ (msgbill/QPay касс түрээслэгчдэд
-                            # НИЙТЛЭГ: …10045952/…10014863 — санамсаргүй тааралтаар бус)
+                            # НИЙТЛЭГ: …10045952/…10014863 — санамсаргүй тааралтаар бус). ФАЙЛЫН
+                            # түвшинд (2026-10-15): 9-р сарын файлын 09-01..02 хэсэгт QPay олноор нь
+                            # дахин илгээсэн мөрүүдээс болж хэсгийн хувь 45% болж тэр 2 хоног
+                            # нотолгоонд огт орохгүй байв (файлын нийт 89%)
+# Зогсоол × өдрийн терминалын хэрэглээ (2026-10-15): тэр өдрийн POS аппын карт/бэлэн борлуулалтын
+# ≥10% (ба ≥1) нь терминалын мөртэй хосолсон бол тэр зогсоол тэр өдөр терминалаар баримт хэвлэсэн.
+# Нэг Ontime касс (…10002990) 5 зогсоолд үйлчилдэг; 3HOSPITAL огт Ontime-гүй (≤2% санамсаргүй
+# хос) ч бусад зогсоолын хосгүй мөрөөс болж 517 борлуулалт нь «ТОДОРХОЙГҮЙ» болж байв.
+SITE_DAY_MIN_SHARE = 0.10
+SITE_DAY_MIN_PAIRS = 1
+# Манай кассын (msgbill/QPay) мөр төлбөр/манай баримт үүссэнээс −60с…+120с (msgbill синхрон үед 1–5с;
+# 09-07-нд мөр төлбөрөөс 14с ӨМНӨ ч байв) — ДДТД-ээр танигдаагүй мөрийг (09-07-ноос өмнөх
+# msgbill-ийн багцын дугаар 0291…, манайд бүртгэлгүй давхар баримт) төлбөртэй хосолно
+OWN_TIME_BEFORE = timedelta(seconds=60)
+OWN_TIME_TOL = 120
+# msgbill нэг төлбөрт ХОЁР баримт гаргасан (манайд нэг нь л бүртгэлтэй) — ДДТД-ийн дугаар нь 1–2-оор
+# зөрүүтэй (бодит 9/10-р сар: 323/324 хос)
+TWIN_COUNTER_GAP = 2
 
 
 def _register_qr_share(tax: list, reg: str, probe: list, tol: int) -> tuple[int, int]:
@@ -729,24 +768,201 @@ def _register_qr_share(tax: list, reg: str, probe: list, tol: int) -> tuple[int,
 EVIDENCE_CHUNK_DAYS = 2     # урт (сарын) экспортыг хэдэн хоногоор хувааж тулгах вэ — санах ой
 
 
+def ub_day(at: datetime) -> str:
+    return (at + timedelta(hours=settings.tz_offset_hours)).date().isoformat()
+
+
+def _pos_sales(probe: list) -> list:
+    """Терминал баримт хэвлэдэг цорын ганц борлуулалт — POS аппын карт/бэлэн."""
+    return [p for p in probe if p.get("pos_app") and (p.get("method") or "").upper() in POS_APP_METHODS
+            and p.get("paid_at") is not None]
+
+
+def site_day_stats(pos: list, paired) -> dict:
+    """{(site_id, УБ өдөр): [POS аппын карт/бэлэн борлуулалт, терминалын мөртэй хосолсон]} — тэр
+    өдрийн БҮХ борлуулалтаар (терминалын мөрийн хүрээгээр биш: 10-09-нд Ontime 4 мөр л байсан тул
+    мөрийн нарийн хүрээнд 3HOSPITAL-ийн 5 борлуулалтын 1 санамсаргүй хос = 20% болж байв; өдрөөр 1/300)."""
+    out: dict = {}
+    for p in _pos_sales(pos):
+        c = out.setdefault((p.get("site_id"), ub_day(p["paid_at"])), [0, 0])
+        c[0] += 1
+        c[1] += p["id"] in paired
+    return out
+
+
+def terminal_days(stats: dict) -> set:
+    """Терминалаар баримт хэвлэсэн (зогсоол, УБ өдөр) — хосолсон ≥SITE_DAY_MIN_PAIRS, ≥SITE_DAY_MIN_SHARE."""
+    return {k for k, (n, hit) in stats.items()
+            if hit >= SITE_DAY_MIN_PAIRS and hit >= SITE_DAY_MIN_SHARE * n}
+
+
+def site_aware_pairs(rows: list, probe: list, tol: int) -> tuple[dict, dict, set]:
+    """Терминалын мөр ↔ POS аппын борлуулалт, ЗОГСООЛ × ӨДРИЙН хэрэглээгээр (2026-10-15):
+    (1) хамгийн ойроор хосолж зогсоол бүрийн тэр өдрийн терминалын хэрэглээг тооцно; (2) тэр өдөр
+    терминалаа АШИГЛАСАН зогсоолын борлуулалтыг ТҮРҮҮЛЖ дахин хосолно. Эс бөгөөс терминалгүй
+    зогсоолын (3HOSPITAL ~300 борлуулалт/өдөр) ижил дүнтэй борлуулалт жинхэнэ борлуулалтаас мөрийг
+    «булааж» тэр жинхэнэ нь «терминалын мөргүй» → ДАХИН гаргагдаж давхардана.
+    Буцаах ({payment_id: мөр}, site_day_stats, {1-р алхамд хосолсон ч 2-т мөрөө алдсан төлбөр} —
+    мөр аль борлуулалтынх нь маргаантай → evidence_split ТОДОРХОЙГҮЙ (дахин гаргахгүй))."""
+    first = terminal_pairs(rows, probe, tol)
+    if not rows:
+        return first, {}, set()
+    prefer = terminal_days(site_day_stats(probe, first))
+    paired = terminal_pairs(rows, probe, tol, prefer=prefer)
+    return paired, site_day_stats(probe, paired), set(first) - set(paired)
+
+
+def register_attribution(regs: dict, paired: dict, stats: dict, pos: list) -> dict:
+    """Терминалын касс бүр АЛЬ зогсоолынх вэ — ЗОГСООЛ × ӨДРӨӨР (vat_recon.explain_unmatched_tax-ийн
+    «allow»): тэр өдөр терминалаар баримт хэвлэсэн (terminal_days) бөгөөд энэ кассын мөр тэр
+    зогсоолын борлуулалттай хосолсон «зогсоол|УБ өдөр». Тэнд л POS аппын борлуулалтын давхардал
+    цуцлагдана; бусад нь «тэр өдөр терминалгүй — гараар». UI-д site_id = хамгийн олон хостой зогсоол
+    (харуулахад), site_name = бүх зогсоол. POS аппын борлуулалттай огт хосолоогүй касс энд ОРОХГҮЙ
+    (foreign_register_sites-ийн олонхын дүрэм — терминал веб кассын борлуулалтад хэвлэдэг байсан үе)."""
+    ok = terminal_days(stats)
+    by_id = {p["id"]: p for p in pos}
+    names = {p.get("site_id"): p.get("site_name") or p.get("site_code") or "" for p in pos}
+    out = {}
+    for reg in regs:
+        hits = Counter()
+        for pid, row in paired.items():
+            p = by_id.get(pid)
+            if p is not None and row.get("group") == reg:
+                hits[(p.get("site_id"), ub_day(p["paid_at"]))] += 1
+        allow = sorted(f"{sid}|{day}" for sid, day in hits if (sid, day) in ok)
+        per_site = Counter()
+        for (sid, day), n in hits.items():
+            if (sid, day) in ok:
+                per_site[sid] += n
+        total = sum(hits.values())
+        if not total:
+            continue                      # POS аппын хосгүй — хуучин (олонхын) дүрэм хэвээр
+        out[reg] = {"site_id": per_site.most_common(1)[0][0] if per_site else None,
+                    "site_name": ", ".join(names.get(s, "") for s, _n in per_site.most_common()),
+                    "share": round(sum(per_site.values()) / total, 3),
+                    "hits": total, "sites": len(per_site), "allow": allow,
+                    "tz_hours": settings.tz_offset_hours}
+    return out
+
+
+def receipt_numbers(rec) -> set:
+    """Манай баримтын ТЕГ экспортод харагдах дугаар(ууд): ebarimt_id + msgbill-ийн outbox/webhook
+    receipt_no (33 оронтой ТЕГ-ийн хэлбэртэй бол л). 09-07-ноос өмнөх msgbill баримт ebarimt_id-д
+    багцын дугаар (0291…) хадгалсан — ТЕГ-ийн ДДТД (0152…) биш тул ДДТД-ээр олдохгүй (цаг+дүнгээр)."""
+    nums = {getattr(rec, "ebarimt_id", None)}
+    raw = getattr(rec, "raw", None)
+    if isinstance(raw, dict):
+        for k in ("outbox", "webhook.receipt.created"):
+            v = raw.get(k)
+            if isinstance(v, dict):
+                nums.add(v.get("receipt_no"))
+    return {str(n).strip() for n in nums if n and VR.is_teg_ddtd(n)}
+
+
+def _ddtd_parts(n: str) -> tuple[str, int, str]:
+    """ТЕГ-ийн 33 оронтой ДДТД → (угтвар [:16], дугаар [16:25], касс [25:])."""
+    return n[:16], int(n[16:25]), n[25:]
+
+
+def own_presence(db, core: list, a: dict) -> dict:
+    """Хэсгийн ҮНДСЭН мөрүүдээс МАНАЙ кассын (msgbill …10045952, QPay …10014863 — манай баримтын
+    ДДТД-ийн касс) мөр АЛЬ төлбөрийнх вэ → тэр борлуулалт ТЕГ-т баримттай (2026-10-15). Манай баримт
+    (идэвхтэй, эсвэл цуцалсан ч экспортод ҮЛДСЭН) эсвэл msgbill-ийн давхар баримт нь экспортод байхад
+    vat_reissue_missing ДАХИН гаргавал тэр борлуулалт ТЕГ-т 2 баримттай болно (бодит 10-15-ны
+    экспорт: 1,680 борлуулалт / 6.71 сая₮). Дараалал (мөр бүр НЭГ л төлбөрт):
+      1. ДДТД — мөрийн ДДТД = манай баримтын ebarimt_id / outbox / webhook receipt_no (DB-ээс ч
+         хайна — төлбөрөөс хойш олон цагийн дараа гарсан баримт);
+      2. TWIN — msgbill-ийн давхар баримт: манайд бүртгэлгүй мөрийн ДДТД манай баримтынхаас дугаараар
+         1–2 зөрүүтэй (ижил угтвар/касс/дүн; хэд таарвал баримт үүссэн цагаар хамгийн ойр);
+      3. TIME — үлдсэн мөр (09-07-ноос өмнөх 0291… багцын дугаартай баримт г.м) тэр кассаар баримт
+         гаргасан төлбөртэй (төлсөн эсвэл манай баримт ҮҮССЭН цагаас −60с…+120с) дүнгээр, нэг-нэгээр,
+         хамгийн ойроор (ДДТД-ээр таарсан төлбөр ч оролцоно — илүү мөрийг өөртөө «шингээж» өөр
+         борлуулалтыг худал «бий» болгохгүй).
+    match_pass/explain_unmatched_tax-ийн хосоос (EXTRA_SAME_REGISTER г.м) үл хамаарна — тэдгээр нь
+    цуцлагдсан баримтыг хамгийн сүүлд, «тайлбаргүй» төлбөрийг түрүүлж оноодог тул давхар баримтыг
+    өөр борлуулалт руу түлхэж болно. Буцаах {payment_id: "DDTD" | "TWIN" | "TIME"}."""
+    tail = a["r"].get("tail")
+    own_regs = set(a["r"].get("own_registers") or [])
+    rows = [t for t in core if t.get("group") in own_regs and VR.is_teg_ddtd(t.get("ddtd"))]
+    if not rows:
+        return {}
+    index, known = {}, {}
+    for o in a.get("ours") or []:
+        rec, pay = o[0], o[1]
+        for n in receipt_numbers(rec):
+            index.setdefault(n, pay.id)
+            pre, cnt, reg = _ddtd_parts(n)
+            known.setdefault((pre, reg), []).append((cnt, float(rec.amount or 0), pay.id,
+                                                     rec.created_at or pay.paid_at))
+    want = sorted({t["ddtd"] for t in rows} - set(index))
+    for i in range(0, len(want), 1000):
+        for num, pid in (db.query(VatReceipt.ebarimt_id, VatReceipt.payment_id)
+                         .filter(VatReceipt.ebarimt_id.in_(want[i:i + 1000])).all()):
+            index.setdefault(num, pid)
+    out: dict = {}
+    rest = []
+    for t in rows:
+        pid = index.get(t["ddtd"])
+        if pid is not None:
+            out[pid] = "DDTD"
+        else:
+            rest.append(t)
+    left = []
+    for t in rest:
+        pre, cnt, reg = _ddtd_parts(t["ddtd"])
+        at = VR._when(t)
+        # Ижил дүнтэй баримт олноор дараалж гарсан үед (3HOSPITAL 09-25: …23, 25, 27, 29 манайх,
+        # …24, 26, 28 давхар) дугаар 1-ээр хоёр талдаа таарна — баримт ҮҮССЭН цагаар хамгийн ойрыг
+        near = [(abs((at - made).total_seconds()) if made else 1e9, abs(c - cnt), pid)
+                for c, amt, pid, made in known.get((pre, reg), ())
+                if 0 < abs(c - cnt) <= TWIN_COUNTER_GAP and abs(amt - float(t["amount"])) < 1]
+        if near:
+            out.setdefault(min(near)[2], "TWIN")
+        else:
+            left.append(t)
+    if left:
+        # Зангуу: төлбөрийн төлсөн цаг + тэр кассын манай баримт бүрийн ҮҮССЭН цаг (outbox-оос хойш
+        # баримт төлбөрөөс хожуу; 09-07-нд мөр төлбөрөөс өмнө)
+        items = []                                 # (цаг, дүн, payment_id, касс)
+        for p in a.get("probe") or []:
+            if p.get("paid_at") is not None and p.get("system_ddtd"):
+                for reg in {VR.receipt_register(d, tail) for d in p.get("receipts") or []} - {None}:
+                    items.append((p["paid_at"], float(p["amount"]), p["id"], reg))
+        for o in a.get("ours") or []:
+            reg = VR.receipt_register(o[0].ebarimt_id, tail)
+            if reg and o[0].created_at is not None:
+                items.append((o[0].created_at, float(o[0].amount or 0), o[1].id, reg))
+        times = [VR._when(t) for t in left]
+        pairs = VR._pairs(times, [t["amount"] for t in left], [x[0] for x in items], [x[1] for x in items],
+                          OWN_TIME_TOL,
+                          ok=lambda i, j: (times[i] >= items[j][0] - OWN_TIME_BEFORE
+                                           and left[i].get("group") == items[j][3]))
+        for _i, j, _d in VR._assign(pairs):
+            out.setdefault(items[j][2], "TIME")
+    return out
+
+
 def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
                     shifts: list[float], core: list | None = None,
                     pos_users: set | None = None) -> dict:
     """Нэг хэсэг (хэдэн хоног) мөрийн нотолгоо — terminal_evidence-ийн дүрмээр.
     core: хэсгийн ҮНДСЭН мөрүүд (хамрах хүрээ, нотолгоо зөвхөн тэдний хугацаанд); tax нь
-    хөрш хэсгээс нэмсэн нөөц мөртэй (хилийн борлуулалтын терминалын мөр орохын тулд)."""
+    хөрш хэсгээс нэмсэн нөөц мөртэй (хилийн борлуулалтын терминалын мөр орохын тулд).
+    Түрээслэгчийн хувийг (OWN_MATCH_SHARE) энд ШИЙДЭХГҮЙ — "conf"/"own_rows"-ийг буцааж
+    terminal_evidence ФАЙЛЫН түвшинд шийднэ ("low_share" — хэсгийн хувь бага)."""
     from collections import Counter
     st = {"rows": len(tax), "usable": False, "window": None, "tenant": None, "own_registers": set(),
           "terminal_registers": {}, "qr_registers": set(), "terminal_matched": 0,
           "matched_ours": 0, "own_rows": 0, "note": "", "hits": set(), "term_rows": [],
-          "paired_rows": set()}
+          "paired_rows": set(), "conf": Counter(), "low_share": False, "own_present": {},
+          "sales": {}, "contested": set()}
     a = reconcile_db(db, tax, shifts=shifts, tol=tol, ours_sites=site_ids,
                      probe_sites=site_ids, scope_ids=set(site_ids), pos_users=pos_users)
     r = a["r"]
     tail = r.get("tail")
     pay_site = {p["id"]: p["site_id"] for p in a["probe"]}
     core = tax if core is None else core
-    conf, conf_core = Counter(), 0
+    conf = Counter()
     core_ids = {id(t) for t in core}
     for t in tax:                           # шийдвэрт нөөц мөр ч (ижил файл); статистикт үндсэн л
         o = t.get("ours")
@@ -755,13 +971,14 @@ def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
         sid = pay_site.get(o[1].id) or getattr(o[1], "site_id", None)
         if sid in tenant_of:
             conf[tenant_of[sid]] += 1
-            conf_core += id(t) in core_ids
+            if id(t) in core_ids:
+                st["conf"][tenant_of[sid]] += 1
     own_regs = {VR.receipt_register(t["ours"][0].ebarimt_id, tail) for t in tax
                 if t.get("ours")} - {None}
     st["own_registers"] = own_regs
     own_all = sum(1 for t in tax if t.get("group") in own_regs)
     st["own_rows"] = sum(1 for t in core if t.get("group") in own_regs)
-    st["matched_ours"] = conf_core
+    st["matched_ours"] = sum(st["conf"].values())
     if not conf:
         st["note"] = ("манай баримттай (ДДТД-ийн кассаар) таарсан мөр алга — өөр ТТД-ийн экспорт, "
                       "эсвэл манай кассын мөрийг шүүж хаясан")
@@ -769,10 +986,13 @@ def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
     top, n = conf.most_common(1)[0]
     total = sum(conf.values())
     share = total / max(1, own_all)
-    if n * 2 <= total or share < OWN_MATCH_SHARE:
-        st["note"] = (f"манай кассын {own_all} мөрийн {total} ({share:.0%}) л "
-                      "манай баримттай таарсан — энэ түрээслэгчийн экспорт гэж батлагдсангүй")
+    if n * 2 <= total:
+        st["note"] = (f"манай кассын тааралт түрээслэгчдэд тарсан ({n}/{total}) — энэ түрээслэгчийн "
+                      "экспорт гэж батлагдсангүй")
         return st
+    if share < OWN_MATCH_SHARE:
+        st["low_share"] = True
+        st["note"] = f"манай кассын {own_all} мөрийн {total} ({share:.0%}) л манай баримттай таарсан"
     own_sites = [sid for sid in site_ids if tenant_of[sid] == top]
     if len(own_sites) != len(site_ids):
         # Терминалын мөрийг ЗӨВХӨН энэ түрээслэгчийн төлбөртэй хосолно (--tenant ALL):
@@ -781,7 +1001,6 @@ def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
         a = reconcile_db(db, tax, shifts=shifts, tol=tol, ours_sites=own_sites,
                          probe_sites=own_sites, scope_ids=set(own_sites), pos_users=pos_users)
         r = a["r"]
-        pay_site = {p["id"]: p["site_id"] for p in a["probe"]}
     if not core:
         st["note"] = "үндсэн мөр алга"
         return st
@@ -795,15 +1014,20 @@ def _evidence_chunk(db, tax: list, *, site_ids: list, tenant_of: dict, tol: int,
     # Хамрах хүрээг terminal_evidence ФАЙЛ бүрээр (terminal_window) тооцно — хэсгийн хил дээр
     # нүх гаргахгүй; хос нь нөөц мөртэй тул хилийн борлуулалт ч зөв хосолно
     pos = [p for p in a["probe"] if tenant_of.get(p.get("site_id")) == top]
-    paired = terminal_pairs([t for t in tax if t.get("group") in term_regs], pos, tol)
+    paired, _stats, contested = site_aware_pairs([t for t in tax if t.get("group") in term_regs], pos, tol)
     hits = set(paired)
     st["hits"] = hits
+    st["contested"] = contested
     st["terminal_matched"] = len(hits)
     # Хосгүй терминалын мөрийг (ойролцоо зөрүүний шалгалт) ДДТД-ээр — нөөц мөр хөрш хэсэгт
     # хосолсон байж болох тул «хосолсон» нь бүх хэсгийн НЭГДЭЛ (terminal_evidence)
     st["paired_rows"] = {t["ddtd"] for t in paired.values()}
     st["term_rows"] = [(t["ddtd"], VR._when(t), float(t["amount"])) for t in core
                        if t.get("group") in term_regs]
+    # Зогсоол × өдрийн терминалын хэрэглээ (ФАЙЛЫН түвшинд нэгтгэнэ — evidence_split-ийн
+    # ТОДОРХОЙГҮЙ шалгалт) ба манай кассын мөрөөр «ТЕГ-т манай баримт бий» борлуулалт
+    st["sales"] = {p["id"]: (p.get("site_id"), p["paid_at"], float(p["amount"])) for p in _pos_sales(pos)}
+    st["own_present"] = own_presence(db, core, a)
     return st
 
 
@@ -850,7 +1074,7 @@ def terminal_window(core: list, d0: datetime, d1: datetime, term_regs: dict, shi
     return max(lo, t_lo), min(hi, t_hi)
 
 
-def terminal_pairs(rows: list, probe: list, tol: int) -> dict:
+def terminal_pairs(rows: list, probe: list, tol: int, prefer: set | None = None) -> dict:
     """Терминалын мөрийг ЗӨВХӨН POS аппын бэлэн/карт төлбөртэй (терминал өөр төлбөрт
     хэвлэдэггүй) нэг-нэгээр, хамгийн ойроор хосолно (vat_recon._pairs/_assign — мөр бүр
     өөрийн кассын шилжилттэй), мөр төлбөрөөс TERMINAL_LAG_SLACK-аас ӨМНӨ биш.
@@ -859,14 +1083,18 @@ def terminal_pairs(rows: list, probe: list, tol: int) -> dict:
     ажилладаг тул олонхын зогсоолын QR/веб кассын ижил дүнтэй төлбөр бусад зогсоолын POS
     аппын борлуулалтаас Ontime мөрийг булааж (synthetic 10 хоног: 35/1118) жинхэнэ
     борлуулалт «терминалын баримтгүй» → ДАХИН гаргах → давхардал болж байв.
-    Буцаах {payment_id: мөр}."""
-    pos = [p for p in probe if p.get("pos_app") and (p.get("method") or "").upper() in POS_APP_METHODS
-           and p.get("paid_at") is not None]
+    prefer: {(site_id, УБ өдөр)} — тэр өдөр терминалаа ашигласан зогсоолын борлуулалт түрүүнд
+    (site_aware_pairs). Буцаах {payment_id: мөр}."""
+    pos = _pos_sales(probe)
     times = [VR._when(t) for t in rows]
     pairs = VR._pairs(times, [t["amount"] for t in rows], [p["paid_at"] for p in pos],
                       [p["amount"] for p in pos], tol,
                       ok=lambda i, j: times[i] >= pos[j]["paid_at"] - TERMINAL_LAG_SLACK)
-    return {pos[j]["id"]: rows[i] for i, j, _d in VR._assign(pairs)}
+    cost = None
+    if prefer is not None:
+        keys = [(p.get("site_id"), ub_day(p["paid_at"])) for p in pos]
+        cost = lambda pr: (0 if keys[pr[2]] in prefer else 1,)  # noqa: E731
+    return {pos[j]["id"]: rows[i] for i, j, _d in VR._assign(pairs, cost)}
 
 
 def terminal_summary(tax: list, probe: list, paired: dict, tol: int, shift: float,
@@ -893,6 +1121,19 @@ def terminal_summary(tax: list, probe: list, paired: dict, tol: int, shift: floa
     return {"matched": len(inside) - len(missing), "missing": missing, "inside": len(inside)}
 
 
+def _file_chunks(tax: list, chunk_days: int, margin: timedelta):
+    """Файлыг өөрийн огноогоор chunk_days хоногоор: (эхний өдөр, сүүлийн өдөр, d0, d1, үндсэн, нөөцтэй)."""
+    days = sorted({t["dt"].date() for t in tax})
+    step = max(1, int(chunk_days or 1))
+    for i in range(0, len(days), step):
+        want = days[i:i + step]
+        d0 = datetime.combine(want[0], datetime.min.time())
+        d1 = datetime.combine(want[-1], datetime.min.time()) + timedelta(days=1)
+        core = [t for t in tax if d0 <= t["dt"] < d1]
+        part = [t for t in tax if d0 - margin <= t["dt"] < d1 + margin]
+        yield want[0], want[-1], d0, d1, core, part
+
+
 def terminal_evidence(db, taxes: list, *, sites: list, tol: int, shifts: list[float],
                       chunk_days: int = EVIDENCE_CHUNK_DAYS, pos_users: set | None = None) -> dict:
     """ТЕГ экспорт(ууд)-аас «терминалын баримт» нотолгоо.
@@ -910,57 +1151,83 @@ def terminal_evidence(db, taxes: list, *, sites: list, tol: int, shifts: list[fl
       • хамрах ТҮРЭЭСЛЭГЧ — экспорт ТТД-ээр гардаг. msgbill/QPay-ийн касс түрээслэгчдэд
         НИЙТЛЭГ тул: файлын манай кассын мөртэй ДДТД-ийн кассаар батлагдан таарсан манай
         баримтын ОЛОНХ (>50%) нь нэг түрээслэгчийнх БӨГӨӨД тэр тааралт манай кассын мөрийн
-        ≥50%-ийг хамарсан бол л тэр түрээслэгчийн файл. Эс бөгөөс (өөр ТТД-ийн файл, манай
-        кассын мөрийг шүүж хаясан, касс танигдаагүй) НОТОЛГОО БОЛОХГҮЙ — ямар ч төлбөрийг
-        «терминалын баримтгүй» гэж дүгнэхгүй, анхааруулна;
+        ≥50%-ийг хамарсан бол л тэр түрээслэгчийн файл — ФАЙЛЫН нийт мөрөөр (2026-10-15; нэг
+        хэсгийн хувь бага ч — QPay-ийн бөөн дахин илгээлт — файлын түвшинд батлагдвал хамруулна,
+        тэмдэглэнэ). Эс бөгөөс (өөр ТТД-ийн файл, манай кассын мөрийг шүүж хаясан, касс
+        танигдаагүй) НОТОЛГОО БОЛОХГҮЙ — ямар ч төлбөрийг «терминалын баримтгүй» гэж дүгнэхгүй;
       • ТЕРМИНАЛЫН касс — «өөр систем» (манай msgbill/QPay/PosAPI баримтын касс биш)
         бөгөөд манай төлбөртэй таарсан мөрийн олонх нь QR БИШ (манай QPay баримт тэр
         хугацаанд алга бол QPay-ийн касс «өөр систем» болж магадгүй — QR-тэй таардаг);
-      • терминалын мөртэй хосолсон тухайн түрээслэгчийн төлбөрүүд (explain_unmatched_tax-ийн
-        нэг-нэгээр хос).
+      • терминалын мөртэй хосолсон тухайн түрээслэгчийн төлбөрүүд (site_aware_pairs — тэр
+        өдөр терминалаа ашигласан зогсоолын борлуулалт түрүүнд);
+      • МАНАЙ кассын мөрөөр ТЕГ-т манай баримт (эсвэл msgbill-ийн давхар баримт) БИЙ борлуулалт
+        (own_presence) — дахин гаргавал давхардана.
     Олон файл/хэсэг: хамрах = НЭГДЭЛ, нотолгоо = НЭГДЭЛ (аль нэгэнд таарвал болно).
     Хамрах хүрээ нь ТЕРМИНАЛЫН кассын өөрийн цагийн бүсээр (terminal_window). Хосгүй
     терминалын мөрүүд "unpaired"-д (ойролцоо зөрүүний AMBIGUOUS шалгалт — evidence_split).
     Буцаах {"files": [статистик], "terminal_ids": set, "coverage": [(lo, hi, {tenant_id})],
-            "unpaired": [(UTC цаг, дүн, tenant_id)], "days": {УБ огноо: {rows, paired}}}."""
+            "unpaired": [(UTC цаг, дүн, tenant_id)], "days": {УБ огноо: {rows, paired}},
+            "own_present": {payment_id: "DDTD"|"TWIN"|"TIME"},
+            "site_days": {(site_id, УБ огноо): [POS аппын борлуулалт, терминалын мөртэй]},
+            "terminal_days": {(site_id, УБ огноо)} — тэр өдөр терминалаар хэвлэсэн,
+            "offset_days": {(site_id, УБ огноо): n} — терминалын цаг системтэйгээр зөрсөн өдөр,
+            "near_days": terminal_days ∪ offset_days — ойролцоо хосгүй мөр ТОДОРХОЙГҮЙ болгох өдрүүд,
+            "contested": {payment_id} — мөрөө терминалтай зогсоолд алдсан (маргаантай)}."""
     site_ids = [s.id for s in sites]
     tenant_of = {s.id: s.tenant_id for s in sites}
     terminal_ids, coverage, files = set(), [], []
-    unpaired, day_stats = [], {}
+    unpaired, day_stats, own_present, sales, contested = [], {}, {}, {}, set()
+    rank = {"DDTD": 0, "TWIN": 1, "TIME": 2}
     loc = timedelta(hours=settings.tz_offset_hours)
     for name, tax in taxes:
         st = {"file": name, "rows": len(tax), "usable": False, "window": None, "tenants": set(),
               "own_registers": [], "terminal_registers": {}, "qr_registers": [],
               "terminal_rows": 0, "terminal_matched": 0, "matched_ours": 0, "own_rows": 0,
-              "chunks": 0, "unusable_chunks": 0, "note": ""}
+              "chunks": 0, "unusable_chunks": 0, "low_share_chunks": 0, "note": "",
+              "own_present": Counter()}
         files.append(st)
         if not tax:
             st["note"] = "мөр алга"
             continue
-        days = sorted({t["dt"].date() for t in tax})
-        step = max(1, int(chunk_days or 1))
         margin = timedelta(hours=max(abs(x) for x in shifts) + 1, seconds=tol + 5)
-        own, qrs, notes, wins, file_hits = set(), set(), [], [], set()
-        term_rows, paired_rows = {}, set()
-        for i in range(0, len(days), step):
-            want = set(days[i:i + step])
-            d0 = datetime.combine(min(want), datetime.min.time())
-            d1 = datetime.combine(max(want), datetime.min.time()) + timedelta(days=1)
-            core = [t for t in tax if d0 <= t["dt"] < d1]
-            part = [t for t in tax if d0 - margin <= t["dt"] < d1 + margin]
+        chunks = []
+        for first, last, d0, d1, core, part in _file_chunks(tax, chunk_days, margin):
             c = _evidence_chunk(db, part, site_ids=site_ids, tenant_of=tenant_of, tol=tol,
                                 shifts=shifts, core=core, pos_users=pos_users)
             for t in part:
                 t.pop("ours", None)       # ORM мөрийн лавлагааг хэсэг бүрийн дараа чөлөөлнө
-            st["chunks"] += 1
-            st["matched_ours"] += c["matched_ours"]
-            st["own_rows"] += c["own_rows"]
+            c.update(label=f"{first}…{last}", d0=d0, d1=d1)
+            chunks.append(c)
+        # Түрээслэгчийн батламж ФАЙЛЫН түвшинд (хэсгийн үндсэн мөрүүдийн нийлбэрээр)
+        fconf = Counter()
+        for c in chunks:
+            fconf.update(c["conf"])
+        f_total = sum(fconf.values())
+        f_own = sum(c["own_rows"] for c in chunks)
+        ftop, fn = fconf.most_common(1)[0] if fconf else (None, 0)
+        fshare = f_total / max(1, f_own)
+        file_ok = bool(fconf) and fn * 2 > f_total and fshare >= OWN_MATCH_SHARE
+        st["chunks"], st["matched_ours"], st["own_rows"] = len(chunks), f_total, f_own
+        own, qrs, notes, wins, file_hits = set(), set(), [], [], set()
+        term_rows, paired_rows = {}, set()
+        for c in chunks:
             own |= c["own_registers"]
+            why = None
             if not c["usable"]:
+                why = c["note"]
+            elif not file_ok:
+                why = (f"файлын манай кассын {f_own} мөрийн {f_total} ({fshare:.0%}) л манай баримттай "
+                       "таарсан — энэ түрээслэгчийн экспорт гэж батлагдсангүй")
+            elif c["tenant"] != ftop:
+                why = "хэсгийн манай баримт файлын түрээслэгчийнх биш — батлагдсангүй"
+            if why:
                 st["unusable_chunks"] += 1
-                notes.append(f"{min(want)}…{max(want)}: {c['note']}")
+                notes.append(f"{c['label']}: {why}")
                 continue
-            wins.append((d0, d1, c["tenant"], c["shift"]))
+            if c["low_share"]:
+                st["low_share_chunks"] += 1
+                notes.append(f"{c['label']}: {c['note']} — ФАЙЛЫН түвшинд {fshare:.0%} батлагдсан тул хамруулав")
+            wins.append((c["d0"], c["d1"], c["tenant"], c["shift"]))
             st["tenants"].add(c["tenant"])
             qrs |= c["qr_registers"]
             for k, v in c["terminal_registers"].items():
@@ -968,9 +1235,14 @@ def terminal_evidence(db, taxes: list, *, sites: list, tol: int, shifts: list[fl
                 agg["rows"] += v["rows"]
                 agg["shifts"] |= v["shifts"]
             file_hits |= c["hits"]
+            contested |= c["contested"]
             paired_rows |= c["paired_rows"]
             for ddtd, at, amount in c["term_rows"]:
                 term_rows[ddtd] = (at, amount, c["tenant"])
+            for pid, kind in c["own_present"].items():
+                if rank[kind] < rank.get(own_present.get(pid), 9):
+                    own_present[pid] = kind
+            sales.update(c["sales"])
         terminal_ids |= file_hits
         # Хамрах хүрээ: ФАЙЛЫН терминалын хүрээ (terminal_window — терминалын кассын цагийн
         # бүс, файлын эхний/сүүлийн өдрийн хил) ∩ ашиглах боломжтой хэсгүүдийн хоногууд
@@ -1004,25 +1276,83 @@ def terminal_evidence(db, taxes: list, *, sites: list, tol: int, shifts: list[fl
         st["qr_registers"] = sorted(qrs)
         st["terminal_rows"] = sum(v["rows"] for v in st["terminal_registers"].values())
         st["usable"] = st["window"] is not None
+        st["own_present"] = Counter(v for pid, v in own_present.items())
         st["note"] = "; ".join(notes[:3]) + (f" (+{len(notes) - 3})" if len(notes) > 3 else "")
+    # Зогсоол × өдрийн терминалын хэрэглээ — хамрах хүрээнд байгаа POS аппын борлуулалтаар
+    site_days: dict = {}
+    covered = {}
+    for pid, (sid, at, amount) in sales.items():
+        ten = tenant_of.get(sid)
+        if not any(lo <= at <= hi and ten in tens for lo, hi, tens in coverage):
+            continue
+        covered[pid] = (sid, at, amount, ten)
+        c = site_days.setdefault((sid, ub_day(at)), [0, 0])
+        c[0] += 1
+        c[1] += pid in terminal_ids
+    tdays = terminal_days(site_days)
+    odays = offset_days(unpaired, covered, terminal_ids, site_days, tdays)
     return {"files": files, "terminal_ids": terminal_ids, "coverage": coverage,
-            "unpaired": unpaired, "days": dict(sorted(day_stats.items()))}
+            "unpaired": unpaired, "days": dict(sorted(day_stats.items())),
+            "own_present": own_present, "site_days": site_days,
+            "terminal_days": tdays, "offset_days": odays, "near_days": tdays | set(odays),
+            "contested": contested - terminal_ids}
+
+
+def offset_days(unpaired: list, sales: dict, paired_ids: set, site_days: dict, tdays: set) -> dict:
+    """Терминалын мөртэй ОГТ (≥10%) хосолоогүй (зогсоол, УБ өдөр) — терминалын цаг СИСТЕМТЭЙГЭЭР
+    зөрсөн (бүх мөр нь хосгүй, хяналт 2-ын D) уу, эсвэл тэр зогсоол терминалгүй (3HOSPITAL) уу.
+    ХОСГҮЙ терминалын мөр бүрийг НЭГ л борлуулалтад (ижил дүн, −10 мин…+2 цаг, терминал ашигласан
+    зогсоолынх түрүүнд, дараа нь хамгийн ойр) оноож, тэр өдрийн POS аппын борлуулалтын ≥10% нь
+    ийм мөртэй бол цаг зөрсөн терминалын өдөр гэж үзнэ — тэр өдрийн ойролцоо мөр ТОДОРХОЙГҮЙ
+    хэвээр (дахин гаргахгүй). 3HOSPITAL: бусад зогсоолын хэдэн хосгүй мөр ~300 борлуулалтад
+    ≤2% → терминалгүй. sales: {payment_id: (site_id, UTC цаг, дүн, tenant_id)} (хамрах хүрээнд).
+    Буцаах {(site_id, УБ өдөр): оноогдсон мөрийн тоо}."""
+    if not unpaired:
+        return {}
+    items = [(pid, v) for pid, v in sales.items()
+             if pid not in paired_ids and (v[0], ub_day(v[1])) not in tdays]
+    if not items:
+        return {}
+    pref = [(pid, v) for pid, v in sales.items()
+            if pid not in paired_ids and (v[0], ub_day(v[1])) in tdays]
+    allv = pref + items
+    keys = [(v[0], ub_day(v[1])) for _pid, v in allv]
+    times = [at for at, _a, _t in unpaired]
+    pairs = VR._pairs(times, [a for _t, a, _x in unpaired], [v[1] for _pid, v in allv],
+                      [v[2] for _pid, v in allv], NEAR_MISS_AFTER.total_seconds(),
+                      ok=lambda i, j: (unpaired[i][2] == allv[j][1][3]
+                                       and -NEAR_MISS_BEFORE <= times[i] - allv[j][1][1] <= NEAR_MISS_AFTER))
+    hits: dict = {}
+    for _i, j, _d in VR._assign(pairs, cost=lambda pr: (0 if keys[pr[2]] in tdays else 1,)):
+        if keys[j] not in tdays:
+            hits[keys[j]] = hits.get(keys[j], 0) + 1
+    return {k: n for k, n in hits.items()
+            if n >= SITE_DAY_MIN_PAIRS and n >= SITE_DAY_MIN_SHARE * site_days.get(k, [0, 0])[0]}
 
 
 def evidence_split(rows: list, ev: dict, tenant_of: dict) -> dict:
     """Мөрүүдийг (payment_id, site_id, paid_at ISO UTC, amount) нотолгоогоор ангилна:
     {"covered": [ТЕГ файлын хамрах хүрээнд], "with_terminal": [терминалын мөртэй],
-     "missing": [хүрээнд, терминалын мөргүй, ойролцоо хосгүй мөр ч алга],
-     "ambiguous": [хүрээнд, терминалын мөргүй БОЛОВЧ ижил дүнтэй ХОСГҮЙ терминалын мөр
-                   −10 мин…+2 цагт бий — цагийн зөрүүтэй терминал байж магадгүй],
-     "outside": [хүрээнээс гадуур]}."""
+     "own_in_teg": [хүрээнд, терминалын мөргүй, гэхдээ МАНАЙ баримт (идэвхтэй/цуцалсан ч
+                    экспортод үлдсэн) эсвэл msgbill-ийн давхар баримт нь ТЕГ-т БИЙ — мөрд own_teg],
+     "missing": [хүрээнд, ТЕГ-т ямар ч баримтгүй, ойролцоо хосгүй мөр ч алга (эсвэл байгаа ч тэр
+                 зогсоол тэр өдөр терминал ашиглаагүй — мөрд near_miss_ignored)],
+     "ambiguous": [хүрээнд, баримтгүй БОЛОВЧ ижил дүнтэй ХОСГҮЙ терминалын мөр −10 мин…+2 цагт
+                   бий бөгөөд тэр зогсоол тэр өдөр терминалаар хэвлэсэн — цаг зөрсөн байж магадгүй;
+                   эсвэл мөр нь хамгийн ойроор энэ борлуулалттай хосолсон ч терминалтай зогсоолынх
+                   руу шилжсэн (маргаантай хос — мөрд contested)],
+     "outside": [хүрээнээс гадуур]}.
+    ev-д "terminal_days" алга бол (хуучин) ойролцоо мөрийг зогсоолоос үл хамааран тооцно."""
     from bisect import bisect_left, bisect_right
     near: dict = {}
     for at, amount, ten in ev.get("unpaired") or []:
         near.setdefault((ten, int(round(amount))), []).append(at)
     for v in near.values():
         v.sort()
-    out = {"covered": [], "with_terminal": [], "missing": [], "ambiguous": [], "outside": []}
+    tdays = ev.get("near_days", ev.get("terminal_days"))
+    own = ev.get("own_present") or {}
+    out = {"covered": [], "with_terminal": [], "own_in_teg": [], "missing": [], "ambiguous": [],
+           "outside": []}
     for r in rows:
         at = datetime.fromisoformat(r["paid_at"])
         ten = tenant_of.get(r.get("site_id"))
@@ -1033,13 +1363,42 @@ def evidence_split(rows: list, ev: dict, tenant_of: dict) -> dict:
         if r["payment_id"] in ev["terminal_ids"]:
             out["with_terminal"].append(r)
             continue
+        if r["payment_id"] in own:
+            r["own_teg"] = own[r["payment_id"]]
+            out["own_in_teg"].append(r)
+            continue
+        if r["payment_id"] in (ev.get("contested") or ()):
+            # Терминалын мөр хамгийн ойроор энэ борлуулалттай хосолсон ч тэр өдөр терминалтай зогсоолын
+            # борлуулалтад шилжсэн — аль нь болохыг мэдэхгүй (site_aware_pairs) → дахин гаргахгүй
+            r["contested"] = True
+            out["ambiguous"].append(r)
+            continue
         ts = near.get((ten, int(round(float(r["amount"])))), [])
         hit = bisect_right(ts, at + NEAR_MISS_AFTER) - bisect_left(ts, at - NEAR_MISS_BEFORE)
+        if hit and tdays is not None and (r.get("site_id"), ub_day(at)) not in tdays:
+            r["near_miss_ignored"] = hit
+            hit = 0
         (out["ambiguous"] if hit > 0 else out["missing"]).append(r)
     return out
 
 
-def print_evidence(ev: dict, split: dict | None = None, log=print, tenants: dict | None = None):
+def _day_ranges(days: list) -> str:
+    """['2026-09-03', '2026-09-04', '2026-09-07'] → «09-03..09-04, 09-07»."""
+    out, run = [], []
+    for d in sorted(days):
+        if run and (datetime.fromisoformat(d) - datetime.fromisoformat(run[-1])).days == 1:
+            run.append(d)
+            continue
+        if run:
+            out.append(run[0][5:] + (f"..{run[-1][5:]}" if len(run) > 1 else ""))
+        run = [d]
+    if run:
+        out.append(run[0][5:] + (f"..{run[-1][5:]}" if len(run) > 1 else ""))
+    return ", ".join(out)
+
+
+def print_evidence(ev: dict, split: dict | None = None, log=print, tenants: dict | None = None,
+                   site_names: dict | None = None):
     """Файл бүрийн хамрах хүрээ/касс/тааралтын статистик (CLI)."""
     loc = timedelta(hours=settings.tz_offset_hours)
     for st in ev["files"]:
@@ -1060,6 +1419,8 @@ def print_evidence(ev: dict, split: dict | None = None, log=print, tenants: dict
             continue
         if st.get("unusable_chunks"):
             log(f"  ⚠ {st['unusable_chunks']}/{st['chunks']} хэсэг нотолгоо болоогүй (хүрээнд ороогүй): {st['note']}")
+        elif st.get("low_share_chunks"):
+            log(f"  ℹ {st['note']}")
         log(f"  терминалын касс: {regs} · терминалын мөртэй манай төлбөр {st['terminal_matched']}"
             + f" · ХОСГҮЙ терминалын мөр {st.get('terminal_unpaired', 0)}"
             + (f" · QPay гэж хассан касс: {', '.join(st['qr_registers'])}" if st["qr_registers"] else ""))
@@ -1072,14 +1433,39 @@ def print_evidence(ev: dict, split: dict | None = None, log=print, tenants: dict
             f"{d[5:]} {v['rows']}/{v['paired']}" + (f" (хосгүй {v['rows'] - v['paired']})"
                                                      if v["rows"] > v["paired"] else "")
             for d, v in days.items()) + "   [мөр/хосолсон]")
+    sd = ev.get("site_days") or {}
+    if sd:
+        tdays = ev.get("terminal_days") or set()
+        by_site: dict = {}
+        for (sid, day), (n, k) in sd.items():
+            s = by_site.setdefault(sid, {"on": [], "off": [], "n": 0, "k": 0})
+            s["on" if (sid, day) in tdays else "off"].append(day)
+            s["n"] += n
+            s["k"] += k
+        log(f"\nТЕРМИНАЛ АШИГЛАСАН ӨДӨР (зогсоол × УБ өдөр — POS аппын карт/бэлэн борлуулалтын "
+            f"≥{SITE_DAY_MIN_SHARE:.0%} нь терминалын мөртэй; бусад өдөр ойролцоо хосгүй мөр "
+            "ТОДОРХОЙГҮЙ болгохгүй):")
+        for sid, s in sorted(by_site.items(), key=lambda kv: (site_names or {}).get(kv[0]) or str(kv[0])):
+            log(f"  {(site_names or {}).get(sid) or sid}: хосолсон {s['k']}/{s['n']} · "
+                f"терминалтай {len(s['on'])} өдөр ({_day_ranges(s['on']) or '—'})"
+                + (f" · терминалгүй {len(s['off'])} өдөр ({_day_ranges(s['off'])})" if s["off"] else ""))
     if split is not None:
         cov = len(split["covered"])
         pct = (len(split["with_terminal"]) / cov) if cov else 0
+        own = split.get("own_in_teg", [])
+        ign = sum(1 for r in split["missing"] if r.get("near_miss_ignored"))
         log(f"\nХАМРАЛТ: хүрээнд {cov} төлбөр · терминалын мөртэй {len(split['with_terminal'])} ({pct:.1%})"
-            f" · терминалын мөргүй {len(split['missing'])} · ТОДОРХОЙГҮЙ (ойролцоо хосгүй терминалын "
-            f"мөртэй) {len(split.get('ambiguous', []))} · хүрээнээс гадуур {len(split['outside'])}")
+            f" · МАНАЙ баримт ТЕГ-т бий {len(own)}"
+            f" · терминалын мөргүй {len(split['missing'])}"
+            + (f" (үүнээс {ign} нь ойролцоо хосгүй мөртэй боловч зогсоол тэр өдөр терминалгүй)" if ign else "")
+            + f" · ТОДОРХОЙГҮЙ (ойролцоо хосгүй терминалын мөртэй) {len(split.get('ambiguous', []))}"
+            + (f" (үүнээс маргаантай хос {sum(1 for r in split['ambiguous'] if r.get('contested'))})"
+               if any(r.get("contested") for r in split.get("ambiguous", [])) else "")
+            + f" · хүрээнээс гадуур {len(split['outside'])}")
+        if own:
+            kinds = Counter(r.get("own_teg") for r in own)
+            log("  МАНАЙ баримт ТЕГ-т: " + " · ".join(f"{OWN_TEG_MN.get(k, k)} {v}" for k, v in kinds.most_common()))
         cells: dict = {}
-        loc = timedelta(hours=settings.tz_offset_hours)
         for key in ("missing", "ambiguous"):
             for r in split.get(key, []):
                 day = (datetime.fromisoformat(r["paid_at"]) + loc).date().isoformat()
@@ -1088,6 +1474,10 @@ def print_evidence(ev: dict, split: dict | None = None, log=print, tenants: dict
         if cells:
             log("  Зогсоол × өдөр (терминалын мөргүй / ТОДОРХОЙГҮЙ): " + " · ".join(
                 f"{site} {day[5:]} {m}/{a}" for (site, day), (m, a) in sorted(cells.items())))
+
+
+OWN_TEG_MN = {"DDTD": "ДДТД-ээр", "TWIN": "msgbill-ийн давхар баримт (ДДТД дараалал)",
+              "TIME": "цаг+дүнгээр (0291… багцын дугаар г.м)"}
 
 
 # ─────────────── ТЕРМИНАЛ ХЭВЛЭЭГҮЙ БОРЛУУЛАЛТЫГ ДАХИН ГАРГАХ (2026-10-14) ───────────────

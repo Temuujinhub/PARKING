@@ -19,6 +19,17 @@ UTC), нэг-нэгээр, ±tol; файлын түрээслэгчийг ман
 00:00–08:00 нь Ontime-д хамрагдаагүй). Ижил дүнтэй ХОСГҮЙ терминалын мөр −10 мин…+2 цагийн
 дотор байвал (терминалын цаг зөрсөн/хожуу илгээсэн байж магадгүй) ТОДОРХОЙГҮЙ (AMBIGUOUS) —
 --include-ambiguous-гүйгээр дахин гаргахгүй; өдөр бүрийн терминалын мөр/хосолсон/хосгүйг хэвлэнэ.
+Ойролцоо мөрийг ЗӨВХӨН тэр өдөр терминалаар баримт хэвлэсэн зогсоолд тооцно (POS аппын
+борлуулалтын ≥10% нь терминалын мөртэй, эсвэл бүх мөр нь цаг зөрсөн; 2026-10-15 — нэг Ontime касс
+5 зогсоолд үйлчилдэг тул Ontime-гүй 3HOSPITAL-ийн 517 борлуулалт бусдын хосгүй мөрөөс болж
+ТОДОРХОЙГҮЙ болж байв).
+
+МАНАЙ баримт ТЕГ-т бий (OWN_IN_TEG, 2026-10-15): терминалын мөргүй ч тэр борлуулалтын МАНАЙ
+баримт (идэвхтэй, эсвэл цуцалсан ч экспортод ҮЛДСЭН — ДДТД-ээр; 09-07-ноос өмнөх 0291… багцын
+дугаартайг цаг+дүнгээр) эсвэл msgbill-ийн давхар баримт (ДДТД дараалал) нь экспортод байвал
+ДАХИН ГАРГАХГҮЙ — гаргавал ТЕГ-т 2 баримттай болно (10-15-ны экспорт: 1,680 борлуулалт / 6.71
+сая₮ ингэж давхардах байв). --include-own-in-teg-ээр л (ТЕГ-ээс тэдгээр нь хүчингүй гэдгийг
+баталсны дараа).
 
 АНХДАГЧ = DRY-RUN (READ ONLY): зогсоол × өдрөөр тоо/₮, CSV. --apply үед дараалан:
 financial_jobs.retry_payment_receipts (reissue_external + allow_duplicate +
@@ -34,11 +45,13 @@ EBARIMT_REISSUE_SUMMARY. Идемпотент: дахин ажиллуулаха
         --out /root/reissue.csv                                                                # олон файл
     venv/bin/python tools/vat_reissue_missing.py --file /root/teg_sep.xlsx --tenant EASYPARKING \\
         --apply --limit 1 --user temuujin                                                      # туршилт
+    venv/bin/python tools/vat_reissue_missing.py --file a.xlsx --file b.xlsx --tenant EASYPARKING \\
+        --apply --max 4000 --user temuujin                                  # 2000-аас олон бол --max-ийг ил тод
 
 Хамгаалалт: --apply зөвхөн ажиллаж буй «parking» DB + прод сервер дээр (продын ХУУЛБАР
 audit*/t_*, ТЕСТ сервер дээр татгалзана); msgbill MOCK/тест/түлхүүргүй үед ажиллахгүй;
---max (2000)-аас олон бол зогсоно; YES-ийн өмнө DB, сервер, түрээслэгч, тоог хэвлэнэ; TTY
-дээр «YES» (том үсгээр) гэж баталгаажуулна (--yes-ээр алгасна); терминалын (Ontime) мөр
+--max (2000)-аас олон бол зогсоно (dry-run ч сануулна — тоог шалгаад --max <тоо>); YES-ийн өмнө
+DB, сервер, түрээслэгч, тоог хэвлэнэ; TTY дээр «YES» (том үсгээр) гэж баталгаажуулна (--yes-ээр алгасна); терминалын (Ontime) мөр
 ОГТ алга файл (шүүж татсан байж болзошгүй) байвал --accept-no-terminal-file-гүйгээр
 татгалзана. Мөнгө хөдлөхгүй — зөвхөн татварын баримт.
 """
@@ -64,11 +77,14 @@ from app.services.receipts import REISSUED_NO_TERMINAL  # noqa: E402
 TOOL = "vat_reissue_missing"
 FIELDS = ["payment_id", "verdict", "tenant", "site_code", "site_name", "plate", "method", "amount",
           "paid_at_ub", "paid_at", "day", "cashier", "state", "cancel_rule", "cancelled_ddtd",
-          "receiver_type", "customer_tin"]
+          "receiver_type", "customer_tin", "own_teg", "near_miss_ignored"]
 VERDICT_MN = {"REISSUE": "ТЕГ-т терминалын мөр алга — ДАХИН ГАРГАНА",
               "TERMINAL_OK": "терминалын мөр ТЕГ-т бий — хөндөхгүй",
               "AMBIGUOUS": "ТОДОРХОЙГҮЙ — ижил дүнтэй ХОСГҮЙ терминалын мөр −10 мин…+2 цагт бий "
                            "(терминалын цаг зөрсөн байж магадгүй) — --include-ambiguous-гүйгээр гаргахгүй",
+              "OWN_IN_TEG": "МАНАЙ баримт (идэвхтэй/цуцалсан ч экспортод үлдсэн) эсвэл msgbill-ийн давхар "
+                            "баримт ТЕГ-т БИЙ — дахин гаргавал давхардана; --include-own-in-teg-гүйгээр "
+                            "гаргахгүй",
               "OUTSIDE": "ТЕГ файлын хүрээнээс гадуур — дүгнэхгүй"}
 
 
@@ -84,6 +100,13 @@ def write_csv(path, rows, fields):
         w.writeheader()
         for r in rows:
             w.writerow(r)
+
+
+def max_hint(n: int, cap: int) -> str:
+    """--max хамгаалалтын тайлбар (2026-10-15: прод дээрх 9/10-р сарын дахин гаргалт 2000-аас олон)."""
+    return (f"\n⚠ --max: {n} төлбөр > --max {cap} (анхдагч хамгаалалт — санамсаргүй бөөн гаргалтаас). "
+            f"Тоо (дээрх зогсоол × өдөр) зөв бол --apply-д --max {n} нэмнэ үү, эсвэл --limit-ээр "
+            "хэсэгчлэн (--limit 1 → --limit 500 → бүгд; дахин ажиллуулахад гаргасан нь алгасагдана).")
 
 
 def print_by_site_day(rows, log=print):
@@ -122,6 +145,9 @@ def main(argv=None):
                     help="терминалын (Ontime) мөр ОГТ алга файлыг нотолгоо болгож --apply хийх")
     ap.add_argument("--include-ambiguous", action="store_true",
                     help="ТОДОРХОЙГҮЙ (ойролцоо хосгүй терминалын мөртэй) борлуулалтыг ч дахин гаргах")
+    ap.add_argument("--include-own-in-teg", action="store_true",
+                    help="МАНАЙ баримт (цуцалсан ч) ТЕГ экспортод бий борлуулалтыг ч дахин гаргах — ТЕГ-ээс "
+                         "тэдгээр нь хүчингүй гэдгийг баталсны дараа л")
     args = ap.parse_args(argv)
     for f in args.file:
         if not os.path.isfile(f):
@@ -158,17 +184,20 @@ def main(argv=None):
         hi = max(c[1] for c in ev["coverage"])
         sel = VD.select_reissue(db, sites=sites, lo=lo, hi=hi + timedelta(seconds=1))
         split = VD.evidence_split(sel["candidates"], ev, {x.id: x.tenant_id for x in ev_sites})
-        VD.print_evidence(ev, split, tenants=tcode)
+        VD.print_evidence(ev, split, tenants=tcode, site_names={x.id: x.site_code for x in ev_sites})
         no_term = [st["file"] for st in ev["files"] if st["usable"] and not st["terminal_registers"]]
         for r in split["missing"]:
             r["verdict"] = "REISSUE"
         for r in split["ambiguous"]:
             r["verdict"] = "AMBIGUOUS"
+        for r in split["own_in_teg"]:
+            r["verdict"] = "OWN_IN_TEG"
         for r in split["with_terminal"]:
             r["verdict"] = "TERMINAL_OK"
         for r in split["outside"]:
             r["verdict"] = "OUTSIDE"
-        miss = split["missing"] + (split["ambiguous"] if args.include_ambiguous else [])
+        miss = (split["missing"] + (split["ambiguous"] if args.include_ambiguous else [])
+                + (split["own_in_teg"] if args.include_own_in_teg else []))
         total = sum(r["amount"] for r in miss)
         print(f"\nНЭР ДЭВШИГЧ (EXTERNAL / POS-ийн давхардал гэж цуцалсан, өөр баримтгүй): "
               f"{len(sel['candidates'])} · хасагдсан: "
@@ -181,10 +210,19 @@ def main(argv=None):
                   f"({sum(r['amount'] for r in split['ambiguous']):,.0f}₮)"
                   + (" — --include-ambiguous: ДАХИН ГАРГАНА" if args.include_ambiguous else ""))
             print_by_site_day(split["ambiguous"])
-        print(f"\nДАХИН ГАРГАХ (ТЕГ-т терминалын мөр алга"
-              + (" + ТОДОРХОЙГҮЙ" if args.include_ambiguous else "") + f"): {len(miss)} төлбөр · {total:,.0f}₮")
+        if split["own_in_teg"]:
+            kinds = Counter(r.get("own_teg") for r in split["own_in_teg"])
+            print(f"  ⚠ {VERDICT_MN['OWN_IN_TEG']}: {len(split['own_in_teg'])} "
+                  f"({sum(r['amount'] for r in split['own_in_teg']):,.0f}₮; "
+                  + " · ".join(f"{VD.OWN_TEG_MN.get(k, k)} {v}" for k, v in kinds.most_common()) + ")"
+                  + (" — --include-own-in-teg: ДАХИН ГАРГАНА" if args.include_own_in_teg else ""))
+            print_by_site_day(split["own_in_teg"])
+        print("\nДАХИН ГАРГАХ (ТЕГ-т терминалын мөр алга"
+              + (" + ТОДОРХОЙГҮЙ" if args.include_ambiguous else "")
+              + (" + МАНАЙ баримт ТЕГ-т бий" if args.include_own_in_teg else "")
+              + f"): {len(miss)} төлбөр · {total:,.0f}₮")
         print_by_site_day(miss)
-        allrows = (split["missing"] + split["ambiguous"] + split["with_terminal"]
+        allrows = (split["missing"] + split["ambiguous"] + split["own_in_teg"] + split["with_terminal"]
                    + split["outside"])
         write_csv(out, miss, FIELDS)
         write_csv(f"{stem}_all.csv", allrows, FIELDS)
@@ -195,6 +233,8 @@ def main(argv=None):
             probs = VD.issue_ready(db, sites_used)
             if no_term:
                 probs.append(f"терминалын мөргүй файл ({', '.join(no_term)}) — --accept-no-terminal-file шаардлагатай")
+            if len(miss) > args.max:
+                print(max_hint(len(miss), args.max))
             if probs:
                 print("\n⚠ --apply ОДООГООР ажиллахгүй: " + "; ".join(probs))
             print("\nDRY-RUN — юу ч өөрчлөгдсөнгүй. Дахин гаргахын тулд ижил командыг --apply --user <нэр> "
@@ -207,7 +247,7 @@ def main(argv=None):
             return 8
         work = miss if args.limit is None else miss[:max(0, args.limit)]
         if len(work) > args.max:
-            print(f"\nЗОГСОВ: {len(work)} төлбөр > --max {args.max}. Тоог шалгаад --max-ийг ил тодоор өсгөнө үү.")
+            print("\nЗОГСОВ:" + max_hint(len(work), args.max).split(":", 1)[1])
             return 2
         if not work:
             print("\nДахин гаргах төлбөр алга.")
@@ -258,6 +298,7 @@ def main(argv=None):
                         detail={"tool": TOOL, "tenants": [t.code for t in tenants],
                                 "sites": [s_.site_code for s_ in sites], "files": files,
                                 "include_ambiguous": bool(args.include_ambiguous),
+                                "include_own_in_teg": bool(args.include_own_in_teg),
                                 "requested": len(work), "amount": amount, "result": dict(cnt)}))
         db.commit()
     finally:

@@ -525,7 +525,11 @@ def test_evidence_file_excludes_sales_without_ontime_row(db, engine, tmp_path, m
             "--evidence", f, "--delay", "0"]
     assert cli.main(base) == 0
     text = capsys.readouterr().out
-    assert "ХАМРАЛТ: хүрээнд 2 төлбөр · терминалын мөртэй 1 (50.0%) · терминалын мөргүй 1" in text
+    # lacks-ийн манай msgbill мөр файлд бий (терминалын мөргүй — манайх нь цорын ганц баримт) →
+    # «МАНАЙ баримт ТЕГ-т бий» (2026-10-15) — терминалын мөргүйтэй адил ЦУЦЛАХГҮЙ
+    assert ("ХАМРАЛТ: хүрээнд 2 төлбөр · терминалын мөртэй 1 (50.0%) · МАНАЙ баримт ТЕГ-т бий 1 · "
+            "терминалын мөргүй 0") in text
+    assert "Терминалын мөргүй 1 (үүнээс манай баримт ТЕГ-т бий 1)" in text
     assert "терминалын касс: …10002990 1 мөр" in text and "түрээслэгч EASYPARKING" in text
     assert (tmp_path / "p_no_ontime.csv").read_text(encoding="utf-8-sig").count(lacks.id) == 1
     # Хүрээнээс гадуур (ТЕГ файл хамраагүй) — анхдагчаар ХАСНА, түрээслэгч × сараар хэвлэнэ

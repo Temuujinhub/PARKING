@@ -35,6 +35,15 @@ EBARIMT_CANCEL_BULK + commit. Мөнгө буцаахгүй — зөвхөн т�
 төлбөр «ДАВХАРДАЛ ЦУЦЛАГДСАН» гэж гарна). Цуцалсны дараа терминалын баримтыг бүртгэнэ
 (ТЕГ-ийн Ontime ДДТД-тэй ONTIME/SENT мөр) — «Дахин үүсгэх» давхардлыг сэргээхгүй.
 
+--file (2026-10-15): сарын экспортыг файлын өөрийн огноогоор 2 хоногоор хувааж (хөрш хоногийн
+мөрийг нөөц болгон) тулгана — бүтэн сарын файлыг нэг дор тулгахад 2GB сервер дээр ~500MB → OOM.
+10-14-өөс нэг Ontime касс (…10002990) 5 зогсоолд үйлчилдэг тул «олонхын нэг зогсоол» олдохгүй →
+бүх мөр «зогсоол тодорхойгүй — цуцлахгүй» болж байв: одоо кассын зогсоолыг ЗОГСООЛ × ӨДРӨӨР
+тогтооно (тэр өдрийн POS аппын борлуулалтын ≥10% нь Ontime мөртэй) — тэдгээрийн жинхэнэ
+давхардал (Ontime + манай msgbill хоёулаа ТЕГ-т) цуцлагдана, бусад нь «тэр өдөр терминалгүй».
+«Манай баримт ч файлд» нь ДДТД-ээр (0291… багцын дугаартайг л цаг+дүнгээр) — цаг+дүнгээр өөр мөртэй
+таарсан ч ДДТД нь экспортод алга бол цуцлахгүй (audit1014 × 10-15: 41-ийн 25 нь ийм байв).
+
 ──── --pos-app: ДҮРМЭЭР (ТЕГ файлгүй) — 2026-10-13; 10-14 эзний ЭЦСИЙН шийдвэр ────
 PAX терминал (Ontime) POS аппын КАРТ, БЭЛЭН борлуулалт бүрд e-Barimt өөрөө хэвлэдэг — БҮХ
 зогсоол, БҮХ түрээслэгч (ИйзиПаркинг, Моннис пропэрти/Monnis Building, Моннисмоторс…) →
@@ -51,8 +60,9 @@ e-Barimt гаргадаг» УНТРААСАН бол (терминал нь х�
 
 --evidence (ТЕГ экспорт, олон удаа, урт хугацаа ч болно): файлын хамрах хүрээнд (хугацаа ×
 файлын ТТД-ийн түрээслэгч, терминалын кассын цагийн бүсээр) байгаа борлуулалтыг ЗӨВХӨН
-терминалын (манайх биш, QPay биш) мөр таарвал цуцална (CSV basis=TEG); терминалын мөргүй,
-ТОДОРХОЙГҮЙ (ижил дүнтэй хосгүй терминалын мөр ойрхон) борлуулалтыг цуцлахгүй; хүрээнээс
+терминалын (манайх биш, QPay биш) мөр таарвал цуцална (CSV basis=TEG); терминалын мөргүй
+(манай баримт нь ТЕГ-т бий — цорын ганц баримт — ч), ТОДОРХОЙГҮЙ (ижил дүнтэй хосгүй терминалын мөр
+ойрхон) борлуулалтыг цуцлахгүй; хүрээнээс
 гадуурхыг АНХДАГЧААР ХАСНА (түрээслэгч × сараар хэвлэнэ) — дүрмээр цуцлах бол
 --outside-by-rule (basis=RULE). Хамралтын статистикийг хэвлэнэ. Ontime баримт хэвлэгдээгүй ч
 цуцлагдсан борлуулалтыг tools/vat_reissue_missing.py нөхнө.
@@ -124,50 +134,102 @@ def resolve_sites(db, codes):
     return out
 
 
-def analyze_files(db, files, *, tol, shifts, tenant_sites, log=print):
-    """Файл бүрийг ТУСАД НЬ тулгана (өөр өдрийн файлын цонх холилдохгүй),
-    давхардлыг төлбөрөөр нь нэгтгэнэ. Буцаана: (давхардал, үлдсэн мөрүүд, статистик)."""
+def _register_where(chunks_rs: list) -> str:
+    """Өөр системийн кассын зогсоол (хэсэг бүрийн register_sites-ийн нэгдэл) — хэвлэхэд."""
+    allow = [rs for rs in chunks_rs if rs.get("allow") is not None]
+    if allow:
+        days = {x for rs in allow for x in rs["allow"]}
+        names = sorted({n.strip() for rs in allow for n in (rs.get("site_name") or "").split(",") if n.strip()})
+        return (f" · зогсоол × өдрөөр (тэр өдөр терминалаар хэвлэсэн): {', '.join(names) or '—'}"
+                f" ({len(days)} зогсоол-өдөр)" if days else
+                " · ⚠ POS аппын борлуулалттай хосолсон ч аль ч зогсоол тэр өдөр терминал ашиглаагүй — цуцлахгүй")
+    named = [rs for rs in chunks_rs if rs.get("site_id")]
+    if named:
+        names = Counter(rs["site_name"] for rs in named)
+        return " · зогсоол " + ", ".join(f"«{k}»" for k, _v in names.most_common())
+    if chunks_rs:
+        return f" · ⚠ зогсоол ТОДОРХОЙГҮЙ ({max(rs['sites'] for rs in chunks_rs)} зогсоолд тарсан) — цуцлахгүй"
+    return ""
+
+
+def analyze_files(db, files, *, tol, shifts, tenant_sites, log=print, chunk_days=VD.EVIDENCE_CHUNK_DAYS):
+    """Файл бүрийг ТУСАД НЬ тулгана (өөр өдрийн файлын цонх холилдохгүй), давхардлыг төлбөрөөр нь
+    нэгтгэнэ. Буцаана: (давхардал, үлдсэн мөрүүд, статистик).
+
+    Файлыг өөрийн огноогоор chunk_days хоногоор хувааж тулгана (2026-10-15: 9-р сарын бүтэн
+    файлыг нэг дор тулгахад 2GB сервер дээр ~500MB санах ой → OOM-д алагдаж байв) — terminal_evidence-
+    тэй нэг арга: хэсэг бүрт хөрш хоногийн мөрийг (касс бүрийн цагийн бүсийн зөрүү + tol) НӨӨЦ болгон
+    нэмж тулгаад ЗӨВХӨН үндсэн мөрүүдийн дүгнэлт/давхардлыг авна (хил дээрх борлуулалтын мөр нөгөө
+    хэсэгт байсан ч зөв хосолно)."""
     dups, left_rows, stats, seen = [], [], [], set()
+    margin = timedelta(hours=max(abs(x) for x in shifts) + 1, seconds=tol + 5)
     for f in files:
         raw = open(f, "rb").read()
         tax, diag = VR.parse_tax_export(os.path.basename(f), raw)
-        a = VD.reconcile_db(db, tax, shifts=shifts, tol=tol, ours_sites=tenant_sites,
-                            probe_sites=None,
-                            scope_ids=set(tenant_sites) if tenant_sites is not None else None)
-        r = a["r"]
-        verdicts = Counter(x["verdict"] for x in a["explained"])
+        del raw
+        name = os.path.basename(f)
+        verdicts, shifts_seen, reg_rs = Counter(), {}, {}
+        foreign, matched, in_file, chunks = set(), 0, 0, 0
+        un_ours, matched_pids, foreign_hits = {}, set(), Counter()
+        tail = VR.register_tail_len([t["ddtd"] for t in tax])
+        for _first, _last, _d0, _d1, core, part in VD._file_chunks(tax, chunk_days, margin):
+            chunks += 1
+            a = VD.reconcile_db(db, part, shifts=shifts, tol=tol, ours_sites=tenant_sites,
+                                probe_sites=None,
+                                scope_ids=set(tenant_sites) if tenant_sites is not None else None)
+            r = a["r"]
+            core_ids = {id(t) for t in core}
+            matched += sum(1 for t in core if t.get("ours") and not t.get("ours_cancelled"))
+            in_file += sum(1 for t in core if t.get("ours_cancelled"))
+            matched_pids |= {t["ours"][1].id for t in part if t.get("ours")}
+            for u in r["unmatched_ours"]:
+                un_ours.setdefault(u.get("payment_id"), u)
+            for k, v in r["group_shifts"].items():
+                shifts_seen.setdefault(k, set()).add(v)
+            foreign |= set(r["foreign_registers"])
+            for k, rs in (a.get("register_sites") or {}).items():
+                reg_rs.setdefault(k, []).append(rs)
+            dup_pids = set()
+            for t, x in zip(a["left"], a["explained"]):
+                if id(t) not in core_ids:
+                    continue                  # нөөц мөр — өөрийн (хөрш) хэсэгт дүгнэгдэнэ
+                verdicts[x["verdict"]] += 1
+                if x.get("foreign") and x.get("payment_id"):
+                    foreign_hits[x.get("register") or ""] += 1
+                if x["verdict"] == "DUPLICATE":
+                    dup_pids.add(x["payment_id"])
+                left_rows.append({**{k: x.get(k) for k in LEFT_FIELDS}, "file": name})
+            for d in a["duplicates"]:
+                if d["payment_id"] in dup_pids and d["payment_id"] not in seen:
+                    seen.add(d["payment_id"])
+                    dups.append({**d, "file": name})
+            for t in part:
+                t.pop("ours", None)           # ORM мөрийн лавлагааг хэсэг бүрийн дараа чөлөөлнө
+            del a, r
+        unmatched = [u for pid, u in un_ours.items() if pid not in matched_pids]
+        groups = VR.pos_groups([t["ddtd"] for t in tax], tail)
         log(f"\n== {f}")
-        log(f"   ТЕГ мөр {len(tax)} (багана {diag['columns']}) · касс: "
-            + ", ".join(f"…{k}={v} ({'+' if r['group_shifts'].get(k, 0) > 0 else ''}"
-                        f"{r['group_shifts'].get(k, 0):g}ц{', өөр систем' if k in r['foreign_registers'] else ''})"
-                        for k, v in sorted(VR.pos_groups([t['ddtd'] for t in tax], r.get('tail')).items())))
-        log(f"   манай баримттай таарсан {r['matched']} · манайд бий/ТЕГ-д алга {len(r['unmatched_ours'])}"
-            f" · ТЕГ-д бий/манайд алга {len(a['left'])}"
-            + (f" · манай ЦУЦЛАГДСАН баримтын мөр файлд {r['cancelled_in_file']}"
-               if r.get("cancelled_in_file") else ""))
-        for k, st in sorted(r.get("group_stats", {}).items()):
-            if st["foreign"]:
-                rate = st["matched"] / max(st["rows"], 1)
-                rs = a.get("register_sites", {}).get(k)
-                where = ("" if rs is None else
-                         f" · зогсоол «{rs['site_name']}» ({rs['share']:.0%} / {rs['hits']})" if rs["site_id"]
-                         else f" · ⚠ зогсоол ТОДОРХОЙГҮЙ ({rs['sites']} зогсоолд тарсан) — цуцлахгүй")
-                log(f"   өөр системийн касс …{k}: {st['matched']}/{st['rows']} мөр манай төлбөртэй таарсан"
-                    + where
-                    + ("" if rate >= 0.5 else
-                       "  ⚠ ХАГАСААС БАГА — энэ касс манай зогсоолынх биш байж магадгүй, "
-                       "давхардлыг CSV-ээс гараар шалгана уу"))
+        log(f"   ТЕГ мөр {len(tax)} (багана {diag['columns']}) · {chunks} хэсэг · касс: "
+            + ", ".join(f"…{k}={v} ({'/'.join(f'{x:+g}' for x in sorted(shifts_seen.get(k, {0})))}ц"
+                        f"{', өөр систем' if k in foreign else ''})" for k, v in sorted(groups.items())))
+        left_n = sum(verdicts.values())
+        log(f"   манай баримттай таарсан {matched} · манайд бий/ТЕГ-д алга {len(unmatched)}"
+            f" · ТЕГ-д бий/манайд алга {left_n}"
+            + (f" · манай ЦУЦЛАГДСАН баримтын мөр файлд {in_file}" if in_file else ""))
+        for k in sorted(foreign):
+            rows_k = groups.get(k, 0)
+            rate = foreign_hits[k] / max(rows_k, 1)
+            log(f"   өөр системийн касс …{k}: {foreign_hits[k]}/{rows_k} мөр манай төлбөртэй таарсан"
+                + _register_where(reg_rs.get(k, []))
+                + ("" if rate >= 0.5 else
+                   "  ⚠ ХАГАСААС БАГА — энэ касс манай зогсоолынх биш байж магадгүй, "
+                   "давхардлыг CSV-ээс гараар шалгана уу"))
         for v, n in verdicts.most_common():
             log(f"     {n:5d}  {v:26s} {VR.VERDICTS.get(v, '').split(' — ')[0]}")
-        for x in a["explained"]:
-            left_rows.append({**{k: x.get(k) for k in LEFT_FIELDS}, "file": os.path.basename(f)})
-        for d in a["duplicates"]:
-            if d["payment_id"] in seen:
-                continue
-            seen.add(d["payment_id"])
-            dups.append({**d, "file": os.path.basename(f)})
-        stats.append({"file": f, "rows": len(tax), "matched": r["matched"],
-                      "verdicts": dict(verdicts), "duplicates": len(a["duplicates"])})
+        stats.append({"file": f, "rows": len(tax), "matched": matched, "chunks": chunks,
+                      "verdicts": dict(verdicts),
+                      "duplicates": sum(1 for d in dups if d["file"] == name)})
+        del tax
     dups.sort(key=lambda d: d["paid_at"])
     return dups, left_rows, stats
 
@@ -195,6 +257,13 @@ def print_summary(dups, log=print):
         log(f"  {title}: " + " · ".join(f"{k} {v['count']} ({v['amount']:,.0f}₮)"
                                          for k, v in s[key].items()) if s[key] else f"  {title}: —")
     return s
+
+
+def max_hint(n: int, cap: int) -> str:
+    """--max хамгаалалтын тайлбар — dry-run-д сануулж, --apply-д яг ямар тугаар үргэлжлүүлэхийг заана."""
+    return (f"\n⚠ --max: {n} төлбөр > --max {cap} (анхдагч хамгаалалт — санамсаргүй бөөн цуцлалтаас). "
+            f"Тоо (дээрх задаргаа) зөв бол --apply-д --max {n} нэмнэ үү, эсвэл --limit-ээр хэсэгчлэн "
+            "(--limit 1 → --limit 500 → бүгд; дахин ажиллуулахад цуцлагдсан нь алгасагдана).")
 
 
 def write_csv(path, rows, fields):
@@ -398,8 +467,8 @@ def main_pos_app(args):
             ev = VD.terminal_evidence(db, taxes, sites=ev_sites, tol=args.tol, shifts=shifts,
                                       pos_users=scope["users"])
             split = VD.evidence_split(rows, ev, {x.id: x.tenant_id for x in ev_sites})
-            VD.print_evidence(ev, split, tenants=tcode)
-            for r in split["missing"][:20]:
+            VD.print_evidence(ev, split, tenants=tcode, site_names={x.id: x.site_code for x in ev_sites})
+            for r in (split["missing"] + split["own_in_teg"])[:20]:
                 print(f"    терминалын мөргүй (ЦУЦЛАХГҮЙ): {r['paid_at_ub']} {r['site_code']} "
                       f"{r['plate'] or '—'} {r['method']} {r['amount']:,.0f}₮ ({r['cashier']})")
             for r in split["with_terminal"]:
@@ -407,11 +476,14 @@ def main_pos_app(args):
             if split["covered"]:
                 print("  Хүрээнд — терминалын мөртэй (цуцална, basis=TEG):")
                 print_cells(split["with_terminal"])
-            drop = {r["payment_id"] for r in split["missing"] + split["ambiguous"]}
+            # Терминалын мөргүй борлуулалтын манай баримт ТЕГ-т байгаа (own_in_teg) нь тэр борлуулалтын
+            # ЦОРЫН ГАНЦ баримт — терминалын мөргүйтэй адил ЦУЦЛАХГҮЙ (2026-10-15: шинэ ангилал)
+            keep_out = split["missing"] + split["own_in_teg"] + split["ambiguous"]
+            drop = {r["payment_id"] for r in keep_out}
             if drop:
-                write_csv(f"{stem}_no_ontime.csv", split["missing"] + split["ambiguous"],
-                          POSAPP_FIELDS + ["basis"])
-                print(f"Терминалын мөргүй {len(split['missing'])} + ТОДОРХОЙГҮЙ {len(split['ambiguous'])} "
+                write_csv(f"{stem}_no_ontime.csv", keep_out, POSAPP_FIELDS + ["basis", "own_teg"])
+                print(f"Терминалын мөргүй {len(split['missing']) + len(split['own_in_teg'])} (үүнээс манай "
+                      f"баримт ТЕГ-т бий {len(split['own_in_teg'])}) + ТОДОРХОЙГҮЙ {len(split['ambiguous'])} "
                       f"төлбөрийг хасав (ЦУЦЛАХГҮЙ) → {stem}_no_ontime.csv")
             outside = split["outside"]
             if outside:
@@ -442,6 +514,8 @@ def main_pos_app(args):
         sites_used = [s_ for s_ in sites if any(r["site_id"] == s_.id for r in work)]
         if not args.apply:
             probs = VD.cancel_ready(db, sites_used)
+            if len(work) > args.max:
+                print(max_hint(len(work), args.max))
             if probs:
                 print("\n⚠ --apply ОДООГООР ажиллахгүй: " + "; ".join(probs))
             print("\nDRY-RUN — юу ч өөрчлөгдсөнгүй. Цуцлахын тулд ижил командыг --apply --user <нэр> "
@@ -451,7 +525,7 @@ def main_pos_app(args):
             work = work[:max(0, args.limit)]
         # --max нь ЭНЭ УДАА бодитоор цуцлах тоонд (--limit 1 туршилт 8,000+ сонголттой ч болно)
         if len(work) > args.max:
-            print(f"\nЗОГСОВ: {len(work)} төлбөр > --max {args.max}. Тоог шалгаад --max-ийг ил тодоор өсгөнө үү.")
+            print("\nЗОГСОВ:" + max_hint(len(work), args.max).split(":", 1)[1])
             return 2
         if not work:
             print("\nЦуцлах төлбөр алга.")
@@ -594,6 +668,8 @@ def main(argv=None):
         sites = list({d["site_id"]: db.get(ParkingSite, d["site_id"]) for d in dups if d["site_id"]}.values())
         if not args.apply:
             probs = VD.cancel_ready(db, sites)
+            if len(dups) > args.max:
+                print(max_hint(len(dups), args.max))
             if probs:
                 print("\n⚠ --apply ОДООГООР ажиллахгүй: " + "; ".join(probs))
             print("\nDRY-RUN — юу ч өөрчлөгдсөнгүй. Цуцлахын тулд ижил командыг --apply --user <нэр> -тэй ажиллуулна.")
@@ -602,7 +678,7 @@ def main(argv=None):
             dups = dups[:max(0, args.limit)]
         # --max нь ЭНЭ УДАА бодитоор цуцлах тоонд (--limit-ийн дараа)
         if len(dups) > args.max:
-            print(f"\nЗОГСОВ: {len(dups)} давхардал > --max {args.max}. Тоог шалгаад --max-ийг ил тодоор өсгөнө үү.")
+            print("\nЗОГСОВ:" + max_hint(len(dups), args.max).split(":", 1)[1])
             return 2
         if not dups:
             print("\nЦуцлах давхардал алга.")
