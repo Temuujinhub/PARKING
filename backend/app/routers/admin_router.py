@@ -719,44 +719,12 @@ async def qpay_ebarimt_diag(body: dict, db: Session = Depends(get_db),
         except Exception as e:  # noqa: BLE001
             out["qpay_payment_check_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
-    # Тэст create — түүхий хариуг бүрэн барина
+    # Тэст create — түүхий хариуг бүрэн барина. Код зам нь services/qpay_review
+    # (2026-10-15: tools/qpay_review_resolve.py-тэй НЭГ функц — хариу/зан төлөв ижил)
     if body.get("create") and payment.provider_payment_id:
-        import httpx as _httpx
-        t0 = _dt.utcnow()
-        try:
-            receiver_type = payment.ebarimt_receiver_type or (
-                "COMPANY" if payment.customer_tin else "CITIZEN")
-            eb = await qpay_svc.create_ebarimt(
-                payment.provider_payment_id, receiver_type,
-                receiver=payment.customer_tin if receiver_type == "COMPANY" else None,
-                acc=acc)
-            out["create_result"] = {"ok": bool(eb.get("billId")), "raw": eb.get("raw"),
-                                    "elapsed_ms": int((_dt.utcnow() - t0).total_seconds() * 1000)}
-            if eb.get("billId") and rec:
-                from ..services.receipts import assign_ebarimt_id
-                rec.lottery_code = None
-                ok = assign_ebarimt_id(db, rec, eb["billId"], source="qpay-diag",
-                                       lottery=(None if receiver_type == "COMPANY" else eb.get("lottery")),
-                                       username=user.username, raw=eb.get("raw"),
-                                       allow_replace=rec.status != "SENT")
-                if ok:
-                    rec.status = "SENT"
-                    rec.receipt_url = None
-                db.commit()
-                out["create_result"]["receipt_updated"] = ok
-                if not ok:
-                    out["create_result"]["conflict"] = rec.ddtd_note
-        except _httpx.HTTPStatusError as e:
-            body_raw: object
-            try:
-                body_raw = e.response.json()
-            except Exception:  # noqa: BLE001
-                body_raw = e.response.text[:1000]
-            out["create_result"] = {"ok": False, "http_status": e.response.status_code,
-                                    "raw_body": body_raw,
-                                    "elapsed_ms": int((_dt.utcnow() - t0).total_seconds() * 1000)}
-        except Exception as e:  # noqa: BLE001
-            out["create_result"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        from ..services.qpay_review import create_and_assign
+        out["create_result"] = await create_and_assign(db, payment, rec, acc,
+                                                       username=user.username)
     _audit(db, user, "QPAY_EBARIMT_DIAG", "payment", payment.id,
            {"create": bool(body.get("create")),
             "result": (out.get("create_result") or {}).get("ok")})

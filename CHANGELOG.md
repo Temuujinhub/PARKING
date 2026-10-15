@@ -49,6 +49,29 @@ WALLET-ийг ГЛОБАЛААР БҮҮ асаа (баримтаа өөрөө г
 | docs | `INTEGRATION_API.md` (e-Barimt зөвхөн манай системээс, WALLET урьдчилсан нөхцөл, `receipt.ready`, webhook-ийн давталт 24 оролдлого/~18ц — «давтахгүй» гэсэн хуучирсан бичвэрийг засав, гарын үсэггүй, §7 түншээс үл хамаарах зам); `API_REFERENCE.md` §12 түншийн API; `SOCIALPAY_INTEGRATION.md` тэмдэглэл. MonPay-д: `MonPay_EasyParking_API_v1.0.docx` + имэйл (`/root/parking-deploy-1015/`) | (энэ commit) | — | — |
 
 ---
+## 2026-10-15 — QPay e-Barimt REVIEW нөхөлт: `tools/qpay_review_resolve.py` (ebarimt-diag-тай НЭГ код зам)
+
+Эзэн: «10-р сарын QR борлуулалт бүр ЯГ НЭГ e-Barimt-тай байх». audit1014: 10-р сард QPAY баримт REVIEW
+42 (EASYPARKING 40 / 119,500₮ — 21 нь 10-08 11:00–11:10 УБ; MONNIS 2 / 6,000₮), бүгд ажил UNKNOWN
+(`HTTPStatusError`), 6 нь ААН (7 оронтой регистр). «Дахин үүсгэх» → review_required; ганц зам нь
+SUPER_ADMIN-ий ebarimt-diag `{create:true}` (нэг нэгээр) байв. ТЕГ экспорт (10-01…10-15, QPay 26,735 мөр):
+10-02…10-13-ны өдөр бүр (УБ өдөр × дүн) ТЕГ-ийн QPay мөр = манай ДДТД-тэй баримт ЯГ тэнцүү → 40-ийн
+нэг нь ч ТЕГ-т алга (39 NOT_IN_TEG → CREATE, 1 AMBIGUOUS — 10-02 MARSHIL 1,000₮, цаг зөрсөн эзэнтэй мөр).
+Схем өөрчлөгдөхгүй.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| tool | **`backend/tools/qpay_review_resolve.py`**: сонголт — QPAY баримт REVIEW (+ `--include-failed`: тохиргоогоор хаагдсан BLOCKED-оос бусад FAILED), PAID төлбөр, `--from/--to` (УБ, paid_at), `--tenant` (code/ALL), `--site`, `--payment`, `--limit`, `--max` (200); өөр идэвхтэй баримттай / ДДТД-тэй / QPay payment_id-гүй эсвэл өөр төлбөртэй ХУВААЛЦСАН / дүн зөрсөн / олон мөртэйг хасна. **DRY-RUN анхдагч** (READ ONLY транзакц, QPay/сүлжээ дуудахгүй): төлбөр бүрийн мөр (УБ цаг, зогсоол, дүн, ТТД, баримт/ажлын төлөв, сүүлийн алдаа, ТЕГ, үйлдэл) + түрээслэгч/өдөр/дүгнэлтээр дүн, CSV (`--out`) | (энэ commit) | ⏳ | ⏳ |
+| tool | **ТЕГ нотолгоо `--file`** (`services/qpay_review.teg_evidence`, задлагч `vat_recon.parse_tax_export` — vat_reissue_missing/vat_duplicates-тэй нэг): QPay касс (…10014863, UTC); файлын түрээслэгчийг манай ДДТД-тэй баримтын тааралтаар (>50% нэг түрээслэгч, ≥50% мөр) батална; эзэнтэй мөр = манай баримттай ±60с нэг-нэгээр. paid_at −20…+5 мин-д ижил дүнтэй ЭЗЭНГҮЙ мөр + (УБ өдөр × дүн) тэнцэл ≥1 → **IN_TEG** (QPay-г ДУУДАХГҮЙ, ТЕГ-ийн ДДТД-г холбоно; аль мөр нь тодорхойгүй бол гараар); эзэнгүй мөр бий ч тэнцэл 0 (эсвэл эсрэгээр) → **AMBIGUOUS** (`--include-ambiguous`-гүйгээр алгасна); хүрээ/түрээслэгчээс гадуур → алгасна (`--include-uncovered`) | (энэ commit) | ⏳ | ⏳ |
+| tool | **`--apply`**: vat_reissue_missing-тэй ижил хамгаалалт — зөвхөн «parking» DB + прод сервер (audit*/t_* хуулбар, ТЕСТ сервер, `PARKING_DEPLOY_ROLE=staging` → татгалзана), QPay MOCK/sandbox/тохируулаагүй данс → татгалзана, DB/сервер/түрээслэгч/тоо хэвлээд «YES» (`--yes`). Төлбөр бүрд: төлбөр (NOWAIT) + ажил + баримтыг түгжиж дахин шалгана, outbox-ын дансны fingerprint таарна → `create_and_assign` → ДДТД/сугалаа/SENT ebarimt-diag-тай ИЖИЛ + ажил DONE + partner receipt.ready; QPay алдаа → REVIEW хэвээр, алдааг хэвлэнэ; `--delay` 0.5с; AuditLog `EBARIMT_QPAY_REVIEW_RESOLVE` (төлбөр бүрд) + `EBARIMT_QPAY_REVIEW_SUMMARY`. QPAY-ээс бусад суваг/msgbill/customer_tin-д хүрэхгүй. **QPay create идемпотент гэж кодоор батлагдаагүй** (idempotency key алга, GET алга; 2026-08-19 нэг QPay төлбөрт зэрэгцээ 2 өөр баримт) → CREATE-д `--i-understand-not-idempotent` заавал | (энэ commit) | ⏳ | ⏳ |
+| refactor | `services/qpay_review.create_and_assign` — `POST /api/admin/qpay/ebarimt-diag`-ийн create хэсгийг үг үсгээр нь гаргав (endpoint-ийн хариу/зан төлөв ИЖИЛ, raw шошго `qpay-diag` хэвээр; CLI-д `qpay-review-resolve`) | (энэ commit) | ⏳ | ⏳ |
+| test | `tests/unit/test_qpay_review_resolve.py` (10): сонголтын шүүлт (огноо/зогсоол/түрээслэгч/төлөв/BLOCKED/msgbill), endpoint-ийн хариуны бүтэц хуучнаараа, амжилт (SENT, ажил DONE, аудит, дахин ажиллуулахад QPay дуудахгүй), HTTP/сүлжээний алдаа → REVIEW, ААН регистр дамжина (сугалаагүй, customer_tin өөрчлөгдөхгүй), уралдаан/өөр баримт/хуваалцсан QPay id/данс өөрчлөгдсөн → QPay дуудахгүй, ТЕГ дүгнэлтүүд, CLI dry-run бичилтгүй+сүлжээгүй, хамгаалалтууд (хуулбар DB, staging, тест сервер, MOCK, тохируулаагүй, идемпотентийн зөвшөөрөл, TTY, --max), ATTACH_TEG QPay-гүй | (энэ commit) | — | — |
+
+Прод дээр (backend хавтаст; ТЕГ экспортоо `/root/teg_oct.xlsx` болгож хуулна):
+`venv/bin/python tools/qpay_review_resolve.py --from 2026-10-01 --to 2026-10-31 --tenant EASYPARKING --file /root/teg_oct.xlsx`
+→ туршилт `--apply --limit 1 --user temuujin --i-understand-not-idempotent` → бүгд (`--limit`-гүй).
+
+---
 
 ## 2026-10-15 — «Холбогдсон POS»: heartbeat 60с → 4ц, унтраах товч (kill switch)
 
