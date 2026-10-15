@@ -671,6 +671,11 @@ async def qpay_ebarimt_diag(body: dict, db: Session = Depends(get_db),
 
     Аюулгүй байдал: SUPER_ADMIN-only; нууц үг/токен хариунд ОРОХГҮЙ (зөвхөн
     merchant username). create=true нэг дуудлагад НЭГ л оролдлого хийнэ.
+
+    ⚠ create=true нь төлбөрийг түгждэггүй, tools/qpay_review_resolve.py-ийн оролдлогын бүртгэлийг
+    (баримтын raw.qpay_review_attempts, EBARIMT_QPAY_REVIEW_ATTEMPT) ШАЛГАДАГГҮЙ — тэр хэрэгсэлтэй
+    ЗЭРЭГ ч, ДАРАА нь ч (ялангуяа timeout/5xx-ээр унасан төлбөр дээр) БҮҮ ашигла: QPay талд баримт
+    үүссэн байж болзошгүй тул давхар баримт гарна.
     """
     from datetime import datetime as _dt
 
@@ -720,7 +725,8 @@ async def qpay_ebarimt_diag(body: dict, db: Session = Depends(get_db),
             out["qpay_payment_check_error"] = f"{type(e).__name__}: {str(e)[:200]}"
 
     # Тэст create — түүхий хариуг бүрэн барина. Код зам нь services/qpay_review
-    # (2026-10-15: tools/qpay_review_resolve.py-тэй НЭГ функц — хариу/зан төлөв ижил)
+    # (2026-10-15: tools/qpay_review_resolve.py-тэй НЭГ функц — амжилтын/HTTP алдааны хариу ижил;
+    # billId ДДТД биш бол SENT болгохгүй, хадгалалт унавал bill_id/save_error нэмэгдэнэ)
     if body.get("create") and payment.provider_payment_id:
         from ..services.qpay_review import create_and_assign
         out["create_result"] = await create_and_assign(db, payment, rec, acc,
