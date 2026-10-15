@@ -1241,13 +1241,22 @@ def pos_terminal_info(terminal_id: str, db: Session = Depends(get_db),
 @router.post("/pos/heartbeat")
 def pos_heartbeat(body: dict, request: Request, db: Session = Depends(get_db),
                   user: User = Depends(require("cashier"))):
-    """POS аппын амьд байдал + төлөв (2026-10-15, «Холбогдсон POS» таб). Апп 60с тутам (мөн
-    төлөв солигдоход) дуудна. body: {terminal_id, pos_version?, status? (ONLINE/IDLE/
+    """POS аппын амьд байдал + төлөв (2026-10-15, «Холбогдсон POS» таб). Апп next_heartbeat_sec
+    (PARKING_POS_HEARTBEAT_SEC, анхдагч 4ц → ≤6/өдөр) тутам, мөн асах/нэвтрэх үед ба төлөв
+    солигдоход (≤1/5 мин) дуудна. body: {terminal_id, pos_version?, status? (ONLINE/IDLE/
     PRINTER_ERROR/OFFLINE_QUEUE… ≤40), printer?, battery? (0–100), network?, site_id?, extra? (≤1KB)}.
     terminal_id-г X-Terminal-Id толгойгоор ч өгч болно. Хадгалалтыг хүсэлтийн ДАРАА
-    PosCaptureMiddleware санах ойд нэгтгэж ≤60с-д бичнэ — энд DB бичилт байхгүй.
+    PosCaptureMiddleware санах ойд нэгтгэнэ — энд DB бичилт байхгүй; зөвхөн heartbeat-тэй мөр
+    ≤1 upsert / heartbeat-ийн интервал (хэт олон илгээсэн ч бичилт олшрохгүй, хариу 200 хэвээр).
+    Унтраалттай (PARKING_POS_CLIENTS_ENABLED=false) бол шалгалт, санах ой, DB-гүй 200
+    {"ok": true, "disabled": true, ...} — апп алдаа харахгүй.
     Хариу: серверийн цаг + хамгийн бага зөвшөөрөх хувилбар (update_required)."""
     from ..services import pos_clients as PC
+    next_sec = PC.heartbeat_sec()
+    if not PC.is_enabled():
+        return {"ok": True, "disabled": True,
+                "server_time": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "next_heartbeat_sec": next_sec}
     try:
         hb = PC.parse_heartbeat(body, header_terminal=request.headers.get("X-Terminal-Id"),
                                 header_version=request.headers.get("X-App-Version"))
@@ -1260,7 +1269,7 @@ def pos_heartbeat(body: dict, request: Request, db: Session = Depends(get_db),
             "terminal_id": hb["terminal_id"], "pos_version": version,
             "min_app_version": min_v or None,
             "update_required": bool(min_v) and (not version or PC.version_lt(version, min_v)),
-            "next_heartbeat_sec": int(PC.THROTTLE_SEC)}
+            "next_heartbeat_sec": next_sec}
 
 
 def pos_lanes(barriers: list[dict], cameras: list[dict]) -> list[dict]:

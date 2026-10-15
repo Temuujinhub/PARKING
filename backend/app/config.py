@@ -200,6 +200,20 @@ class Settings(BaseSettings):
     # тал нь хэдэн секунд хүлээх вэ (ДДТД/сугалаа/QR хариунд нь). ≤6; 0 = унтраах (хуучин
     # зан — зөвхөн 5с тутмын outbox, апп /print-ээр дахин татна).
     receipt_inline_wait_sec: float = 6.0
+
+    # «Холбогдсон POS» (services/pos_clients, 2026-10-15) — зөвхөн ХЯНАЛТЫН мэдээлэл
+    # (хувилбар/төлөв/сүүлд холбогдсон). Төлбөр, хаалт, e-Barimt-ын урсгал үүнээс хамаардаггүй.
+    # Унтраах товч (kill switch): false бол PosCaptureMiddleware хүсэлтийг ШУУД дамжуулна
+    # (receive/send боолтгүй), pos-clients-flush task асахгүй, heartbeat 200 {"disabled": true}
+    # буцааж санах ой/DB-д хүрэхгүй, админы жагсаалт хоосон. Процесс асахад нэг удаа уншина —
+    # өөрчилсний дараа restart (.env: PARKING_POS_CLIENTS_ENABLED=false).
+    pos_clients_enabled: bool = True
+    # POS аппын heartbeat-ийн давтамж (сек) — heartbeat-ийн хариуны next_heartbeat_sec. 60с нь
+    # терминал бүрд өдөрт 1,440 хүсэлт + бичилт үүсгэх байсан; эзэн (10-15): «өдөрт 4–6 удаа
+    # хангалттай» → 14400 = 4 цаг (≤6/өдөр). Код [3600, 86400]-д хавчина
+    # (pos_clients.heartbeat_sec). «Онлайн» нь heartbeat биш, аппын ЕРДИЙН хүсэлтээр тодорхойлогдоно.
+    pos_heartbeat_sec: int = 14400
+
     # msgbill webhook нууц (whsec_…) — Dashboard → Developers → Webhook endpoint нэмэхэд
     # НЭГ удаа харуулна. Endpoint: {public_base_url}/api/payments/msgbill/webhook.
     # UI-аас (Тохиргоо → Холболт → msgbill) тавьж болно — DB утга .env-г дарна.

@@ -16,6 +16,15 @@
 нэг мөрөнд хэвийн үед ≤1 upsert / 60с; зөвхөн шинэ мөр, хувилбар/төлөв солигдвол ≤1 / 10с. Прод ~7 мянган POS хүсэлт/өдөр → терминал бүр идэвхтэй минут тутам ≤1
 жижиг upsert. DB унасан үед тоолуур санах ойд хуримтлагдаж дараа бичигдэнэ (алдагдахгүй).
 
+HEARTBEAT (10-15 засвар): апп 4 цаг тутам (PARKING_POS_HEARTBEAT_SEC, ≤6/өдөр) — 60с нь терминал
+бүрд өдөрт 1,440 хүсэлт + upsert байв. ЗӨВХӨН heartbeat-тэй мөр (ердийн хүсэлтгүй) ≤1 upsert /
+heartbeat-ийн интервал, төлөв солигдвол ≤1 / 5 мин — хуучин апп 60с тутам илгээсээр байсан ч DB
+бичилт олшрохгүй (хариу 200 хэвээр). «Онлайн» нь бичилтийн throttle-оос үл хамаарч санах ойн
+last_seen-ээр (live_last_seen) тооцогдоно.
+
+УНТРААХ (PARKING_POS_CLIENTS_ENABLED=false): middleware шууд дамжуулна, flush task асахгүй,
+heartbeat 200 {"disabled": true} (санах ой/DB-гүй), админы жагсаалт хоосон + disabled.
+
 POS аппын хүсэлт гэж: X-App-Version / X-Terminal-Id / X-POS-Status толгойтой, ЭСВЭЛ хөтөч биш
 (User-Agent «Mozilla/» биш) бөгөөд role POS / /api/payments/pos/* зам / POS аппын хэрэглэгч
 (services/pos_app.known_users — 10 мин тутам). Веб касс (хөтөч, толгойгүй) ОРОХГҮЙ.
@@ -36,10 +45,15 @@ log = logging.getLogger("parking.pos_clients")
 
 THROTTLE_SEC = 60.0            # нэг мөрөнд хэвийн үед ≤1 бичилт / 60с
 URGENT_MIN_SEC = 10.0          # шинэ мөр / хувилбар / төлөв солигдвол — ≤1 / 10с
+HB_STATUS_MIN_SEC = 300.0      # ЗӨВХӨН heartbeat-тэй мөрийн төлөв солигдвол — ≤1 / 5 мин (анивчилт)
 FLUSH_TICK_SEC = 5.0
 KNOWN_USERS_REFRESH_SEC = 600.0
-ONLINE_SEC = 300               # «онлайн» = сүүлийн 5 мин дотор
-STALE_HOURS = 24               # «хуучирсан» = 24 цагаас дээш сураггүй
+ONLINE_SEC = 300               # «онлайн» = сүүлийн 5 мин дотор ЯМАР Ч POS хүсэлт
+STALE_HOURS = 24               # «хуучирсан» = 24 цагаас (ба 2 heartbeat-ээс) дээш сураггүй
+HEARTBEAT_DEFAULT_SEC = 14400  # 4 цаг — өдөрт ≤6 (PARKING_POS_HEARTBEAT_SEC)
+HEARTBEAT_MIN_SEC = 3600       # [1ц, 24ц]-д хавчина — 60с руу буцаж тохируулагдахаас
+HEARTBEAT_MAX_SEC = 86400
+HEARTBEAT_GRACE_MIN_SEC = 900  # heartbeat хоцрох зөвшөөрөл: интервалын 25%, ≥15 мин
 INFER_TTL_SEC = 12 * 3600      # terminal_id-гүй хүсэлтийг (хэрэглэгч, IP)-ийн сүүлийн терминалд
 MAX_ENTRIES = 1000             # санах ойн дээд хязгаар (мөрийн тоо)
 MAX_INFER = 5000               # (хэрэглэгч, IP) → терминал зураглалын дээд хязгаар
@@ -109,13 +123,49 @@ def min_app_version(db) -> str:
         return ""
 
 
+# ─────────────────────────── Тохиргоо (.env, процесс асахад) ───────────────────────────
+def is_enabled() -> bool:
+    """PARKING_POS_CLIENTS_ENABLED — settings нь модулийн түвшинд нэг удаа уншигддаг тул энд
+    env/файл уншихгүй, зөвхөн атрибут (хүсэлт бүрд дуудагдахгүй — middleware __init__-д)."""
+    from ..config import settings
+    return bool(getattr(settings, "pos_clients_enabled", True))
+
+
+def heartbeat_sec() -> int:
+    """POS аппын heartbeat-ийн давтамж (сек), [1ц, 24ц]-д хавчсан. Буруу утга → 4ц."""
+    from ..config import settings
+    try:
+        v = int(getattr(settings, "pos_heartbeat_sec", HEARTBEAT_DEFAULT_SEC))
+    except (TypeError, ValueError):
+        return HEARTBEAT_DEFAULT_SEC
+    return max(HEARTBEAT_MIN_SEC, min(HEARTBEAT_MAX_SEC, v))
+
+
+def presence_windows(hb: int | None = None) -> dict:
+    """«Онлайн»/«Холбоотой»/«Холбогдоогүй»/«Хуучирсан»-ын хил (сек).
+
+    - online ≤5 мин: аппын ЯМАР Ч хүсэлт (recent-exits, confirm, heartbeat…) — heartbeat-ээс
+      хамаарахгүй, ажиллаж буй POS 5 минутаас олон чимээгүй байх нь ховор.
+    - idle ≤ heartbeat + 25% (4ц → 5ц): хүсэлтгүй ч heartbeat-ийн хугацаанд сураг гарсан. Ингэхгүй
+      бол 4 цагийн heartbeat-тэй сул терминал 5 минутын дараа «холбогдоогүй» болж худал анхааруулна.
+      25% (≥15 мин) — Android-ийн timer/Doze хойшлол, сүлжээний богино тасалдлыг даана.
+    - offline: дараагийн heartbeat ирэх ёстой байсан ч ирээгүй.
+    - stale > max(24ц, 2 heartbeat + зөвшөөрөл): 24ц heartbeat тохируулсан ч худал «хуучирсан» болохгүй.
+    """
+    hb = hb or heartbeat_sec()
+    grace = max(HEARTBEAT_GRACE_MIN_SEC, hb // 4)
+    idle = hb + grace
+    return {"online_sec": ONLINE_SEC, "idle_sec": idle,
+            "stale_sec": max(STALE_HOURS * 3600, 2 * hb + grace), "heartbeat_sec": hb}
+
+
 # ─────────────────────────── Санах ойн нэгтгэл ───────────────────────────
 class _Entry:
     __slots__ = ("user_id", "username", "terminal_id", "terminal_source", "requests", "errors",
                  "payments", "heartbeats", "first_seen", "last_seen", "version", "status",
                  "status_at", "hb", "ip", "ua", "endpoint", "status_code", "last_payment",
                  "site_hint", "dirty", "urgent", "flushed", "touched", "known_version",
-                 "known_status")
+                 "known_status", "active", "status_changed")
 
     def __init__(self, user_id: str, username: str, terminal_id: str):
         self.user_id, self.username, self.terminal_id = user_id, username, terminal_id
@@ -126,6 +176,9 @@ class _Entry:
         self.ip = self.ua = self.endpoint = self.status_code = None
         self.last_payment = self.site_hint = None
         self.dirty = self.urgent = False
+        # active: сүүлийн бичилтээс хойш heartbeat-ээс ӨӨР хүсэлт ирсэн (хэвийн 60с throttle);
+        # үгүй бол мөр «зөвхөн heartbeat» — ≤1 бичилт / heartbeat-ийн интервал (_is_due)
+        self.active = self.status_changed = False
         self.flushed = 0.0
         self.touched = time.monotonic()
         self.known_version = self.known_status = None
@@ -138,7 +191,7 @@ class _Entry:
             "status_at", "hb", "ip", "ua", "endpoint", "status_code", "last_payment", "site_hint")}
         self.requests = self.errors = self.payments = self.heartbeats = 0
         self.status = self.status_at = self.hb = self.last_payment = None
-        self.dirty = self.urgent = False
+        self.dirty = self.urgent = self.active = self.status_changed = False
         self.flushed = now_m
         return snap
 
@@ -195,8 +248,10 @@ def is_pos_request(role: str | None, username: str | None, path: str, *, has_pos
 def record(*, user_id: str, username: str, terminal_id: str | None, terminal_source: str | None,
            version: str | None, status: str | None, ip: str | None, ua: str | None,
            endpoint: str | None, status_code: int, payment: bool = False, site_hint: str | None = None,
-           hb: dict | None = None, now: datetime | None = None) -> tuple[str, str] | None:
-    """Нэг хүсэлтийн ажиглалтыг санах ойд нэгтгэнэ (DB-гүй, микросекунд). Буцаах: түлхүүр."""
+           hb: dict | None = None, activity: bool = True,
+           now: datetime | None = None) -> tuple[str, str] | None:
+    """Нэг хүсэлтийн ажиглалтыг санах ойд нэгтгэнэ (DB-гүй, микросекунд). Буцаах: түлхүүр.
+    activity=False — heartbeat замын хүсэлт: «зөвхөн heartbeat» мөрийн удаан throttle-д үлдэнэ."""
     now = now or datetime.utcnow()
     mono = time.monotonic()
     ip = (ip or "")[:64] or None
@@ -255,12 +310,14 @@ def record(*, user_id: str, username: str, terminal_id: str | None, terminal_sou
             e.version = version
         if status:
             if status != e.known_status:
-                e.urgent = True
+                e.status_changed = True          # ижил төлөвтэй heartbeat яаралтай БИШ
                 e.known_status = status
             e.status, e.status_at = status, now
         if hb is not None:
             e.heartbeats += 1
             e.hb = hb
+        if activity:
+            e.active = True
         if payment:
             e.payments += 1
             e.last_payment = now
@@ -290,19 +347,45 @@ def _restore(snap: dict):
             if getattr(e, k) is None and snap[k] is not None:
                 setattr(e, k, snap[k])
         e.dirty = True
+        e.active = True      # дахин оролдлого хэвийн 60с-ийн хэмнэлээр (heartbeat-ийн 4ц биш)
+
+
+def _is_due(e: _Entry, gap: float, force: bool, hb_write: float) -> bool:
+    """Мөрийг одоо бичих үү (gap = сүүлийн бичилтээс хойш сек).
+
+    - шинэ мөр / хувилбар солигдсон: ≤10с (ховор — апп асах, шинэчлэх үед л);
+    - ердийн POS хүсэлттэй мөр: ≤1 / 60с, төлөв солигдвол ≤10с (өмнөх шигээ);
+    - ЗӨВХӨН heartbeat-тэй мөр: ≤1 / heartbeat-ийн интервал (4ц), төлөв солигдвол ≤1 / 5 мин.
+      Хуучин апп 60с тутам heartbeat илгээсээр байсан ч DB бичилт өдөрт ≤6 (+төлөвийн өөрчлөлт);
+      ижил төлөвтэй heartbeat яаралтай биш. «Онлайн» нь live_last_seen-ээр (санах ой) хоцрохгүй."""
+    if not e.dirty:
+        return False
+    if force or (e.urgent and gap >= URGENT_MIN_SEC):
+        return True
+    if e.active:
+        return gap >= THROTTLE_SEC or (e.status_changed and gap >= URGENT_MIN_SEC)
+    return gap >= hb_write or (e.status_changed and gap >= HB_STATUS_MIN_SEC)
 
 
 def due_count(force: bool = False) -> int:
     mono = time.monotonic()
+    hb_write = float(heartbeat_sec())
     with _lock:
-        return sum(1 for e in _pending.values() if e.dirty and (
-            force or mono - e.flushed >= THROTTLE_SEC
-            or (e.urgent and mono - e.flushed >= URGENT_MIN_SEC)))
+        return sum(1 for e in _pending.values() if _is_due(e, mono - e.flushed, force, hb_write))
+
+
+def live_last_seen() -> dict[tuple[str, str], datetime]:
+    """Санах ойн (бичигдээгүй байж болох) хамгийн сүүлийн хүсэлтийн цаг — (user_id, terminal_id).
+    Админы тайлан «онлайн»/«сүүлд»-ийг DB-ийн бичилтийн throttle-оос (heartbeat-only ≤1/4ц)
+    хамааруулахгүйн тулд. terminal_id-гүй мөрийг алгасна (бичих үед DB-ээс өөр терминалд онооно)."""
+    with _lock:
+        return {k: e.last_seen for k, e in _pending.items() if k[1] and e.last_seen is not None}
 
 
 def flush_due(*, force: bool = False, session_factory=None) -> int:
     """Бичих цаг болсон мөрүүдийг upsert хийнэ (flush_loop-ийн thread дээр). Буцаах: бичсэн тоо."""
     mono = time.monotonic()
+    hb_write = float(heartbeat_sec())
     due = []
     with _lock:
         for key, e in list(_pending.items()):
@@ -310,8 +393,7 @@ def flush_due(*, force: bool = False, session_factory=None) -> int:
                 if mono - e.touched > 24 * 3600:
                     _pending.pop(key, None)
                 continue
-            gap = mono - e.flushed
-            if force or gap >= THROTTLE_SEC or (e.urgent and gap >= URGENT_MIN_SEC):
+            if _is_due(e, mono - e.flushed, force, hb_write):
                 due.append(e.take(mono))
         for k in [k for k, (_t, m) in _last_terminal.items() if mono - m > INFER_TTL_SEC]:
             _last_terminal.pop(k, None)
@@ -475,7 +557,11 @@ def refresh_known_users(session_factory=None) -> int:
 
 
 async def flush_loop():
-    """main.py-ийн background task: 5с тутам бичих цаг болсныг thread дээр upsert хийнэ."""
+    """main.py-ийн background task: 5с тутам бичих цаг болсныг thread дээр upsert хийнэ.
+    Унтраалттай (PARKING_POS_CLIENTS_ENABLED=false) бол шууд дуусна — known_users-ийн DB
+    уншилт ч хийхгүй (main.py ч task-ыг эхлүүлэхгүй, энэ нь давхар хамгаалалт)."""
+    if not is_enabled():
+        return
     while True:
         await asyncio.sleep(FLUSH_TICK_SEC)
         try:
@@ -565,25 +651,34 @@ def capture_from_scope(scope, status_code: int, body: bytes | None) -> tuple[str
     ip = client[0] if client else None
     method = scope.get("method") or ""
     payment = status_code < 300 and method == "POST" and tmpl in PAYMENT_ROUTES
+    # heartbeat замын хүсэлт (422 ч гэсэн) «идэвх» биш — хэт олон heartbeat бичилтийг олшруулахгүй
+    activity = tmpl != HEARTBEAT_PATH and path != HEARTBEAT_PATH
     # Маршрут тааралгүй (404) бол түүхий зам НУЛ/удирдлагын тэмдэгттэй байж болно (psycopg2 NUL-ийг
     # татгалздаг) — загварын нэрийг л, UA-г цэвэрлэж хадгална
     endpoint = clean_text(f"{method} {tmpl if route is not None else '<unmatched>'}", 120)
     return record(user_id=user_id, username=username, terminal_id=tid, terminal_source=src,
                   version=version, status=status, ip=ip, ua=clean_text(ua_s, 120),
                   endpoint=endpoint, status_code=status_code, payment=payment,
-                  site_hint=site_hint,
+                  site_hint=site_hint, activity=activity,
                   hb=({k: hb.get(k) for k in ("printer", "battery", "network", "extra")}
                       if hb is not None else None))
 
 
 class PosCaptureMiddleware:
     """Pure ASGI: хүсэлтийг ӨӨРЧЛӨХГҮЙ, хариуг саатуулахгүй. /api/payments/pos/* POST-ийн
-    биеийг (≤8KB) зөвхөн ХУУЛЖ авна (terminal_id) — доод апп ижил мессежүүдийг авна."""
+    биеийг (≤8KB) зөвхөн ХУУЛЖ авна (terminal_id) — доод апп ижил мессежүүдийг авна.
 
-    def __init__(self, app):
+    Унтраалттай (PARKING_POS_CLIENTS_ENABLED=false) бол хүсэлтийг ШУУД дамжуулна — receive/send
+    боолтгүй, ажиглалтгүй. Тохиргоог НЭГ удаа (stack үүсэхэд) уншина, хүсэлт бүрд биш."""
+
+    def __init__(self, app, enabled: bool | None = None):
         self.app = app
+        self.enabled = is_enabled() if enabled is None else bool(enabled)
 
     async def __call__(self, scope, receive, send):
+        if not self.enabled:
+            await self.app(scope, receive, send)
+            return
         path = scope.get("path") or ""
         if scope.get("type") != "http" or not path.startswith("/api/"):
             await self.app(scope, receive, send)
@@ -689,13 +784,37 @@ def _row_visible(row, allowed: set | None) -> bool:
     return bool(sites) and set(sites) <= allowed
 
 
-def presence(last_seen: datetime | None, now: datetime) -> str:
+def presence(last_seen: datetime | None, now: datetime, windows: dict | None = None) -> str:
+    """online (≤5 мин ямар ч хүсэлт) / idle (heartbeat-ийн хугацаанд) / offline / stale —
+    хилүүд presence_windows()-д тайлбартай."""
     if last_seen is None:
         return "stale"
+    w = windows or presence_windows()
     age = (now - last_seen).total_seconds()
-    if age <= ONLINE_SEC:
+    if age <= w["online_sec"]:
         return "online"
-    return "stale" if age > STALE_HOURS * 3600 else "offline"
+    if age <= w["idle_sec"]:
+        return "idle"
+    return "stale" if age > w["stale_sec"] else "offline"
+
+
+def _thresholds(w: dict) -> dict:
+    return {"online_sec": w["online_sec"], "idle_sec": w["idle_sec"],
+            "stale_hours": -(-w["stale_sec"] // 3600), "heartbeat_sec": w["heartbeat_sec"],
+            "throttle_sec": int(THROTTLE_SEC)}
+
+
+def _empty_summary() -> dict:
+    return {"total": 0, "online": 0, "idle": 0, "outdated": 0, "unknown_version": 0,
+            "terminal_receipts": 0, "external_7d": 0, "shared_terminal_ids": 0}
+
+
+def disabled_report(now: datetime | None = None) -> dict:
+    """PARKING_POS_CLIENTS_ENABLED=false — DB/санах ойд хүрэхгүй хоосон хариу (UI мэдэгдэл харуулна)."""
+    now = now or datetime.utcnow()
+    return {"disabled": True, "generated_at": _iso(now), "thresholds": _thresholds(presence_windows()),
+            "min_app_version": None, "latest_version": None, "reference_version": None,
+            "summary": _empty_summary(), "sites": [], "clients": []}
 
 
 def _iso(dt):
@@ -711,7 +830,11 @@ def clients_report(db, user, *, site_id: str | None = None, days: int = 30,
     from ..models import Device, ParkingSession, ParkingSite, Payment, PosClient, User, VatReceipt
     from .app_settings import pos_terminal_receipt_methods
     from .receipts import choose_primary
+    if not is_enabled():
+        return disabled_report(now)
     now = now or datetime.utcnow()
+    windows = presence_windows()
+    live = live_last_seen()
     allowed_list = operator_sites(user)
     allowed = set(allowed_list) if allowed_list is not None else None
     q = db.query(PosClient)
@@ -824,6 +947,8 @@ def clients_report(db, user, *, site_id: str | None = None, days: int = 30,
         methods = _methods(eff_site)
         rec = choose_primary(receipts.get(s["last_payment_id"], [])) if s["last_payment_id"] else None
         dev = devices.get(r.terminal_id)
+        # Санах ойд DB-ээс шинэ хүсэлт байвал (heartbeat-only мөр ≤1 бичилт/4ц) — түүгээр
+        seen = max(filter(None, (r.last_seen_at, live.get((r.user_id, r.terminal_id)))), default=None)
         out.append({
             "id": r.id, "terminal_id": r.terminal_id or None, "terminal_source": r.terminal_source,
             "terminal_shared": bool(r.terminal_id) and len(shared.get(r.terminal_id, ())) > 1,
@@ -843,8 +968,8 @@ def clients_report(db, user, *, site_id: str | None = None, days: int = 30,
             "version_state": vstate, "version_outdated": vstate != "ok",
             "status": r.status, "status_at": _iso(r.status_at),
             "printer": r.printer, "battery": r.battery, "network": r.network, "extra": r.extra,
-            "presence": presence(r.last_seen_at, now),
-            "last_seen_at": _iso(r.last_seen_at), "first_seen_at": _iso(r.first_seen_at),
+            "presence": presence(seen, now, windows),
+            "last_seen_at": _iso(seen), "first_seen_at": _iso(r.first_seen_at),
             "last_ip": r.last_ip, "user_agent": r.user_agent, "last_endpoint": r.last_endpoint,
             "last_status_code": r.last_status_code,
             "request_count": int(r.request_count or 0), "error_count": int(r.error_count or 0),
@@ -861,14 +986,15 @@ def clients_report(db, user, *, site_id: str | None = None, days: int = 30,
     if allowed is not None:
         visible_sites = visible_sites.filter(ParkingSite.id.in_(sorted(allowed)))
     return {
+        "disabled": False,
         "generated_at": _iso(now),
-        "thresholds": {"online_sec": ONLINE_SEC, "stale_hours": STALE_HOURS,
-                       "throttle_sec": int(THROTTLE_SEC)},
+        "thresholds": _thresholds(windows),
         "min_app_version": min_v or None, "latest_version": latest,
         "reference_version": reference,
         "summary": {
             "total": len(out),
             "online": sum(1 for c in out if c["presence"] == "online"),
+            "idle": sum(1 for c in out if c["presence"] == "idle"),
             "outdated": sum(1 for c in out if c["version_outdated"]),
             "unknown_version": sum(1 for c in out if c["version_state"] == "unknown"),
             "terminal_receipts": sum(1 for c in out if c["receipt_mode"] == "terminal"),
@@ -1016,6 +1142,7 @@ def settings_report(db, user) -> dict:
         "open_reasons": A.get_open_reasons(db),
         "special_exit_kinds": [{"kind": k, "label": v["label"], "needs_snapshot": v["needs_snapshot"]}
                                for k, v in SPECIAL_EXIT_KINDS.items()],
-        "capture": {"throttle_sec": int(THROTTLE_SEC), "online_sec": ONLINE_SEC,
-                    "heartbeat_path": HEARTBEAT_PATH},
+        "capture": {"enabled": is_enabled(), "throttle_sec": int(THROTTLE_SEC),
+                    "online_sec": ONLINE_SEC, "heartbeat_path": HEARTBEAT_PATH,
+                    "heartbeat_sec": heartbeat_sec(), "heartbeat_status_min_sec": int(HB_STATUS_MIN_SEC)},
     }

@@ -26,6 +26,23 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-15 — «Холбогдсон POS»: heartbeat 60с → 4ц, унтраах товч (kill switch)
+
+Эзэн: «60 секунд арай өндөр ачаалал үүсгэхээр байна, өдөрт 4–6 байхад болно»; мөн шинэ таб үндсэн
+үйл ажиллагааг (төлбөр, хаалт) тасалдуулах вий гэсэн санаа зовнил. 60с heartbeat = терминал бүрд
+өдөрт 1,440 HTTP хүсэлт + JWT/хэрэглэгчийн DB уншилт + `min_app_version` уншилт + ≤1,440 upsert
+(сул үед ч 24/7). `PosCaptureMiddleware` нь БҮХ `/api/*` хүсэлтийг (хаалт, LPR, төлбөр) дамжин
+өнгөрдөг тул алдаа/удаашрал гарвал хариуг шууд унтраах арга хэрэгтэй байв. Схем өөрчлөгдөхгүй.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| perf | **Heartbeat 4 цаг тутам** (`PARKING_POS_HEARTBEAT_SEC`, анхдагч 14400, [3600, 86400]-д хавчина) → хариуны `next_heartbeat_sec`; апп мөн асах/нэвтрэх ба төлөв солигдох үед (≤1/5 мин). Сервер талын хамгаалалт: ЗӨВХӨН heartbeat-тэй мөр (ердийн хүсэлтгүй) ≤1 upsert / heartbeat-ийн интервал, төлөв солигдвол ≤1/5 мин, шинэ мөр/хувилбар ≤10с; ижил төлөвтэй heartbeat яаралтай БИШ; 422 heartbeat ч «идэвх» биш — хуучин апп 60с тутам илгээсээр байсан ч бичилт өдөрт ≤6 (хариу 200 хэвээр, тоолуур санах ойд алдагдахгүй). Ердийн POS хүсэлтийн 60с/10с throttle хэвээр | (энэ commit) | ⏳ | ⏳ |
+| feat | **Төлөв «Холбоотой» (idle)**: онлайн = ≤5 мин-д ЯМАР Ч POS хүсэлт (хэвээр); холбоотой = heartbeat + 25% (4ц → 5ц) дотор сураг гарсан; холбогдоогүй = heartbeat хоцорсон; хуучирсан = max(24ц, 2 heartbeat). Админы тайлан `last_seen_at`/онлайныг санах ойгоор (`live_last_seen`) — бичилтийн throttle-оос хоцрохгүй. `thresholds`-д `idle_sec`, `heartbeat_sec`; `summary.idle` | (энэ commit) | ⏳ | ⏳ |
+| ops | **Унтраах товч `PARKING_POS_CLIENTS_ENABLED=false`** (анхдагч true, restart шаардлагатай): middleware stack-д ОГТ орохгүй (мөн middleware өөрөө шууд дамжуулна — receive/send боолтгүй), `pos-clients-flush` task + known_users уншилт асахгүй, shutdown-ын эцсийн бичилт алгасна, `auth` `request.state.auth_user` тавихгүй, heartbeat 200 `{ok, disabled: true, next_heartbeat_sec}` (шалгалт/санах ой/DB-гүй), `GET /api/admin/pos-clients` → `{disabled: true, clients: []}`; Тохиргоо табд мэдэгдэл. Төлбөр/хаалт/e-Barimt-д нөлөөгүй | (энэ commit) | ⏳ | ⏳ |
+| perf | Frontend: «Холбогдсон POS» жагсаалт 30с → 60с тутам, таб нуугдсан/унтраалттай үед татахгүй (7 хоногийн төлбөрийн query-тэй тайлан); «Холбоотой» тоо/шошго, тайлбар tooltip | (энэ commit) | ⏳ | ⏳ |
+| test | `test_pos_clients.py` +8: интервал/хавчилт/хариу, presence хил (4ц/24ц heartbeat), 60с тутмын 362 heartbeat → 5 бичилт (тоолуур бүтэн), heartbeat-only бичилт унахад 60с-д дахин, унтраалттай: middleware ЯГ тэр receive/send-ийг дамжуулна, heartbeat no-op (parse/record/min_app_version дуудагдахгүй), админ disabled, flush_loop шууд дуусна, auth state тавихгүй | (энэ commit) | — | — |
+| docs | PAX_POS_APP_GUIDE §2.2 (4ц, хэзээ илгээх хүснэгт, `disabled` хариу, серверийн нэгтгэл, төлөвүүд); API_REFERENCE; `.env.example` | (энэ commit) | — | — |
+
 ## 2026-10-15 — «Холбогдсон POS»: POS аппын хувилбар/төлөв/терминалын бүртгэл + Тохиргоо таб
 
 Эзэн: «pos app-аас pos_version, user_id, terminal_id, status мэдээллийг авч хадгалж, тохиргоо хэсэгт

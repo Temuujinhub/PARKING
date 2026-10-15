@@ -117,8 +117,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         if iat is None or datetime.utcfromtimestamp(int(iat)) < user.password_changed_at:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                                 "Нууц үг солигдсон тул дахин нэвтэрнэ үү.")
-    if conn is not None:
-        # «Холбогдсон POS» (services/pos_clients) хариуны ДАРАА уншина — нэмэлт DB/JWT-гүй
+    if conn is not None and settings.pos_clients_enabled:
+        # «Холбогдсон POS» (services/pos_clients) хариуны ДАРАА уншина — нэмэлт DB/JWT-гүй.
+        # PARKING_POS_CLIENTS_ENABLED=false бол уншигч байхгүй тул тавихгүй
         conn.state.auth_user = (user.id, user.username, user.role)
     return user
 

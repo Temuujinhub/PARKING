@@ -70,9 +70,15 @@ app.add_middleware(
 )
 
 # «Холбогдсон POS» (2026-10-15): POS аппын хүсэлтийг ХАРИУНЫ ДАРАА санах ойд нэгтгэнэ —
-# хүсэлтийн замд DB-гүй; бичилтийг pos-clients-flush task 60с тутам (services/pos_clients).
-from .services.pos_clients import PosCaptureMiddleware  # noqa: E402
-app.add_middleware(PosCaptureMiddleware)
+# хүсэлтийн замд DB-гүй; бичилтийг pos-clients-flush task (services/pos_clients).
+# Унтраах товч PARKING_POS_CLIENTS_ENABLED=false: middleware stack-д ОГТ орохгүй (хүсэлтийн
+# замд 0 нэмэлт); middleware өөрөө ч унтраалттай үед шууд дамжуулдаг (давхар хамгаалалт).
+from .services import pos_clients as _pos_clients  # noqa: E402
+if _pos_clients.is_enabled():
+    app.add_middleware(_pos_clients.PosCaptureMiddleware)
+else:
+    log.warning("«Холбогдсон POS» УНТРААЛТТАЙ (PARKING_POS_CLIENTS_ENABLED=false) — POS аппын "
+                "хүсэлтийг бүртгэхгүй, heartbeat хадгалахгүй; төлбөр/хаалт/e-Barimt хэвийн")
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
@@ -182,8 +188,10 @@ async def start_vat_auto_send():
     _bg_task(loop_lag_monitor(), "loop-lag-monitor")
 
     # «Холбогдсон POS»: санах ойд нэгтгэсэн POS аппын ажиглалтыг ≤1 бичилт/60с-ээр upsert
+    # (зөвхөн heartbeat-тэй мөр ≤1/4ц). Унтраалттай бол task (known_users уншилт ч) асахгүй.
     from .services import pos_clients
-    _bg_task(pos_clients.flush_loop(), "pos-clients-flush")
+    if pos_clients.is_enabled():
+        _bg_task(pos_clients.flush_loop(), "pos-clients-flush")
 
     async def camera_silence_monitor():
         """Камер event ИЛГЭЭХЭЭ БОЛЬСОН эсэхийг ажиглана.
@@ -325,11 +333,14 @@ async def stop_background_tasks():
         await close_camera_clients()
     except Exception as e:  # noqa: BLE001
         log.warning("камерын холболт хаахад алдаа: %r", e)
-    # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с) — restart-д алдагдахгүй, ≤3с.
-    # Камерын холболт хаасны ДАРАА: DB удаан бол камерын subscription хаалтыг хойшлуулахгүй
+    # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с; heartbeat-only ≤4ц) — restart-д
+    # алдагдахгүй, ≤3с. Камерын холболт хаасны ДАРАА: DB удаан бол камерын subscription хаалтыг
+    # хойшлуулахгүй. Унтраалттай бол алгасна (санах ойд юу ч байхгүй).
     try:
         from .services import pos_clients
-        await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True), timeout=3.0)
+        if pos_clients.is_enabled():
+            await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True),
+                                   timeout=3.0)
     except Exception as e:  # noqa: BLE001 — зогсолтыг саатуулахгүй
         log.warning("pos_clients эцсийн бичилт амжилтгүй: %r", e)
 

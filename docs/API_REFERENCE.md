@@ -261,14 +261,21 @@ CLI `tools/vat_cancel_duplicates.py`-тэй НЭГ (`services/vat_duplicates.can
 ### POST /api/payments/pos/heartbeat  (cashier, 2026-10-15)
 POS аппын амьд байдал/төлөв: `{terminal_id, pos_version?, status? ≤40, printer?, battery? 0–100,
 network?, site_id?, extra? ≤1KB}` (`terminal_id`-г `X-Terminal-Id`-аар ч болно) → `{ok, server_time,
-min_app_version, update_required, next_heartbeat_sec}`; буруу утга **422**. Бүх хүсэлтэд сонголттой
-`X-Terminal-Id`, `X-POS-Status` толгой. Дэлгэрэнгүй: PAX_POS_APP_GUIDE §2.2.
+min_app_version, update_required, next_heartbeat_sec}`; буруу утга **422**. `next_heartbeat_sec` =
+`PARKING_POS_HEARTBEAT_SEC` (анхдагч 14400 = 4ц, 3600–86400-д хавчина); апп мөн асах/нэвтрэх, төлөв
+солигдох үед (≤1/5 мин). Зөвхөн heartbeat-тэй терминалын DB бичилт ≤1 / интервал (хэт олон илгээсэн ч).
+`PARKING_POS_CLIENTS_ENABLED=false` үед шалгалт/санах ой/DB-гүй **200** `{ok, disabled: true, server_time,
+next_heartbeat_sec}`. Бүх хүсэлтэд сонголттой `X-Terminal-Id`, `X-POS-Status` толгой. Дэлгэрэнгүй:
+PAX_POS_APP_GUIDE §2.2.
 
 ### GET /api/admin/pos-clients?site_id=&days=30  (ADMIN/SUPER_ADMIN)
 «Холбогдсон POS» (хэрэглэгч × терминал): хувилбар (`version_state` ok/behind/outdated/unknown), төлөв,
-`presence` (online ≤5 мин / offline / stale 24ц+), сүүлд холбогдсон, IP, 24ц/7х POS аппын төлбөр,
+`presence` (online ≤5 мин ямар ч хүсэлт / idle ≤ heartbeat + 25% (4ц → 5ц) / offline /
+stale: max(24ц, 2 heartbeat)-аас дээш) — `thresholds`-д сек-ээр; `last_seen_at` нь серверийн санах ойгоор (бичилтийн
+throttle-оос хоцрохгүй), сүүлд холбогдсон, IP, 24ц/7х POS аппын төлбөр,
 e-Barimt горим (`receipt_mode` system/terminal), 7х EXTERNAL, сүүлийн баримтын төлөв. Түрээслэгчийн
-админ өөрийн зогсоолынхоо мөрийг л авна. `days≤0` → бүх түүх.
+админ өөрийн зогсоолынхоо мөрийг л авна. `days≤0` → бүх түүх. `PARKING_POS_CLIENTS_ENABLED=false` үед
+`{disabled: true, clients: [], summary: 0…}` (тайлан DB/санах ойд хүрэхгүй).
 
 ### GET|PUT /api/admin/pos-settings  (ADMIN/SUPER_ADMIN; PUT — ерөнхий тохиргооны эрх)
 POS-той холбоотой одоо байгаа тохиргооны хураангуй (e-Barimt терминалын дүрэм ерөнхий/зогсоол,

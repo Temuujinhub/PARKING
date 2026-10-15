@@ -7,7 +7,11 @@
 //
 // Энэ таб: (1) POS аппын хүсэлтээс автоматаар (апп өөрчлөхгүйгээр) цугласан «холбогдсон POS»-ын
 // жагсаалт, (2) POS-той холбоотой ОДОО БАЙГАА тохиргоог нэг дор (засварыг өөрийн газарт нь),
-// (3) аппын хамгийн бага хувилбар (зөвхөн тодруулга). Өгөгдөл ≤60с хоцорч болно (бичилтийн throttle).
+// (3) аппын хамгийн бага хувилбар (зөвхөн тодруулга). «Онлайн»/«сүүлд» нь бодит цагаар (серверийн
+// санах ой); тоолуур/төлөв ≤60с, зөвхөн heartbeat-тэй терминалынх ≤4ц хоцорч болно (бичилтийн throttle).
+// 10-15: heartbeat 60с → 4ц (өдөрт ≤6, эзний шийдвэр) тул «Холбоотой» (heartbeat-ийн хугацаанд)
+// төлөв нэмэв — сул терминал 5 минутын дараа худал «Холбогдоогүй» болохгүй. Сервер дээр
+// PARKING_POS_CLIENTS_ENABLED=false бол жагсаалт хоосон, мэдэгдэл л харагдана.
 import { AlertTriangle, ListChecks, RefreshCw, Save, Smartphone, Users } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -16,8 +20,30 @@ import { Table, useToast } from '../../components/ui'
 
 const PRESENCE = {
   online: ['Онлайн', 'bg-emerald-400'],
+  idle: ['Холбоотой', 'bg-sky-400'],
   offline: ['Холбогдоогүй', 'bg-slate-500'],
-  stale: ['24ц+ сураггүй', 'bg-red-500'],
+  stale: ['Сураггүй', 'bg-red-500'],
+}
+
+/** 14400 → «4 цаг», 18000 → «5 цаг», 4500 → «1 цаг 15 мин», 300 → «5 мин» */
+function dur(sec) {
+  if (sec === null || sec === undefined) return '—'
+  const h = Math.floor(sec / 3600)
+  const m = Math.round((sec % 3600) / 60)
+  if (!h) return `${m} мин`
+  return m ? `${h} цаг ${m} мин` : `${h} цаг`
+}
+
+/** Төлөвийн шошго + тайлбар (серверийн thresholds-оор — heartbeat-ийн давтамж .env-ээс). */
+function presenceInfo(p, th) {
+  const [label, dot] = PRESENCE[p] || PRESENCE.offline
+  const tips = {
+    online: `Сүүлийн ${dur(th.online_sec)}-д POS аппын хүсэлт ирсэн`,
+    idle: `Хүсэлтгүй ч heartbeat-ийн хугацаанд (${dur(th.heartbeat_sec)} + зөвшөөрөл = ${dur(th.idle_sec)}) сураг гарсан — асаалттай, сул`,
+    offline: `${dur(th.idle_sec)}-аас дээш сураггүй — heartbeat ирэх ёстой байсан ч ирээгүй (унтраалттай / сүлжээгүй / хуучин апп)`,
+    stale: `${th.stale_hours} цагаас дээш сураггүй`,
+  }
+  return [p === 'stale' ? `${th.stale_hours}ц+ сураггүй` : label, dot, tips[p] || '']
 }
 
 // Аппын мэдээлэх төлөв — чөлөөт текст; мэдэгдэх утгуудыг Монголоор
@@ -63,8 +89,8 @@ function Chip({ children, cls = 'border-slate-600/40 text-slate-400', title }) {
   )
 }
 
-function ClientRow({ c, nowMs }) {
-  const [pLabel, pDot] = PRESENCE[c.presence] || PRESENCE.offline
+function ClientRow({ c, nowMs, th }) {
+  const [pLabel, pDot, pTip] = presenceInfo(c.presence, th)
   const rc = c.last_receipt ? (RECEIPT_LABEL[c.last_receipt.status] || [c.last_receipt.status, 'text-slate-300']) : null
   return (
     <tr className={c.presence === 'stale' ? 'opacity-60' : ''}>
@@ -105,7 +131,7 @@ function ClientRow({ c, nowMs }) {
         {c.version_state === 'unknown' && <div className="text-[10px] text-amber-300">хуучин build?</div>}
       </td>
       <td className="td text-xs">
-        <div className="flex items-center gap-1.5 whitespace-nowrap">
+        <div className="flex items-center gap-1.5 whitespace-nowrap" title={pTip}>
           <span className={`inline-block w-2 h-2 rounded-full ${pDot}`} /> {pLabel}
         </div>
         {c.status && (
@@ -365,8 +391,12 @@ function SettingsSummary({ s, onGotoRules, onGotoDevices, onSaved, toast }) {
           )}
           <p className="text-[11px] text-slate-500 pt-2">
             Апп → сервер: хүсэлт бүрд <span className="font-mono">X-App-Version</span>,{' '}
-            <span className="font-mono">X-Terminal-Id</span>, (сонголттой) <span className="font-mono">X-POS-Status</span>;
-            60с тутам <span className="font-mono">POST {s.capture.heartbeat_path}</span> (docs/PAX_POS_APP_GUIDE.md §2.2).
+            <span className="font-mono">X-Terminal-Id</span>, (сонголттой) <span className="font-mono">X-POS-Status</span>{' '}
+            (нэмэлт хүсэлт үүсгэхгүй); {dur(s.capture.heartbeat_sec)} тутам (өдөрт ≤{Math.ceil(86400 / s.capture.heartbeat_sec)}),
+            мөн апп асах/нэвтрэх, төлөв солигдох үед (≤1 / {dur(s.capture.heartbeat_status_min_sec)}){' '}
+            <span className="font-mono">POST {s.capture.heartbeat_path}</span> (docs/PAX_POS_APP_GUIDE.md §2.2;
+            .env <span className="font-mono">PARKING_POS_HEARTBEAT_SEC</span>).
+            {!s.capture.enabled && <b className="text-amber-300"> Бүртгэл серверт унтраалттай.</b>}
           </p>
         </div>
       </section>
@@ -397,9 +427,14 @@ export default function PosClientsSection({ onGotoRules, onGotoDevices }) {
   }, [siteId, allHistory])
 
   useEffect(() => { load() }, [load])
-  // 30с тутам шинэчилнэ — сервер ≤60с-д бичдэг тул илүү давтамжтай татах утгагүй
+  // 60с тутам шинэчилнэ (7 хоногийн төлбөрийн query-тэй тайлан — DB ачаалал багасгахын тулд):
+  // таб нуугдсан эсвэл серверт бүртгэл унтраалттай бол татахгүй
+  const disabledRef = useRef(false)
+  useEffect(() => { disabledRef.current = Boolean(data?.disabled) }, [data])
   useEffect(() => {
-    const t = setInterval(load, 30000)
+    const t = setInterval(() => {
+      if (!document.hidden && !disabledRef.current) load()
+    }, 60000)
     return () => clearInterval(t)
   }, [load])
   useEffect(() => {
@@ -411,6 +446,28 @@ export default function PosClientsSection({ onGotoRules, onGotoDevices }) {
     : <div role="status" className="text-sm text-slate-500">Ачаалж байна…</div>
 
   const sm = data.summary
+  const th = data.thresholds
+  const settingsCard = settings && (
+    <SettingsSummary s={settings} onGotoRules={onGotoRules} onGotoDevices={onGotoDevices}
+      onSaved={(s) => { setSettings(s); load() }} toast={toast} />
+  )
+  if (data.disabled) {
+    return (
+      <div className="space-y-5">
+        <div className="card space-y-2">
+          <h2 className="font-semibold flex items-center gap-2">
+            <Smartphone size={16} className="text-accent" /> Холбогдсон POS
+          </h2>
+          <p role="status" className="text-sm text-amber-300/90 border border-amber-500/30 bg-amber-500/5 rounded-lg px-3 py-2">
+            Серверт унтраалттай (<span className="font-mono">PARKING_POS_CLIENTS_ENABLED=false</span>) — POS аппын
+            хүсэлтийг бүртгэхгүй, heartbeat-ийг хадгалахгүй. Төлбөр, хаалт, e-Barimt хэвийн ажиллана.
+            Асаахад .env-д <span className="font-mono">true</span> болгоод backend-ийг restart хийнэ.
+          </p>
+        </div>
+        {settingsCard}
+      </div>
+    )
+  }
   return (
     <div className="space-y-5">
       {error && <p role="alert" className="text-sm text-slate-100 border border-brand-red rounded-lg p-3">{error}</p>}
@@ -422,7 +479,9 @@ export default function PosClientsSection({ onGotoRules, onGotoDevices }) {
           <p className="text-xs text-slate-400 mt-1">
             PAX POS аппын хүсэлтүүдээс автоматаар цуглуулна (хэрэглэгч × терминал): хувилбар
             (<span className="font-mono">X-App-Version</span>), төлөв, сүүлд холбогдсон цаг, IP. Онлайн = сүүлийн
-            {' '}{Math.round(data.thresholds.online_sec / 60)} мин; өгөгдөл ≤{data.thresholds.throttle_sec}с хоцорч болно.
+            {' '}{dur(th.online_sec)}-д хүсэлттэй; Холбоотой = heartbeat-ийн хугацаанд ({dur(th.idle_sec)}) сураг
+            гарсан; Холбогдоогүй = heartbeat хоцорсон. Тоолуур ≤{th.throttle_sec}с (зөвхөн heartbeat бол
+            ≤{dur(th.heartbeat_sec)}) хоцорч болно.
             {data.min_app_version
               ? <> Доод хувилбар: <b className="text-slate-200 font-mono">{data.min_app_version}</b>.</>
               : data.latest_version && <> Хамгийн сүүлийн хувилбар: <b className="text-slate-200 font-mono">{data.latest_version}</b>.</>}
@@ -431,6 +490,9 @@ export default function PosClientsSection({ onGotoRules, onGotoDevices }) {
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="px-2 py-1 rounded bg-surface-muted">Нийт <b>{sm.total}</b></span>
           <span className="px-2 py-1 rounded bg-surface-muted">Онлайн <b className="text-emerald-300">{sm.online}</b></span>
+          <span className="px-2 py-1 rounded bg-surface-muted" title={presenceInfo('idle', th)[2]}>
+            Холбоотой <b className="text-sky-300">{sm.idle ?? 0}</b>
+          </span>
           <span className="px-2 py-1 rounded bg-surface-muted">Хуучин/тодорхойгүй хувилбар <b className={sm.outdated ? 'text-amber-300' : ''}>{sm.outdated}</b></span>
           <span className="px-2 py-1 rounded bg-surface-muted">Терминал баримт гаргадаг <b className={sm.terminal_receipts ? 'text-amber-300' : ''}>{sm.terminal_receipts}</b></span>
           {sm.external_7d > 0 && (
@@ -462,13 +524,10 @@ export default function PosClientsSection({ onGotoRules, onGotoDevices }) {
         <Table maxH="65vh" empty={data.clients.length === 0}
           headers={['Терминал', 'Хэрэглэгч', 'Зогсоол', 'Хувилбар', 'Төлөв', 'Сүүлд холбогдсон', 'IP',
             '24ц төлбөр', 'e-Barimt горим', 'Сүүлийн баримт']}>
-          {data.clients.map((c) => <ClientRow key={c.id} c={c} nowMs={nowMs} />)}
+          {data.clients.map((c) => <ClientRow key={c.id} c={c} nowMs={nowMs} th={th} />)}
         </Table>
       </div>
-      {settings && (
-        <SettingsSummary s={settings} onGotoRules={onGotoRules} onGotoDevices={onGotoDevices}
-          onSaved={(s) => { setSettings(s); load() }} toast={toast} />
-      )}
+      {settingsCard}
     </div>
   )
 }

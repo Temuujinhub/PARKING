@@ -528,3 +528,210 @@ def test_get_current_user_still_works_without_connection():
     """ws.py нь get_current_user(token=, db=)-г шууд дууддаг — conn-гүй ажиллана."""
     import inspect
     assert inspect.signature(auth.get_current_user).parameters['conn'].default is None
+
+
+# ── 6. Heartbeat-ийн давтамж (10-15: 60с → 4ц) ба хэт олон heartbeat ─────────
+from app.config import settings as CFG   # noqa: E402
+
+
+def test_heartbeat_interval_setting_clamped_and_returned(env, monkeypatch):
+    """Анхдагч 14400 (4ц → ≤6/өдөр); [3600, 86400]-д хавчина; хариуны next_heartbeat_sec."""
+    assert CFG.pos_heartbeat_sec == 14400 and PC.heartbeat_sec() == 14400
+    for raw, want in ((60, 3600), (10 ** 7, 86400), ('junk', 14400), (21600, 21600)):
+        monkeypatch.setattr(CFG, 'pos_heartbeat_sec', raw)
+        assert PC.heartbeat_sec() == want
+    monkeypatch.setattr(CFG, 'pos_heartbeat_sec', 14400)
+    app = make_app(env)
+    with TestClient(app) as c:
+        r = c.post('/api/payments/pos/heartbeat', headers=hdr(env['u']['sport']),
+                   json={'terminal_id': '91186920', 'status': 'ONLINE'})
+    assert r.status_code == 200 and r.json()['next_heartbeat_sec'] == 14400
+    assert 'disabled' not in r.json()
+
+
+def test_presence_windows_not_misfiring_with_hours_apart_heartbeats():
+    """Онлайн = ≤5 мин ямар ч хүсэлт; 4ц heartbeat-тэй сул терминал 5ц хүртэл «холбоотой»
+    (худал «холбогдоогүй» биш); 24ц heartbeat тохируулсан ч 24ц-т «хуучирсан» болохгүй."""
+    now = datetime(2026, 10, 15, 12, 0, 0)
+    w = PC.presence_windows(14400)
+    assert w == {'online_sec': 300, 'idle_sec': 14400 + 3600, 'stale_sec': 86400, 'heartbeat_sec': 14400}
+    ago = lambda s: now - timedelta(seconds=s)      # noqa: E731
+    assert PC.presence(ago(299), now, w) == 'online'
+    assert PC.presence(ago(301), now, w) == 'idle'
+    assert PC.presence(ago(4 * 3600 + 50 * 60), now, w) == 'idle'     # heartbeat 50 мин хоцорсон
+    assert PC.presence(ago(5 * 3600 + 1), now, w) == 'offline'
+    assert PC.presence(ago(86401), now, w) == 'stale'
+    w24 = PC.presence_windows(86400)
+    assert w24['idle_sec'] == 86400 + 21600 and w24['stale_sec'] == 2 * 86400 + 21600
+    assert PC.presence(ago(25 * 3600), now, w24) == 'idle'
+    assert PC.presence(None, now, w) == 'stale'
+    # 1ц heartbeat → зөвшөөрөл 15 мин (доод хязгаар)
+    assert PC.presence_windows(3600)['idle_sec'] == 3600 + 900
+
+
+def test_frequent_heartbeats_do_not_multiply_db_writes(env, clock, monkeypatch):
+    """Хуучин апп 60с тутам heartbeat илгээсээр байвал: хариу 200, санах ойд тоологдоно, гэхдээ
+    DB upsert ≤1 / heartbeat-ийн интервал (4ц); ижил төлөв яаралтай биш; төлөв солигдвол ≤1/5 мин."""
+    u = env['u']['sport']
+    writes = []
+    real = PC._write
+
+    def counting(db, snap):
+        writes.append(snap['heartbeats'])
+        return real(db, snap)
+    monkeypatch.setattr(PC, '_write', counting)
+    app = make_app(env)
+    body = {'terminal_id': '91186920', 'status': 'ONLINE', 'battery': 80}
+    with TestClient(app) as c:
+        def beat(**kw):
+            r = c.post('/api/payments/pos/heartbeat', headers=hdr(u), json={**body, **kw})
+            assert r.status_code == 200, r.text
+        beat()
+        assert flush(env) == 1                    # шинэ мөр → шууд (≤10с)
+        for _ in range(120):                      # 2 цаг, минут тутам, төлөв өөрчлөгдөөгүй
+            clock.t += 60
+            beat()
+            assert flush(env) == 0
+        # 422 heartbeat (ижил терминал) ч «идэвх» биш — бичилт нэмэхгүй, алдааг л тоолно
+        r = c.post('/api/payments/pos/heartbeat', headers=hdr(u, **{'X-Terminal-Id': '91186920'}),
+                   json={'battery': 500})
+        assert r.status_code == 422
+        clock.t += 61
+        assert flush(env) == 0
+        # «Онлайн» нь санах ойгоор — DB-д 2 цагийн өмнөх ч тайланд одоо
+        rep = PC.clients_report(env['db'], env['u']['root'])
+        (cl,) = [x for x in rep['clients'] if x['terminal_id'] == '91186920']
+        assert cl['presence'] == 'online' and rep['thresholds']['heartbeat_sec'] == 14400
+        assert rows(env, terminal_id='91186920')[0].heartbeat_count == 1
+        # төлөв солигдвол (принтер) — сүүлийн бичилтээс ≥5 мин тул шууд
+        beat(status='PRINTER_ERROR')
+        assert flush(env) == 1
+        # анивчсан төлөв: 5 мин дотор дахин солигдвол хүлээнэ
+        clock.t += 60
+        beat(status='ONLINE')
+        assert flush(env) == 0
+        clock.t += 240
+        assert flush(env) == 1
+        # дахин 4ц хүртэл ижил төлөвтэй heartbeat → 0; 4ц хүрэхэд нэг л бичилт
+        for _ in range(4 * 60 - 1):
+            clock.t += 60
+            beat(status='ONLINE')
+            assert flush(env) == 0
+        clock.t += 60
+        assert flush(env) == 1
+        # ердийн POS хүсэлт ирвэл хэвийн 60с-ийн хэмнэл (heartbeat-ийн 4ц биш)
+        c.get('/api/payments?limit=10', headers=hdr(u, **{'X-Terminal-Id': '91186920'}))
+        clock.t += 61
+        assert flush(env) == 1
+    assert len(writes) == 5
+    r = rows(env, terminal_id='91186920')[0]
+    # 1 + 120 + 1 + 1 + 239 = 362 heartbeat — бичилт цөөрсөн ч тоолуур алдагдаагүй
+    assert r.heartbeat_count == 362 and r.status == 'ONLINE' and r.error_count == 1
+    assert r.request_count == 364
+
+
+def test_write_failure_of_heartbeat_only_row_retried_at_normal_pace(env, clock, monkeypatch):
+    u = env['u']['sport']
+    app = make_app(env)
+    with TestClient(app) as c:
+        c.post('/api/payments/pos/heartbeat', headers=hdr(u), json={'terminal_id': 'HB1'})
+    from sqlalchemy.exc import OperationalError
+    real = PC._write
+    monkeypatch.setattr(PC, '_write', lambda db, snap: (_ for _ in ()).throw(
+        OperationalError('SELECT 1', {}, Exception('db down'))))
+    assert flush(env) == 0
+    monkeypatch.setattr(PC, '_write', real)
+    clock.t += 61                                 # 4ц биш — 60с-ийн дараа дахин
+    assert flush(env) == 1 and rows(env)[0].heartbeat_count == 1
+
+
+# ── 7. Унтраах товч: PARKING_POS_CLIENTS_ENABLED=false ─────────────────────────
+@pytest.fixture
+def disabled(monkeypatch):
+    PC.reset_state()
+    monkeypatch.setattr(CFG, 'pos_clients_enabled', False)
+    yield
+    PC.reset_state()
+
+
+def test_disabled_middleware_passes_through_without_wrapping(disabled):
+    import asyncio
+    seen = {}
+
+    async def inner(scope, receive, send):
+        seen['receive'], seen['send'] = receive, send
+
+    async def receive():
+        return {'type': 'http.request', 'body': b'{"terminal_id": "T1"}'}
+
+    async def send(message):
+        pass
+
+    mw = PC.PosCaptureMiddleware(inner)            # тохиргоог __init__-д нэг удаа уншина
+    assert mw.enabled is False
+    scope = {'type': 'http', 'method': 'POST', 'path': '/api/payments/pos/confirm',
+             'headers': [(b'x-app-version', b'1.5.3')], 'state': {'auth_user': ('u', 'pos', 'POS')}}
+    asyncio.run(mw(scope, receive, send))
+    # ЯГ тэр callable-ууд — receive/send боолтгүй (body peek, status барих ч үгүй)
+    assert seen['receive'] is receive and seen['send'] is send
+    assert PC._pending == {} and PC.live_last_seen() == {}
+    # тодорхой enabled=True өгвөл боолттой (харьцуулалт)
+    asyncio.run(PC.PosCaptureMiddleware(inner, enabled=True)(scope, receive, send))
+    assert seen['receive'] is not receive and seen['send'] is not send
+
+
+def test_disabled_heartbeat_is_noop_and_admin_shows_disabled(env, clock, monkeypatch):
+    u = env['u']
+    seed_clients(env, clock)                      # асаалттай үед цугласан мөрүүд DB-д байна
+    before = {(r.username, r.request_count) for r in rows(env)}
+    PC.reset_state()
+    monkeypatch.setattr(CFG, 'pos_clients_enabled', False)
+    boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError('унтраалттай үед дуудагдах ёсгүй'))  # noqa: E731
+    real_min = PC.min_app_version
+    monkeypatch.setattr(PC, 'parse_heartbeat', boom)
+    monkeypatch.setattr(PC, 'min_app_version', boom)      # heartbeat-ийн DB уншилт ч үгүй
+    monkeypatch.setattr(PC, 'record', boom)
+    app = make_app(env)                           # middleware stack шинээр — унтраалттай
+    with TestClient(app) as c:
+        for body in ({'terminal_id': '91186920', 'status': 'ONLINE'}, {'battery': 500}):
+            r = c.post('/api/payments/pos/heartbeat', headers=hdr(u['sport']), json=body)
+            assert r.status_code == 200, r.text
+            j = r.json()
+            assert j['ok'] is True and j['disabled'] is True and j['next_heartbeat_sec'] == 14400
+        c.get('/api/payments?limit=10', headers=hdr(u['sport'], **{'X-Terminal-Id': TDB}))
+        r = c.get('/api/admin/pos-clients', headers=hdr(u['root'], version=None, ua='Mozilla/5.0'))
+        assert r.status_code == 200
+        j = r.json()
+        assert j['disabled'] is True and j['clients'] == [] and j['summary']['total'] == 0
+        assert j['thresholds']['heartbeat_sec'] == 14400
+        # «POS-той холбоотой тохиргоо» хураангуй (зөвхөн харах) унтраалттай үед ч ажиллана
+        monkeypatch.setattr(PC, 'min_app_version', real_min)
+        # tenant-ийн шалгалт хэвээр (өөр түрээслэгчийн зогсоол → 403)
+        assert c.get('/api/admin/pos-clients', params={'site_id': env['sites'][0].id},
+                     headers=hdr(u['mon_admin'], version=None, ua='Mozilla/5.0')).status_code == 403
+        s = c.get('/api/admin/pos-settings', headers=hdr(u['root'], version=None, ua='Mozilla/5.0'))
+        assert s.status_code == 200 and s.json()['capture']['enabled'] is False
+    assert PC._pending == {} and PC.due_count(force=True) == 0
+    assert flush(env, force=True) == 0
+    assert {(r.username, r.request_count) for r in rows(env)} == before   # DB хөндөгдөөгүй
+
+
+def test_disabled_flush_loop_exits_without_db(disabled, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(PC, 'refresh_known_users',
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError('DB уншилт')))
+    monkeypatch.setattr(PC, 'FLUSH_TICK_SEC', 0.0)
+    asyncio.run(asyncio.wait_for(PC.flush_loop(), timeout=2))   # шууд дуусна (гогцоо эхлэхгүй)
+
+
+def test_disabled_auth_does_not_tag_request_state(env, disabled):
+    from fastapi import APIRouter
+    probe = APIRouter()
+
+    @probe.get('/api/probe')
+    def _probe(request: Request, user=Depends(auth.get_current_user)):
+        return {'tagged': getattr(request.state, 'auth_user', None) is not None}
+
+    app = make_app(env, probe)
+    with TestClient(app) as c:
+        assert c.get('/api/probe', headers=hdr(env['u']['sport'])).json() == {'tagged': False}
