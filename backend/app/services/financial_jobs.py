@@ -724,55 +724,103 @@ async def deliver_now(db, payment_id, *, budget=None, factory=None) -> dict:
     return out
 
 
-# QR нөхөлт: msgbill-ийн SENT баримтад QR санах ойд алга (процесс restart, webhook-оор
-# дууссан, 1 цаг өнгөрсөн) бол /print нэг удаа GET /partner/receipts/{id}-ээс авна.
+# QR нөхөлт: msgbill-ийн SENT баримтад QR санах ойд алга (POST хариунд QR ирээгүй, webhook-оор
+# дууссан, процесс restart, 1 цаг өнгөрсөн) бол msgbill GET /partner/receipts/{id}-ээс татна.
+# Хяналтын засвар (2026-10-15): татах ажил нь БИЕ ДААСАН task — дуудагчийн төсөв (confirm-ийн
+# үлдсэн хугацаа) дуусах/цуцлагдах нь татлагыг тасалдуулахгүй, QR ирмэгц кэшлэгдэнэ. ЗЭРЭГ
+# хүсэлтүүд нэг task-ийг хүлээнэ (давхар GET үгүй). Бүтэлгүй/QR-гүй хариуны дараа ЗӨВХӨН
+# QR_RETRY_SEC (2с) дотор дахин татахгүй — өмнө нь 60с түгжиж, аппын /print-ийн давталт QR-гүй
+# хэвлэдэг байв. Цуцлагдсан (процесс зогссон) оролдлого бүртгэгдэхгүй.
 QR_FETCH_TIMEOUT = 3.0
-QR_RETRY_SEC = 60.0
-_qr_attempts: dict = {}   # receipt_id → сүүлийн оролдлогын monotonic (давтан татахгүй)
+QR_RETRY_SEC = 2.0
+QR_LIST_MAX_FETCH = 10      # /pos/receipts нэг хүсэлтэд QR татах дээд тоо
+_qr_fetching: dict = {}     # receipt_id → asyncio.Task (одоо татаж буй)
+_qr_failed: dict = {}       # receipt_id → сүүлийн бүтэлгүй/QR-гүй хариуны monotonic
 
 
-async def ensure_qr(db, payment, rec=None, *, timeout: float = QR_FETCH_TIMEOUT) -> str | None:
-    """Хэвлэх баримтын QR (санах ойд байхгүй бол msgbill-ээс НЭГ удаа татаж кэшилнэ).
-
-    ЗӨВХӨН SENT, provider MSGBILL, provider_ref-тэй баримтад. DB-д юу ч бичихгүй (QR-ыг
-    ТЕГ №11-ээр хадгалахгүй). msgbill-ийн дугаар хадгалсан ДДТД-ээс өөр бол QR-ыг
-    ашиглахгүй (хэвлэсэн ДДТД ≠ QR болохоос). Алдаа/удаашрал хэвлэлтийг унагаахгүй —
-    QR-гүй хэвлэнэ, QR_RETRY_SEC-ийн дараа дахин оролдоно."""
-    import time as _t
+def qr_plan(db, payment, rec=None) -> dict | None:
+    """SYNC (DB): хэвлэх баримтын QR-ыг татах шаардлагатай юу. None = татах зүйлгүй (QR кэштэй,
+    SENT биш, msgbill биш, provider_ref/түлхүүргүй). Түлхүүрүүдийг ЭНД (request-ийн session-д)
+    бодно — арын task DB-д хүрэхгүй."""
     from .receipts import print_receipt, receipt_qr
+    rec = rec if rec is not None else print_receipt(db, payment)
+    if rec is None or rec.status != "SENT" or not rec.ebarimt_id or receipt_qr(rec):
+        return None
+    if (rec.provider or "") != "MSGBILL" or not rec.provider_ref:
+        return None
+    site = payment_site(payment)
+    accounts = msgbill.cancel_accounts(site)
+    if not accounts:
+        return None
+    return {"receipt_id": rec.id, "ref": rec.provider_ref, "ddtd": rec.ebarimt_id,
+            "payment_id": payment.id, "site": site, "accounts": accounts}
+
+
+async def _fetch_qr(plan) -> str | None:
+    import time as _t
+    rid, ref, ddtd = plan["receipt_id"], plan["ref"], plan["ddtd"]
     try:
-        rec = rec if rec is not None else print_receipt(db, payment)
-        if rec is None or rec.status != "SENT" or not rec.ebarimt_id:
-            return None
-        cached = receipt_qr(rec)
-        if cached:
-            return cached
-        if (rec.provider or "") != "MSGBILL" or not rec.provider_ref:
-            return None
-        now = _t.monotonic()
-        last = _qr_attempts.get(rec.id)
-        if last is not None and now - last < QR_RETRY_SEC:
-            return None
-        if len(_qr_attempts) > 5000:
-            _qr_attempts.clear()
-        _qr_attempts[rec.id] = now   # await-ээс ӨМНӨ — зэрэг ирсэн хүсэлт давхар татахгүй
-        rec_id, ref, ddtd = rec.id, rec.provider_ref, rec.ebarimt_id
-        site = payment_site(payment)
-        res = await msgbill.get_receipt_any(site, ref, timeout=timeout)
+        res = await msgbill.get_receipt_any(plan["site"], ref, timeout=QR_FETCH_TIMEOUT,
+                                            accounts=plan["accounts"])
     except Exception as exc:  # noqa: BLE001 — msgbill унасан/удаан: QR-гүй хэвлэнэ
-        log.warning("QR татаж чадсангүй (payment=%s): %s", getattr(payment, "id", None),
-                    type(exc).__name__)
+        _qr_failed[rid] = _t.monotonic()
+        log.warning("QR татаж чадсангүй (payment=%s): %s", plan["payment_id"], type(exc).__name__)
         return None
     qr, no = res.get("qrData"), res.get("billId")
     if not qr or (res.get("state") or "").upper() != "CREATED":
+        _qr_failed[rid] = _t.monotonic()
         log.info("msgbill %s QR өгсөнгүй (state=%s)", ref, res.get("state"))
         return None
     if no and no != ddtd:
+        _qr_failed[rid] = _t.monotonic()
         log.error("QR татахад ДДТД зөрөв payment=%s: msgbill %s ≠ хадгалсан %s — QR ашиглахгүй",
-                  payment.id, no, ddtd)
+                  plan["payment_id"], no, ddtd)
         return None
-    ebarimt.cache_qr(rec_id, qr)
+    _qr_failed.pop(rid, None)
+    ebarimt.cache_qr(rid, qr)
     return qr
+
+
+async def fetch_qr(plan, *, timeout: float = QR_FETCH_TIMEOUT) -> str | None:
+    """qr_plan-ийн дагуу QR татна (эсвэл татаж буйг хүлээнэ) ≤timeout сек. timeout 0 = арын
+    горимд эхлүүлээд шууд буцна (дараагийн /print кэшээс авна). Хэзээ ч алдаа шидэхгүй."""
+    import time as _t
+    if not plan:
+        return None
+    rid = plan["receipt_id"]
+    loop = asyncio.get_running_loop()
+    task = _qr_fetching.get(rid)
+    if task is None or task.done() or task.get_loop() is not loop:
+        last = _qr_failed.get(rid)
+        if last is not None and _t.monotonic() - last < QR_RETRY_SEC:
+            return None
+        if len(_qr_failed) > 5000:
+            _qr_failed.clear()
+        task = asyncio.ensure_future(_fetch_qr(plan))
+        _qr_fetching[rid] = task
+        task.add_done_callback(lambda t, k=rid: _qr_fetching.pop(k, None)
+                               if _qr_fetching.get(k) is t else None)
+    if timeout and timeout > 0:
+        # wait нь task-ийг ЦУЦЛАХГҮЙ — төсөв дууссан ч татлага үргэлжилж кэшилнэ
+        await asyncio.wait([task], timeout=timeout)
+    return ebarimt.get_cached_qr(rid)
+
+
+async def ensure_qr(db, payment, rec=None, *, timeout: float = QR_FETCH_TIMEOUT) -> str | None:
+    """Хэвлэх баримтын QR (санах ойд байхгүй бол msgbill-ээс татаж кэшилнэ — DB-д ХЭЗЭЭ Ч үгүй,
+    ТЕГ №11). ЗӨВХӨН SENT, MSGBILL, provider_ref-тэй баримтад; msgbill-ийн дугаар хадгалсан
+    ДДТД-ээс өөр бол QR-ыг ашиглахгүй. Алдаа/удаашрал хэвлэлтийг унагаахгүй (QR-гүй хэвлэнэ)."""
+    from .receipts import print_receipt, receipt_qr
+    try:
+        rec = rec if rec is not None else print_receipt(db, payment)
+        cached = receipt_qr(rec)
+        if cached:
+            return cached
+        plan = qr_plan(db, payment, rec)
+    except Exception:  # noqa: BLE001
+        log.exception("QR төлөвлөж чадсангүй (payment=%s)", getattr(payment, "id", None))
+        return None
+    return await fetch_qr(plan, timeout=timeout)
 
 
 async def supervisor():

@@ -372,8 +372,11 @@ def _wrong_account(e: "MsgbillError") -> bool:
     return e.status in (401, 403, 404) or code in ("RECEIPT_NOT_FOUND", "NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN")
 
 
-async def _with_fallback(site, fn, msgbill_id: str, prefer_scope: str | None = None):
-    accs = cancel_accounts(site)
+async def _with_fallback(site, fn, msgbill_id: str, prefer_scope: str | None = None,
+                         accounts: list | None = None):
+    # accounts — урьдчилан (request-ийн DB session дотор) бодсон түлхүүрүүд: арын task-аас
+    # дуудахад site-ийн lazy-load хаагдсан session-д хүрэхгүй (2026-10-15 QR нөхөлт)
+    accs = list(accounts) if accounts is not None else cancel_accounts(site)
     if prefer_scope:
         accs.sort(key=lambda a: a.scope != prefer_scope)
     if not accs:
@@ -400,10 +403,10 @@ async def cancel_receipt_any(site, msgbill_id: str, note: str = "",
 
 
 async def get_receipt_any(site, msgbill_id: str, prefer_scope: str | None = None,
-                          timeout: float | None = None) -> dict:
+                          timeout: float | None = None, accounts: list | None = None) -> dict:
     """get_receipt + түлхүүрийн уналт (CANCEL_PENDING-ийн төлөвийг эцэслэхэд, QR нөхөхөд)."""
     return await _with_fallback(site, lambda acc: get_receipt(acc, msgbill_id, timeout=timeout),
-                                msgbill_id, prefer_scope)
+                                msgbill_id, prefer_scope, accounts=accounts)
 
 
 # ── Webhook (msgbill → бид): X-Billing-Event, X-Billing-Signature = HMAC-SHA256(raw body, whsec_)

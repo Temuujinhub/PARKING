@@ -761,14 +761,3 @@ def pos_terminal_on_traffic(db, site_id: str) -> dict | None:
     if not n:
         return None
     return {"count": n, "methods": methods, "external": pos_external_count(db, site_id, methods)}
-
-
-def pos_terminal_off_traffic(db, site_id: str) -> dict | None:
-    """Энэ зогсоолд терминалын дүрэм хамаарахгүй (унтраасан/аргаас хассан) аргаар сүүлийн
-    30 хоногт POS аппын төлбөр авсан уу. {"count", "methods"} эсвэл None."""
-    missing = sorted({"CARD", "CASH"} - A.pos_terminal_receipt_methods(db, site_id))
-    if not missing:
-        return None
-    traffic = pos_app_traffic(db, site_id)
-    n = sum(traffic.get(m, 0) for m in missing)
-    return {"count": n, "methods": missing} if n else None

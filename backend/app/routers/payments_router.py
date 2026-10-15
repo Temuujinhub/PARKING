@@ -556,8 +556,9 @@ async def _ready_for_print(db: Session, payment: Payment, *, deliver: bool = Fal
     deliver=True (/pos/confirm, /cash): мөнгө commit болсны дараа ЭНЭ төлбөрийн msgbill
     ажлыг outbox-ын lease-ээр авч шууд илгээнэ, ≤settings.receipt_inline_wait_sec хүлээнэ
     (financial_jobs.deliver_now — worker давхар илгээхгүй). Дараа нь хэвлэх баримтын QR
-    санах ойд алга бол msgbill-ээс НЭГ удаа татна (ensure_qr). Юу ч болсон алдаа шидэхгүй —
-    төлбөр, хаалт аль хэдийн болсон; бэлэн болоогүй бол хариу PENDING (апп /print-ээр татна)."""
+    санах ойд алга бол msgbill-ээс татна (ensure_qr — үлдсэн төсөв дуусвал татлага арын горимд
+    үргэлжилж кэшилнэ, дараагийн /print-д бэлэн). Юу ч болсон алдаа шидэхгүй — төлбөр, хаалт
+    аль хэдийн болсон; бэлэн болоогүй бол хариу PENDING (апп /print-ээр татна)."""
     import time as _t
     from ..services import financial_jobs as FJ
     pid = payment.id
@@ -566,13 +567,15 @@ async def _ready_for_print(db: Session, payment: Payment, *, deliver: bool = Fal
         db.commit()   # хүлээлтийн үед request-ийн транзакц нээлттэй үлдэхгүй (түгжээгүй)
         qr_timeout = FJ.QR_FETCH_TIMEOUT
         if deliver:
-            # ДДТД + QR татах НИЙТ хүлээлт ≤ receipt_inline_wait_sec (≤6с); 0 = хоёулаа унтарна
+            # ДДТД + QR НИЙТ хүлээлт ≤ receipt_inline_wait_sec (≤6с); 0 = хоёулаа унтарна
             budget = FJ.inline_budget()
+            if budget <= 0:
+                return
             await FJ.deliver_now(db, pid, budget=budget)
             db.expire_all()   # outbox тусдаа session-д бичсэн ДДТД/төлөвийг дахин уншина
-            qr_timeout = min(qr_timeout, budget - (_t.monotonic() - t0))
-        if qr_timeout >= 0.3:
-            await FJ.ensure_qr(db, db.get(Payment, pid), timeout=qr_timeout)
+            # Үлдсэн хугацаа бага/0 байсан ч татлагыг ЭХЛҮҮЛНЭ (хүлээхгүй) — оролдлого «шатахгүй»
+            qr_timeout = max(0.0, min(qr_timeout, budget - (_t.monotonic() - t0)))
+        await FJ.ensure_qr(db, db.get(Payment, pid), timeout=qr_timeout)
     except Exception:  # noqa: BLE001
         log.exception("хэвлэх баримт бэлтгэхэд алдаа (payment=%s)", pid)
         db.rollback()
@@ -1121,58 +1124,93 @@ async def pos_recent_receipts(terminal_id: str | None = None, limit: int = 10,
     явдал бөгөөд өмнө нь баримт бүрмөсөн алдагддаг байв.
 
     Мөр бүр `print_data` + `receipt`-тэй ирнэ — POS шууд хэвлэнэ. QR санах ойд алга
-    (процесс restart, 1 цаг өнгөрсөн) msgbill баримтын QR-ыг нэг удаа татна (2026-10-15)."""
+    (процесс restart, 1 цаг өнгөрсөн) msgbill баримтын QR-ыг татна (2026-10-15; эхний
+    QR_LIST_MAX_FETCH мөрөнд, нийт ≤4с). DB-ийн sync ажил threadpool-д — event loop-ыг
+    хаалт/LPR-аас булаахгүй; зөвхөн msgbill-ийн татлага async."""
     import asyncio as _aio
+    from fastapi.concurrency import run_in_threadpool
     from ..services import financial_jobs as FJ
-    q = (db.query(Payment).filter(Payment.status == "PAID")
-         .order_by(Payment.paid_at.desc().nullslast()))
-    if terminal_id:
-        q = q.filter(Payment.terminal_id == terminal_id)
-    allowed = operator_sites(user)   # оператор зөвхөн өөрийн зогсоолын баримт
     limit = min(max(limit, 1), 50)
-    picked = []
-    for p in q.limit(limit * 3).all():
-        s = db.get(ParkingSession, p.session_id) if p.session_id else None
-        if allowed and (s is None or s.site_id not in allowed):
-            continue
-        picked.append((p, s))
-        if len(picked) >= limit:
-            break
-    if picked:
-        # Нийт ≤4с; нэг зэрэг ≤5 GET — msgbill удаан/унасан ч жагсаалт QR-гүй ирнэ
-        sem = _aio.Semaphore(5)
 
-        async def _one(pay):
-            async with sem:
-                await FJ.ensure_qr(db, pay)
+    def _load():
+        q = (db.query(Payment).filter(Payment.status == "PAID")
+             .order_by(Payment.paid_at.desc().nullslast()))
+        if terminal_id:
+            q = q.filter(Payment.terminal_id == terminal_id)
+        allowed = operator_sites(user)   # оператор зөвхөн өөрийн зогсоолын баримт
+        picked = []
+        for p in q.limit(limit * 3).all():
+            s = db.get(ParkingSession, p.session_id) if p.session_id else None
+            if allowed and (s is None or s.site_id not in allowed):
+                continue
+            picked.append((p, s))
+            if len(picked) >= limit:
+                break
+        plans = []
+        for p, _s in picked:
+            if len(plans) >= FJ.QR_LIST_MAX_FETCH:
+                break
+            try:
+                plan = FJ.qr_plan(db, p)
+            except Exception:  # noqa: BLE001 — QR-гүй хэвлэнэ
+                log.exception("pos/receipts: QR төлөвлөж чадсангүй (payment=%s)", p.id)
+                plan = None
+            if plan:
+                plans.append(plan)
+        db.commit()   # хүлээлтийн үед транзакц нээлттэй үлдэхгүй
+        return picked, plans
+
+    picked, plans = await run_in_threadpool(_load)
+    if plans:
         try:
-            await _aio.wait_for(_aio.gather(*(_one(p) for p, _s in picked),
+            # Нийт ≤4с — msgbill удаан/унасан ч жагсаалт QR-гүй ирнэ (татлага арын горимд дуусна)
+            await _aio.wait_for(_aio.gather(*(FJ.fetch_qr(pl) for pl in plans),
                                             return_exceptions=True), timeout=4.0)
         except (_aio.TimeoutError, Exception):  # noqa: BLE001
             log.warning("pos/receipts: QR нөхөлт 4с-д дууссангүй — QR-гүй мөр байж болно")
-    return [{"payment_id": p.id, "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-             "plate_number": s.plate_number if s else None,
-             **_print_payload(db, p)} for p, s in picked]
+
+    def _build():
+        return [{"payment_id": p.id, "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+                 "plate_number": s.plate_number if s else None,
+                 **_print_payload(db, p)} for p, s in picked]
+    return await run_in_threadpool(_build)
 
 
 @router.get("/{payment_id}/print")
 async def payment_print(payment_id: str, db: Session = Depends(get_db),
                         user: User = Depends(require("cashier"))):
     """Нэг төлбөрийн хэвлэх өгөгдөл — дахин хэвлэх/баримт үзүүлэхэд.
-    SENT msgbill баримтын QR санах ойд алга бол msgbill-ээс НЭГ удаа татаж кэшилнэ
-    (≤3с, DB-д хадгалахгүй) — 2026-10-09-өөс QR хэвлэгдэхгүй байсны засвар."""
-    p = db.get(Payment, payment_id)
-    if not p:
-        raise HTTPException(404, "Төлбөр олдсонгүй")
-    s = db.get(ParkingSession, p.session_id) if p.session_id else None
-    if s is not None:
-        enforce_site(user, s.site_id)
-    elif _site_of(p) is not None:
-        enforce_site(user, _site_of(p).id)   # сешнгүй (өрийн) төлбөр — зогсоолоор нь
-    if p.status == "PAID":
-        await _ready_for_print(db, p)
+    SENT msgbill баримтын QR санах ойд алга бол msgbill-ээс татаж кэшилнэ (≤3с, DB-д
+    хадгалахгүй) — 2026-10-09-өөс QR хэвлэгдэхгүй байсны засвар. DB-ийн sync ажил
+    threadpool-д; зөвхөн msgbill-ийн татлага event loop дээр (async)."""
+    from fastapi.concurrency import run_in_threadpool
+    from ..services import financial_jobs as FJ
+
+    def _load():
         p = db.get(Payment, payment_id)
-    return {"payment_id": p.id, "status": p.status, **_print_payload(db, p)}
+        if not p:
+            raise HTTPException(404, "Төлбөр олдсонгүй")
+        s = db.get(ParkingSession, p.session_id) if p.session_id else None
+        if s is not None:
+            enforce_site(user, s.site_id)
+        elif _site_of(p) is not None:
+            enforce_site(user, _site_of(p).id)   # сешнгүй (өрийн) төлбөр — зогсоолоор нь
+        plan = None
+        if p.status == "PAID":
+            try:
+                plan = FJ.qr_plan(db, p)
+            except Exception:  # noqa: BLE001 — QR-гүй хэвлэнэ
+                log.exception("print: QR төлөвлөж чадсангүй (payment=%s)", p.id)
+        db.commit()   # хүлээлтийн үед транзакц нээлттэй үлдэхгүй
+        return p, plan
+
+    p, plan = await run_in_threadpool(_load)
+    if plan:
+        await FJ.fetch_qr(plan)
+
+    def _build():
+        return {"payment_id": p.id, "status": p.status, **_print_payload(db, p)}
+    return await run_in_threadpool(_build)
 
 
 @router.get("/pos/terminal/{terminal_id}")

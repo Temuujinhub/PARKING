@@ -48,11 +48,11 @@ def offline(monkeypatch):
     monkeypatch.setattr(J.msgbill, 'account_enabled_for', lambda *a: ACC)
     monkeypatch.setattr(J.msgbill, 'api_key_for', lambda *a: ACC)
     ebarimt._qr_cache.clear()
-    J._qr_attempts.clear()
+    J._qr_failed.clear(); J._qr_fetching.clear()
     J._INFLIGHT.clear()
     yield
     ebarimt._qr_cache.clear()
-    J._qr_attempts.clear()
+    J._qr_failed.clear(); J._qr_fetching.clear()
 
 
 @pytest.fixture
@@ -482,8 +482,8 @@ def test_print_qr_fetch_failure_does_not_break_and_is_not_hammered(db, monkeypat
     for _ in range(3):
         out = asyncio.run(PR.payment_print(p.id, db, u))
         assert out['qr_data'] is None and out['ebarimt_id'] == DDTD
-    assert get.await_count == 1                     # 60с дотор дахин оролдохгүй
-    J._qr_attempts.clear()
+    assert get.await_count == 1                     # 2с дотор дахин оролдохгүй (зэрэг/давтан)
+    J._qr_failed.clear()                            # ≥2с өнгөрсөн
     get.side_effect = None
     get.return_value = created(rid='rcp-9')
     assert asyncio.run(PR.payment_print(p.id, db, u))['qr_data'] == QR
@@ -520,7 +520,7 @@ def test_pos_receipts_fill_missing_qr(db, monkeypatch):
     assert by[p1.id]['qr_data'] == QR and by[p2.id]['qr_data'] == QR
     assert get.await_count == 1                       # кэштэйг дахин татахгүй
     # msgbill унасан ч жагсаалт ирнэ
-    ebarimt._qr_cache.clear(); J._qr_attempts.clear()
+    ebarimt._qr_cache.clear(); J._qr_failed.clear()
     get.side_effect = RuntimeError('down')
     out = asyncio.run(PR.pos_recent_receipts(None, 10, db, u))
     assert len(out) == 2 and all(row['qr_data'] is None for row in out)
@@ -551,7 +551,7 @@ def test_qr_cache_is_keyed_by_receipt_debt_cannot_overwrite_main(db, monkeypatch
     assert ebarimt.get_cached_qr(p.id) is None
 
 
-def test_print_prefers_main_receipt_over_sent_debt_receipt(db):
+def test_print_payload_prefers_main_receipt_over_sent_debt_receipt(db):
     """Үндсэн баримт PENDING, өрийнх SENT — хэвлэлт өрийн ДДТД/QR-ыг ҮНДСЭН мэт харуулахгүй."""
     s = parking(db)
     other = parking(db, '9999УБА', site=db.get(M.ParkingSite, s.site_id))
@@ -569,7 +569,7 @@ def test_print_prefers_main_receipt_over_sent_debt_receipt(db):
     assert out['qr_data'] is None and main.status == 'PENDING'
 
 
-def test_print_prefers_main_receipt_over_sent_debt_receipt(db, monkeypatch):
+def test_print_endpoint_prefers_main_receipt_and_skips_fetch(db, monkeypatch):
     """Үндсэн баримт PENDING, өрийн баримт SENT — хэвлэлт өрийн ДДТД/QR-ыг зогсоолынх мэт
     гаргахгүй (PENDING → апп дахин татна)."""
     s = parking(db)
@@ -783,3 +783,166 @@ def test_warning_now_fires_when_rule_on_with_pos_traffic(db, monkeypatch):
     assert found and found[0]['level'] == 'high' and 'асаалттай' in found[0]['title']
     on = PRULES.pos_terminal_on_traffic(db, site.id)
     assert on == {'count': 2, 'methods': ['CARD', 'CASH'], 'external': 1}
+
+
+# ── 6. Хяналтын засвар (rev5): QR дахин татах цонх, арын татлага, бусад probe ─────────
+def _no_qr_post(monkeypatch):
+    no_qr = created(); no_qr['qrData'] = None
+    monkeypatch.setattr(J.msgbill, 'create_receipt', AsyncMock(return_value=no_qr))
+
+
+def test_qr_retry_window_is_short_after_inline_get_failure(db, monkeypatch):
+    """rev5 MAJOR: inline GET бүтэлгүйтсэний дараа 60с түгждэг байсан → аппын /print-ийн давталт
+    QR-гүй. Одоо ЗӨВХӨН 2с (QR_RETRY_SEC) — гайд: SENT + qr_data=null бол ≥2с-ийн дараа дахин."""
+    _no_qr_post(monkeypatch)
+    get = AsyncMock(side_effect=[httpx.ReadTimeout('slow'), created()])
+    monkeypatch.setattr(J.msgbill, 'get_receipt_any', get)
+    s, u = parking(db), user(db)
+    out = asyncio.run(confirm(db, s, u))
+    assert out['receipt']['ebarimt_status'] == 'SENT' and out['qr_data'] is None
+    assert get.await_count == 1 and J.QR_RETRY_SEC <= 2.0
+    [r] = rows(db, M.VatReceipt, payment_id=out['payment_id'])
+    again = asyncio.run(PR.payment_print(out['payment_id'], db, u))     # шууд — 2с дотор
+    assert again['qr_data'] is None and get.await_count == 1
+    J._qr_failed[r.id] -= J.QR_RETRY_SEC + 0.1                          # ≥2с өнгөрөв
+    again = asyncio.run(PR.payment_print(out['payment_id'], db, u))
+    assert again['qr_data'] == QR and get.await_count == 2
+    assert get.await_args.kwargs['timeout'] == J.QR_FETCH_TIMEOUT      # бүтэн 3с (тайраагүй)
+
+
+def test_budget_truncated_qr_fetch_finishes_in_background_and_dedupes(db, monkeypatch):
+    """confirm-ийн үлдсэн төсөв QR татахад хүрэлцээгүй — татлага тасрахгүй, кэшилнэ; дараагийн
+    /print (зэрэг 2) нэмэлт GET-гүйгээр QR авна."""
+    monkeypatch.setattr(settings, 'receipt_inline_wait_sec', 0.3)
+    _no_qr_post(monkeypatch)
+
+    async def slow_get(*a, **k):
+        await asyncio.sleep(0.6)
+        return created()
+    get = AsyncMock(side_effect=slow_get)
+    monkeypatch.setattr(J.msgbill, 'get_receipt_any', get)
+    s, u = parking(db), user(db)
+
+    async def scenario():
+        out = await confirm(db, s, u)
+        assert out['receipt']['ebarimt_status'] == 'SENT' and out['qr_data'] is None
+        a, b = await asyncio.gather(PR.payment_print(out['payment_id'], db, u),
+                                    PR.payment_print(out['payment_id'], db, u))
+        return out, a, b
+    out, a, b = asyncio.run(scenario())
+    assert a['qr_data'] == QR and b['qr_data'] == QR
+    assert get.await_count == 1                       # нэг л GET (зэрэг хүсэлтүүд хуваалцав)
+
+
+def test_cancelled_qr_fetch_is_not_recorded_as_failure(db, monkeypatch):
+    """Процесс зогсож татлага цуцлагдсан — «бүтэлгүй» гэж бүртгэхгүй, дараагийн /print шууд татна."""
+    monkeypatch.setattr(settings, 'receipt_inline_wait_sec', 0.2)
+    _no_qr_post(monkeypatch)
+
+    async def hang(*a, **k):
+        await asyncio.sleep(30)
+    get = AsyncMock(side_effect=hang)
+    monkeypatch.setattr(J.msgbill, 'get_receipt_any', get)
+    s, u = parking(db), user(db)
+    out = asyncio.run(confirm(db, s, u))              # loop хаагдахад татлага цуцлагдана
+    assert out['qr_data'] is None and not J._qr_failed
+    get.side_effect = None
+    get.return_value = created()
+    assert asyncio.run(PR.payment_print(out['payment_id'], db, u))['qr_data'] == QR
+
+
+def test_background_fetch_uses_keys_resolved_in_request(db, monkeypatch):
+    """Арын task DB/site-д хүрэхгүй — түлхүүрүүд request дотор бодогдож дамжина."""
+    s, u = parking(db), user(db)
+    p, _r = sent_payment(db, s)
+    seen = {}
+
+    async def spy(site, ref, **k):
+        seen.update(k)
+        return created(rid=ref)
+    monkeypatch.setattr(J.msgbill, 'get_receipt_any', spy)
+    monkeypatch.setattr(J.msgbill, 'cancel_accounts', lambda site: [ACC])
+    assert asyncio.run(PR.payment_print(p.id, db, u))['qr_data'] == QR
+    assert seen['accounts'] == [ACC] and seen['timeout'] == J.QR_FETCH_TIMEOUT
+
+
+def test_print_endpoints_run_db_work_off_the_event_loop(db, monkeypatch):
+    """rev5 MINOR: /print, /pos/receipts-ийн sync DB ажил threadpool-д."""
+    import threading
+    s, u = parking(db), user(db)
+    p, _r = sent_payment(db, s, qr_cached=True)
+    threads = set()
+    real = PR._print_payload
+
+    def spy(db_, pay):
+        threads.add(threading.get_ident())
+        return real(db_, pay)
+    monkeypatch.setattr(PR, '_print_payload', spy)
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        await PR.payment_print(p.id, db, u)
+        await PR.pos_recent_receipts(None, 10, db, u)
+        return loop_thread
+    loop_thread = asyncio.run(scenario())
+    assert threads and loop_thread not in threads
+
+
+def test_deliver_phase2_crash_does_not_break_confirm(db, monkeypatch):
+    """rev5 probe: outbox-ын 2-р шат (DB бичилт) унасан ч confirm амжилттай; давтан confirm
+    дахин илгээхгүй (SENDING lease — worker 3 мин-ийн дараа ижил түлхүүрээр нөхнө)."""
+    create = AsyncMock(return_value=created())
+    monkeypatch.setattr(J.msgbill, 'create_receipt', create)
+
+    def boom(*a, **k):
+        raise RuntimeError('db hiccup')
+    monkeypatch.setattr(J, 'assign_ebarimt_id', boom)
+    s, u = parking(db), user(db)
+    out = asyncio.run(confirm(db, s, u))
+    assert out['status'] == 'PAID' and out['receipt']['ebarimt_status'] == 'PENDING'
+    [job] = rows(db, M.FinancialJob, payment_id=out['payment_id'])
+    assert job.status == 'SENDING' and not J._INFLIGHT
+    out2 = asyncio.run(confirm(db, s, u))
+    assert out2['payment_id'] == out['payment_id'] and create.await_count == 1
+
+
+def test_site_rule_on_cash_is_external_and_not_sent(db, monkeypatch):
+    create = AsyncMock(side_effect=AssertionError('must not send'))
+    monkeypatch.setattr(J.msgbill, 'create_receipt', create)
+    s, u = parking(db), user(db)
+    A.set_site_rules(db, A.EBARIMT_KEY, s.site_id, {'pos_terminal_issues': True}, 't'); db.commit()
+    A.invalidate_cache()
+    out = asyncio.run(cash(db, s, u))
+    assert out['receipt']['ebarimt_status'] == 'EXTERNAL' and create.await_count == 0
+    assert out['qr_data'] is None
+
+
+def test_global_stored_true_keeps_rule_on(db, monkeypatch):
+    """Ерөнхийг UI-аар ON хадгалсан бол кодын анхдагч (OFF) үйлчлэхгүй — rollout-д шалгана."""
+    create = AsyncMock(side_effect=AssertionError('must not send'))
+    monkeypatch.setattr(J.msgbill, 'create_receipt', create)
+    s, u = parking(db), user(db)
+    A.set_rules(db, A.EBARIMT_KEY, {'pos_terminal_issues': True}, 't'); db.commit()
+    A.invalidate_cache()
+    out = asyncio.run(confirm(db, s, u))
+    assert out['receipt']['ebarimt_status'] == 'EXTERNAL'
+
+
+def test_company_receipt_inline_no_lottery(db, monkeypatch):
+    create = AsyncMock(return_value=created(lottery='IW 1'))
+    monkeypatch.setattr(J.msgbill, 'create_receipt', create)
+    s, u = parking(db), user(db)
+    out = asyncio.run(confirm(db, s, u, payer_reg_no='5037409'))
+    assert out['ebarimt_id'] == DDTD and out['lottery_code'] is None
+    assert not any(ln.startswith('Сугалаа') for ln in out['print_data']['lines'])
+    assert create.await_args.kwargs['payer_reg_no'] == '5037409'
+
+
+def test_print_after_cancel_has_no_qr(db, monkeypatch):
+    monkeypatch.setattr(J.msgbill, 'create_receipt', AsyncMock(return_value=created()))
+    s, u = parking(db), user(db)
+    out = asyncio.run(confirm(db, s, u))
+    [r] = rows(db, M.VatReceipt, payment_id=out['payment_id'])
+    r.status = 'CANCELLED'; db.commit()
+    again = asyncio.run(PR.payment_print(out['payment_id'], db, u))
+    assert again['qr_data'] is None
