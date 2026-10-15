@@ -349,7 +349,7 @@ def teg_world(db, w):
     B: REVIEW 1500 — мөр алга · C: REVIEW 2000 — ойролцоо эзэнгүй мөр бий, гэвч тэр нь SENT S-ийн
     90с зөрсөн мөр (өдрийн тоо тэнцүү) · D: файлын хүрээнээс өмнө · M: Моннис (файл EP-ийнх)."""
     s, rows = {}, []
-    for i, m in enumerate((-60, 0, 2, 4, 6, 8, 10, 60)):         # файл T0−1ц … T0+1ц-ийг хамарна
+    for i, m in enumerate((-60, 0, 2, 4, 6, 8, 10, 60, 30 * 60, 31 * 60)):  # файл T0−1ц … T0+30ц (TEG_LAG ≥24ц; сүүлийнх DB-ээр тасдагдана)
         p, _r = pay(db, w, T0 + timedelta(minutes=m), 1000, rstatus="SENT", jstatus="DONE",
                     ebarimt_id=ddtd(100 + i, "030101065006"))
         rows.append((ddtd(100 + i), p.paid_at + timedelta(seconds=2), 1000))
@@ -733,8 +733,9 @@ def test_cli_create_without_teg_evidence_needs_flag(db, engine, tmp_path, monkey
     monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     w = world(db)
     rows = anchors(db, w, T0 - timedelta(hours=1), T0 + timedelta(hours=1), timedelta(minutes=10))
+    rows += anchors(db, w, T0 + timedelta(hours=30), T0 + timedelta(hours=30), timedelta(hours=1), seq0=900)
     p_in, r_in = pay(db, w, T0 + timedelta(minutes=12), 1500)                # файлд хамрагдсан → NOT_IN_TEG
-    p_out, r_out = pay(db, w, T0 + timedelta(hours=5), 2500)                 # файлын хүрээнээс гадуур
+    p_out, r_out = pay(db, w, T0 + timedelta(hours=40), 2500)                # файлын хүрээнээс гадуур
     fake = FakeQpay(monkeypatch)
     base = ["--from", "2026-10-01", "--tenant", "EASYPARKING", "--delay", "0", "--apply", "--user", "t",
             "--i-understand-not-idempotent"]
@@ -801,3 +802,71 @@ def test_cli_retry_attempted_needs_covering_teg_file(db, engine, tmp_path, monke
     assert len(fake.calls) == 2 and _rec(db, r.id).status == "SENT"
     assert [a["outcome"] for a in _attempts(db, r.id)] == ["NETWORK", "SENT"]
     assert _actions(db, QR.SUMMARY_ACTION)[-1].detail["retried"] == 1
+
+
+# ───────────────────────── 10-15 хяналт 2 ─────────────────────────
+
+def test_candidate_near_file_end_is_teg_lag_not_create(db):
+    """Анхны create тодорхойгүй байсан тул файл төлбөрөөс ≥24ц хойш хамрахгүй бол «ТЕГ-т алга» гэж үзэхгүй."""
+    w = world(db)
+    rows = anchors(db, w, T0 - timedelta(hours=1), T0 + timedelta(hours=2), timedelta(minutes=30))
+    p, r = pay(db, w, T0 + timedelta(hours=1, minutes=5), 1500)
+    tax = [{"ddtd": d, "dt": dt, "amount": a, "src": "QPayPos"} for d, dt, a in rows]
+    cands = QR.select_candidates(db, site_ids=None)["candidates"]
+    v = QR.teg_evidence(db, [("teg.xlsx", tax)], cands)["verdicts"][r.id]
+    assert v["teg"] == "TEG_LAG" and "≥24ц" in v["note"]
+    assert QR.plan_action("TEG_LAG") == "SKIP" and QR.plan_action("TEG_LAG", include_ambiguous=True) == "SKIP"
+
+
+def test_retry_attempted_gap_between_files_is_uncovered(db, engine, tmp_path, monkeypatch, capsys):
+    """Хуучин + шинэ экспортын ЗАВСАРТ орсон оролдлогыг «хамарсан» гэж үзэхгүй — QPay дахин дуудагдахгүй."""
+    cli = _tool()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    w = world(db)
+    rows = anchors(db, w, T0 - timedelta(hours=1), T0 + timedelta(hours=30), timedelta(minutes=30))
+    p, r = pay(db, w, T0 + timedelta(minutes=10), 1500)
+    fake = FakeQpay(monkeypatch)
+    monkeypatch.setattr(QR, "_now", lambda: T0 + timedelta(hours=1))   # оролдлого T0+1ц-д
+    fake.fail = httpx.ReadTimeout("timeout")
+    full = _xlsx(str(tmp_path / "full.xlsx"), rows)
+    base = ["--from", "2026-10-01", "--tenant", "EASYPARKING", "--delay", "0", "--apply", "--yes", "--user", "t",
+            "--i-understand-not-idempotent"]
+    assert cli.main(base + ["--file", full]) == 1 and len(fake.calls) == 1
+    capsys.readouterr()
+    fake.fail = None
+    old = _xlsx(str(tmp_path / "old.xlsx"), [x for x in rows if x[1] <= T0 + timedelta(minutes=40)])
+    new = _xlsx(str(tmp_path / "new.xlsx"), [x for x in rows if x[1] >= T0 + timedelta(hours=2)])
+    assert cli.main(base + ["--file", old, "--file", new, "--retry-attempted"]) == 0
+    out = capsys.readouterr().out
+    assert "ATTEMPT_UNCOVERED" in out and len(fake.calls) == 1 and _rec(db, r.id).status == "REVIEW"
+
+
+def test_retry_attempted_never_creates_when_attempt_returned_bill(db, engine, tmp_path, monkeypatch, capsys):
+    """QPay billId буцаасан оролдлого = баримт ҮҮССЭН → --retry-attempted ч create хийхгүй (ATTEMPT_HAS_BILL)."""
+    cli = _tool()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    w = world(db)
+    rows = anchors(db, w, T0 - timedelta(hours=1), T0 + timedelta(hours=30), timedelta(minutes=30))
+    p, r = pay(db, w, T0 + timedelta(minutes=10), 3000)
+    fake = FakeQpay(monkeypatch)
+    monkeypatch.setattr(QR, "_now", lambda: T0 + timedelta(hours=1))
+
+    def boom(*a, **k):
+        raise RuntimeError("DB унав")
+    monkeypatch.setattr(FJ, "enqueue_receipt_ready", boom)              # QPay ДДТД өгсний ДАРАА унана
+    f = _xlsx(str(tmp_path / "teg.xlsx"), rows)
+    base = ["--from", "2026-10-01", "--tenant", "EASYPARKING", "--delay", "0", "--apply", "--yes", "--user", "t",
+            "--i-understand-not-idempotent", "--file", f]
+    assert cli.main(base) == 1 and len(fake.calls) == 1
+    capsys.readouterr()
+    monkeypatch.undo()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    for k, v in (("database_url", "postgresql+psycopg2://u:p@localhost/parking"),
+                 ("public_base_url", "https://site.easy-parking.mn"), ("qpay_mock", False),
+                 ("qpay_sandbox", False), ("qpay_username", "EASY_2PARKING"), ("qpay_password", "secret"),
+                 ("qpay_invoice_code", "EB_EASY_2PARKING_INVOICE")):
+        monkeypatch.setattr(settings, k, v)
+    fake2 = FakeQpay(monkeypatch)
+    assert cli.main(base + ["--retry-attempted"]) == 0
+    out = capsys.readouterr().out
+    assert "ATTEMPT_HAS_BILL" in out and fake2.calls == [] and _rec(db, r.id).status == "REVIEW"

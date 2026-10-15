@@ -81,6 +81,7 @@ ATTEMPT_COVER = timedelta(hours=24)              # --retry-attempted: ТЕГ ф�
 ATTEMPT_NEAR_BEFORE = timedelta(minutes=2)       # оролдлогын үеийн эзэнгүй ТЕГ мөр: −2 мин …
 ATTEMPT_NEAR_AFTER = timedelta(hours=1)          # … +1 цаг (QPay ТЕГ-т хожуу бүртгүүлж болно)
 DEFAULT_TOL = 60                    # vat_recon.DEFAULT_TOL — манай баримт ↔ ТЕГ мөр (сек)
+TEG_LAG = timedelta(hours=24)       # NOT_IN_TEG: файл төлбөрөөс ≥24ц хойш хамарсан байх (QPay ТЕГ-т хожуу бүртгүүлж болно)
 TEG_BEFORE = timedelta(minutes=20)  # ТЕГ мөр paid_at-аас −20 мин …
 TEG_AFTER = timedelta(minutes=5)    # … +5 мин (QPay касс UTC)
 TEG_TENANT_SHARE = 0.5              # файлын QPay мөрийн ≥50% нь нэг түрээслэгчийн баримттай таарах
@@ -134,6 +135,8 @@ VERDICT_MN = {
     "OUTSIDE": "ТЕГ файлын хүрээнээс гадуур — дүгнэхгүй",
     "NOT_COVERED": "ТЕГ файл энэ түрээслэгчийнх биш — дүгнэхгүй",
     "ATTEMPT_UNCOVERED": "өмнөх QPay оролдлого тодорхойгүй, ТЕГ файл түүнээс хойш 24ц-ийг хамрахгүй — create хийхгүй",
+    "ATTEMPT_HAS_BILL": "өмнөх QPay оролдлого ДДТД/billId буцаасан — баримт ҮҮССЭН, create ХИЙХГҮЙ, тэр ДДТД-г гараар холбоно",
+    "TEG_LAG": "ТЕГ файл төлбөрөөс хойш 24ц хамрахгүй (QPay хожуу бүртгүүлсэн байж болзошгүй) — шинэ экспортоор",
 }
 
 
@@ -641,6 +644,7 @@ def teg_evidence(db, taxes: list, candidates: list[dict], *, tol: int = DEFAULT_
             near = near_of.get(c["receipt_id"])
             if near is None:
                 continue
+            at = c["paid_at"]
             key = (c["day"], round(c["amount"]))
             surplus = surplus_b.get(key, 0)
             later = sorted((d, v) for (d, a), v in surplus_b.items()
@@ -661,6 +665,10 @@ def teg_evidence(db, taxes: list, candidates: list[dict], *, tol: int = DEFAULT_
                                         + ", ".join(f"{d} {n:+d}" for d, n in later[:5])
                                         + (f" (+{len(later) - 5})" if len(later) > 5 else "")
                                         + " — QPay хожуу үүсгэсэн байж болзошгүй")
+            elif not any(a <= at - before and at + TEG_LAG <= b for a, b in wins):
+                # Анхны outbox create өөрөө тодорхойгүй (HTTPStatusError) байсан — QPay баримтаа ТЕГ-т
+                # хожуу бүртгүүлсэн бол файлын төгсгөлд ойр төлбөрт «алга» гэх нотолгоо сул (10-15 хяналт)
+                v, note = "TEG_LAG", f"ТЕГ файл {ub(max(b for _a, b in wins)):%m-%d %H:%M} УБ хүртэл — төлбөрөөс ≥24ц хойш хамрах экспорт хэрэгтэй"
             else:
                 v = "NOT_IN_TEG"
             prelim[c["receipt_id"]] = (v, key, surplus, near, note, c)
@@ -683,9 +691,19 @@ def teg_evidence(db, taxes: list, candidates: list[dict], *, tol: int = DEFAULT_
                 ats = [a for a in (c.get("attempt_ats") or [last]) if a is not None]
                 near_a = [r for r in orphans if abs(r["amount"] - c["amount"]) < 1
                           and any(a - ATTEMPT_NEAR_BEFORE <= r["dt"] <= a + ATTEMPT_NEAR_AFTER for a in ats)]
-                info["attempt_cover"] = bool(last is not None and hi >= last + ATTEMPT_COVER)
+                # Оролдлого БҮР нэг файлын цонхонд (−2 мин … +24ц) бүрэн багтах ёстой — хоёр экспортын
+                # завсарт орсон оролдлогыг «хамарсан» гэж үзэхгүй (10-15 хяналт)
+                info["attempt_cover"] = bool(ats) and all(
+                    any(a0 <= at_ - ATTEMPT_NEAR_BEFORE and at_ + ATTEMPT_COVER <= b0 for a0, b0 in wins)
+                    for at_ in ats)
                 info["attempt_near"] = len(near_a)
-                if near_a:
+                if c.get("attempt_bills"):
+                    # QPay billId буцаасан оролдлого = баримт ҮҮССЭН (ТЕГ-т хожуу орж болно) → хэзээ ч create биш
+                    info["teg"] = "ATTEMPT_HAS_BILL"
+                    info["note"] = f"өмнөх оролдлогын billId: {c['attempt_bills']} — «баримт холбох»-оор гараар"
+                    for k in ("teg_ddtd", "teg_dt", "teg_file"):
+                        info.pop(k, None)
+                elif near_a:
                     info["teg"] = "IN_TEG_AMBIG"
                     info["note"] = (f"өмнөх QPay оролдлогын үед ижил дүнтэй эзэнгүй ТЕГ мөр {len(near_a)} — "
                                     "тэр оролдлого баримт үүсгэсэн байж магадгүй, гараар холбоно")

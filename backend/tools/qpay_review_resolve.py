@@ -478,7 +478,11 @@ def main(argv=None):
                                 "retried": len(retried),
                                 "requested": len(work), "amount": amount,
                                 "actions": dict(acts), "result": dict(cnt)}))
-        db.commit()
+        try:
+            db.commit()
+        except Exception as e:  # noqa: BLE001 — DB унасан ч ТОДОРХОЙГҮЙ жагсаалтыг доор хэвлэнэ
+            print(f"⚠ SUMMARY аудит хадгалагдсангүй: {e!r}")
+            db.rollback()
     finally:
         db.close()
     if args.out:
