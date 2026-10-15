@@ -815,6 +815,12 @@ def test_budget_truncated_qr_fetch_finishes_in_background_and_dedupes(db, monkey
     /print (зэрэг 2) нэмэлт GET-гүйгээр QR авна."""
     monkeypatch.setattr(settings, 'receipt_inline_wait_sec', 0.3)
     _no_qr_post(monkeypatch)
+    # Энэ тест хоёр зэрэг /print-д НЭГ session дамжуулдаг (продод хүсэлт бүр өөрийн session-тэй).
+    # SQLAlchemy session-ийг 2 thread зэрэг хэрэглэвэл IndexError өгч тест санамсаргүй унадаг байсан
+    # — DB хэсгийг event loop дээр дараалуулж, зөвхөн QR татлагын хуваалцалтыг шалгана.
+    async def _inline(func, *a, **k):
+        return func(*a, **k)
+    monkeypatch.setattr('fastapi.concurrency.run_in_threadpool', _inline)
 
     async def slow_get(*a, **k):
         await asyncio.sleep(0.6)
