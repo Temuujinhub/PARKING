@@ -262,17 +262,17 @@ CATALOG: list[dict] = [
      "applies": "Шөнийн хаалт", "not_applied": "—"},
 
     # ── e-Barimt (НӨАТ баримт) ──────────────────────────────────────────────
-    # 2026-10-14 эзний эцсийн шийдвэр: PAX терминал (Ontime) POS аппын карт/бэлэн
-    # борлуулалт бүрд баримт хэвлэдэг — БҮХ зогсоол, бүх түрээслэгч → ерөнхий анхдагч
-    # АСААЛТТАЙ, терминал нь хэвлэдэггүй зогсоолд л унтраана (зогсоолын давхарга).
+    # 2026-10-15: PAX аппын шинэ хувилбар e-Barimt-ыг ЗӨВХӨН манай API-аас (msgbill)
+    # хэвлэдэг — Ontime ашиглахгүй → ерөнхий анхдагч УНТРААЛТТАЙ (10-14-нд асаалттай
+    # байсан). Терминал (Ontime) ДАХИН баримт хэвлэдэг болбол л асаана.
     {"group": A.EBARIMT_KEY, "key": "pos_terminal_issues", "unit": "bool",
      "name": "POS терминал (PAX апп) өөрөө e-Barimt гаргадаг",
-     "desc": "POS терминалаар (PAX апп) авсан карт/бэлэн төлбөрийн e-Barimt-ыг терминал "
-             "(Ontime) өөрөө гаргадаг — систем давхар гаргахгүй. «POS терминал гаргасан» "
-             "(EXTERNAL, ДДТД-гүй) гэж бүртгэнэ. Анхдагч АСААЛТТАЙ — бүх зогсоол, бүх "
-             "түрээслэгч (2026-10-14 эзний шийдвэр; 9-р сард Ontime + msgbill давхардлаас "
-             "~13 сая₮ илүү НӨАТ-ын борлуулалт). Терминал нь баримт хэвлэдэггүй зогсоолд "
-             "ЗӨВХӨН тэр зогсоолд унтраана — эс бөгөөс жолооч баримтгүй үлдэнэ.",
+     "desc": "Асаалттай бол POS терминалаар (PAX апп) авсан карт/бэлэн төлбөрийн e-Barimt-ыг "
+             "терминал (Ontime) өөрөө гаргадаг гэж үзэж систем баримт ГАРГАХГҮЙ — «POS "
+             "терминал гаргасан» (EXTERNAL, ДДТД-гүй) гэж бүртгэнэ. Анхдагч УНТРААЛТТАЙ "
+             "(2026-10-15): PAX аппын шинэ хувилбар баримтыг ЗӨВХӨН манай API-аас (msgbill) "
+             "авч хэвлэдэг — Ontime ашиглахгүй. Терминал баримтаа өөрөө хэвлэдэг нь батлагдсан "
+             "зогсоолд л асаана — эс бөгөөс жолооч баримтгүй үлдэнэ.",
      "applies": "POS аппын карт (/pos/confirm) ба бэлэн/өрийн төлөлт (X-App-Version толгой, "
                 "эсвэл кассчин нь POS аппын хэрэглэгч) · апп ДДТД илгээгээгүй үед",
      "not_applied": "ААН/ТТД-тэй баримт (терминал иргэний баримт хэвлэдэг — систем гаргана), "
@@ -678,19 +678,26 @@ def check_conflicts(db, site, eff: dict | None = None, tariff: dict | None = Non
                 f"гарах уншилтаар батлагдсан бүх хугацаа хасагдана. {_miss}",
                 "Зориуд биш бол энд эсвэл доторх зогсоол дээр 4-8 цагийн хязгаар тавина уу.")
 
-    # 10. POS аппын төлбөртэй зогсоолд терминалын баримтын дүрэм УНТРААЛТТАЙ (2026-10-14)
+    # 10. POS аппын төлбөртэй зогсоолд терминалын баримтын дүрэм АСААЛТТАЙ (2026-10-15).
+    # Өмнө (10-14) эсрэгээр — унтраалттай бол «давхардал» гэж анхааруулдаг байв. PAX аппын
+    # шинэ хувилбар Ontime-гүй, баримтаа манай API-аас хэвлэдэг тул асаалттай бол POS аппын
+    # карт/бэлэн борлуулалт EXTERNAL (ДДТД-гүй) — жолооч ба ТЕГ-т баримт ОГТ үүсэхгүй.
     try:
-        off = pos_terminal_off_traffic(db, site.id)
+        on = pos_terminal_on_traffic(db, site.id)
     except Exception:  # noqa: BLE001 — шалгалт тохиргооны хуудсыг унагаахгүй
-        off = None
-    if off:
-        add("warn", "POS аппын төлбөртэй зогсоолд «POS терминал e-Barimt гаргадаг» унтраалттай",
-            f"Сүүлийн {POS_TRAFFIC_DAYS} хоногт POS аппаар {off['count']} "
-            f"{'/'.join({'CARD': 'карт', 'CASH': 'бэлэн'}[m] for m in off['methods'])} "
-            "төлбөр авсан — эдгээрт систем msgbill-ээр баримт гаргаж байна. Терминал (Ontime) "
-            "мөн хэвлэдэг бол ТЕГ-т нэг борлуулалт ХОЁР баримттай болно.",
-            "Терминал баримт хэвлэдэг бол энэ зогсоолын «POS терминал (PAX апп) өөрөө e-Barimt "
-            "гаргадаг»-ийг ерөнхий рүү буцаана (асаана); хэвлэдэггүй нь батлагдсан бол хэвээр.")
+        on = None
+    if on:
+        add("high" if on["external"] else "warn",
+            "POS аппын төлбөртэй зогсоолд «POS терминал e-Barimt гаргадаг» асаалттай",
+            f"Сүүлийн {POS_TRAFFIC_DAYS} хоногт POS аппаар {on['count']} "
+            f"{'/'.join({'CARD': 'карт', 'CASH': 'бэлэн'}[m] for m in on['methods'])} "
+            f"төлбөр авсан, үүнээс {on['external']} нь «POS терминал гаргасан» (EXTERNAL, "
+            "ДДТД-гүй) — систем баримт гаргаагүй. PAX аппын шинэ хувилбар (2026-10-15) "
+            "e-Barimt-ыг ЗӨВХӨН манай API-аас хэвлэдэг (Ontime-гүй) тул эдгээр борлуулалт "
+            "баримтгүй үлдэнэ.",
+            "Терминал (Ontime) баримт хэвлэдэггүй бол энэ зогсоолын «POS терминал (PAX апп) "
+            "өөрөө e-Barimt гаргадаг»-ийг УНТРААНА (эсвэл ерөнхий рүү буцаана); баримтгүй "
+            "үлдсэнийг tools/vat_reissue_missing.py (ТЕГ экспортоор) нөхнө.")
     return out
 
 
@@ -716,6 +723,44 @@ def pos_app_traffic(db, site_id: str, days: int = POS_TRAFFIC_DAYS) -> dict[str,
                         & (func.coalesce(Payment.kind, "PARKING") == "PARKING")))
             .group_by(Payment.payment_method).all())
     return {m: int(n) for m, n in rows}
+
+
+def pos_external_count(db, site_id: str, methods, days: int = POS_TRAFFIC_DAYS) -> int:
+    """Сүүлийн N хоногийн POS аппын (methods) PAID төлбөрөөс «POS терминал гаргасан»
+    (EXTERNAL, ДДТД-гүй) баримттай нь — систем e-Barimt гаргаагүй борлуулалт."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, or_
+
+    from ..models import ParkingSession, Payment, VatReceipt
+    if not methods:
+        return 0
+    since = datetime.utcnow() - timedelta(days=days)
+    return int(db.query(func.count(func.distinct(Payment.id)))
+               .join(VatReceipt, VatReceipt.payment_id == Payment.id)
+               .outerjoin(ParkingSession, Payment.session_id == ParkingSession.id)
+               .filter(func.coalesce(Payment.site_id, ParkingSession.site_id) == site_id,
+                       Payment.status == "PAID", Payment.paid_at >= since,
+                       Payment.payment_method.in_(tuple(methods)),
+                       VatReceipt.status == "EXTERNAL",
+                       or_(Payment.source == "POSAPP",
+                           (Payment.provider == "POS")
+                           & (func.coalesce(Payment.kind, "PARKING") == "PARKING")))
+               .scalar() or 0)
+
+
+def pos_terminal_on_traffic(db, site_id: str) -> dict | None:
+    """Энэ зогсоолд терминалын дүрэм ҮЙЛЧИЛЖ буй аргаар (асаалттай) сүүлийн 30 хоногт POS
+    аппын төлбөр авсан уу (2026-10-15 — аппын шинэ хувилбар Ontime-гүй тул асаалттай бол
+    баримтгүй). {"count", "methods", "external"} эсвэл None."""
+    methods = sorted(A.pos_terminal_receipt_methods(db, site_id) & {"CARD", "CASH"})
+    if not methods:
+        return None
+    traffic = pos_app_traffic(db, site_id)
+    n = sum(traffic.get(m, 0) for m in methods)
+    if not n:
+        return None
+    return {"count": n, "methods": methods, "external": pos_external_count(db, site_id, methods)}
 
 
 def pos_terminal_off_traffic(db, site_id: str) -> dict | None:

@@ -19,7 +19,7 @@ from ..models import (AuditLog, CashierShift, Compensation, ParkingSession, Park
 from ..ratelimit import throttle
 from ..serializers import to_dict
 from ..services import ebarimt, msgbill, qpay
-from ..services.receipts import assign_ebarimt_id, primary_receipt
+from ..services.receipts import assign_ebarimt_id, primary_receipt, print_receipt, receipt_qr
 from ..session_logic import amount_due, paid_total, mark_paid_and_open, session_fee_info
 
 log = logging.getLogger("parking.payments")
@@ -471,8 +471,9 @@ def _print_payload(db: Session, payment: Payment) -> dict:
     """POS терминал/веб-д хэвлэх e-Barimt баримтын мэдээлэл (мөрүүд + QR + сугалаа)."""
     session = db.get(ParkingSession, payment.session_id)
     # Нэг төлбөрт олон мөр (өрийн баримт, цуцлагдаад дахин үүссэн) байхад
-    # `.first()` дурын нэгийг өгч ХЭВЛЭСЭН ≠ ХАДГАЛСАН болдог байв (2026-09-07)
-    receipt = primary_receipt(db, payment.id)
+    # `.first()` дурын нэгийг өгч ХЭВЛЭСЭН ≠ ХАДГАЛСАН болдог байв (2026-09-07).
+    # Үндсэн (зогсоолын) баримт өрийн баримтаас түрүүлнэ — ДДТД, QR хоёул түүнийх (2026-10-15)
+    receipt = print_receipt(db, payment)
     site = session.site if session else None
     tz = timedelta(hours=8)     # Улаанбаатар — принтерт ОРОН НУТГИЙН цаг хэвлэнэ
     ent = (session.entry_time + tz) if session and session.entry_time else None
@@ -518,8 +519,9 @@ def _print_payload(db: Session, payment: Payment) -> dict:
     return {
         "ebarimt_id": receipt.ebarimt_id if receipt else None,
         "lottery_code": receipt.lottery_code if receipt else None,
-        # thermal printer энэ qrData-г QR болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй)
-        "qr_data": ebarimt.get_cached_qr(payment.id),
+        # thermal printer энэ qrData-г QR болгон хэвлэнэ (түр санах ойгоос — DB-д хадгалагдахгүй).
+        # ЭНЭ (үндсэн) баримтын QR — өрийн баримтынх биш; SENT биш бол null (2026-10-15)
+        "qr_data": receipt_qr(receipt),
         # Апп өөрөө байрлуулж хэвлэхэд зориулсан ТАЛБАРУУД (мөрүүдээс задлахгүй).
         # `print_data.lines` нь бэлэн формат — аль нэгийг нь сонгож хэрэглэнэ.
         "receipt": {
@@ -546,6 +548,34 @@ def _print_payload(db: Session, payment: Payment) -> dict:
         },
         "print_data": {"lines": [ln for ln in lines if ln]},
     }
+
+
+async def _ready_for_print(db: Session, payment: Payment, *, deliver: bool = False) -> None:
+    """Хэвлэхийн ӨМНӨ баримтыг бэлтгэнэ (2026-10-15 — PAX апп баримтаа ЗӨВХӨН манай API-аас).
+
+    deliver=True (/pos/confirm, /cash): мөнгө commit болсны дараа ЭНЭ төлбөрийн msgbill
+    ажлыг outbox-ын lease-ээр авч шууд илгээнэ, ≤settings.receipt_inline_wait_sec хүлээнэ
+    (financial_jobs.deliver_now — worker давхар илгээхгүй). Дараа нь хэвлэх баримтын QR
+    санах ойд алга бол msgbill-ээс НЭГ удаа татна (ensure_qr). Юу ч болсон алдаа шидэхгүй —
+    төлбөр, хаалт аль хэдийн болсон; бэлэн болоогүй бол хариу PENDING (апп /print-ээр татна)."""
+    import time as _t
+    from ..services import financial_jobs as FJ
+    pid = payment.id
+    t0 = _t.monotonic()
+    try:
+        db.commit()   # хүлээлтийн үед request-ийн транзакц нээлттэй үлдэхгүй (түгжээгүй)
+        qr_timeout = FJ.QR_FETCH_TIMEOUT
+        if deliver:
+            # ДДТД + QR татах НИЙТ хүлээлт ≤ receipt_inline_wait_sec (≤6с); 0 = хоёулаа унтарна
+            budget = FJ.inline_budget()
+            await FJ.deliver_now(db, pid, budget=budget)
+            db.expire_all()   # outbox тусдаа session-д бичсэн ДДТД/төлөвийг дахин уншина
+            qr_timeout = min(qr_timeout, budget - (_t.monotonic() - t0))
+        if qr_timeout >= 0.3:
+            await FJ.ensure_qr(db, db.get(Payment, pid), timeout=qr_timeout)
+    except Exception:  # noqa: BLE001
+        log.exception("хэвлэх баримт бэлтгэхэд алдаа (payment=%s)", pid)
+        db.rollback()
 
 
 def _tenant_site_ids(db: Session, site) -> list[str] | None:
@@ -911,9 +941,12 @@ async def qpay_webhook_post(request: Request, payment_id: str = "", token: str =
 
 
 @router.post("/qpay/check/{payment_id}")
+@router.get("/qpay/check/{payment_id}")
 async def qpay_check(payment_id: str, request: Request, db: Session = Depends(get_db)):
     """Webhook ирээгүй үед polling шалгалт (pay page/POS 5 сек тутам дуудна).
-    PAID болмогц e-Barimt-ийн хэвлэх мэдээллийг (POS терминалд) хамт буцаана."""
+    PAID болмогц e-Barimt-ийн хэвлэх мэдээллийг (POS терминалд) хамт буцаана.
+    GET (2026-10-15): PAX аппын шинэ хувилбар GET-ээр дууддаг — өмнө нь 405 буцдаг байв.
+    Хоёулаа зөвхөн хадгалсан үр дүнг уншина (банк руу хүсэлт илгээхгүй)."""
     # 5 сек тутам poll = 12/мин/утас; CGNAT-аар нэг IP-д олон жолооч → 300
     _throttle_qpay(request, "check", limit=300)
     payment = db.get(Payment, payment_id)
@@ -922,6 +955,8 @@ async def qpay_check(payment_id: str, request: Request, db: Session = Depends(ge
     # Browser polling reads our durable result. Bank verification is triggered
     # by callback, as required by QPay, not by every foreground polling request.
     if payment.status == "PAID":
+        await _ready_for_print(db, payment)   # QR алга бол msgbill-ээс нэг удаа (QPay биш)
+        payment = db.get(Payment, payment_id)
         return {"status": "PAID", **_print_payload(db, payment), **payment_outcome(db, payment)}
     return {"status": payment.status}
 
@@ -996,8 +1031,16 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
                                                      else {"user_agent": (request.headers.get("User-Agent")
                                                                           or "")[:80]})}))
     db.commit()
+    # POS апп баримтаа ЗӨВХӨН энэ хариунаас/print-ээс хэвлэдэг (2026-10-15): msgbill баримтыг
+    # шууд илгээж ≤6с хүлээгээд /pos/confirm-тэй ИЖИЛ хэвлэх багц (ebarimt_id, lottery_code,
+    # qr_data, receipt, print_data) нэмнэ. Хуучин түлхүүрүүд хэвээр. Веб касс (source≠POSAPP)
+    # баримт хэвлэдэггүй тул хүлээлгэхгүй — багц нь ирнэ (ихэвчлэн PENDING), outbox ≤5с.
+    pid, from_pos_app = payment.id, payment.source == "POSAPP"
+    await _ready_for_print(db, payment, deliver=from_pos_app)
+    payment = db.get(Payment, pid)
     return {"ok": True, "status": payment.status, "payment_id": payment.id,
-            "amount": float(payment.amount), **payment_outcome(db, payment)}
+            "amount": float(payment.amount), **payment_outcome(db, payment),
+            **_print_payload(db, payment)}
 
 
 # ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
@@ -1071,41 +1114,64 @@ async def ebarimt_payer(reg_no: str, user: User = Depends(require("cashier"))):
 
 
 @router.get("/pos/receipts")
-def pos_recent_receipts(terminal_id: str | None = None, limit: int = 10,
-                        db: Session = Depends(get_db),
-                        user: User = Depends(require("cashier"))):
+async def pos_recent_receipts(terminal_id: str | None = None, limit: int = 10,
+                              db: Session = Depends(get_db),
+                              user: User = Depends(require("cashier"))):
     """Сүүлийн төлбөрүүд — ДАХИН ХЭВЛЭХЭД. Цаас дуусах/зам гацах нь өдөр тутмын
     явдал бөгөөд өмнө нь баримт бүрмөсөн алдагддаг байв.
 
-    Мөр бүр `print_data` + `receipt`-тэй ирнэ — POS шууд хэвлэнэ."""
+    Мөр бүр `print_data` + `receipt`-тэй ирнэ — POS шууд хэвлэнэ. QR санах ойд алга
+    (процесс restart, 1 цаг өнгөрсөн) msgbill баримтын QR-ыг нэг удаа татна (2026-10-15)."""
+    import asyncio as _aio
+    from ..services import financial_jobs as FJ
     q = (db.query(Payment).filter(Payment.status == "PAID")
          .order_by(Payment.paid_at.desc().nullslast()))
     if terminal_id:
         q = q.filter(Payment.terminal_id == terminal_id)
     allowed = operator_sites(user)   # оператор зөвхөн өөрийн зогсоолын баримт
-    rows = []
-    for p in q.limit(min(max(limit, 1), 50) * 3).all():
+    limit = min(max(limit, 1), 50)
+    picked = []
+    for p in q.limit(limit * 3).all():
         s = db.get(ParkingSession, p.session_id) if p.session_id else None
         if allowed and (s is None or s.site_id not in allowed):
             continue
-        rows.append({"payment_id": p.id, "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-                     "plate_number": s.plate_number if s else None,
-                     **_print_payload(db, p)})
-        if len(rows) >= limit:
+        picked.append((p, s))
+        if len(picked) >= limit:
             break
-    return rows
+    if picked:
+        # Нийт ≤4с; нэг зэрэг ≤5 GET — msgbill удаан/унасан ч жагсаалт QR-гүй ирнэ
+        sem = _aio.Semaphore(5)
+
+        async def _one(pay):
+            async with sem:
+                await FJ.ensure_qr(db, pay)
+        try:
+            await _aio.wait_for(_aio.gather(*(_one(p) for p, _s in picked),
+                                            return_exceptions=True), timeout=4.0)
+        except (_aio.TimeoutError, Exception):  # noqa: BLE001
+            log.warning("pos/receipts: QR нөхөлт 4с-д дууссангүй — QR-гүй мөр байж болно")
+    return [{"payment_id": p.id, "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+             "plate_number": s.plate_number if s else None,
+             **_print_payload(db, p)} for p, s in picked]
 
 
 @router.get("/{payment_id}/print")
-def payment_print(payment_id: str, db: Session = Depends(get_db),
-                  user: User = Depends(require("cashier"))):
-    """Нэг төлбөрийн хэвлэх өгөгдөл — дахин хэвлэх/баримт үзүүлэхэд."""
+async def payment_print(payment_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(require("cashier"))):
+    """Нэг төлбөрийн хэвлэх өгөгдөл — дахин хэвлэх/баримт үзүүлэхэд.
+    SENT msgbill баримтын QR санах ойд алга бол msgbill-ээс НЭГ удаа татаж кэшилнэ
+    (≤3с, DB-д хадгалахгүй) — 2026-10-09-өөс QR хэвлэгдэхгүй байсны засвар."""
     p = db.get(Payment, payment_id)
     if not p:
         raise HTTPException(404, "Төлбөр олдсонгүй")
     s = db.get(ParkingSession, p.session_id) if p.session_id else None
     if s is not None:
         enforce_site(user, s.site_id)
+    elif _site_of(p) is not None:
+        enforce_site(user, _site_of(p).id)   # сешнгүй (өрийн) төлбөр — зогсоолоор нь
+    if p.status == "PAID":
+        await _ready_for_print(db, p)
+        p = db.get(Payment, payment_id)
     return {"payment_id": p.id, "status": p.status, **_print_payload(db, p)}
 
 
@@ -1307,6 +1373,11 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
         if dup:
             if dup.session_id != session.id or money(dup.amount) != paid_amount:
                 raise HTTPException(409, "Гүйлгээний дугаар өөр зогсолт эсвэл өөр дүнгээр бүртгэгдсэн")
+            # Давтан confirm (offline queue) — анхны хүсэлтийн илгээж буй баримтыг ДАВХАР
+            # илгээхгүй, дуусахыг нь хүлээнэ (lease); хүлээгдэж буй ажил бол шууд илгээнэ
+            dup_id = dup.id
+            await _ready_for_print(db, dup, deliver=True)
+            dup = db.get(Payment, dup_id)
             return {"status": "PAID", "payment_id": dup.id, **gate_result(db, dup),
                     **_print_payload(db, dup), **settlement_info(db, dup)}
     # Session мөрийг түгжинэ — нэг session дээр хоёр confirm ЗЭРЭГ орж ирвэл
@@ -1378,15 +1449,26 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
         # Card was already charged. Keep that fact even when old QR cancellation is uncertain.
         db.add(AuditLog(username=user.username, action="PAYMENT_PROVIDER_CONFLICT", entity="payment",
                         entity_id=payment.id, detail={"reason": "QPay cancellation unconfirmed"}))
-    await _finalize_paid(db, payment, raw=body, external_receipt=_external_receipt(body),
-                         pos_lane=lane)
+    # raw_payload-д терминалын QR-ыг хадгалахгүй (ТЕГ №11 — QR зөвхөн санах ойд)
+    await _finalize_paid(db, payment, raw={k: v for k, v in body.items() if k != "qr_data"},
+                         external_receipt=_external_receipt(body), pos_lane=lane)
     db.commit()
+    # Хаалт хүртэлх хугацааг (мөнгө + хаалт) баримтын хүлээлтээс ТУСАД нь хэмжинэ — «төлсний
+    # дараа хаалт удаан» гомдлын хэмжүүр баримтын суваг удааширснаас бохирдохгүй
+    _ms = int((_t.monotonic() - _c0) * 1000)
+    plate = session.plate_number
+    # Апп e-Barimt-ыг ЗӨВХӨН манай API-аас хэвлэдэг (2026-10-15): msgbill баримтыг шууд
+    # илгээж ≤6с хүлээнэ → ДДТД/сугалаа/QR энэ хариунд (бэлэн болоогүй бол PENDING)
+    pid = payment.id
+    _r0 = _t.monotonic()
+    await _ready_for_print(db, payment, deliver=True)
+    payment = db.get(Payment, pid)
     out = {"status": "PAID", "payment_id": payment.id, **gate_result(db, payment),
            **_print_payload(db, payment), **settlement_info(db, payment),
            "exit_lane_context": exit_context}
-    _ms = int((_t.monotonic() - _c0) * 1000)
     (log.warning if _ms >= settings.payment_slow_warn_ms else log.info)(
-        "POS confirm: %dмс (session=%s)", _ms, session.plate_number)
+        "POS confirm: %dмс (session=%s) · баримт %dмс %s", _ms, plate,
+        int((_t.monotonic() - _r0) * 1000), (out.get("receipt") or {}).get("ebarimt_status"))
     return out
 
 
@@ -1574,7 +1656,7 @@ async def cancel_ebarimt(db: Session, payment: Payment, note: str, mark: dict | 
         # цуцалдаг (vat_recon.cancel_block_reason); QPay/PosAPI-д нотолгоо л үлдэнэ
         _mark_cancel(rec, "CANCELLED", key_scopes.get(rec.ebarimt_id), note,
                      mark if prov == "MSGBILL" else None)
-        ebarimt.cache_qr(payment.id, None)
+        ebarimt.cache_qr(rec.id, None)   # цуцалсан баримтын QR хэвлэгдэхгүй (түлхүүр = баримт)
         cancelled.append(rec.ebarimt_id)
     db.commit()
     err = "; ".join(errors) or None
@@ -1599,12 +1681,19 @@ def _apply_msgbill_event(db: Session, rec: VatReceipt, event: str, data: dict) -
             return "stale"   # аль хэдийн цуцалсан — хуучирсан мэдэгдэл
         incoming = data.get("receipt_no")
         before = rec.ebarimt_id
+        qr = data.get("qr_data") or data.get("qrData")
+        # QR-ыг DB-д ХЭЗЭЭ Ч бичихгүй (ТЕГ №11) — raw-д зөвхөн ирсэн эсэх (has_qr)
+        safe = {k: v for k, v in data.items() if k not in ("qr_data", "qrData")}
+        safe["has_qr"] = bool(qr)
         ok = assign_ebarimt_id(db, rec, incoming, source="webhook.receipt.created",
-                               lottery=data.get("lottery"), username="msgbill-webhook", raw=data)
+                               lottery=data.get("lottery"), username="msgbill-webhook", raw=safe)
         if rec.ebarimt_id:
             rec.status, rec.receipt_url, rec.provider = "SENT", None, "MSGBILL"
         if not ok and incoming and before and incoming != before:
             return "conflict"
+        if qr and rec.ebarimt_id and rec.ebarimt_id == incoming:
+            # webhook-оор дууссан баримтын QR (outbox-ын POST хариунд QR ирээгүй байж болно)
+            ebarimt.cache_qr(rec.id, qr)
         return "set" if ok and before != incoming else "same"
     # receipt.cancelled
     incoming = data.get("receipt_no")
@@ -1622,7 +1711,7 @@ def _apply_msgbill_event(db: Session, rec: VatReceipt, event: str, data: dict) -
     rec.raw = merged
     rec.status = "CANCELLED"
     rec.receipt_url = "msgbill webhook: receipt.cancelled"
-    ebarimt.cache_qr(rec.payment_id, None)
+    ebarimt.cache_qr(rec.id, None)   # түлхүүр = баримт (2026-10-15)
     return "cancelled"
 
 
@@ -1714,13 +1803,16 @@ async def attach_external_ebarimt(payment_id: str, body: dict, db: Session = Dep
     rec.lottery_code = None
     assign_ebarimt_id(db, rec, ext["billId"], source=f"attach:{ext['provider']}",
                       lottery=None if receiver_type == "COMPANY" else ext["lottery"],
-                      username=user.username, raw=dict(body), allow_replace=True)
+                      username=user.username, allow_replace=True,
+                      # QR-ыг DB-д хадгалахгүй (ТЕГ №11) — зөвхөн ирсэн эсэх
+                      raw={**{k: v for k, v in body.items() if k != "qr_data"},
+                           "has_qr": bool(ext["qrData"])})
     rec.status, rec.receipt_url = "SENT", None
     rec.provider, rec.provider_ref = ext["provider"], ext["msgbillId"]
     for job in jobs:
         if job.receipt_id == rec.id:
             job.status, job.last_error = "DONE", None
-    ebarimt.cache_qr(payment.id, ext["qrData"])
+    ebarimt.cache_qr(rec.id, ext["qrData"])   # None бол хуучин QR-ыг хасна
     db.add(AuditLog(username=user.username, action="EBARIMT_ATTACH", entity="payment",
                     entity_id=payment_id, detail={"ebarimt_id": ext["billId"], "provider": ext["provider"]}))
     db.commit()

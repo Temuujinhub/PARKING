@@ -195,6 +195,11 @@ class Settings(BaseSettings):
     # Анхдагч = ALL (дансаар/бэлэн/карт бүгд msgbill — PosAPI суугаагүй тул).
     msgbill_methods: str = "ALL"
     msgbill_timeout: float = 20
+    # POS апп (/pos/confirm, /cash) баримтаа ЗӨВХӨН манай API-аас хэвлэдэг (2026-10-15):
+    # мөнгө commit болсны дараа энэ төлбөрийн msgbill баримтыг шууд илгээж хариуг дээд
+    # тал нь хэдэн секунд хүлээх вэ (ДДТД/сугалаа/QR хариунд нь). ≤6; 0 = унтраах (хуучин
+    # зан — зөвхөн 5с тутмын outbox, апп /print-ээр дахин татна).
+    receipt_inline_wait_sec: float = 6.0
     # msgbill webhook нууц (whsec_…) — Dashboard → Developers → Webhook endpoint нэмэхэд
     # НЭГ удаа харуулна. Endpoint: {public_base_url}/api/payments/msgbill/webhook.
     # UI-аас (Тохиргоо → Холболт → msgbill) тавьж болно — DB утга .env-г дарна.

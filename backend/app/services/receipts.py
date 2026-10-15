@@ -95,6 +95,30 @@ def primary_receipt(db: Session, payment_id: str) -> VatReceipt | None:
     return choose_primary(rows)
 
 
+def print_receipt(db: Session, payment) -> VatReceipt | None:
+    """ХЭВЛЭХ баримт — төлбөрийн ҮНДСЭН (зогсоолын) баримтыг өрийн баримтаас ТҮРҮҮЛНЭ.
+
+    Өр нийлүүлсэн төлбөрт өр тус бүрийн баримт `session_id`-аараа (өрийн зогсолт) ялгаатай;
+    үндсэн/орлох/терминалын мөр бүгд төлбөрийн зогсолттой ижил session_id-тай. Үндсэн мөр
+    алга (сешнгүй өрийн төлбөр г.м) бол бүх мөрөөс primary_receipt-ийн дүрмээр (2026-10-15)."""
+    rows = db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id).all()
+    sid = getattr(payment, "session_id", None)
+    main = [r for r in rows if sid and r.session_id == sid]
+    return choose_primary(main or rows)
+
+
+def receipt_qr(rec) -> str | None:
+    """Хэвлэх/харуулах QR — ЗӨВХӨН энэ баримтынх (түр санах ойгоос, DB-д хэзээ ч үгүй).
+
+    Түлхүүр нь баримтын id (2026-10-15): өрийн баримтын QR үндсэн баримтынхыг дарахгүй.
+    SENT биш (PENDING/EXTERNAL/CANCELLED…) баримтад QR буцаахгүй — ДДТД-гүй эсвэл
+    цуцлагдсан баримтын QR хэвлэгдэх ёсгүй."""
+    if rec is None or getattr(rec, "status", None) != "SENT" or not getattr(rec, "ebarimt_id", None):
+        return None
+    from .ebarimt import get_cached_qr
+    return get_cached_qr(rec.id)
+
+
 def assign_ebarimt_id(db: Session, rec: VatReceipt, new_id: str | None, *,
                       source: str, lottery: str | None = None,
                       username: str = "system", raw: dict | None = None,

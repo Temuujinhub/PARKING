@@ -30,18 +30,28 @@ _qr_cache: dict[str, tuple[str, float]] = {}
 _QR_TTL = 3600
 
 
-def cache_qr(payment_id: str, qr_data: str | None):
+def cache_qr(key: str, qr_data: str | None):
+    """QR-ыг түр санах ойд. Түлхүүр = БАРИМТЫН (VatReceipt) id (2026-10-15).
+
+    Өмнө нь төлбөрийн id-аар түлхүүрлэдэг байсан тул өр нийлүүлсэн төлбөрт өрийн
+    баримтын QR үндсэн (зогсоолын) баримтынхыг дарж, хэвлэсэн ДДТД-тэй таарахгүй QR
+    гардаг байв. qr_data хоосон = ХАСНА (цуцлагдсан/солигдсон баримтын QR хэвлэгдэхгүй) —
+    өмнө нь None ирэхэд юу ч хийдэггүй тул цуцалсан баримтын QR 1 цаг үлддэг байв."""
+    if not key:
+        return
     if qr_data:
-        _qr_cache[payment_id] = (qr_data, time.monotonic() + _QR_TTL)
+        _qr_cache[key] = (qr_data, time.monotonic() + _QR_TTL)
+    else:
+        _qr_cache.pop(key, None)
 
 
-def get_cached_qr(payment_id: str) -> str | None:
-    item = _qr_cache.get(payment_id)
+def get_cached_qr(key: str) -> str | None:
+    item = _qr_cache.get(key)
     if not item:
         return None
     qr, exp = item
     if time.monotonic() > exp:
-        _qr_cache.pop(payment_id, None)
+        _qr_cache.pop(key, None)
         return None
     return qr
 

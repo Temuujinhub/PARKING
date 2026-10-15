@@ -36,6 +36,10 @@ def env(monkeypatch):
     monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking")
     monkeypatch.setattr(settings, "public_base_url", "https://easy-parking.mn")
     monkeypatch.delenv("PARKING_DEPLOY_ROLE", raising=False)
+    # Түүхэн цуцлалт/нөхөлтийн хэрэгслүүд 10-14-ний тохиргоогоор (ерөнхий «терминал баримт
+    # гаргадаг» АСААЛТТАЙ) ажиллаж байсныг барина — кодын анхдагч 2026-10-15-аас УНТРААЛТТАЙ
+    # (унтраалттай үед --pos-app юу ч сонгохгүй: SITE_OFF — test_pos_inline_receipt).
+    monkeypatch.setitem(A.DEFAULTS[A.EBARIMT_KEY], "pos_terminal_issues", True)
 
     async def no_net(*a, **k):
         raise AssertionError("Network forbidden")

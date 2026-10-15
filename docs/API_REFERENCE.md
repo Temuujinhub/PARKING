@@ -121,9 +121,10 @@ QPay төлбөр амжилттай болмогц дуудна. Стандар
 Систем `payment/check`-ээр эргэж баталгаажуулж, `qpay_payment_id`-аар **e-Barimt (ebarimt_v3)**
 үүсгэж, хаалтыг нээнэ. `PARKING_QPAY_WEBHOOK_SECRET` тохируулсан бол `&token=` таарах ёстой.
 
-### POST /api/payments/qpay/check/{payment_id}  (нэвтрэлт шаардахгүй)
-Polling — 5 сек тутам дуудна (webhook ирээгүй тохиолдолд). Хариу `PENDING` эсвэл PAID үед
-**хэвлэх өгөгдөл хамт**:
+### GET|POST /api/payments/qpay/check/{payment_id}  (нэвтрэлт шаардахгүй)
+Polling — 5 сек тутам дуудна (webhook ирээгүй тохиолдолд). GET (PAX апп, 2026-10-15) ба POST
+(веб) ИЖИЛ — хоёулаа хадгалсан үр дүнг уншина, банк руу хүсэлт илгээхгүй. Хариу `PENDING` эсвэл
+PAID үед **хэвлэх өгөгдөл хамт** (`receipt`, `print_data` — бүтэн жагсаалт PAX_POS_APP_GUIDE §3.5):
 
 ```json
 {
@@ -141,6 +142,10 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 ### POST /api/payments/cash  (OPERATOR+)
 `{"session_id": "uuid", "customer_tin"?: "ААН ТТД", + гадна баримтын талбарууд (доор)}` —
 кассын бэлэн мөнгөний төлбөр. Хаалт автоматаар нээгдэнэ, e-Barimt систем үүсгэнэ.
+Хариу (2026-10-15-аас): `{ok, status, payment_id, amount, session_status, amount_due, …,
+barrier_*}` + `pos/confirm`-той ИЖИЛ хэвлэх багц `ebarimt_id, lottery_code, qr_data, receipt,
+print_data` (POS аппын хүсэлтэд msgbill баримтыг шууд илгээж ≤6с хүлээнэ — доор; веб касс
+хүлээхгүй).
 
 ### POST /api/payments/transfer  (pay_transfer эрхтэй)
 `{"session_id": "uuid", "customer_tin"?, + гадна баримтын талбарууд}` — дансаар (шилжүүлгээр)
@@ -174,7 +179,16 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 ```
 
 e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г thermal printer дээр
-**QR код болгон хэвлэнэ** — хэрэглэгч ebarimt апп-аар уншуулна. Картаар (POS), бэлнээр,
+**QR код болгон хэвлэнэ** — хэрэглэгч ebarimt апп-аар уншуулна.
+
+**Шууд илгээлт (2026-10-15):** `pos/confirm` ба `cash` мөнгийг commit хийсний ДАРАА ЭНЭ
+төлбөрийн msgbill баримтыг outbox-ын ажлыг lease-ээр авч (worker давхар илгээхгүй) шууд
+илгээж, ДДТД + QR-ыг нийт **≤6 секунд** хүлээнэ (`PARKING_RECEIPT_INLINE_WAIT_SEC`, 0 =
+унтраах). Хариулбал `receipt.ebarimt_status=SENT` + `ebarimt_id/lottery_code/qr_data`; үгүй бол
+`PENDING` — апп `GET /api/payments/{id}/print`-ээр дахин татна (баримтыг ДАХИН илгээхгүй,
+зөвхөн уншина; SENT msgbill баримтын QR санах ойд алга бол msgbill-ээс НЭГ удаа татна).
+Давтан `pos/confirm` (ижил `transaction_id`) шинэ баримт үүсгэхгүй, илгээж буй баримтыг хүлээнэ.
+Хариуны бүтэн талбар, дахин татах дүрэм: docs/PAX_POS_APP_GUIDE.md §3.5. Картаар (POS), бэлнээр,
 дансаар төлсөн баримтыг систем **msgbill.mn eBarimt API**-аар (2026-08-19-өөс; тохируулаагүй
 зогсоолд локал PosAPI 3.0), QR-аар (QPay) төлсөн баримтыг **QPay ebarimt_v3**-аар үүсгэнэ (§11).
 
@@ -193,10 +207,11 @@ e-Barimt: `ebarimt_id` = ДДТД (баримтын дугаар), `qr_data`-г 
 ```
 Хариунд ижил `ebarimt_id/lottery_code/qr_data` буцна; Ибаримт хуудсанд суваг = тухайн нэр.
 
-**POS терминал (PAX апп) өөрөө баримт гаргадаг (2026-10-13; 10-14 бүх зогсоолд):** Тохиргоо →
-Төлбөрийн дүрэм → «e-Barimt» бүлэг (`ebarimt_rules.pos_terminal_issues` + `pos_terminal_methods`;
-ЕРӨНХИЙ анхдагч АСААЛТТАЙ — эзний 10-14-ний шийдвэр, терминал нь хэвлэдэггүй зогсоолд л
-зогсоолоор унтраана). POS аппын төлбөр (`pos/confirm` — үргэлж; `cash` болон
+**POS терминал (PAX апп) өөрөө баримт гаргадаг (2026-10-13; 10-14 бүх зогсоолд; 10-15 анхдагч
+УНТРААЛТТАЙ):** Тохиргоо → Төлбөрийн дүрэм → «e-Barimt» бүлэг (`ebarimt_rules.pos_terminal_issues`
++ `pos_terminal_methods`). PAX аппын шинэ хувилбар баримтыг ЗӨВХӨН манай API-аас хэвлэдэг
+(Ontime-гүй) тул ЕРӨНХИЙ анхдагч 2026-10-15-аас УНТРААЛТТАЙ; терминал баримтаа өөрөө хэвлэдэг нь
+батлагдсан зогсоолд л асаана. Асаалттай зогсоолд POS аппын төлбөр (`pos/confirm` — үргэлж; `cash` болон
 `compensations/{id}/pay` — `X-App-Version` толгойтой, эсвэл кассчин нь POS аппын хэрэглэгч: role
 POS / `pos_terminal_users` / POS аппаар ≥20 карт — зогсоолоос үл хамааран; `payments.source=POSAPP`)
 ДДТД-гүй ирвэл систем msgbill баримт ГАРГАХГҮЙ: `vat_receipts.status=EXTERNAL`,

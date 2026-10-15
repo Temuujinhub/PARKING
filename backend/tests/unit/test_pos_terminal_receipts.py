@@ -45,6 +45,20 @@ def offline(monkeypatch):
     # msgbill тохируулсан зогсоол (прод шиг): карт/бэлэн → MSGBILL суваг
     monkeypatch.setattr(J.msgbill, 'account_enabled_for', lambda *a: ACC)
     monkeypatch.setattr(J.msgbill, 'api_key_for', lambda *a: ACC)
+    # Энэ модуль ДҮРМИЙН (EXTERNAL/msgbill) сонголтыг шалгана — баримтыг шууд илгээх
+    # (2026-10-15) нь test_pos_inline_receipt.py-д; энд ажлын төлөв дүрмийг л тусгана.
+    monkeypatch.setattr(settings, 'receipt_inline_wait_sec', 0)
+
+
+@pytest.fixture(autouse=True)
+def global_on_like_1014(monkeypatch):
+    """2026-10-14-ний тохиргоо: ерөнхий «терминал баримт гаргадаг» АСААЛТТАЙ. 10-15-аас кодын
+    анхдагч УНТРААЛТТАЙ (PAX апп Ontime-гүй) ч ерөнхий/зогсоолоор асаах боломж хэвээр —
+    энэ модуль асаалттай үеийн зан төлөвийг (EXTERNAL, зогсоолын OFF давхарга г.м) барина."""
+    monkeypatch.setitem(A.DEFAULTS[A.EBARIMT_KEY], 'pos_terminal_issues', True)
+    A.invalidate_cache()
+    yield
+    A.invalidate_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -132,12 +146,25 @@ def test_setting_off_keeps_msgbill_receipt_and_job(db):
     assert 'ДДТД: хүлээгдэж байна' in out['print_data']['lines']
 
 
-def test_default_is_on_for_every_site(db):
-    """2026-10-14: ерөнхий анхдагч АСААЛТТАЙ — тохиргоо огт бичээгүй зогсоолд ч, зогсоол
+def test_global_on_applies_to_every_site(db):
+    """Ерөнхий АСААЛТТАЙ үед (10-14-ний тохиргоо) — тохиргоо огт бичээгүй зогсоолд ч, зогсоол
     тодорхойгүй төлбөрт ч (ерөнхий утга)."""
     assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is True
     assert A.pos_terminal_receipt_methods(db, 'any-site') == {'CARD', 'CASH'}
     assert A.pos_terminal_receipt_methods(db, None) == {'CARD', 'CASH'}
+
+
+def test_code_default_is_off_since_2026_10_15(db, monkeypatch):
+    """PAX аппын шинэ хувилбар e-Barimt-ыг ЗӨВХӨН манай API-аас хэвлэдэг (Ontime-гүй) —
+    кодын ерөнхий анхдагч УНТРААЛТТАЙ: POS аппын карт/бэлэн → msgbill баримт."""
+    monkeypatch.setitem(A.DEFAULTS[A.EBARIMT_KEY], 'pos_terminal_issues', False)
+    A.invalidate_cache()
+    assert A.get_rules(db, A.EBARIMT_KEY)['pos_terminal_issues'] is False
+    assert A.pos_terminal_receipt_methods(db, None) == set()
+    s, u = parking(db), user(db)
+    out = card(db, s, u)
+    [r] = receipts(db, out['payment_id'])
+    assert (r.provider, r.status) == ('MSGBILL', 'PENDING') and len(jobs(db, out['payment_id'])) == 1
 
 
 def test_default_on_pos_card_and_header_cash_are_external_without_any_setting(db):
@@ -417,10 +444,10 @@ def test_primary_receipt_ranks_external():
 
 def test_print_payload_and_pos_receipts_for_external(db):
     p, u, _ = external_payment(db)
-    rows = PR.pos_recent_receipts(None, 10, db, u)
+    rows = asyncio.run(PR.pos_recent_receipts(None, 10, db, u))
     assert rows[0]['receipt']['ebarimt_status'] == 'EXTERNAL'
     assert 'ДДТД: -' not in rows[0]['print_data']['lines']
-    single = PR.payment_print(p.id, db, u)
+    single = asyncio.run(PR.payment_print(p.id, db, u))
     assert single['receipt']['ebarimt_issuer'] == 'POS_TERMINAL'
 
 
@@ -434,10 +461,10 @@ def test_print_returns_ddtd_once_outbox_delivers(db):
     [r] = receipts(db, out['payment_id'])
     r.ebarimt_id, r.status, r.lottery_code = '0301010000005595', 'SENT', 'HV 1'
     db.commit()
-    again = PR.payment_print(out['payment_id'], db, u)
+    again = asyncio.run(PR.payment_print(out['payment_id'], db, u))
     assert again['ebarimt_id'] == '0301010000005595'
     assert 'ДДТД: 0301010000005595' in again['print_data']['lines']
-    assert PR.pos_recent_receipts(None, 10, db, u)[0]['receipt']['ebarimt_status'] == 'SENT'
+    assert asyncio.run(PR.pos_recent_receipts(None, 10, db, u))[0]['receipt']['ebarimt_status'] == 'SENT'
 
 
 # ── 8. Өрийн төлөлт (Нөхөн төлбөр) ─────────────────────────────────────────
@@ -614,19 +641,25 @@ def test_existing_per_site_on_rows_stay_valid(db):
     assert receipts(db, out['payment_id'])[0].status == 'EXTERNAL'
 
 
-def test_conflict_warns_when_site_with_pos_traffic_is_off(db):
-    """Зөрчлийн шалгалт: POS аппын төлбөртэй зогсоолд дүрэм унтраалттай бол анхааруулна."""
+def test_conflict_warns_when_site_with_pos_traffic_is_on(db):
+    """Зөрчлийн шалгалт (2026-10-15-аас урвуу): POS аппын төлбөртэй зогсоолд дүрэм АСААЛТТАЙ
+    бол анхааруулна — аппын шинэ хувилбар Ontime-гүй тул EXTERNAL = баримтгүй."""
     s, u = parking(db), user(db)
     site = db.get(M.ParkingSite, s.site_id)
     titles = lambda: [c['title'] for c in PRULES.check_conflicts(db, site)]   # noqa: E731
     enable(db, s.site_id, on=False)
     assert not any('POS аппын төлбөртэй' in t for t in titles())          # POS аппын төлбөр алга
-    card(db, s, u)
-    assert any('POS аппын төлбөртэй' in t for t in titles())
-    enable(db, s.site_id, methods='CASH')                                   # карт хасагдсан
-    assert any('POS аппын төлбөртэй' in t for t in titles())
-    enable(db, s.site_id)
+    card(db, s, u)                                                          # унтраалттай → msgbill
     assert not any('POS аппын төлбөртэй' in t for t in titles())
+    enable(db, s.site_id, methods='CASH')                                   # карт хасагдсан
+    assert not any('POS аппын төлбөртэй' in t for t in titles())          # бэлэн POS аппын төлбөр алга
+    enable(db, s.site_id)                                                   # асаав — карт хамаарна
+    hit = [c for c in PRULES.check_conflicts(db, site) if 'POS аппын төлбөртэй' in c['title']]
+    assert hit and hit[0]['level'] == 'warn'                                # EXTERNAL хараахан 0
+    s2 = another_session(db, s.site_id, '4545УБА')
+    card(db, s2, u, txn='bank-2')                                           # → EXTERNAL
+    hit = [c for c in PRULES.check_conflicts(db, site) if 'POS аппын төлбөртэй' in c['title']]
+    assert hit[0]['level'] == 'high' and '1 нь «POS терминал гаргасан»' in hit[0]['detail']
 
 
 # ── #2: давхардал гэж цуцалсны дараа «Дахин үүсгэх» давхардлыг сэргээхгүй ───
@@ -684,7 +717,7 @@ def test_duplicate_cancel_records_terminal_receipt_and_retry_is_noop(db, monkeyp
     assert out['ok'] is True and out['ebarimt_id'] == teg
     assert len(receipts(db, p.id)) == 2 and db.query(M.FinancialJob).count() == 0
     # Хэвлэлт терминалын ДДТД-г харуулна (цуцлагдсан msgbill-ийн биш)
-    assert f'ДДТД: {teg}' in PR.payment_print(p.id, db, u)['print_data']['lines']
+    assert f'ДДТД: {teg}' in asyncio.run(PR.payment_print(p.id, db, u))['print_data']['lines']
     # Дахин ажиллуулбал (ижил ТЕГ файл) — терминалын мөрийг ХӨНДӨХГҮЙ
     again = cancel_dups(db, u, [p.id], {p.id: teg})
     assert again[0]['skipped'] == 'already_cancelled' and 'terminal_receipt' not in again[0]

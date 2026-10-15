@@ -298,9 +298,10 @@ async def create_receipt(acc: MsgbillAccount, amount: float, *, description: str
     return out
 
 
-async def get_receipt(acc: MsgbillAccount, msgbill_id: str) -> dict:
-    """Баримтын төлөв (state, receipt_no, lottery, qr_data) — PENDING/FAILED-ийг дараа нөхөхөд."""
-    async with httpx.AsyncClient(timeout=settings.msgbill_timeout) as client:
+async def get_receipt(acc: MsgbillAccount, msgbill_id: str, timeout: float | None = None) -> dict:
+    """Баримтын төлөв (state, receipt_no, lottery, qr_data) — PENDING/FAILED-ийг дараа нөхөхөд.
+    timeout — хэвлэхийн өмнөх QR татах мэт богино хүлээлтэд (анхдагч msgbill_timeout)."""
+    async with httpx.AsyncClient(timeout=timeout or settings.msgbill_timeout) as client:
         resp = await client.get(f"{acc.base_url}/partner/receipts/{msgbill_id}",
                                 headers=_headers(acc))
     if resp.status_code >= 400:
@@ -398,9 +399,10 @@ async def cancel_receipt_any(site, msgbill_id: str, note: str = "",
                                 msgbill_id, prefer_scope)
 
 
-async def get_receipt_any(site, msgbill_id: str, prefer_scope: str | None = None) -> dict:
-    """get_receipt + түлхүүрийн уналт (CANCEL_PENDING-ийн төлөвийг эцэслэхэд)."""
-    return await _with_fallback(site, lambda acc: get_receipt(acc, msgbill_id),
+async def get_receipt_any(site, msgbill_id: str, prefer_scope: str | None = None,
+                          timeout: float | None = None) -> dict:
+    """get_receipt + түлхүүрийн уналт (CANCEL_PENDING-ийн төлөвийг эцэслэхэд, QR нөхөхөд)."""
+    return await _with_fallback(site, lambda acc: get_receipt(acc, msgbill_id, timeout=timeout),
                                 msgbill_id, prefer_scope)
 
 

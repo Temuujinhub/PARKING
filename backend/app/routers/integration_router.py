@@ -36,7 +36,7 @@ def receipt_info(db: Session, payment: Payment) -> dict | None:
     ДДТД, сугалаа, дүн/НӨАТ, төлөв, QR (түр санах ойд байвал). Баримт үүсээгүй/
     амжилтгүй бол status FAILED + шалтгаан — түнш дараа GET-ээр дахин асууж болно."""
     from ..models import VatReceipt
-    from ..services import ebarimt as _eb
+    from ..services.receipts import receipt_qr
     r = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id)
          .order_by(VatReceipt.created_at.desc()).first())
     if r is None:
@@ -46,7 +46,7 @@ def receipt_info(db: Session, payment: Payment) -> dict | None:
             "status": r.status, "provider": r.provider,
             # EXTERNAL = POS терминал өөрөө гаргасан (алдаа биш) — тайлбарыг error-д бүү хий
             "error": (r.receipt_url or "")[:200] if r.status not in ("SENT", "EXTERNAL") else None,
-            "qr_data": _eb.get_cached_qr(payment.id),
+            "qr_data": receipt_qr(r),   # ЭНЭ баримтын QR (түлхүүр = баримт, 2026-10-15)
             "created_at": r.created_at.isoformat() if r.created_at else None}
 
 

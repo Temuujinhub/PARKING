@@ -41,13 +41,14 @@ def _account(provider, site):
     return acc, hashlib.sha256(identity.encode()).hexdigest()
 
 
-# ── POS ТЕРМИНАЛЫН ӨӨРИЙН БАРИМТ (2026-10-13; 10-14 бүх зогсоолд) ───────────────
+# ── POS ТЕРМИНАЛЫН ӨӨРИЙН БАРИМТ (2026-10-13; 10-14 бүх зогсоолд; 10-15 анхдагч OFF) ──
 # PAX терминал POS аппаар авсан карт/бэлэн төлбөрт Ontime-ийн e-Barimt-ыг өөрөө
-# хэвлэдэг — систем msgbill-ээр ДАХИН баримт гаргаж ТЕГ-т давхардал үүсгэж байв
+# хэвлэдэг байсан — систем msgbill-ээр ДАХИН баримт гаргаж ТЕГ-т давхардал үүсгэж байв
 # (2026-08-24 Хангарьд 63: 39 бэлэн + 24 карт; 9-р сард ~13 сая₮ илүү борлуулалт).
 # Апп тэр ДДТД-г илгээдэггүй тул бид дугаарыг нь мэдэхгүй — зөвхөн «терминал
 # гаргасан» гэсэн EXTERNAL мөр үлдээж, FinancialJob ҮҮСГЭХГҮЙ. Тохиргоо:
-# app_settings.EBARIMT_KEY — ерөнхий анхдагч АСААЛТТАЙ, зогсоолоор унтрааж болно.
+# app_settings.EBARIMT_KEY — 2026-10-15-аас ерөнхий анхдагч УНТРААЛТТАЙ (аппын шинэ
+# хувилбар Ontime-гүй, баримтыг манай API-аас хэвлэдэг); ерөнхий/зогсоолоор асааж болно.
 TERMINAL_PROVIDER = "POS-TERMINAL"
 TERMINAL_STATUS = "EXTERNAL"
 TERMINAL_NOTE = "Баримтыг POS терминал (Ontime) гаргасан — систем давхар үүсгээгүй"
@@ -73,9 +74,9 @@ def terminal_issues_receipt(db, payment) -> bool:
 
     Дөрвөн нөхцөл ЗЭРЭГ: (1) POS аппын төлбөр (services/pos_app — source POSAPP эсвэл
     /pos/confirm-ын карт; толгойгүй хуучин аппын хэрэглэгчийг _mark_pos_app POSAPP болгож
-    тэмдэглэдэг), (2) арга CARD/CASH, (3) тохиргоо — ерөнхий анхдагч АСААЛТТАЙ (2026-10-14
-    эзний шийдвэр: бүх зогсоол, бүх түрээслэгч), зогсоолд тодорхой унтраагаагүй ба энэ
-    арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт БИШ — терминал (Ontime) ИРГЭНИЙ баримт
+    тэмдэглэдэг), (2) арга CARD/CASH, (3) тохиргоо асаалттай — ерөнхий анхдагч 2026-10-15-аас
+    УНТРААЛТТАЙ (10-14-нд асаалттай байсан; аппын шинэ хувилбар Ontime-гүй), ерөнхий эсвэл
+    зогсоолд асааж энэ арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт БИШ — терминал (Ontime) ИРГЭНИЙ баримт
     хэвлэдэг тул байгууллагын НӨАТ-ын баримтыг систем гаргасаар байна (түүхэн цуцлалт
     `vat_cancel_duplicates --pos-app` ч ААН-ийг хөндөхгүй — нэг бодлого). Зогсоол
     тодорхойгүй бол ерөнхий утга. Тохиргоо уншигдахгүй бол False — систем баримт
@@ -207,7 +208,7 @@ def enqueue_receipt(db, payment, *, amount=None, vat=None, session_id=None,
         assign_ebarimt_id(db, receipt, external["billId"], source="terminal",
             lottery=None if payment.customer_tin else external.get("lottery"))
         receipt.status = "SENT"
-        ebarimt.cache_qr(payment.id, external.get("qrData"))
+        ebarimt.cache_qr(receipt.id, external.get("qrData"))   # түлхүүр = баримт
         return receipt
     if terminal is None:
         terminal = terminal_issues_receipt(db, payment)
@@ -563,12 +564,20 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
         if rec and result.get("msgbillId"):
             rec.provider_ref = result["msgbillId"]
         if rec and result.get("billId"):
-            assign_ebarimt_id(db, rec, result["billId"], source="outbox",
+            assigned = assign_ebarimt_id(db, rec, result["billId"], source="outbox",
                 lottery=None if data.get("receiver_type") == "COMPANY" else result.get("lottery"),
-                raw={k: (result.get("raw") or {}).get(k) for k in
-                     ("id", "receipt_no", "state", "barimt_status", "ebarimt_receipt_id")})
+                raw={**{k: (result.get("raw") or {}).get(k) for k in
+                        ("id", "receipt_no", "state", "barimt_status", "ebarimt_receipt_id")},
+                     # QR ирсэн эсэх (2026-10-15) — QR-ыг ӨӨРИЙГ нь хэзээ ч DB-д бичихгүй
+                     # (ТЕГ №11); «QR хэвлэгдэхгүй» гомдлыг сувгийн хариунаас ялгах нотолгоо
+                     "has_qr": bool(result.get("qrData"))})
             rec.status, rec.receipt_url = "SENT", None
-            ebarimt.cache_qr(job.payment_id, result.get("qrData"))
+            if assigned and result.get("qrData"):
+                # Түлхүүр = баримт (өрийн баримт үндсэн баримтын QR-ыг дарахгүй)
+                ebarimt.cache_qr(rec.id, result.get("qrData"))
+            elif not result.get("qrData"):
+                log.warning("баримт %s: суваг (%s) ДДТД өгсөн ч QR өгсөнгүй — /print msgbill-ээс "
+                            "нөхнө", rec.id, data.get("provider"))
         # A webhook may have completed the receipt while the request timed out.
         if rec and rec.ebarimt_id:
             error = None
@@ -596,7 +605,174 @@ async def run_once(factory=SessionLocal, limit=20):
         if claim is None:
             break
         if claim != "quarantined":
-            await deliver(*claim, factory=factory)
+            # Бүртгэлтэй task — POS-ийн confirm/cash ижил ажлыг давхар илгээхгүй, харин
+            # дуусахыг нь хүлээж чадна (deliver_now)
+            await _track(claim[0], deliver(*claim, factory=factory))
+
+
+# ── POS АППЫН БАРИМТЫГ ХАРИУНД НЬ (2026-10-15) ────────────────────────────────
+# PAX аппын шинэ хувилбар e-Barimt-ыг ЗӨВХӨН манай API-аас хэвлэдэг (Ontime-гүй). Outbox
+# 5с тутам ажилладаг тул /pos/confirm, /cash-ийн хариу ДДТД/сугалаа/QR-гүй (PENDING)
+# буцдаг байв — QR нь зөвхөн outbox-ын POST хариунаас түр санах ойд орно. Одоо мөнгө
+# commit болсны ДАРАА ЭНЭ төлбөрийн msgbill ажлыг ижил lease-ээр авч (claim) шууд
+# илгээж, ≤6с хүлээнэ. Хүлээлт дуусвал task-ийг ЗОГСООХГҮЙ (HTTP-г тасалбал баримт
+# үүссэн эсэх тодорхойгүй болно) — task өөрөө дуусгаж бичнэ, апп /print-ээр дахин татна.
+# Давхар илгээлтээс: ажлыг FOR UPDATE SKIP LOCKED + SENDING lease-ээр авна (worker-тэй
+# нэг механизм); lease-тэй ажлыг worker (claim_one) алгасна; процесс унавал lease 3 мин
+# дуусч worker ИЖИЛ Idempotency-Key-ээр нөхнө (msgbill — давхар баримт үүсэхгүй).
+# Зөвхөн MSGBILL: QPay/PosAPI-ийн дахин илгээлт идемпотент биш (claim_one тусгаарлана).
+INLINE_PROVIDERS = frozenset({"MSGBILL"})
+INLINE_MAX_SEC = 6.0
+_INFLIGHT: dict = {}   # job_id → asyncio.Task (энэ процесс дахь илгээж буй ажил)
+
+
+def _track(job_id, coro):
+    """deliver-ийг task болгож бүртгэнэ — өөр хүсэлт дуусахыг нь хүлээж чадна. Хүчтэй
+    лавлагаа (dict) нь task-ийг хог цуглуулагчаас хамгаална."""
+    task = asyncio.ensure_future(coro)
+    _INFLIGHT[job_id] = task
+
+    def _done(t, key=job_id):
+        if _INFLIGHT.get(key) is t:
+            _INFLIGHT.pop(key, None)
+        if not t.cancelled() and t.exception() is not None:
+            log.error("баримтын ажил %s алдаатай дуусав: %r", key, t.exception())
+    task.add_done_callback(_done)
+    return task
+
+
+def session_factory(db):
+    """Хүсэлтийн session-тэй ИЖИЛ DB (engine) — тестийн SQLite/прод Postgres аль аль нь."""
+    from sqlalchemy.orm import Session
+    bind = db.get_bind()
+    return lambda: Session(bind=bind, autoflush=False)
+
+
+def claim_payment_jobs(db, payment_id, now=None) -> tuple[list, list]:
+    """ЭНЭ төлбөрийн илгээх боломжтой msgbill баримтын ажлуудыг SENDING lease-ээр авна.
+
+    Буцаах: (claims [(job_id, lease_token)], илгээгдэж буй [job_id]). claim_one-той ижил
+    дүрэм: PENDING эсвэл хугацаа нь болсон RETRY; өөр процесс/worker түгжсэнийг алгасна
+    (SKIP LOCKED); BLOCKED/UNKNOWN/DONE-д хүрэхгүй (санхүүгийн тулгалт шаардлагатай)."""
+    now = now or datetime.utcnow()
+    jobs = (db.query(FinancialJob)
+            .filter(FinancialJob.payment_id == payment_id, FinancialJob.kind == "RECEIPT",
+                    or_(FinancialJob.status == "PENDING",
+                        (FinancialJob.status == "RETRY") & (FinancialJob.next_attempt_at <= now),
+                        FinancialJob.status == "SENDING"))
+            .order_by(FinancialJob.created_at, FinancialJob.id)
+            .with_for_update(skip_locked=True).all())
+    claims, sending = [], []
+    for job in jobs:
+        if (job.payload or {}).get("provider") not in INLINE_PROVIDERS:
+            continue
+        if job.status == "SENDING":
+            sending.append(job.id)
+            continue
+        job.status = "SENDING"
+        job.attempts += 1
+        job.lease_token = str(uuid.uuid4())
+        job.lease_until = now + timedelta(minutes=3)
+        claims.append((job.id, job.lease_token))
+    db.commit()
+    return claims, sending
+
+
+def inline_budget(value=None) -> float:
+    """Шууд илгээлтийн хүлээлтийн төсөв (сек): тохиргоо → [0, INLINE_MAX_SEC]."""
+    try:
+        v = float(settings.receipt_inline_wait_sec if value is None else value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(v, INLINE_MAX_SEC)) if v == v else 0.0   # NaN → 0
+
+
+async def deliver_now(db, payment_id, *, budget=None, factory=None) -> dict:
+    """Мөнгө commit болсны ДАРАА энэ төлбөрийн баримтыг шууд илгээж ≤budget сек хүлээнэ.
+
+    Хэзээ ч алдаа шидэхгүй (төлбөр, хаалт аль хэдийн болсон) — үр дүнг request-ийн session
+    дахин уншина. budget анхдагч settings.receipt_inline_wait_sec (≤6с; 0 = унтраах).
+    Буцаах: {claimed, awaited, pending, ms} — логт/тестэд."""
+    import time as _t
+    t0 = _t.monotonic()
+    budget = inline_budget(budget)
+    out = {"claimed": 0, "awaited": 0, "pending": 0, "ms": 0}
+    if budget <= 0 or not payment_id:
+        return out
+    factory = factory or session_factory(db)
+    try:
+        with factory() as s:
+            claims, sending = claim_payment_jobs(s, payment_id)
+    except Exception:  # noqa: BLE001 — баримт worker-ээр нөхөгдөнө
+        log.exception("шууд илгээх ажил авч чадсангүй (payment=%s)", payment_id)
+        return out
+    tasks = [_track(job_id, deliver(job_id, token, factory=factory)) for job_id, token in claims]
+    # Worker эсвэл давтан confirm аль хэдийн илгээж байгаа бол дуусахыг нь хүлээнэ
+    loop = asyncio.get_running_loop()
+    tasks += [_INFLIGHT[j] for j in sending
+              if j in _INFLIGHT and _INFLIGHT[j].get_loop() is loop and not _INFLIGHT[j].done()]
+    out["claimed"], out["awaited"] = len(claims), len(tasks)
+    if tasks:
+        remaining = max(0.0, budget - (_t.monotonic() - t0))
+        # asyncio.wait хугацаа дуусахад task-ийг ЦУЦЛАХГҮЙ — тэд lease-ээ барьсаар дуусна
+        _done, pending = await asyncio.wait(tasks, timeout=remaining)
+        out["pending"] = len(pending)
+    out["ms"] = int((_t.monotonic() - t0) * 1000)
+    if out["pending"]:
+        log.warning("баримт %dмс-д бэлэн болсонгүй (payment=%s) — апп /print-ээр дахин татна",
+                    out["ms"], payment_id)
+    return out
+
+
+# QR нөхөлт: msgbill-ийн SENT баримтад QR санах ойд алга (процесс restart, webhook-оор
+# дууссан, 1 цаг өнгөрсөн) бол /print нэг удаа GET /partner/receipts/{id}-ээс авна.
+QR_FETCH_TIMEOUT = 3.0
+QR_RETRY_SEC = 60.0
+_qr_attempts: dict = {}   # receipt_id → сүүлийн оролдлогын monotonic (давтан татахгүй)
+
+
+async def ensure_qr(db, payment, rec=None, *, timeout: float = QR_FETCH_TIMEOUT) -> str | None:
+    """Хэвлэх баримтын QR (санах ойд байхгүй бол msgbill-ээс НЭГ удаа татаж кэшилнэ).
+
+    ЗӨВХӨН SENT, provider MSGBILL, provider_ref-тэй баримтад. DB-д юу ч бичихгүй (QR-ыг
+    ТЕГ №11-ээр хадгалахгүй). msgbill-ийн дугаар хадгалсан ДДТД-ээс өөр бол QR-ыг
+    ашиглахгүй (хэвлэсэн ДДТД ≠ QR болохоос). Алдаа/удаашрал хэвлэлтийг унагаахгүй —
+    QR-гүй хэвлэнэ, QR_RETRY_SEC-ийн дараа дахин оролдоно."""
+    import time as _t
+    from .receipts import print_receipt, receipt_qr
+    try:
+        rec = rec if rec is not None else print_receipt(db, payment)
+        if rec is None or rec.status != "SENT" or not rec.ebarimt_id:
+            return None
+        cached = receipt_qr(rec)
+        if cached:
+            return cached
+        if (rec.provider or "") != "MSGBILL" or not rec.provider_ref:
+            return None
+        now = _t.monotonic()
+        last = _qr_attempts.get(rec.id)
+        if last is not None and now - last < QR_RETRY_SEC:
+            return None
+        if len(_qr_attempts) > 5000:
+            _qr_attempts.clear()
+        _qr_attempts[rec.id] = now   # await-ээс ӨМНӨ — зэрэг ирсэн хүсэлт давхар татахгүй
+        rec_id, ref, ddtd = rec.id, rec.provider_ref, rec.ebarimt_id
+        site = payment_site(payment)
+        res = await msgbill.get_receipt_any(site, ref, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — msgbill унасан/удаан: QR-гүй хэвлэнэ
+        log.warning("QR татаж чадсангүй (payment=%s): %s", getattr(payment, "id", None),
+                    type(exc).__name__)
+        return None
+    qr, no = res.get("qrData"), res.get("billId")
+    if not qr or (res.get("state") or "").upper() != "CREATED":
+        log.info("msgbill %s QR өгсөнгүй (state=%s)", ref, res.get("state"))
+        return None
+    if no and no != ddtd:
+        log.error("QR татахад ДДТД зөрөв payment=%s: msgbill %s ≠ хадгалсан %s — QR ашиглахгүй",
+                  payment.id, no, ddtd)
+        return None
+    ebarimt.cache_qr(rec_id, qr)
+    return qr
 
 
 async def supervisor():

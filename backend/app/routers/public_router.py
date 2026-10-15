@@ -162,8 +162,7 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
     payment = db.get(Payment, payment_id)
     if not payment or payment.status != "PAID":
         raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
-    from ..services.ebarimt import get_cached_qr
-    from ..services.receipts import primary_receipt
+    from ..services.receipts import primary_receipt, receipt_qr as _qr_of
     receipt = primary_receipt(db, payment_id)   # олон мөрөөс АЛБАН ЁСНЫ баримт (2026-09-07)
     return {
         "plate_number": payment.session.plate_number if payment.session else None,
@@ -174,8 +173,9 @@ def payment_receipt(payment_id: str, db: Session = Depends(get_db)):
         "receipt_status": receipt.status if receipt else "PENDING",
         "lottery_code": receipt.lottery_code if receipt else None,
         "customer_tin": receipt.customer_tin if receipt else None,
-        # QR түр санах ойгоос (ТЕГ №11 — DB-д хадгалагдахгүй, 1 цагийн дотор л үзнэ)
-        "qr_data": get_cached_qr(payment_id),
+        # QR түр санах ойгоос (ТЕГ №11 — DB-д хадгалагдахгүй, 1 цагийн дотор л үзнэ);
+        # түлхүүр = энэ баримт (өрийн баримтын QR биш — 2026-10-15)
+        "qr_data": _qr_of(receipt),
     }
 
 
@@ -186,11 +186,11 @@ def receipt_qr(payment_id: str, db: Session = Depends(get_db)):
     from qrcode.constants import ERROR_CORRECT_M
 
     from ..models import Payment, VatReceipt
-    from ..services.ebarimt import get_cached_qr
+    from ..services.receipts import primary_receipt, receipt_qr as _qr_of   # энэ endpoint-ийн нэртэй ижил
     payment = db.get(Payment, payment_id)
     if not payment or payment.status != "PAID":
         raise HTTPException(404, "Төлөгдсөн баримт олдсонгүй")
-    qr_data = get_cached_qr(payment_id)
+    qr_data = _qr_of(primary_receipt(db, payment_id))
     if not qr_data:
         raise HTTPException(404, "Баримтын QR хугацаа дууссан (аюулгүй байдлын үүднээс хадгалагддаггүй)")
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_M, box_size=8, border=2)

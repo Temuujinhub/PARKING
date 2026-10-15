@@ -72,6 +72,10 @@ def fake_http(monkeypatch):
     monkeypatch.setattr(settings, "database_url", "postgresql+psycopg2://u:p@localhost/parking")
     monkeypatch.setattr(settings, "public_base_url", "https://easy-parking.mn")
     monkeypatch.delenv("PARKING_DEPLOY_ROLE", raising=False)
+    # Түүхэн цуцлалт/нөхөлтийн хэрэгслүүд 10-14-ний тохиргоогоор (ерөнхий «терминал баримт
+    # гаргадаг» АСААЛТТАЙ) ажиллаж байсныг барина — кодын анхдагч 2026-10-15-аас УНТРААЛТТАЙ
+    # (унтраалттай үед --pos-app юу ч сонгохгүй: SITE_OFF — test_pos_inline_receipt).
+    monkeypatch.setitem(A.DEFAULTS[A.EBARIMT_KEY], "pos_terminal_issues", True)
     msgbill.invalidate_cache()
     A.invalidate_cache()
     PA.invalidate_cache()
@@ -436,8 +440,9 @@ def test_pos_app_external_then_teg_file_upgrades_terminal_row(db):
 # ───────────────────────── тохиргооны хэрэгсэл ─────────────────────────────
 
 def test_setting_tool_report_override_and_guards(db, engine, monkeypatch, capsys):
-    """2026-10-14: дүрэм ерөнхий анхдагчаар ON — хэрэгсэл нь тайлан + зогсоолоор ДАРАХ
-    (off/on/global). Бөөнөөр өөрчлөхгүй (--site заавал), хуулбар/staging дээр бичихгүй."""
+    """Ерөнхий ON (10-14-ний тохиргоо; 10-15-аас кодын анхдагч OFF) — хэрэгсэл нь тайлан +
+    зогсоолоор ДАРАХ (off/on/global). Бөөнөөр өөрчлөхгүй (--site заавал), хуулбар/staging дээр
+    бичихгүй. ⚠ нь 10-15-аас урвуу: асаалттай + POS аппын төлбөртэй зогсоолд."""
     tool = _tool("pos_terminal_setting.py")
     monkeypatch.setattr(tool, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     w = build(db)
@@ -449,8 +454,10 @@ def test_setting_tool_report_override_and_guards(db, engine, monkeypatch, capsys
     assert tool.main([]) == 0                                               # тайлан
     text = capsys.readouterr().out
     assert "ЕРӨНХИЙ: ON CARD,CASH" in text
-    assert [ln for ln in text.splitlines() if " HANGARID " in ln][0].split()[2:6] == \
-        ["ON", "CARD,CASH", "ерөнхий", "CARD"]
+    hline = [ln for ln in text.splitlines() if " HANGARID " in ln][0]
+    assert hline.split()[2:6] == ["ON", "CARD,CASH", "ерөнхий", "CARD"]
+    # 2026-10-15: асаалттай + POS аппын төлбөртэй → ⚠ (аппын шинэ хувилбар Ontime-гүй)
+    assert "⚠ дүрэм асаалттай" in hline
     with pytest.raises(SystemExit):
         tool.main(["--apply", "--user", "t"])                               # --set-гүй apply
     with pytest.raises(SystemExit):
@@ -472,10 +479,11 @@ def test_setting_tool_report_override_and_guards(db, engine, monkeypatch, capsys
     [log] = db.query(M.AuditLog).filter_by(action="UPDATE", entity="payment_rules").all()
     assert log.entity_id == hid and log.username == "temuujin" and log.detail["_set"] == "off"
     assert log.detail["ebarimt_rules"] == {"pos_terminal_issues": False}
-    # Тайлан ⚠: POS аппын төлбөртэй ч унтраалттай
+    # Тайлан: унтраалттай зогсоолд ⚠ ҮГҮЙ (2026-10-15-аас — msgbill баримт гаргаж буй нь зөв)
     capsys.readouterr()
     assert tool.main([]) == 0
-    assert "⚠ POS аппын төлбөртэй ч дүрэм үйлчлэхгүй" in capsys.readouterr().out
+    hline = [ln for ln in capsys.readouterr().out.splitlines() if " HANGARID " in ln][0]
+    assert "⚠" not in hline and hline.split()[2] == "OFF"
     # Дахин — өөрчлөлтгүй (идемпотент)
     assert tool.main(["--site", "HANGARID", "--set", "off", "--apply", "--user", "temuujin"]) == 0
     assert db.query(M.AuditLog).filter_by(action="UPDATE").count() == 1
