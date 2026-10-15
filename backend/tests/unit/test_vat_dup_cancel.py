@@ -512,8 +512,10 @@ def test_cli_rerun_same_file_after_limit_1_does_not_cancel_legit_payment(db, eng
     ws.append(["Пос дугаар", "ДДТД", "Огноо", "Нийт дүн", "Систем нийлүүлэгч"])
     ws.append(["7524322", "015200020090000097260000110002990",          # Ontime (UTC, P1-ээс 4с өмнө)
                (p1.paid_at - timedelta(seconds=4)).strftime("%Y-%m-%d %H:%M:%S"), 1000, "Ontime"])
-    for p, rid in ((p1, _recs(db, p1.id)[0].ebarimt_id), (p2, msg2)):  # манай msgbill (УБ локал)
-        ws.append(["8164522", rid[:-11] + "1" + rid[-10:],
+    # манай msgbill (УБ локал) — ТЕГ-ийн дугаарлалтаар (0152…; манай 0291… нь 09-07-ноос өмнөх msgbill-ийн
+    # багцын дугаар — ТЕГ экспортод хэзээ ч гардаггүй, цаг+дүнгээр тулгагдана)
+    for k, p in enumerate((p1, p2)):
+        ws.append(["8164522", "0152000200900010972600%03d10045952" % (500 + k),
                    (p.paid_at + timedelta(hours=8, seconds=1)).strftime("%Y-%m-%d %H:%M:%S"), 1000,
                    "Онлайм нетворк"])
     f = str(tmp_path / "teg.xlsx")
@@ -678,3 +680,44 @@ def test_already_cancelled_without_terminal_row_is_completed_on_rerun(db):
     out = asyncio.run(VD.cancel_one(db, pay.id, note="x", username="t", teg={}))
     assert out["skipped"] == "already_cancelled" and "terminal_receipt" not in out
     assert len(_recs(db, pay.id)) == 2
+
+
+def test_file_mode_is_chunked_by_day_with_same_result(db, engine, tmp_path, monkeypatch, capsys):
+    """2026-10-15: --file сарын файлыг нэг дор тулгахад 2GB сервер дээр ~500MB → OOM-д алагдаж байв.
+    Файлын өөрийн огноогоор хувааж (хөрш хоногийн мөр нөөцөөр) тулгасан давхардал/дүгнэлт бүхэлд нь
+    тулгасантай ИЖИЛ — UTC шөнө дундын хил дээрх (Ontime мөр дараагийн хоногт) борлуулалт ч."""
+    cli = _cli()
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    site, pays = _setup(db, n=3)                                     # 08-24
+    extra = []
+    for k, at in enumerate((BASE + timedelta(days=1, hours=1), datetime(2026, 8, 25, 23, 59, 58),
+                            BASE + timedelta(days=2))):
+        p = M.Payment(site_id=site.id, provider="CASH", payment_method="CASH", amount=Decimal("1000"),
+                      vat_amount=Decimal("90.91"), status="PAID", sender_invoice_no=f"x-{k}", paid_at=at,
+                      raw_payload={"plate_number": f"{2000 + k}УБА"})
+        db.add(p)
+        db.flush()
+        db.add(M.VatReceipt(payment_id=p.id, ebarimt_id=MSG_DDTD[:-12] + "%04d" % (10 + k) + MSG_DDTD[-8:],
+                            amount=Decimal("1000"), vat_amount=Decimal("90.91"), status="SENT",
+                            provider="MSGBILL", provider_ref=f"rcp-x{k}"))
+        extra.append(p)
+    db.commit()
+    f = _teg_file(tmp_path, pays + extra)
+    kw = dict(tol=60, shifts=[0.0, -8.0], tenant_sites=[site.id], log=lambda *a: None)
+    whole = cli.analyze_files(db, [f], chunk_days=31, **kw)
+    parts = cli.analyze_files(db, [f], chunk_days=1, **kw)
+    assert whole[2][0]["chunks"] == 1 and parts[2][0]["chunks"] == 3
+    assert {d["payment_id"] for d in parts[0]} == {d["payment_id"] for d in whole[0]} \
+        == {p.id for p in pays + extra}
+    assert sorted(x["verdict"] for x in parts[1]) == sorted(x["verdict"] for x in whole[1])
+    assert len(parts[1]) == len(whole[1]) == 6                        # Ontime мөр бүр НЭГ л удаа
+    out = tmp_path / "rep.csv"
+    assert cli.main(["--file", f, "--out", str(out), "--tenant", "EASY"]) == 0
+    text = capsys.readouterr().out
+    assert "2 хэсэг" in text and "6 төлбөр" in text and "зогсоол «Хангарьд»" in text
+    # --max: dry-run сануулна, --apply нь яг ямар тугаар үргэлжлүүлэхийг заагаад зогсоно
+    assert cli.main(["--file", f, "--out", str(out), "--tenant", "EASY", "--max", "5"]) == 0
+    assert "--max: 6 төлбөр > --max 5" in capsys.readouterr().out
+    assert cli.main(["--file", f, "--out", str(out), "--tenant", "EASY", "--max", "5", "--apply", "--yes",
+                     "--user", "t"]) == 2
+    assert "--apply-д --max 6 нэмнэ" in capsys.readouterr().out and FakeHTTP.calls == []

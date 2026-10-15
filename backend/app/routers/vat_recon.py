@@ -796,6 +796,16 @@ def foreign_register_sites(left: list, probe: list, tol: int, shift: float = 0.0
     return out
 
 
+def register_allows(rs: dict | None, p: dict) -> bool | None:
+    """Олон зогсоолын терминалын касс (vat_duplicates.register_attribution, 2026-10-15): «allow» =
+    тэр өдөр терминалаар баримт хэвлэсэн «зогсоол|УБ өдөр». Энэ төлбөрийн (зогсоол, өдөр) тэнд
+    орох уу. None = «allow» алга — хуучин нэг зогсоолын (олонхын) дүрэм (foreign_register_sites)."""
+    if not rs or rs.get("allow") is None or p.get("paid_at") is None:
+        return None
+    day = (p["paid_at"] + timedelta(hours=rs.get("tz_hours") or 0)).date().isoformat()
+    return f"{p.get('site_id')}|{day}" in rs["allow"]
+
+
 def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
                           matched_pay_ids: set, scope_ids: set | None,
                           register_sites: dict | None = None) -> list:
@@ -822,7 +832,9 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
     oi = [i for i, t in enumerate(left) if not t.get("foreign")]
 
     def reg_site(t):
-        return (register_sites.get(t.get("group") or "") or {}).get("site_id")
+        rs = register_sites.get(t.get("group") or "") or {}
+        # Олон зогсоолын касс («allow») — нэг зогсоолыг түрүүлэхгүй (POS апп эрэмбээр л)
+        return None if rs.get("allow") is not None else rs.get("site_id")
 
     def f_cost(pr):
         # POS аппын борлуулалт ТҮРҮҮНД, дараа нь кассын зогсоол (2026-10-14): олон зогсоолын
@@ -890,11 +902,17 @@ def explain_unmatched_tax(left: list, probe: list, shift: float, tol: int,
             elif t.get("foreign"):
                 v, note = _foreign_verdict(p)
                 rs = register_sites.get(t.get("group") or "")
-                if v == "DUPLICATE" and rs is not None and rs["site_id"] is None:
+                allows = register_allows(rs, p)
+                if v == "DUPLICATE" and allows is False:
+                    v, note = "DUPLICATE_NOT_CANCELLABLE", (
+                        f"зогсоол «{p.get('site_name') or ''}» тэр өдөр терминалаар (касс …{t.get('group')}) "
+                        "баримт хэвлээгүй (POS аппын борлуулалтын хос бага) — санамсаргүй тааралт байж "
+                        "болзошгүй, гараар шалгана")
+                elif v == "DUPLICATE" and allows is None and rs is not None and rs["site_id"] is None:
                     v, note = "DUPLICATE_NOT_CANCELLABLE", (
                         f"касс …{t.get('group')} аль зогсоолынх нь тодорхойгүй "
                         f"({rs['sites']} зогсоолд тарсан) — гараар шалгана")
-                elif v == "DUPLICATE" and rs is not None and p.get("site_id") != rs["site_id"]:
+                elif v == "DUPLICATE" and allows is None and rs is not None and p.get("site_id") != rs["site_id"]:
                     v, note = "DUPLICATE_NOT_CANCELLABLE", (
                         f"өөр зогсоол — касс …{t.get('group')} нь «{rs['site_name']}»-ийнх")
                 elif v == "DUPLICATE" and i in ambiguous:

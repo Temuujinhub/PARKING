@@ -449,7 +449,10 @@ def test_ui_terminal_missing_not_fooled_by_shared_ontime_register(db):
 def test_file_mode_never_cancels_web_cash_of_majority_site(db):
     """--file/UI-ийн давхардлын илрүүлэлт: нэг Ontime кассаар олон зогсоол ажиллах үед олонхын
     зогсоолын ижил дүнтэй ВЕБ КАССЫН бэлэн (msgbill-ийн цорын ганц баримт) нөгөө зогсоолын POS
-    аппын борлуулалтаас Ontime мөрийг булааж «DUPLICATE» болохгүй (2026-10-14: POS апп түрүүнд)."""
+    аппын борлуулалтаас Ontime мөрийг булааж «DUPLICATE» болохгүй (2026-10-14: POS апп түрүүнд).
+    2026-10-15: кассын зогсоолыг ЗОГСООЛ × ӨДРӨӨР тогтооно — Хангарьдын POS аппын борлуулалт ч
+    тэр өдөр терминалаар хэвлэсэн тул түүний ЖИНХЭНЭ давхардал (Ontime + манай msgbill хоёулаа
+    ТЕГ-т) «өөр зогсоол» биш DUPLICATE (өмнө нь олонх = Ялалт → цуцлагдахгүй байв)."""
     w = world(db)
     s = scenario(db, w)
     yl = M.ParkingSite(name="ялалт", site_code="YLALT1", tenant_id=w.ep.id)
@@ -478,4 +481,233 @@ def test_file_mode_never_cancels_web_cash_of_majority_site(db):
     dup_ids = {d["payment_id"] for d in a["duplicates"]}
     assert web.id not in dup_ids
     [row] = [x for x in a["explained"] if x["foreign"] and x["amount"] == 2500.0]
-    assert row["payment_id"] == h.id and row["verdict"] == "DUPLICATE_NOT_CANCELLABLE"   # өөр зогсоол
+    assert row["payment_id"] == h.id and row["verdict"] == "DUPLICATE"
+    assert h.id in dup_ids and {p["site_id"] for p in a["probe"] if p["id"] in dup_ids} == {w.site.id, yl.id}
+    rs = a["register_sites"][ONT]
+    assert rs["sites"] == 2 and rs["allow"] == sorted([f"{w.site.id}|2026-09-20", f"{yl.id}|2026-09-20"])
+
+
+# ───────── 2026-10-15: прод дахин гаргалт ДАВХАРДАЛГҮЙ (ТЕГ-ийн 9/10-р сарын бодит экспорт) ─────────
+
+def _ub(p, s=3):
+    """Манай msgbill мөр — ТЕГ экспортод УБ локал цагаар."""
+    return p.paid_at + timedelta(hours=8, seconds=s)
+
+
+def own_world(db, w, s):
+    """Терминалын мөргүй нэр дэвшигчид — МАНАЙ баримт ТЕГ экспортод бий/алга:
+    dup_miss — цуцалсан баримт (…000002) экспортод ҮЛДСЭН (ДДТД-ээр);
+    twin — манайх (…000020) экспортод алга, msgbill-ийн ДАВХАР баримт (…000021, манайд бүртгэлгүй) бий;
+    old — 09-07-ноос өмнөх msgbill-ийн БАГЦЫН дугаар (0291…) — ТЕГ-т өөр ДДТД (цаг+дүнгээр);
+    gone — цуцалсан баримт экспортод алга, давхар ч алга → ДАХИН ГАРГАНА;
+    web/b — веб кассын (идэвхтэй) баримтын мөр b-ийн төлбөрт ЦАГААР ойрхон (5с vs 25с), дугаар нь b-ийн
+    цуцалсан баримтаас 1-ээр зөрүүтэй ч ДДТД нь веб кассынх → ДДТД түрүүнд: b ДАХИН ГАРГАНА."""
+    x = {"rows": []}
+    x["twin"] = payment(db, w, T0 + timedelta(minutes=55), 5500, receipts=[dup(20)])
+    x["rows"].append({"dt": _ub(x["twin"], 2), "amount": 5500.0, "ddtd": ddtd(21, MSG), "src": "msgbill"})
+    x["old"] = payment(db, w, T0 + timedelta(minutes=65), 6500, receipts=[(
+        "MSGBILL", "CANCELLED", {"ebarimt_id": "02910024410600109722%05d" % 7 + MSG, "provider_ref": "rcp_old",
+                                 "ddtd_note": f"{DUPLICATE_OF_POS}: x",
+                                 "raw": {"cancel": {"reason": DUPLICATE_OF_POS}}})])
+    x["rows"].append({"dt": _ub(x["old"], 2), "amount": 6500.0, "ddtd": ddtd(30, MSG), "src": "msgbill"})
+    x["gone"] = payment(db, w, T0 + timedelta(minutes=75), 7300, receipts=[dup(50)])
+    x["web"] = payment(db, w, T0 + timedelta(minutes=80), 7700, method="CASH", user=w.web, receipts=[sent(40)])
+    x["b"] = payment(db, w, x["web"].paid_at + timedelta(seconds=20), 7700, receipts=[dup(41)])
+    x["rows"].append({"dt": _ub(x["web"], 25), "amount": 7700.0, "ddtd": ddtd(40, MSG), "src": "msgbill"})
+    x["rows"].append({"dt": _ub(s["dup_miss"]), "amount": 5000.0, "ddtd": ddtd(2, MSG), "src": "msgbill"})
+    db.commit()
+    return x
+
+
+def test_own_receipt_still_in_teg_is_never_reissued(db):
+    """10-15-ны экспортод манай 1,680 борлуулалтын (6.71 сая₮) баримт — идэвхтэй, эсвэл 10-14-нд
+    цуцалсан ч экспортод ҮЛДСЭН, эсвэл msgbill-ийн давхар баримт — бий байхад vat_reissue_missing
+    тэдгээрийг «терминалын мөргүй» → ДАХИН гаргах байв (ТЕГ-т 2 баримт). ДДТД-ээр түрүүлж, 0291…
+    багцын дугаартайг цаг+дүнгээр, давхар баримтыг ДДТД-ийн дарааллаар таньж OWN_IN_TEG болгоно."""
+    w = world(db)
+    s = scenario(db, w)
+    x = own_world(db, w, s)
+    ev = evidence(db, w, export(s) + x["rows"])
+    own = ev["own_present"]
+    assert own[s["dup_miss"].id] == "DDTD" and own[x["web"].id] == "DDTD"
+    assert own[x["twin"].id] == "TWIN" and own[x["old"].id] == "TIME"
+    assert x["b"].id not in own and x["gone"].id not in own and s["ext_miss"].id not in own
+    sel = VD.select_reissue(db, sites=[w.site], lo=T0 - timedelta(days=1), hi=T0 + timedelta(days=5))
+    split = VD.evidence_split(sel["candidates"], ev, {w.site.id: w.ep.id})
+    ids = {k: {r["payment_id"] for r in v} for k, v in split.items()}
+    assert ids["own_in_teg"] == {s["dup_miss"].id, x["twin"].id, x["old"].id}
+    assert ids["missing"] == {s["ext_miss"].id, x["gone"].id, x["b"].id}
+    assert ids["with_terminal"] == {s["ext_ok"].id, s["dup_ok"].id} and not ids["ambiguous"]
+    assert {r["own_teg"] for r in split["own_in_teg"]} == {"DDTD", "TWIN", "TIME"}
+
+
+def test_twin_goes_to_receipt_created_nearest_when_numbers_interleave(db):
+    """3HOSPITAL 09-25: ижил дүнтэй баримт дараалж гарахад манайх …23, 25, 27, давхар нь …24, 26 —
+    давхар мөр (…26) дугаараар 25, 27 хоёуланд 1 зөрүүтэй. Баримт ҮҮССЭН цагаар хамгийн ойрд оноохгүй
+    бол 27-ийн борлуулалт (баримт нь ТЕГ-т алга, давхар нь бий) ДАХИН гаргагдаж давхардана."""
+    w = world(db)
+    s = scenario(db, w)
+    a = payment(db, w, T0 + timedelta(minutes=75), 1000, receipts=[dup(25)])
+    b = payment(db, w, T0 + timedelta(minutes=77), 1000, receipts=[dup(27)])
+    db.flush()
+    for p in (a, b):
+        for r in db.query(M.VatReceipt).filter_by(payment_id=p.id):
+            r.created_at = p.paid_at
+    db.commit()
+    rows = export(s) + [{"dt": _ub(a, 1), "amount": 1000.0, "ddtd": ddtd(25, MSG), "src": "msgbill"},
+                        {"dt": _ub(b, 2), "amount": 1000.0, "ddtd": ddtd(26, MSG), "src": "msgbill"}]
+    ev = evidence(db, w, rows)
+    assert ev["own_present"][a.id] == "DDTD" and ev["own_present"][b.id] == "TWIN"
+
+
+def test_site_day_terminal_usage_gates_ambiguous_pairing_and_file_duplicates(db):
+    """Нэг Ontime касс 5 зогсоолд: 3HOSPITAL огт терминалгүй (≤2% санамсаргүй хос) ч бусдын ХОСГҮЙ
+    мөрөөс болж 517 борлуулалт нь ТОДОРХОЙГҮЙ болж байв. Одоо:
+    (а) хосгүй мөр зөвхөн ТЭР ӨДӨР терминалаар хэвлэсэн зогсоолд ТОДОРХОЙГҮЙ (Хангарьд h_amb), 3HOSPITAL-д
+        терминалын мөргүй (near_miss_ignored);
+    (б) мөр 3HOSPITAL-ийн y-д (2с) илүү ойр ч тэр өдөр терминалтай Хангарьдын x-тэй (8с) хосолно; y нь
+        маргаантай → ТОДОРХОЙГҮЙ (дахин гаргахгүй);
+    (в) --file/UI: 3HOSPITAL-ийн z (манай msgbill + Ontime мөр) санамсаргүй тааралт — «тэр өдөр
+        терминалгүй» → цуцлахгүй."""
+    from app.routers import vat_recon as VR
+    w = world(db)
+    s = scenario(db, w)
+    hos = M.ParkingSite(name="3-р эмнэлэг", site_code="3HOSPITAL", tenant_id=w.ep.id)
+    db.add(hos)
+    db.flush()
+    # 3HOSPITAL-ийн өдрийн ~300 борлуулалтын жижиг хувилбар — санамсаргүй 2 хос нь <10%
+    hs = [payment(db, w, T0 + timedelta(minutes=5 + 2 * i), 1000, site=hos, receipts=[EXT]) for i in range(40)]
+    rows = export(s)
+    h_amb = payment(db, w, T0 + timedelta(minutes=33), 1000, receipts=[EXT])
+    rows.append({"dt": h_amb.paid_at - timedelta(seconds=30), "amount": 1000.0, "ddtd": ddtd(350, ONT),
+                 "src": "Ontime"})
+    x = payment(db, w, T0 + timedelta(minutes=61), 2000, receipts=[EXT])
+    y = payment(db, w, x.paid_at + timedelta(seconds=6), 2000, site=hos, receipts=[EXT])
+    rows.append({"dt": x.paid_at + timedelta(seconds=8), "amount": 2000.0, "ddtd": ddtd(351, ONT), "src": "Ontime"})
+    z = payment(db, w, T0 + timedelta(minutes=70), 2500, method="CASH", site=hos, receipts=[sent(360)])
+    rows.append({"dt": z.paid_at + timedelta(seconds=3), "amount": 2500.0, "ddtd": ddtd(352, ONT), "src": "Ontime"})
+    rows.append({"dt": _ub(z, 2), "amount": 2500.0, "ddtd": ddtd(360, MSG), "src": "msgbill"})
+    db.commit()
+    sites = VD.tenant_sites(db, [w.ep])
+    ev = VD.terminal_evidence(db, [("teg.xlsx", rows)], sites=sites, tol=60, shifts=[0.0, -8.0])
+    day = "2026-09-20"
+    assert (w.site.id, day) in ev["terminal_days"] and (hos.id, day) not in ev["near_days"]
+    assert x.id in ev["terminal_ids"] and y.id not in ev["terminal_ids"] and y.id in ev["contested"]
+    sel = VD.select_reissue(db, sites=sites, lo=T0 - timedelta(days=1), hi=T0 + timedelta(days=1))
+    split = VD.evidence_split(sel["candidates"], ev, {p.id: w.ep.id for p in sites})
+    ids = {k: {r["payment_id"] for r in v} for k, v in split.items()}
+    assert ids["ambiguous"] == {h_amb.id, y.id}
+    assert {p.id for p in hs} <= ids["missing"] and x.id in ids["with_terminal"]
+    ignored = {r["payment_id"] for r in split["missing"] if r.get("near_miss_ignored")}
+    assert ignored and ignored <= {p.id for p in hs}
+    # (в) --file/UI-ийн давхардал: 3HOSPITAL тэр өдөр терминалгүй → санамсаргүй тааралт цуцлагдахгүй
+    ids_ = [p.id for p in sites]
+    a = VD.reconcile_db(db, rows, shifts=[0.0, -8.0], tol=60, ours_sites=ids_, probe_sites=ids_,
+                        scope_ids=set(ids_))
+    [row] = [r for r in a["explained"] if r["foreign"] and r["amount"] == 2500.0]
+    assert row["payment_id"] == z.id and row["verdict"] == "DUPLICATE_NOT_CANCELLABLE"
+    assert "тэр өдөр терминалаар" in row["note"] and z.id not in {d["payment_id"] for d in a["duplicates"]}
+    rs = a["register_sites"][ONT]
+    assert rs["allow"] == [f"{w.site.id}|{day}"] and VR.register_allows(rs, {"site_id": hos.id,
+                                                                              "paid_at": z.paid_at}) is False
+
+
+def test_chunk_with_low_own_share_is_covered_by_file_level_share(db):
+    """9-р сарын файлын 09-01..02 хэсэг: QPay олноор нь дахин илгээсэн мөрөөс болж хэсгийн манай
+    кассын хувь 45% (<50%) → тэр 2 хоног нотолгоонд ОГТ орохгүй (хүрээнээс гадуур) байв. Түрээслэгчийн
+    батламжийг ФАЙЛЫН нийт мөрөөр (58%) — тэр хоног хамрагдана."""
+    w = world(db)
+    rows = []
+    for i in range(2):
+        p = payment(db, w, T0 + timedelta(minutes=10 * i), 1100 + i, method="CASH", user=w.web, receipts=[sent(800 + i)])
+        rows.append({"dt": _ub(p), "amount": float(p.amount), "ddtd": ddtd(800 + i, MSG), "src": "msgbill"})
+        q = payment(db, w, T0 + timedelta(minutes=5 + 10 * i), 900 + i, method="QR", user=w.web,
+                    receipts=[sent(820 + i, prov="QPAY", reg=QPY)])
+        rows.append({"dt": q.paid_at + timedelta(seconds=4), "amount": float(q.amount), "ddtd": ddtd(820 + i, QPY),
+                     "src": "QPay"})
+    for i in range(10):                                  # QPay-ийн бөөн дахин илгээлт — манайд таарахгүй
+        rows.append({"dt": T0 + timedelta(minutes=30 + i), "amount": 777.0 + i, "ddtd": ddtd(840 + i, QPY),
+                     "src": "QPay"})
+    e1 = payment(db, w, T0 + timedelta(minutes=20), 2000, receipts=[EXT])
+    rows.append({"dt": e1.paid_at + timedelta(seconds=5), "amount": 2000.0, "ddtd": ddtd(860, ONT), "src": "Ontime"})
+    e2 = payment(db, w, T0 + timedelta(minutes=40), 3000, receipts=[EXT])
+    for i in range(10):
+        p = payment(db, w, T0 + timedelta(days=1, minutes=10 * i), 1200 + i, method="CASH", user=w.web,
+                    receipts=[sent(870 + i)])
+        rows.append({"dt": _ub(p), "amount": float(p.amount), "ddtd": ddtd(870 + i, MSG), "src": "msgbill"})
+    e3 = payment(db, w, T0 + timedelta(days=1, minutes=45), 2200, receipts=[EXT])
+    rows.append({"dt": e3.paid_at + timedelta(seconds=5), "amount": 2200.0, "ddtd": ddtd(890, ONT), "src": "Ontime"})
+    db.commit()
+    ev = VD.terminal_evidence(db, [("sep.xlsx", rows)], sites=VD.tenant_sites(db, [w.ep]), tol=60,
+                              shifts=[0.0, -8.0], chunk_days=1)
+    [st] = ev["files"]
+    assert st["chunks"] == 2 and st["low_share_chunks"] == 1 and st["unusable_chunks"] == 0
+    assert "ФАЙЛЫН түвшинд 58%" in st["note"] and st["usable"]
+    sel = VD.select_reissue(db, sites=[w.site], lo=T0 - timedelta(days=1), hi=T0 + timedelta(days=3))
+    split = VD.evidence_split(sel["candidates"], ev, {w.site.id: w.ep.id})
+    ids = {k: {r["payment_id"] for r in v} for k, v in split.items()}
+    assert {e1.id, e3.id} <= ids["with_terminal"] and e2.id in ids["missing"] and not ids["outside"]
+    # Файлын нийт хувь ч бага бол (14/44 — дахин илгээлт давамгайлсан) — НОТОЛГОО БИШ
+    more = [{"dt": T0 + timedelta(minutes=45, seconds=30 * i), "amount": 555.0 + i, "ddtd": ddtd(900 + i, QPY),
+             "src": "QPay"} for i in range(20)]
+    ev2 = VD.terminal_evidence(db, [("sep.xlsx", rows + more)], sites=VD.tenant_sites(db, [w.ep]), tol=60,
+                               shifts=[0.0, -8.0], chunk_days=1)
+    assert ev2["coverage"] == [] and "батлагдсангүй" in ev2["files"][0]["note"]
+
+
+def test_cli_own_in_teg_flag_and_max_hint(db, engine, tmp_path, monkeypatch, capsys):
+    cli = _tool("vat_reissue_missing.py")
+    monkeypatch.setattr(cli, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
+    w = world(db)
+    s = scenario(db, w)
+    x = own_world(db, w, s)
+    f = _xlsx(str(tmp_path / "teg.xlsx"), export(s) + x["rows"])
+    out = str(tmp_path / "r.csv")
+    base = ["--file", f, "--tenant", "EASYPARKING", "--out", out, "--delay", "0"]
+    assert cli.main(base) == 0
+    text = capsys.readouterr().out
+    assert "ДАХИН ГАРГАХ (ТЕГ-т терминалын мөр алга): 3 төлбөр" in text
+    assert "МАНАЙ баримт ТЕГ-т бий 3" in text and "--include-own-in-teg-гүйгээр гаргахгүй: 3" in text
+    assert "ТЕРМИНАЛ АШИГЛАСАН ӨДӨР" in text and "HANGARID: хосолсон 2/" in text
+    import csv as _csv
+    allrows = list(_csv.DictReader(open(str(tmp_path / "r_all.csv"), encoding="utf-8-sig")))
+    own = {r["payment_id"]: r["own_teg"] for r in allrows if r["verdict"] == "OWN_IN_TEG"}
+    assert own == {s["dup_miss"].id: "DDTD", x["twin"].id: "TWIN", x["old"].id: "TIME"}
+    # --max: dry-run сануулна, --apply нь яг ямар тугаар үргэлжлүүлэхийг заагаад зогсоно
+    assert cli.main(base + ["--max", "2"]) == 0
+    assert "--max: 3 төлбөр > --max 2" in capsys.readouterr().out
+    assert cli.main(base + ["--apply", "--yes", "--user", "t", "--max", "2"]) == 2
+    text = capsys.readouterr().out
+    assert "ЗОГСОВ: 3 төлбөр > --max 2" in text and "--apply-д --max 3 нэмнэ" in text
+    assert db.query(M.FinancialJob).count() == 0
+    assert cli.main(base + ["--include-own-in-teg"]) == 0
+    assert "+ МАНАЙ баримт ТЕГ-т бий): 6 төлбөр" in capsys.readouterr().out
+    # Бодит: зөвхөн ТЕГ-т ямар ч баримтгүй 3 — манай баримт ТЕГ-т байгааг ХӨНДӨХГҮЙ
+    assert cli.main(base + ["--apply", "--yes", "--user", "temuujin"]) == 0
+    jobs = {j.payment_id for j in db.query(M.FinancialJob).all()}
+    assert jobs == {s["ext_miss"].id, x["gone"].id, x["b"].id}
+    summ = db.query(M.AuditLog).filter_by(action="EBARIMT_REISSUE_SUMMARY").one()
+    assert summ.detail["include_own_in_teg"] is False and summ.detail["requested"] == 3
+
+
+def test_file_duplicate_requires_our_ddtd_not_just_time_match(db):
+    """--file/UI: «манай баримт ч ТЕГ файлд бий» (давхардлын шууд нотолгоо) нь ДДТД-ээр. audit1014 ×
+    10-15-ны экспорт: 41 «давхардлын» 25-д манай баримт экспортод огт алга, зөвхөн цаг+дүнгээр өөр
+    (давхар/бусдын) msgbill мөртэй таарсан байв — цуцалбал тэр борлуулалтын ЦОРЫН ГАНЦ баримт болно."""
+    w = world(db)
+    s = scenario(db, w)
+    rows = export(s)
+    real = payment(db, w, T0 + timedelta(minutes=72), 2700, method="CASH", receipts=[sent(370)])
+    fake = payment(db, w, T0 + timedelta(minutes=76), 2900, method="CASH", receipts=[sent(380)])
+    for p, msg in ((real, ddtd(370, MSG)), (fake, ddtd(381, MSG))):      # fake: өөр ДДТД (цагаар таарна)
+        rows.append({"dt": p.paid_at + timedelta(seconds=4), "amount": float(p.amount),
+                     "ddtd": ddtd(390 + int(p.amount) // 100, ONT), "src": "Ontime"})
+        rows.append({"dt": _ub(p, 2), "amount": float(p.amount), "ddtd": msg, "src": "msgbill"})
+    db.commit()
+    a = VD.reconcile_db(db, rows, shifts=[0.0, -8.0], tol=60, ours_sites=[w.site.id],
+                        probe_sites=[w.site.id], scope_ids={w.site.id})
+    assert real.id in a["matched_pay_ids"] and fake.id not in a["matched_pay_ids"]
+    v = {r["payment_id"]: r for r in a["explained"] if r["foreign"]}
+    assert v[real.id]["verdict"] == "DUPLICATE"
+    assert v[fake.id]["verdict"] == "DUPLICATE_NOT_CANCELLABLE" and "олдсонгүй" in v[fake.id]["note"]
+    assert {d["payment_id"] for d in a["duplicates"]} == {real.id}
