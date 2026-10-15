@@ -32,16 +32,20 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 авсан байгаа». Төлбөрийн урсгал (`/api/v1/sessions`, `/payments`, confirm/cancel, webhook) аль хэдийн
 түншээс үл хамаарна; машин бүртгэл, bill, байршил зөвхөн `/api/v1/socialpay/*` нэртэй байсан тул
 ижил handler-ыг түншийн нэргүй замаар нээв. SocialPay-ийн замууд, хариу, мэдэгдлийн формат
-ӨӨРЧЛӨГДӨӨГҮЙ. Схем өөрчлөгдөхгүй. TEST дээрх «monpay» түлхүүр 09-15-нд үүсч 23с-ийн дараа
-хаагдсан (ашиглагдаагүй, `read,pay`) — «Сэргээх» эсвэл шинэ түлхүүр. **Анхаар:** прод msgbill-ийн
-аргад WALLET алга (`CARD,CASH,QR,TRANSFER`) → түншийн төлбөрийн баримт бүгд FAILED (easywallet 30 /
-95,500₮, 08-31…10-14) — MonPay PROD-оос өмнө Тохиргоо → Холболт → e-Barimt API-д «Хэтэвч»-ийг асаана.
+ӨӨРЧЛӨГДӨӨГҮЙ. Схем өөрчлөгдөхгүй. MonPay (Mobifinance-ийн бүтээгдэхүүн) TEST дээр ИДЭВХТЭЙ
+«mobifinance» түлхүүрийг (`read,pay`) аль хэдийн ашиглаж байна (10-15 06:20 UTC `GET /api/v1/sessions`);
+«monpay» түлхүүр хаагдсан, ашиглагдаагүй — шинэ түлхүүр шаардлагагүй, `vehicles` эрх/webhook URL-ыг
+«mobifinance» түлхүүрт нэмнэ (Гадаад API → «Машин бүртгэл идэвхжүүлэх», «Webhook»). **Анхаар:** прод
+msgbill-ийн аргад WALLET алга (`CARD,CASH,QR,TRANSFER`) → түншийн төлбөрийн баримт FAILED (BLOCKED).
+WALLET-ийг ГЛОБАЛААР БҮҮ асаа (баримтаа өөрөө гаргадаг түншийн төлбөрт давхардал үүснэ) — MonPay-ийн
+төлбөрт системийн баримтыг түнш тус бүрээр асаах өөрчлөлт PROD-оос өмнө хэрэгтэй (хэрэгжээгүй).
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
 | feat | **`POST /api/v1/vehicles/register\|delete\|bill`, `GET\|POST /api/v1/parkings`** (`socialpay_router.neutral_router`) — `/api/v1/socialpay/*`-ийн ЯГ ИЖИЛ handler (`_register/_delete/_bill/_parkings`), `Success/Message` хэлбэр, `vehicles` эрх, түлхүүр тутмын 600/мин хязгаар хуваалцана; бүртгэлийн `created_via` = `api` (SocialPay замаар `socialpay` хэвээр); 404/405/422/500-ийн `Success:false` хэлбэр шинэ замуудад ч (бусад `/api/v1` `{"detail"}` хэвээр) | (энэ commit) | ⏳ | ⏳ |
 | feat | Frontend: Гадаад API-ийн curl жишээ түншээс үл хамаарах замаар (+ `/api/v1/parkings`), intent-ийн жишээнд `amount` биш `include_debts`, «e-Barimt-ыг систем гаргана — түнш давхар гаргахгүй» тайлбар; машин бүртгэлийн формат шошго `socialpay (үндсэн)` / `extended (MonPay)` (утга өөрчлөгдөөгүй) | (энэ commit) | ⏳ | ⏳ |
 | test | `tests/unit/test_partner_vehicle_aliases.py` (14): гэрээ/хүснэгт нэг, created_via, bill ижил + нууцлал, эрх/алдааны хэлбэр (401/403/400/404/405/500; бусад API хөндөгдөөгүй), хурдны хязгаар хуваалцах, `/parkings` (доторх зогсоолгүй, read түлхүүр), main.py-д router, extended ENTRY payload + `{"success": true}` = хүргэгдсэн, хоосон/өөр 2xx → RETRY | (энэ commit) | — | — |
+| docs | **Хяналтын засвар (MonPay баримт)**: `INTEGRATION_API.md` — гуравдагч түншийн давхардлын түүх, түншийн нэр/тоо хасав (зөвхөн «түнш өөрөө e-Barimt гаргахгүй» дүрэм); «WALLET-ийг msgbill-д асаа» урьдчилсан нөхцөлийг «глобалаар БҮҮ асаа — түнш тус бүрээр асаах өөрчлөлт хэрэгтэй» болгож засав; QR зөвхөн `GET /payments/{id}` (1ц түр санах ой, сүүлийн баримт); «Турших» event-ийн ялгаа (`event_id`/`Idempotency-Key`-гүй, 6с; машины тест зөвхөн `plateNo`+`enteredDate`). MonPay-д: `MonPay_EasyParking_API_v1.0.docx` + имэйл дахин бэлтгэв (TEST «mobifinance» түлхүүр, жишээнд бодит код NOMADS/3HOSPITAL, 409-ийн бодит текст + confirm-ийн дараах GET дүрэм, орхигдсон intent-ийг заавал цуцлах, receipt.ready-д TEST mock баримт, go-live: PROD-д MonPay-ийн баримт асаах + шинэ замуудын deploy) | (энэ commit) | — | — |
 | docs | `INTEGRATION_API.md` (e-Barimt зөвхөн манай системээс, WALLET урьдчилсан нөхцөл, `receipt.ready`, webhook-ийн давталт 24 оролдлого/~18ц — «давтахгүй» гэсэн хуучирсан бичвэрийг засав, гарын үсэггүй, §7 түншээс үл хамаарах зам); `API_REFERENCE.md` §12 түншийн API; `SOCIALPAY_INTEGRATION.md` тэмдэглэл. MonPay-д: `MonPay_EasyParking_API_v1.0.docx` + имэйл (`/root/parking-deploy-1015/`) | (энэ commit) | — | — |
 
 ---
