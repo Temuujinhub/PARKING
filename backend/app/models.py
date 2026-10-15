@@ -814,6 +814,56 @@ class PartnerVehicleEvent(Base):
     )
 
 
+class PosClient(Base):
+    """«Холбогдсон POS» — PAX POS аппын (терминал × хэрэглэгч) сүүлийн төлөв (2026-10-15).
+
+    Нэг мөр = нэг (user_id, terminal_id) хос; terminal_id тодорхойгүй бол ''. terminal_id
+    ГАНЦААРАА давтагдашгүй БИШ: прод дээр 'TDB-PAX-SITE01-01' (зааврын жишээ) 10-р сард 7 зогсоолын
+    8 хэрэглэгчээс ирсэн — тиймээс хэрэглэгчтэй хослуулна. Мөрийг services/pos_clients хүсэлтийн
+    ДАРАА санах ойд нэгтгэж ≤1 бичилт/60с-ээр (upsert) бичнэ — хүсэлтийн замд DB-гүй.
+    Түүх биш (retention хэрэггүй): тоолуурууд хуримтлагдана, бусад нь сүүлийн утга.
+    FK ЗОРИУД тавиагүй: зогсоол устгахад (DELETE /sites) энэ мөр саад болохгүй, хэрэглэгч
+    устгагддаггүй (идэвхгүй болдог) ч ирээдүйд саад болохгүй."""
+    __tablename__ = "pos_clients"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    user_id = Column(UUID(as_uuid=False), nullable=False)
+    username = Column(String(60), nullable=False, default="")
+    terminal_id = Column(String(60), nullable=False, default="", server_default=text("''"))
+    # terminal_id хаанаас ирсэн: header | heartbeat | path | query | body | inferred
+    terminal_source = Column(String(12), nullable=True)
+    # Шийдсэн зогсоол (бүртгэлтэй терминал → хүсэлтийн site_id → хэрэглэгчийн ганц зогсоол)
+    site_id = Column(UUID(as_uuid=False), nullable=True)
+    # Хэрэглэгчийн хамрах хүрээний агшин зураг (operator_sites); NULL = бүх зогсоол
+    site_ids = Column(JSON, nullable=True)
+    pos_version = Column(String(40), nullable=True)
+    prev_pos_version = Column(String(40), nullable=True)
+    version_changed_at = Column(DateTime, nullable=True)
+    # Аппын өөрийн мэдээлсэн төлөв (heartbeat / X-POS-Status) — чөлөөт текст ≤40
+    status = Column(String(40), nullable=True)
+    status_at = Column(DateTime, nullable=True)
+    printer = Column(String(40), nullable=True)
+    battery = Column(Integer, nullable=True)
+    network = Column(String(40), nullable=True)
+    extra = Column(JSON, nullable=True)
+    last_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(120), nullable=True)
+    last_endpoint = Column(String(120), nullable=True)
+    last_status_code = Column(Integer, nullable=True)
+    first_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_payment_at = Column(DateTime, nullable=True)
+    request_count = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    error_count = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    payment_count = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    heartbeat_count = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # ЗӨВХӨН upsert-ийн давтагдашгүй индекс: хүснэгт жижиг (терминал × хэрэглэгч, ≤ хэдэн зуу)
+    # тул last_seen_at/site_id индексгүй — минут тутмын UPDATE HOT хэвээр (индекс шинэчлэхгүй).
+    __table_args__ = (
+        Index("uq_pos_clients_user_terminal", "user_id", "terminal_id", unique=True),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # EV цэнэглэлт + Данс (wallet) — EV_CHARGING_PLAN.md §5
 # Данс нь ТҮРЭЭСЛЭГЧИЙН хүрээнд (§1.1): нэг жолооч 2 операторын зогсоол

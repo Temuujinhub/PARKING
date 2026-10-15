@@ -69,6 +69,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# «Холбогдсон POS» (2026-10-15): POS аппын хүсэлтийг ХАРИУНЫ ДАРАА санах ойд нэгтгэнэ —
+# хүсэлтийн замд DB-гүй; бичилтийг pos-clients-flush task 60с тутам (services/pos_clients).
+from .services.pos_clients import PosCaptureMiddleware  # noqa: E402
+app.add_middleware(PosCaptureMiddleware)
+
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
           health_router, integration_router, legacy_router, dr_router, billing_router,
@@ -175,6 +180,10 @@ async def start_vat_auto_send():
                             "түгжээ хүлээлт байх магадлалтай)", lag_ms)
 
     _bg_task(loop_lag_monitor(), "loop-lag-monitor")
+
+    # «Холбогдсон POS»: санах ойд нэгтгэсэн POS аппын ажиглалтыг ≤1 бичилт/60с-ээр upsert
+    from .services import pos_clients
+    _bg_task(pos_clients.flush_loop(), "pos-clients-flush")
 
     async def camera_silence_monitor():
         """Камер event ИЛГЭЭХЭЭ БОЛЬСОН эсэхийг ажиглана.
@@ -310,6 +319,12 @@ async def stop_background_tasks():
     except (asyncio.TimeoutError, TimeoutError):
         log.warning("зарим task 5с дотор зогсоогүй — албадан хаалаа")
     _bg_tasks.clear()
+    # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с) — restart-д алдагдахгүй, ≤3с
+    try:
+        from .services import pos_clients
+        await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True), timeout=3.0)
+    except Exception as e:  # noqa: BLE001 — зогсолтыг саатуулахгүй
+        log.warning("pos_clients эцсийн бичилт амжилтгүй: %r", e)
     # Камер руу нээсэн keep-alive холболтуудыг ч цэвэр хаана
     try:
         from .services.barrier import close_camera_clients

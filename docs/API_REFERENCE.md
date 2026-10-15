@@ -258,6 +258,24 @@ CLI `tools/vat_cancel_duplicates.py`-тэй НЭГ (`services/vat_duplicates.can
 ### GET /api/payments
 Төлбөрийн жагсаалт (FINANCE+). Query: `site_id, status, provider, date_from, date_to`.
 
+### POST /api/payments/pos/heartbeat  (cashier, 2026-10-15)
+POS аппын амьд байдал/төлөв: `{terminal_id, pos_version?, status? ≤40, printer?, battery? 0–100,
+network?, site_id?, extra? ≤1KB}` (`terminal_id`-г `X-Terminal-Id`-аар ч болно) → `{ok, server_time,
+min_app_version, update_required, next_heartbeat_sec}`; буруу утга **422**. Бүх хүсэлтэд сонголттой
+`X-Terminal-Id`, `X-POS-Status` толгой. Дэлгэрэнгүй: PAX_POS_APP_GUIDE §2.2.
+
+### GET /api/admin/pos-clients?site_id=&days=30  (ADMIN/SUPER_ADMIN)
+«Холбогдсон POS» (хэрэглэгч × терминал): хувилбар (`version_state` ok/behind/outdated/unknown), төлөв,
+`presence` (online ≤5 мин / offline / stale 24ц+), сүүлд холбогдсон, IP, 24ц/7х POS аппын төлбөр,
+e-Barimt горим (`receipt_mode` system/terminal), 7х EXTERNAL, сүүлийн баримтын төлөв. Түрээслэгчийн
+админ өөрийн зогсоолынхоо мөрийг л авна. `days≤0` → бүх түүх.
+
+### GET|PUT /api/admin/pos-settings  (ADMIN/SUPER_ADMIN; PUT — ерөнхий тохиргооны эрх)
+POS-той холбоотой одоо байгаа тохиргооны хураангуй (e-Barimt терминалын дүрэм ерөнхий/зогсоол,
+баримтын inline хүлээлт, бүртгэлтэй PAX терминал, POS аппын хэрэглэгчид, нээх шалтгаан, онцгой
+гаргалт, `payment_hold_minutes`, зогсоолын POS эгнээ). PUT `{min_app_version: "1.5.3" | ""}` —
+зөвхөн тодруулга/`update_required`, хүсэлт хаахгүй.
+
 ---
 
 ## 4. Public API (нэвтрэлтгүй — жолоочийн /pay хуудас)

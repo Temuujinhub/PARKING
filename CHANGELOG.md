@@ -26,6 +26,25 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-15 — «Холбогдсон POS»: POS аппын хувилбар/төлөв/терминалын бүртгэл + Тохиргоо таб
+
+Эзэн: «pos app-аас pos_version, user_id, terminal_id, status мэдээллийг авч хадгалж, тохиргоо хэсэгт
+«холбогдсон POS» таб дотор харуулах, pos-той хамаатай бусад тохируулгыг нэгтгэх». Яагаад: «100айл
+барилгачин» хуучин build-ээр Ontime баримт хэвлэж давхардал үүсгэсээр — хэн ямар хувилбартайг харах газар
+байгаагүй. audit1014: `pax_terminal` бүртгэл 0 (`Device.extra.app_version` хэзээ ч бичигдээгүй);
+`TDB-PAX-SITE01-01` (зааврын ЖИШЭЭ) 10-р сард 8 хэрэглэгч/7 зогсоолоос ирсэн → түлхүүр = (хэрэглэгч, терминал).
+Апп өөрчлөхгүйгээр ажиллана; шинэ толгой/heartbeat нь сонголттой. **Шинэ хүснэгт `pos_clients`** (startup
+migration, хуучин мөр хөндөхгүй).
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | **Барих** (`services/pos_clients`, pure ASGI `PosCaptureMiddleware`): POS аппын хүсэлт (X-App-Version/X-Terminal-Id/X-POS-Status, эсвэл хөтөч биш + role POS / `/api/payments/pos/*` / POS аппын хэрэглэгч) ХАРИУНЫ ДАРАА санах ойд нэгтгэгдэнэ — DB/JWT-гүй (~12мкс confirm, ~1мкс веб); `auth.get_current_user` хэрэглэгчийг `request.state.auth_user`-д. terminal_id: толгой → heartbeat → зам → query → бие (≤8KB) → (хэрэглэгч, IP)-ийн сүүлийн терминал (12ц; restart-ын дараа DB-ээс). Бичилт `pos-clients-flush` task (thread): мөр тутам ≤1 upsert/60с, зөвхөн шинэ мөр/хувилбар/төлөв солигдвол ≤10с (жижиг хүснэгт, upsert-ийн индекс л — UPDATE HOT); DB унавал тоолуур санах ойд хадгалагдаж дахин; shutdown-д эцсийн бичилт. Зогсоол: бүртгэлтэй терминал → хүсэлтийн `site_id` (хэрэглэгчийн хүрээнд) → ганц зогсоол | (энэ commit) | ⏳ | ⏳ |
+| feat | **`POST /api/payments/pos/heartbeat`** (cashier эрх): `{terminal_id, pos_version?, status? ≤40, printer?, battery? 0–100, network?, site_id?, extra? ≤1KB}` → 422 шалгалт; хариу `server_time`, `min_app_version`, `update_required` (хаахгүй) | (энэ commit) | ⏳ | ⏳ |
+| feat | **`GET /api/admin/pos-clients`** (зөвхөн ADMIN/SUPER_ADMIN; түрээслэгчийн админ өөрийн зогсоолынхоо мөрийг л — IP/хэрэглэгч задрахгүй): онлайн (≤5 мин)/24ц+ хуучирсан, хувилбар ok/behind/outdated/unknown, жишээ/давхардсан terminal_id, бүртгэлтэй терминал, 24ц/7х POS аппын төлбөр, e-Barimt горим (зогсоолын `pos_terminal_issues`), 7х «терминал гаргасан» (EXTERNAL), сүүлийн баримтын төлөв. **`GET/PUT /api/admin/pos-settings`**: e-Barimt терминалын дүрэм (ерөнхий+зогсоол), `PARKING_RECEIPT_INLINE_WAIT_SEC`, бүртгэлтэй PAX терминал, POS аппын хэрэглэгчид (яаж танигдсан, карт, эрх, хувилбар), нээх шалтгаан, онцгой гаргалт, `payment_hold_minutes`; ШИНЭ `pos_app_rules.min_app_version` (анхдагч хоосон, зөвхөн тодруулга; ерөнхий тохиргооны эрхтэй админ) | (энэ commit) | ⏳ | ⏳ |
+| feat | Frontend: Тохиргоо → **«Холбогдсон POS»** таб (админд): жагсаалт 30с тутам, зогсоолын шүүлт, хувилбарын тодруулга, «POS-той холбоотой тохиргоо» хураангуй + Төлбөрийн дүрэм/Төхөөрөмж/Хэрэглэгчид рүү холбоос, доод хувилбарын талбар | (энэ commit) | ⏳ | ⏳ |
+| test | `tests/unit/test_pos_clients.py` (14: толгой/query/зам/бие, веб касс/401 орохгүй, throttle 60с/10с (төлбөр яаралтай биш), бичилт унахад тоолуур хадгалагдах, heartbeat шалгалт, terminal онох, tenant хүрээ, эрх); `tests/postgres/test_pos_clients_pg.py` (migration+ledger давталт, ON CONFLICT/CASE, 6 зэрэг бичилт → тоолуур 18) | (энэ commit) | — | — |
+| docs | PAX_POS_APP_GUIDE §2.2 (толгойнууд, heartbeat, 422/хариу), §4 terminal_id-д жишээг бүү хуул; API_REFERENCE | (энэ commit) | — | — |
+
 ## 2026-10-15 — PAX POS апп: e-Barimt-ыг ЗӨВХӨН манай API-аас (ДДТД/сугалаа/QR confirm, cash, print-д)
 
 PAX аппын шинэ хувилбар баримтаа Ontime-гүй, манай API-аас л хэвлэдэг (ТЕГ экспорт: Ontime-ийн мөр

@@ -1,4 +1,5 @@
 """Тохиргооны CRUD: зогсоол, төхөөрөмж, тарифын загвар, хөнгөлөлт, жолооч, хар жагсаалт, хэрэглэгч."""
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -2575,6 +2576,52 @@ def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_
     db.commit()
     A.invalidate_cache()
     return PR.global_report(db) if is_global else PR.site_report(db, site)
+
+
+# ── ХОЛБОГДСОН POS (2026-10-15) — PAX аппын хувилбар/төлөв + POS-той холбоотой тохиргоо ──
+# IP, хэрэглэгчийн нэр агуулдаг тул ЗӨВХӨН админ; түрээслэгчийн админ өөрийн зогсоолынхоо
+# мөрийг л харна (services/pos_clients._row_visible, list_users-тэй ижил дүрэм).
+@router.get("/pos-clients")
+def pos_clients_list(site_id: str | None = None, days: int = 30, db: Session = Depends(get_db),
+                     user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Холбогдсон POS (хэрэглэгч × терминал): хувилбар, төлөв, сүүлд холбогдсон, IP, 24ц/7х
+    POS аппын төлбөр, e-Barimt горим (систем/терминал), «терминал гаргасан» баримт 7 хоногт,
+    сүүлийн баримтын төлөв. days ≤0 → бүх түүх."""
+    from ..services import pos_clients as PC
+    if site_id:
+        enforce_site(user, site_id)
+    return PC.clients_report(db, user, site_id=site_id or None, days=days)
+
+
+@router.get("/pos-settings")
+def pos_settings_get(db: Session = Depends(get_db),
+                     user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """POS-той холбоотой ОДОО БАЙГАА тохиргоог нэг дор (зөвхөн харах): e-Barimt-ын терминалын
+    дүрэм (ерөнхий + зогсоол), баримтын inline хүлээлт, бүртгэлтэй PAX терминал, POS аппын
+    хэрэглэгчид, нээх шалтгаан, онцгой гаргалт, үнэ барих хугацаа, аппын доод хувилбар."""
+    from ..services import pos_clients as PC
+    return PC.settings_report(db, user)
+
+
+_APP_VERSION_RE = re.compile(r"\d{1,4}(\.\d{1,4}){0,3}")
+
+
+@router.put("/pos-settings")
+def pos_settings_put(body: dict, db: Session = Depends(get_db),
+                     user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Аппын хамгийн бага хувилбар (ж: 1.5.3; хоосон = тавихгүй). ЗӨВХӨН тодруулга ба
+    heartbeat-ийн update_required-д — хүсэлтийг хаахгүй. Бүх түрээслэгчид нийтлэг тул ерөнхий
+    тохиргооны эрхтэй админ л өөрчилнө."""
+    enforce_global_settings(user)
+    from ..services import app_settings as A
+    from ..services import pos_clients as PC
+    raw = str((body or {}).get("min_app_version") or "").strip()
+    if raw and not _APP_VERSION_RE.fullmatch(raw):
+        raise HTTPException(400, "Хувилбар «1.5.3» хэлбэртэй байх ёстой (хоосон = тавихгүй)")
+    rules = A.set_rules(db, A.POSAPP_KEY, {"min_app_version": raw}, user.username)
+    _audit(db, user, "UPDATE", "pos_app_rules", "-", rules)
+    db.commit()
+    return PC.settings_report(db, user)
 
 
 @router.get("/driver-type/rules")

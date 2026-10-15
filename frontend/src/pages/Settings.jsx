@@ -1,11 +1,12 @@
 // Тохиргоо: Зогсоол / Төхөөрөмж / LED дэлгэц / Төлбөрийн дүрэм / Автомат ажил /
-// Түрээслэгч / Холболт — хэсэг бүр settings/ доторх тусдаа файлд
+// Холбогдсон POS / Түрээслэгч / Холболт — хэсэг бүр settings/ доторх тусдаа файлд
 import { useState } from 'react'
 import { useAuth } from '../auth'
 import AutomationSection from './settings/AutomationSection'
 import DevicesSection from './settings/DevicesSection'
 import IntegrationsSection from './settings/IntegrationsSection'
 import PaymentRulesSection from './settings/PaymentRulesSection'
+import PosClientsSection from './settings/PosClientsSection'
 import ScreenSection from './settings/ScreenSection'
 import SitesSection from './settings/SitesSection'
 import TenantsSection from './settings/TenantsSection'
@@ -23,6 +24,9 @@ export default function Settings() {
   // давхцаж байсан тул задлав.
   const tabs = [['sites', 'Зогсоол'], ['devices', 'Төхөөрөмж'], ['screen', 'LED дэлгэц'],
     ['payrules', 'Төлбөрийн дүрэм'], ['automation', 'Автомат ажил'],
+    // Холбогдсон POS (2026-10-15) — IP/хэрэглэгчийн нэр агуулдаг тул зөвхөн админд (backend
+    // нь түрээслэгчийн админд өөрийн зогсоолын POS-ыг л буцаана)
+    ...(canIntegrations ? [['pos', 'Холбогдсон POS']] : []),
     // Түрээслэгч зөвхөн SUPER_ADMIN-д; Холболт (данс/API/цэнэглэгч) ADMIN-д мөн
     // харагдана (өөрийн хамрах хүрээгээр — backend шүүнэ)
     ...(user?.role === 'SUPER_ADMIN' ? [['tenants', 'Түрээслэгч']] : []),
@@ -45,6 +49,8 @@ export default function Settings() {
       {tab === 'screen' && <ScreenSection />}
       {tab === 'payrules' && <PaymentRulesSection onGotoDevices={() => setTab('devices')} />}
       {tab === 'automation' && <AutomationSection onGotoRules={() => setTab('payrules')} />}
+      {tab === 'pos' && <PosClientsSection onGotoRules={() => setTab('payrules')}
+        onGotoDevices={() => setTab('devices')} />}
       {tab === 'tenants' && <TenantsSection onGotoIntegrations={() => setTab('integrations')} />}
       {tab === 'integrations' && <IntegrationsSection />}
     </div>

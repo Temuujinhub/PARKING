@@ -5,6 +5,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from starlette.requests import HTTPConnection
 
 from .config import settings
 from .database import get_db
@@ -102,7 +103,8 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Токен буруу байна.")
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db),
+                     conn: HTTPConnection = None) -> User:
     payload = decode_token(token)
     user = db.get(User, payload["sub"])
     if not user or not user.is_active:
@@ -115,6 +117,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         if iat is None or datetime.utcfromtimestamp(int(iat)) < user.password_changed_at:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                                 "Нууц үг солигдсон тул дахин нэвтэрнэ үү.")
+    if conn is not None:
+        # «Холбогдсон POS» (services/pos_clients) хариуны ДАРАА уншина — нэмэлт DB/JWT-гүй
+        conn.state.auth_user = (user.id, user.username, user.role)
     return user
 
 

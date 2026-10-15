@@ -23,6 +23,8 @@ DRIVERTYPE_KEY = "driver_type_rules"
 CAMSYNC_KEY = "camsync_rules"
 CAMHEALTH_KEY = "camhealth_rules"
 EBARIMT_KEY = "ebarimt_rules"
+# «Холбогдсон POS» таб (2026-10-15): POS аппын хувилбарын доод хязгаар г.м
+POSAPP_KEY = "pos_app_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
 CAMHEALTH_STATE = "camhealth_state"
@@ -237,6 +239,12 @@ DEFAULTS: dict[str, dict] = {
         # АВТОМАТААР танигдана — жагсаалт хоосон байж болно. Ерөнхий ба бүх зогсоолын
         # жагсаалт НЭГТГЭГДЭНЭ (хэрэглэгч зогсоолоос үл хамааран POS аппынх).
         "pos_terminal_users": "",
+    },
+    POSAPP_KEY: {
+        # Хамгийн бага ЗӨВШӨӨРӨХ POS аппын хувилбар (ж: "1.5.3"). Хоосон = тавиагүй — тэр үед
+        # «Холбогдсон POS» таб хамгийн сүүлд харагдсан хувилбараас хоцорсныг шараар тодруулна.
+        # ЗӨВХӨН харуулах/heartbeat-ийн хариуны `update_required`-д — хүсэлтийг ХААХГҮЙ.
+        "min_app_version": "",
     },
     CAMHEALTH_KEY: {
         # Гацсан камерыг илрүүлж, шаардвал reboot хийх (snapshot эрүүл мэнд).

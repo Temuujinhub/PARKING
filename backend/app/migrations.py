@@ -428,6 +428,22 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_partner_vehicle_events_key_created ON partner_vehicle_events "
     "(partner_key_id, created_at)",
 
+    # 2026-10-15 «Холбогдсон POS»: PAX аппын (хэрэглэгч × терминал) сүүлийн төлөв. ШИНЭ хүснэгт
+    # (create_all дээр үүснэ, хоосон) — энд ledger-д бүртгэнэ. Хуучин хүснэгт/мөр хөндөхгүй,
+    # FK-гүй тул users/parking_sites дээр түгжээ авахгүй. Upsert-ийн давтагдашгүй индекс л —
+    # минут тутмын UPDATE HOT хэвээр үлдэнэ (жижиг хүснэгт, нэмэлт индекс хэрэггүй).
+    "CREATE TABLE IF NOT EXISTS pos_clients (id UUID PRIMARY KEY, user_id UUID NOT NULL, "
+    "username VARCHAR(60) NOT NULL, terminal_id VARCHAR(60) NOT NULL DEFAULT '', "
+    "terminal_source VARCHAR(12), site_id UUID, site_ids JSON, pos_version VARCHAR(40), "
+    "prev_pos_version VARCHAR(40), version_changed_at TIMESTAMP, status VARCHAR(40), "
+    "status_at TIMESTAMP, printer VARCHAR(40), battery INTEGER, network VARCHAR(40), extra JSON, "
+    "last_ip VARCHAR(64), user_agent VARCHAR(120), last_endpoint VARCHAR(120), "
+    "last_status_code INTEGER, first_seen_at TIMESTAMP NOT NULL, last_seen_at TIMESTAMP NOT NULL, "
+    "last_payment_at TIMESTAMP, request_count BIGINT NOT NULL DEFAULT 0, "
+    "error_count BIGINT NOT NULL DEFAULT 0, payment_count BIGINT NOT NULL DEFAULT 0, "
+    "heartbeat_count BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMP NOT NULL)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_clients_user_terminal ON pos_clients (user_id, terminal_id)",
+
 ]
 
 
@@ -498,6 +514,8 @@ def check_ready():
         conn.execute(text("SELECT benefit_date, daily_minutes FROM hospital_daily_grants LIMIT 0"))
         conn.execute(text("SELECT vehicle_webhook_url, vehicle_webhook_format FROM partner_keys LIMIT 0"))
         conn.execute(text("SELECT job_key, status, awaiting_exit FROM partner_vehicle_events LIMIT 0"))
+        conn.execute(text("SELECT user_id, terminal_id, pos_version, status, last_seen_at, "
+                          "request_count FROM pos_clients LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'
