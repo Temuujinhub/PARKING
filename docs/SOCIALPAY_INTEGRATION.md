@@ -7,6 +7,10 @@ SocialPay» имэйл (tsogtbayar.j@golomtbank.com 10-09, gantulga_a@golomtbank
 Код: `backend/app/routers/socialpay_router.py`, `backend/app/services/partner_vehicles.py`,
 админ: Тохиргоо → Холболт → Гадаад API. Ерөнхий түншийн API: `docs/INTEGRATION_API.md`.
 
+> 2026-10-15: ижил endpoint-ууд түншээс үл хамаарах замаар ч ажиллана (MonPay г.м бусад түншид):
+> `/api/v1/vehicles/register|delete|bill`, `GET|POST /api/v1/parkings` — handler, хариу, эрх,
+> хязгаар ЯГ ИЖИЛ (`docs/INTEGRATION_API.md` §7). SocialPay-ийн `/api/v1/socialpay/*` өөрчлөгдөөгүй.
+
 ## 1. Зорилго
 
 1. SocialPay хэрэглэгч аппаасаа машинаа EasyParking-д **бүртгүүлнэ / устгана**.

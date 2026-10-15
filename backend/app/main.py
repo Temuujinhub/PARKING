@@ -85,7 +85,9 @@ for r in (auth_router, lpr_router, admin_router, sessions_router, payments_route
           health_router, integration_router, legacy_router, dr_router, billing_router,
           ev_router, wallet_router, hospital_router, exit_review_router, socialpay_router):
     app.include_router(r.router)
-# /api/v1/socialpay/*-ийн 404/405/422-ыг {"Success": false, …} болгоно (бусад API хэвээр)
+# Түншээс үл хамаарах машин бүртгэл/bill/байршил (MonPay г.м): /api/v1/vehicles/*, /api/v1/parkings
+app.include_router(socialpay_router.neutral_router)
+# /api/v1/socialpay/* (+ дээрх замууд)-ийн 404/405/422-ыг {"Success": false, …} болгоно (бусад API хэвээр)
 socialpay_router.install_error_handlers(app)
 
 

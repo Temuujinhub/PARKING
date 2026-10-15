@@ -1,7 +1,19 @@
 # Түншийн интеграцийн API (/api/v1)
 
-tokI, Easy Wallet зэрэг гадаад төлбөрийн систем зогсоолын төлбөрийг өөрийн апп
+tokI, Easy Wallet, MonPay, SocialPay зэрэг гадаад төлбөрийн систем зогсоолын төлбөрийг өөрийн апп
 дотроо төлүүлэхэд зориулсан B2B API. Төлбөр баталгаажмагц систем хаалтыг нээнэ.
+
+> **e-Barimt-ыг ЗӨВХӨН EasyParking-ийн систем гаргана** (confirm-ийн хариу, `payment.paid` /
+> `receipt.ready` webhook-оор ДДТД/сугалаа түнш рүү очно). Түнш ЭНЭ төлбөрт өөрийн e-Barimt
+> гаргавал ТЕГ-т нэг борлуулалт 2 баримттай болно (Easy Wallet дээр ажиглагдсан). Түншид өгөх
+> бүрэн баримт: MonPay — `MonPay_EasyParking_API_v1.0.docx` (2026-10-15), SocialPay —
+> `docs/SOCIALPAY_INTEGRATION.md`.
+>
+> **Урьдчилсан нөхцөл:** Тохиргоо → Холболт → e-Barimt API (msgbill)-д **«Хэтэвч» (WALLET)** арга
+> асаалттай байх ёстой. Үгүй бол түншийн (WALLET) төлбөрийн баримт PosAPI руу унаж `FAILED`
+> болно (audit1014: прод дээр msgbill арга `CARD,CASH,QR,TRANSFER` — WALLET-гүй; 08-31…10-14-ний
+> easywallet-ийн 30 төлбөр / 95,500₮ бүгд FAILED). Тэдгээрийг бөөнөөр «Дахин үүсгэх»-ийн ӨМНӨ
+> Easy Wallet өөрөө баримт гаргасан эсэхийг ТЕГ экспортоор тулгана — эс бол давхардал.
 
 ## Холболт идэвхжүүлэх (сервер талд)
 
@@ -19,6 +31,12 @@ PARKING_PARTNER_KEYS=toki:УРТ_НУУЦ_ТҮЛХҮҮР1,easywallet:УРТ_НУ
 
 Бүх хүсэлтэд толгой: `X-API-Key: <түлхүүр>`
 Буруу түлхүүр → 401. Минутад 20-оос олон буруу оролдлого → 429.
+
+Түлхүүрийг Тохиргоо → Холболт → Гадаад API-д үүсгэнэ (DB-д зөвхөн SHA-256 hash; түлхүүр
+ҮҮСГЭХ мөчид НЭГ л удаа харагдана). Эрх: `read` (лавлах), `pay` (intent/confirm/cancel),
+`vehicles` (машин бүртгэл, bill, орох/гарах мэдэгдэл). «Хаах» нь тэр дороо хүчингүй болгоно;
+«Сэргээх» нь ИЖИЛ түлхүүрийг дахин идэвхжүүлнэ. Хаагдсан түлхүүрийн мөрөнд Webhook болон
+«Машин бүртгэл» тохиргооны талбар харагдахгүй («—») — сэргээсний дараа гарч ирнэ.
 
 ## Endpoints
 
@@ -112,37 +130,69 @@ Body: `{"transaction_id": "TX123", "amount": 2000}` — `amount` **заавал 
   "ddtd": "030101065006000097410004910014863",   // ДДТД (33 орон)
   "lottery": "SO 63177600",                       // сугалааны дугаар (ААН-д null)
   "amount": 2000, "vat_amount": 182,
-  "status": "SENT",                               // SENT | FAILED | PENDING
-  "provider": "QPAY",                             // QPAY | MSGBILL | POSAPI
+  "status": "SENT",                               // SENT | PENDING | FAILED | REVIEW
+  "provider": "MSGBILL",                          // MSGBILL | POSAPI | QPAY
   "error": null,                                  // FAILED үед шалтгаан
-  "qr_data": "…",                                 // ebarimt QR (үүссэн даруйд түр байна)
+  "qr_data": "…",                                 // ebarimt QR (түр санах ойд байвал)
   "created_at": "2026-09-13T10:20:00"
 }
 ```
 
-Баримт үүсэх нь хэдэн зуун мс — `confirm`-ийн хариунд ихэвчлэн бэлэн; `null` эсвэл
-`PENDING` бол 2–3 секундын дараа `GET /payments/{id}`-ээр дахин асууна.
+Түншийн confirm баримтыг ХҮЛЭЭХГҮЙ (баримт outbox ажилтнаар хэдхэн секундэд үүснэ) — тиймээс
+confirm-ийн хариунд `ebarimt.status` ихэвчлэн `PENDING`, `ddtd: null`. Эцсийн ДДТД-г
+`receipt.ready` webhook-оор эсвэл 2–3 секундын дараа `GET /payments/{id}`-ээр авна.
+`include_debts=true` үед нэг төлбөрт хэд хэдэн баримт (зогсолт + өр тус бүр) үүсч, `ebarimt`
+талбарт хамгийн сүүлд үүссэн НЭГ нь л харагдана — бүгдийг `receipt.ready` (баримт тус бүрд нэг)-ээр.
 
-**б) Webhook (POST)** — Тохиргоо → Холболт → Гадаад API → түлхүүрийн «Webhook» талбарт
-түншийн URL оруулбал төлбөр PAID болмогц систем тэр URL руу дараах JSON-ыг POST хийнэ
-(толгой: `Content-Type: application/json`, `X-Parking-Partner: <нэр>`,
-`X-Parking-Event: payment.paid`):
+**б) Webhook (POST)** — Тохиргоо → Холболт → Гадаад API → түлхүүрийн «Webhook (төлбөр + баримт)»
+талбарт түншийн URL оруулбал (төлбөр батлагдах ҮЕД URL тохируулсан байх ёстой) систем 2 төрлийн
+event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking-Partner: <нэр>`,
+`X-Parking-Event: payment.paid|receipt.ready`, `X-Parking-Event-Id` = `Idempotency-Key` = `event_id`.
 
 ```json
-{"event": "payment.paid", "payment_id": "…", "status": "PAID", "transaction_id": "TX123",
- "amount": 2000, "vat_amount": 182, "paid_at": "…", "plate": "1234УБА",
- "site_code": "NIC", "site_name": "NIC", "ebarimt": { …дээрхтэй ижил… }}
+{"event": "payment.paid", "event_id": "…", "payment_id": "…", "status": "PAID",
+ "transaction_id": "TX123", "amount": 2000, "vat_amount": 182, "paid_at": "…",
+ "plate": "1234УБА", "site_code": "NIC", "site_name": "NIC",
+ "ebarimt": {…дээрхтэй ижил, qr_data-гүй; ихэвчлэн status PENDING…},
+ "session_status": "PAID", "amount_due": 0, "needs_additional_payment": false, "overpaid_amount": 0}
+
+{"event": "receipt.ready", "event_id": "…", "payment_id": "…", "receipt_id": "…",
+ "ddtd": "0301…", "lottery": "SO 63177600", "amount": "2000.00", "status": "SENT"}
 ```
 
-Түншийн сервер 2xx буцаах ёстой; хариуг хүлээхгүй (хугацаа 6с), давтан илгээхгүй —
-алдвал `GET /payments/{id}`-ээр нөхнө. «Турших» товч `payment.paid.test` event-ийг
-(`"test": true`) сүүлийн бодит төлбөрийн өгөгдлөөр илгээж HTTP код/хариуг харуулна.
+- Амжилт = HTTP 2xx (body-г шалгахгүй). Хугацаа 10с.
+- Амжилтгүй бол давтана: 1, 2, 4, 8, 16, 32 мин, дараа нь цаг тутам — нийт 24 оролдлого (~18 цаг),
+  дараа нь `UNKNOWN` (админ шалгана). At-least-once — `event_id`-аар давхардлыг ялгана.
+- `receipt.ready` нь `payment.paid`-ээс ӨМНӨ ирж болно (тусдаа дараалал) — `payment_id`-аар холбоно.
+- Гарын үсэг (HMAC) БАЙХГҮЙ: түнш event-д итгэхээсээ өмнө `GET /payments/{payment_id}`-ээр
+  өөрийн түлхүүрээр баталгаажуулах, эсвэл манай гадагшаа IP-г (прод `202.21.117.178`, тест
+  `152.42.235.199`) зөвшөөрөх жагсаалтад оруулна.
+- «Турших» товч `payment.paid.test` event-ийг (`"test": true`) сүүлийн бодит төлбөрийн өгөгдлөөр
+  (эсвэл жишээгээр) нэг удаа илгээж HTTP код/хариуг харуулна (давтахгүй).
 
-### 7. SocialPay: машин бүртгэл, bill, байршил, орох/гарах мэдэгдэл (2026-10-14)
+### 7. Машин бүртгэл, bill, байршил, орох/гарах мэдэгдэл (SocialPay 2026-10-14; MonPay г.м 2026-10-15)
 
-`vehicles` эрхтэй түлхүүрээр `POST /api/v1/socialpay/register|delete|bill`,
-`GET|POST /api/v1/socialpay/parkings`; бүртгэлтэй машин орох/гарах бүрд түншийн URL руу
-`{"data":{"plateNo","enteredDate","exitedDate"?}}`. Дэлгэрэнгүй: `docs/SOCIALPAY_INTEGRATION.md`.
+`vehicles` эрхтэй түлхүүрээр. Хоёр ижил зам — ЯГ ИЖИЛ handler, хариу, эрх, хязгаар:
+
+| Түншээс үл хамаарах (MonPay г.м) | SocialPay (spec) | |
+|---|---|---|
+| `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId"}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` |
+| `POST /api/v1/vehicles/delete` | `POST /api/v1/socialpay/delete` | → `OK` \| `NOT_FOUND` (Success=true) |
+| `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн |
+| `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes` (`vehicles` эрх шаардахгүй) |
+
+Хариу `{"Success", "Message", "Detail"?, "data"?}` (camelCase), алдаа ч ижил хэлбэр + HTTP код
+(404/405/422 мөн). Ялгаа нь зөвхөн бүртгэлийн `created_via` (`api` / `socialpay`). Хурдны хязгаар
+түлхүүр тутам НИЙТ минутад 600 (`PARKING_PARTNER_VEHICLE_RATE_PER_MIN`), нэг хэрэглэгч ≤10 машин.
+
+Бүртгэлтэй машин орох/гарах бүрд түлхүүрийн «Машин бүртгэл» мэдэгдлийн URL руу POST
+(`X-Parking-Event: vehicle.entry|vehicle.exit`, `Idempotency-Key`). Формат:
+`socialpay` (үндсэн) — `{"data":{"plateNo","enteredDate","exitedDate"?}}`;
+`extended` (MonPay-д) — нэмэлт `event`, `sessionId`, `siteCode`, `siteName`, ENTRY-д
+`freeMinutes`/`freeUntil`, EXIT-д `exitConfirmed`/`minutesParked`/`totalFee`/`isFree`
+(гарах уншилтгүй албадан хаалтыг ч `exitConfirmed:false`-оор илгээнэ). Амжилт = 2xx БА body-д
+`"Success": true` эсвэл `"success": true`; үгүй бол 1м, 5м, 15м, 1ц, 2ц, дараа нь 4ц тутам 24ц
+хүртэл → DEAD. Дэлгэрэнгүй дүрэм: `docs/SOCIALPAY_INTEGRATION.md`.
 
 ## Жишээ урсгал (curl)
 

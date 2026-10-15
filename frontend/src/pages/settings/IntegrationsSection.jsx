@@ -744,17 +744,20 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
 curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234УБА&site_code=SITE10"`],
   ['Зогсоолуудын жагсаалт, сул орон тоо',
     `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/sites"`],
-  ['Төлбөрийн хүсэлт (intent) үүсгэх',
-    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"session_id": "SESSION_ID", "amount": 3000}' \\\n  ${base}/api/v1/payments`],
-  ['Төлөгдсөнийг батлах → хаалт нээгдэж, e-Barimt үүснэ',
-    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"transaction_id": "ТАНЫ_ГҮЙЛГЭЭНИЙ_ДУГААР"}' \\\n  ${base}/api/v1/payments/PAYMENT_ID/confirm`],
-  ['SocialPay: машин бүртгэх / устгах («vehicles» эрхтэй түлхүүр)',
-    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/register
+  ['Төлбөрийн хүсэлт (intent) үүсгэх — дүнг СИСТЕМ тооцно (amount илгээхгүй)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"session_id": "SESSION_ID", "include_debts": true}' \\\n  ${base}/api/v1/payments
+# → {"payment_id": "…", "amount": 7000, "status": "PENDING", "parking_amount": 1000, "debt_amount": 6000, …}`],
+  ['Төлөгдсөнийг батлах → хаалт нээгдэж, e-Barimt-ыг СИСТЕМ гаргана (түнш өөрөө баримт гаргахгүй)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"transaction_id": "ТАНЫ_ГҮЙЛГЭЭНИЙ_ДУГААР", "amount": 7000}' \\\n  ${base}/api/v1/payments/PAYMENT_ID/confirm`],
+  ['Машин бүртгэх / устгах («vehicles» эрхтэй түлхүүр; SocialPay: /api/v1/socialpay/… ижил)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/register
 # → {"Success": true, "Message": "OK"}  (давтан бол "ALREADY_REGISTERED")
-curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/delete`],
-  ['SocialPay: одоогийн зогсолт, үнэгүй хугацаа, төлөх дүн (bill)',
-    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/socialpay/bill
+curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/delete`],
+  ['Бүртгэлтэй машины одоогийн зогсолт, үнэгүй хугацаа, төлөх дүн (bill)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/bill
 # → {"Success": true, "Message": "OK", "data": {"sessionId": "…", "enteredDate": "…Z", "freeMinutes": 15, "freeUntil": "…Z", "amountDue": 2000, …}}`],
+  ['Зогсоолын байршил (гадна зогсоолууд, координат, үнэгүй минут)',
+    `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/parkings"`],
   ['Төлбөрийн төлөв + e-Barimt (ДДТД, сугалаа, QR) шалгах',
     `curl -H "X-API-Key: ТҮЛХҮҮР" "${base}/api/v1/payments/PAYMENT_ID"
 # → {"status":"PAID", ..., "ebarimt": {"ddtd": "0301…", "lottery": "SO 1234…", "amount": 2000, "vat_amount": 182, "status": "SENT", "qr_data": "…"}}`],
@@ -795,7 +798,7 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <input type="checkbox" checked={f.can_vehicles}
               onChange={(e) => setF({ ...f, can_vehicles: e.target.checked })} />
-            Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay)
+            Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay, MonPay …)
           </label>
           <Field label="Зогсоолын хязгаар">
             <select className="input" value={f.site_id}
@@ -823,9 +826,10 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
   )
 }
 
-// SocialPay (2026-10-14): «vehicles» эрх + бүртгэлтэй машины орох/гарах мэдэгдлийн URL.
-// URL = түншийн {SP_URL}/parking/notification; хоосон бол мэдэгдэл явахгүй (бүртгэл ажиллана).
-// «socialpay» формат = spec-ийн яг JSON; «extended» = нэмэлт талбартай (docs/SOCIALPAY_INTEGRATION.md).
+// Машин бүртгэл (SocialPay 2026-10-14; MonPay г.м бусад түнш 2026-10-15): «vehicles» эрх +
+// бүртгэлтэй машины орох/гарах мэдэгдлийн URL. SocialPay: {SP_URL}/parking/notification; хоосон бол
+// мэдэгдэл явахгүй (бүртгэл ажиллана). «socialpay» формат = үндсэн JSON (plateNo/enteredDate/exitedDate);
+// «extended» = нэмэлт талбартай (event, sessionId, siteCode…) — MonPay-д (docs/INTEGRATION_API.md §7).
 function VehiclesCell({ k, onChanged, onHistory }) {
   const toast = useToast()
   const [url, setUrl] = useState(k.vehicle_webhook_url || '')
@@ -850,7 +854,7 @@ function VehiclesCell({ k, onChanged, onHistory }) {
   if (!k.vehicles_enabled) {
     return (
       <button className="btn-secondary py-0.5 text-[11px]" onClick={() => save(true)}
-        title="SocialPay зэрэг түнш хэрэглэгчийн машиныг бүртгүүлж, орох/гарах мэдэгдэл авна">
+        title="SocialPay, MonPay зэрэг түнш хэрэглэгчийн машиныг бүртгүүлж, орох/гарах мэдэгдэл авна">
         Машин бүртгэл идэвхжүүлэх
       </button>
     )
@@ -861,9 +865,9 @@ function VehiclesCell({ k, onChanged, onHistory }) {
         value={url} onChange={(e) => setUrl(e.target.value)} />
       <div className="flex gap-1.5 items-center flex-wrap">
         <select className="input py-0.5 text-[11px] w-auto" value={fmt} onChange={(e) => setFmt(e.target.value)}
-          title="socialpay = spec-ийн яг JSON; extended = нэмэлт талбартай">
-          <option value="socialpay">socialpay (spec)</option>
-          <option value="extended">extended</option>
+          title="socialpay = үндсэн JSON (SocialPay spec); extended = нэмэлт талбартай (event, sessionId, siteCode … — MonPay)">
+          <option value="socialpay">socialpay (үндсэн)</option>
+          <option value="extended">extended (MonPay)</option>
         </select>
         <button className="btn-secondary py-0.5 text-[11px]" onClick={() => save(true)}>Хадгалах</button>
         <button className="btn-secondary py-0.5 text-[11px]" onClick={test} disabled={!url}>Турших</button>
@@ -1129,18 +1133,22 @@ function PartnerApiPanel() {
           </button>
         </div>
         <p className="text-xs text-slate-400">
-          TOKI, банкны апп, хэтэвч зэрэг гуравдагч систем машины зогсолтыг лавлаж, өөрийн
+          TOKI, MonPay, банкны апп, хэтэвч зэрэг гуравдагч систем машины зогсолтыг лавлаж, өөрийн
           сувгаар төлбөр авч баталгаажуулна. Бүх хүсэлт <span className="font-mono">X-API-Key</span> толгойтой.
         </p>
         <div className="text-xs text-slate-400 rounded-lg border border-surface-border px-3 py-2 space-y-1">
           <div className="text-slate-300 font-medium">Бүтэн урсгал:</div>
           <div>1. Дугаараар зогсолт лавлана → төлөх дүн (amount_due) ирнэ</div>
           <div>2. Intent үүсгээд wallet өөрийн хэрэглэгчээс дүнг нэхэмжилнэ</div>
-          <div>3. Төлөгдмөгц confirm дуудна → зогсолт ТӨЛӨГДСӨН болж, e-Barimt автоматаар үүснэ</div>
+          <div>3. Төлөгдмөгц confirm дуудна → зогсолт ТӨЛӨГДСӨН болж, e-Barimt-ыг манай систем
+            үүсгэнэ (confirm-ийн хариу, webhook-ийн <span className="font-mono">receipt.ready</span>-аар ДДТД/сугалаа очно).
+            Түнш өөрөө ЭНЭ төлбөрт e-Barimt гаргахгүй — ТЕГ-т давхардал үүснэ</div>
           <div>4. Жолооч тарифын «үнэгүй гарах хугацаа»-нд (default 15 мин) багтаж гарахад
             хаалт дугаараар нь автоматаар нээгдэнэ; машин гарах хаалтан дээр аль хэдийн
             зогсож байсан бол confirm-ын дараа шууд нээгдэнэ</div>
-          <div>Хугацаа хэтэрвэл нэмэлт төлбөр бодогдож, дахин төлүүлнэ.</div>
+          <div>Хугацаа хэтэрвэл нэмэлт төлбөр бодогдож, гарах камерт уншигдмагц дахин төлүүлнэ.</div>
+          <div>Сонголтоор: машин бүртгүүлж (<span className="font-mono">/api/v1/vehicles/register</span>)
+            орох/гарах мэдэгдэл авна («vehicles» эрх + мэдэгдлийн URL).</div>
         </div>
         {CURL_EXAMPLES(base).map(([title, cmd]) => (
           <div key={title}>
@@ -1153,7 +1161,7 @@ function PartnerApiPanel() {
           </div>
         ))}
         <p className="text-[11px] text-slate-500">
-          Дэлгэрэнгүй техникийн баримтыг (алдааны кодууд, PAX терминал бүртгэл)
+          Дэлгэрэнгүй техникийн баримтыг (алдааны кодууд, webhook, давталт, PAX терминал бүртгэл)
           системийн админаас авна.
         </p>
       </div>

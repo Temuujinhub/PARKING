@@ -440,3 +440,28 @@ PARKING_QPAY_WEBHOOK_SECRET=<санамсаргүй урт тэмдэгт>
 4. POS апп `POST /api/payments/qpay/check/{payment_id}`-г 3–5 сек тутам дуудна.
 5. Хариу `status=PAID` болмогц дотор нь ирсэн `print_data.lines` (текст) +
    `qr_data` (e-Barimt QR)-г thermal printer-ээр хэвлэж жолоочид өгнө. Хаалт автоматаар нээгдсэн байна.
+
+---
+
+## 12. Түншийн API (/api/v1) — хэтэвч, банкны апп (MonPay, SocialPay, Easy Wallet, tokI)
+
+Нэвтрэлт: `X-API-Key` (Тохиргоо → Холболт → Гадаад API; эрх `read` / `pay` / `vehicles`).
+Base URL: TEST `https://test.easy-parking.mn`, PROD `https://site.easy-parking.mn`.
+Бүрэн тайлбар: [INTEGRATION_API.md](INTEGRATION_API.md); SocialPay: [SOCIALPAY_INTEGRATION.md](SOCIALPAY_INTEGRATION.md);
+MonPay-д өгөх Word баримт: `MonPay_EasyParking_API_v1.0.docx` (2026-10-15).
+
+| Endpoint | Эрх | Утга |
+|---|---|---|
+| `GET /api/v1/sessions?plate=1234УБА[&site_code=]` | read | Дугаараар БҮХ зогсоолоос нээлттэй зогсолт + `amount_due` |
+| `GET /api/v1/sites` | read | Зогсоолууд (snake_case, доторх зогсоол орно) |
+| `GET\|POST /api/v1/parkings` | read | Гадна зогсоолууд, координат, `freeMinutes` (camelCase, `Success/Message`) |
+| `GET /api/v1/recent-exits?minutes=5` | read | Гарах камерт уншигдаад төлбөр хүлээж буй машинууд |
+| `POST /api/v1/payments` `{session_id, include_debts?}` | pay | Intent (PENDING) — дүнг систем тооцно |
+| `POST /api/v1/payments/{id}/confirm` `{transaction_id, amount?}` | pay | PAID → хаалт нээгдэнэ, e-Barimt-ыг СИСТЕМ гаргана |
+| `POST /api/v1/payments/{id}/cancel` `{outcome: "NOT_CHARGED"}` | pay | Мөнгө татаагүй intent-ийг цуцлах |
+| `GET /api/v1/payments/{id}` | read | Төлөв + `ebarimt` (ДДТД, сугалаа, QR) |
+| `POST /api/v1/vehicles/register\|delete\|bill` (= `/api/v1/socialpay/…`) | vehicles | Машин бүртгэл, bill (2026-10-15 түншээс үл хамаарах зам) |
+
+Webhook (EasyParking → түнш): `payment.paid`, `receipt.ready` (2xx = амжилт, 24 оролдлого ~18ц);
+машины `vehicle.entry` / `vehicle.exit` (2xx + `{"success": true}`, 24ц). Гарын үсэггүй — түнш
+`GET /api/v1/payments/{id}`-ээр баталгаажуулна. **Түнш энэ төлбөрт өөрийн e-Barimt гаргахгүй.**

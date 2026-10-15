@@ -26,6 +26,26 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-15 — MonPay: түншээс үл хамаарах машин бүртгэл/bill/байршлын зам + MonPay-д API баримт
+
+Эзэн: «socialpay-д зориулсан документийг monpay-д зориулсан болгож өөрчилж өг; test server дээр key
+авсан байгаа». Төлбөрийн урсгал (`/api/v1/sessions`, `/payments`, confirm/cancel, webhook) аль хэдийн
+түншээс үл хамаарна; машин бүртгэл, bill, байршил зөвхөн `/api/v1/socialpay/*` нэртэй байсан тул
+ижил handler-ыг түншийн нэргүй замаар нээв. SocialPay-ийн замууд, хариу, мэдэгдлийн формат
+ӨӨРЧЛӨГДӨӨГҮЙ. Схем өөрчлөгдөхгүй. TEST дээрх «monpay» түлхүүр 09-15-нд үүсч 23с-ийн дараа
+хаагдсан (ашиглагдаагүй, `read,pay`) — «Сэргээх» эсвэл шинэ түлхүүр. **Анхаар:** прод msgbill-ийн
+аргад WALLET алга (`CARD,CASH,QR,TRANSFER`) → түншийн төлбөрийн баримт бүгд FAILED (easywallet 30 /
+95,500₮, 08-31…10-14) — MonPay PROD-оос өмнө Тохиргоо → Холболт → e-Barimt API-д «Хэтэвч»-ийг асаана.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | **`POST /api/v1/vehicles/register\|delete\|bill`, `GET\|POST /api/v1/parkings`** (`socialpay_router.neutral_router`) — `/api/v1/socialpay/*`-ийн ЯГ ИЖИЛ handler (`_register/_delete/_bill/_parkings`), `Success/Message` хэлбэр, `vehicles` эрх, түлхүүр тутмын 600/мин хязгаар хуваалцана; бүртгэлийн `created_via` = `api` (SocialPay замаар `socialpay` хэвээр); 404/405/422/500-ийн `Success:false` хэлбэр шинэ замуудад ч (бусад `/api/v1` `{"detail"}` хэвээр) | (энэ commit) | ⏳ | ⏳ |
+| feat | Frontend: Гадаад API-ийн curl жишээ түншээс үл хамаарах замаар (+ `/api/v1/parkings`), intent-ийн жишээнд `amount` биш `include_debts`, «e-Barimt-ыг систем гаргана — түнш давхар гаргахгүй» тайлбар; машин бүртгэлийн формат шошго `socialpay (үндсэн)` / `extended (MonPay)` (утга өөрчлөгдөөгүй) | (энэ commit) | ⏳ | ⏳ |
+| test | `tests/unit/test_partner_vehicle_aliases.py` (14): гэрээ/хүснэгт нэг, created_via, bill ижил + нууцлал, эрх/алдааны хэлбэр (401/403/400/404/405/500; бусад API хөндөгдөөгүй), хурдны хязгаар хуваалцах, `/parkings` (доторх зогсоолгүй, read түлхүүр), main.py-д router, extended ENTRY payload + `{"success": true}` = хүргэгдсэн, хоосон/өөр 2xx → RETRY | (энэ commit) | — | — |
+| docs | `INTEGRATION_API.md` (e-Barimt зөвхөн манай системээс, WALLET урьдчилсан нөхцөл, `receipt.ready`, webhook-ийн давталт 24 оролдлого/~18ц — «давтахгүй» гэсэн хуучирсан бичвэрийг засав, гарын үсэггүй, §7 түншээс үл хамаарах зам); `API_REFERENCE.md` §12 түншийн API; `SOCIALPAY_INTEGRATION.md` тэмдэглэл. MonPay-д: `MonPay_EasyParking_API_v1.0.docx` + имэйл (`/root/parking-deploy-1015/`) | (энэ commit) | — | — |
+
+---
+
 ## 2026-10-15 — «Холбогдсон POS»: heartbeat 60с → 4ц, унтраах товч (kill switch)
 
 Эзэн: «60 секунд арай өндөр ачаалал үүсгэхээр байна, өдөрт 4–6 байхад болно»; мөн шинэ таб үндсэн

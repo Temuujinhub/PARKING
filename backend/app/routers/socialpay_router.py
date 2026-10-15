@@ -12,6 +12,12 @@ EasyParkingUrl = https://site.easy-parking.mn/api/v1 (тест: https://test.eas
 Endpoint-ууд sync (def) — FastAPI threadpool-д ажиллуулна: DB хүлээлт event loop-ийг
 (хаалт/LPR) царцаахгүй. Бизнес логик: services/partner_vehicles.py.
 Баримт бичиг: docs/SOCIALPAY_INTEGRATION.md.
+
+ТҮНШЭЭС ҮЛ ХАМААРАХ НЭР (2026-10-15, MonPay): ижил handler-ууд `neutral_router`-ээр
+`/api/v1/vehicles/register|delete|bill`, `GET|POST /api/v1/parkings` замаар ч ажиллана —
+SocialPay-ээс бусад түнш (MonPay г.м) «socialpay» нэртэй зам дуудахгүй. Хариуны хэлбэр,
+эрх, хязгаар ЯГ ИЖИЛ; ялгаа нь зөвхөн бүртгэлийн `created_via` («api»). SocialPay-ийн
+замууд өөрчлөгдөөгүй. Баримт бичиг: docs/INTEGRATION_API.md §7.
 """
 import logging
 from datetime import datetime, timedelta
@@ -31,6 +37,10 @@ from ..services import partner_vehicles as PV
 from .integration_router import PartnerAuth, require_partner, site_catalog
 
 PREFIX = "/api/v1/socialpay"
+# Түншээс үл хамаарах ижил endpoint-ууд (MonPay г.м) — install_error_handlers-д мөн хамаарна
+NEUTRAL_PREFIX = "/api/v1"
+NEUTRAL_VEHICLES = NEUTRAL_PREFIX + "/vehicles"
+NEUTRAL_PARKINGS = NEUTRAL_PREFIX + "/parkings"
 log = logging.getLogger("parking.socialpay")
 
 _HTTP_CODES = {400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND",
@@ -57,18 +67,23 @@ class _SocialPayRoute(APIRoute):
 
 
 router = APIRouter(prefix=PREFIX, tags=["socialpay"], route_class=_SocialPayRoute)
+neutral_router = APIRouter(prefix=NEUTRAL_PREFIX, tags=["partner-vehicles"],
+                           route_class=_SocialPayRoute)
 
 
 def install_error_handlers(app):
-    """/api/v1/socialpay/* дээрх 404/405/422 (байхгүй зам, буруу method, validation)-ийг
-    Success/Message/Detail хэлбэрт оруулна. Бусад API-д FastAPI-ийн АНХДАГЧ handler
+    """/api/v1/socialpay/* (мөн түншээс үл хамаарах /api/v1/vehicles/*, /api/v1/parkings)
+    дээрх 404/405/422 (байхгүй зам, буруу method, validation)-ийг Success/Message/Detail
+    хэлбэрт оруулна. Бусад API-д FastAPI-ийн АНХДАГЧ handler
     хэвээр (зан төлөв өөрчлөгдөхгүй) — зөвхөн замаар шүүнэ."""
     from fastapi.exception_handlers import (http_exception_handler,
                                             request_validation_exception_handler)
 
     def _ours(request: Request) -> bool:
         path = request.url.path
-        return path == PREFIX or path.startswith(PREFIX + "/")
+        return (path == PREFIX or path.startswith(PREFIX + "/")
+                or path == NEUTRAL_VEHICLES or path.startswith(NEUTRAL_VEHICLES + "/")
+                or path == NEUTRAL_PARKINGS or path.startswith(NEUTRAL_PARKINGS + "/"))
 
     async def on_http(request: Request, exc: StarletteHTTPException):
         if not _ours(request):
@@ -146,26 +161,20 @@ def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
-@router.post("/register")
-def register(request: Request, body=Depends(_json_body), partner=Depends(_partner),
-             db: Session = Depends(get_db)):
-    """4.1 Машин бүртгэх. Идемпотент: давтан дуудахад Success=true, Message=ALREADY_REGISTERED."""
+def _register(request: Request, body, partner, db: Session, via: str) -> JSONResponse:
     err = _guard(partner)
     if err:
         return err
     try:
         plate, user = _plate_user(body)
         msg = PV.register_vehicle(db, partner.key_id, str(partner), plate, user,
-                                  via="socialpay", ip=_ip(request))
+                                  via=via, ip=_ip(request))
     except PV.VehicleInputError as exc:
         return _fail(exc.code, exc.detail, exc.status)
     return _resp(True, msg)
 
 
-@router.post("/delete")
-def delete(request: Request, body=Depends(_json_body), partner=Depends(_partner),
-           db: Session = Depends(get_db)):
-    """4.2 Машин устгах. Бүртгэлгүй бол Success=true, Message=NOT_FOUND (давталт аюулгүй)."""
+def _delete(request: Request, body, partner, db: Session) -> JSONResponse:
     err = _guard(partner)
     if err:
         return err
@@ -175,6 +184,20 @@ def delete(request: Request, body=Depends(_json_body), partner=Depends(_partner)
     except PV.VehicleInputError as exc:
         return _fail(exc.code, exc.detail, exc.status)
     return _resp(True, msg)
+
+
+@router.post("/register")
+def register(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+             db: Session = Depends(get_db)):
+    """4.1 Машин бүртгэх. Идемпотент: давтан дуудахад Success=true, Message=ALREADY_REGISTERED."""
+    return _register(request, body, partner, db, via="socialpay")
+
+
+@router.post("/delete")
+def delete(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+           db: Session = Depends(get_db)):
+    """4.2 Машин устгах. Бүртгэлгүй бол Success=true, Message=NOT_FOUND (давталт аюулгүй)."""
+    return _delete(request, body, partner, db)
 
 
 def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
@@ -249,6 +272,10 @@ def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
 def bill(body=Depends(_json_body), partner=Depends(_partner), db: Session = Depends(get_db)):
     """Bill дээр харуулах: одоогийн зогсолт, үнэгүй хугацаа, төлөх дүн. Зөвхөн ЭНЭ
     хэрэглэгчийн ЭНЭ түншээр бүртгүүлсэн машинд (бусдын машины байршил задрахгүй)."""
+    return _bill(body, partner, db)
+
+
+def _bill(body, partner, db: Session) -> JSONResponse:
     err = _guard(partner)
     if err:
         return err
@@ -305,4 +332,38 @@ def parkings_get(partner=Depends(_partner), db: Session = Depends(get_db)):
 @router.post("/parkings")
 def parkings_post(partner=Depends(_partner), db: Session = Depends(get_db)):
     """Spec-ийн «бүх хүсэлт POST» журамд нийцүүлсэн хувилбар (body шаардлагагүй)."""
+    return _parkings(db, partner)
+
+
+# ───────── Түншээс үл хамаарах нэр (MonPay г.м, 2026-10-15) — ЯГ ИЖИЛ логик ─────────
+
+@neutral_router.post("/vehicles/register")
+def vehicles_register(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+                      db: Session = Depends(get_db)):
+    """= /socialpay/register (бүртгэлийн created_via нь «api»)."""
+    return _register(request, body, partner, db, via="api")
+
+
+@neutral_router.post("/vehicles/delete")
+def vehicles_delete(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+                    db: Session = Depends(get_db)):
+    """= /socialpay/delete."""
+    return _delete(request, body, partner, db)
+
+
+@neutral_router.post("/vehicles/bill")
+def vehicles_bill(body=Depends(_json_body), partner=Depends(_partner),
+                  db: Session = Depends(get_db)):
+    """= /socialpay/bill."""
+    return _bill(body, partner, db)
+
+
+@neutral_router.get("/parkings")
+def neutral_parkings_get(partner=Depends(_partner), db: Session = Depends(get_db)):
+    """= /socialpay/parkings (гадна зогсоолууд, байршил, үнэгүй минут; «vehicles» эрх шаардахгүй)."""
+    return _parkings(db, partner)
+
+
+@neutral_router.post("/parkings")
+def neutral_parkings_post(partner=Depends(_partner), db: Session = Depends(get_db)):
     return _parkings(db, partner)
