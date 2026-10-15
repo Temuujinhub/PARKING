@@ -319,18 +319,19 @@ async def stop_background_tasks():
     except (asyncio.TimeoutError, TimeoutError):
         log.warning("зарим task 5с дотор зогсоогүй — албадан хаалаа")
     _bg_tasks.clear()
-    # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с) — restart-д алдагдахгүй, ≤3с
-    try:
-        from .services import pos_clients
-        await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True), timeout=3.0)
-    except Exception as e:  # noqa: BLE001 — зогсолтыг саатуулахгүй
-        log.warning("pos_clients эцсийн бичилт амжилтгүй: %r", e)
     # Камер руу нээсэн keep-alive холболтуудыг ч цэвэр хаана
     try:
         from .services.barrier import close_camera_clients
         await close_camera_clients()
     except Exception as e:  # noqa: BLE001
         log.warning("камерын холболт хаахад алдаа: %r", e)
+    # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с) — restart-д алдагдахгүй, ≤3с.
+    # Камерын холболт хаасны ДАРАА: DB удаан бол камерын subscription хаалтыг хойшлуулахгүй
+    try:
+        from .services import pos_clients
+        await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True), timeout=3.0)
+    except Exception as e:  # noqa: BLE001 — зогсолтыг саатуулахгүй
+        log.warning("pos_clients эцсийн бичилт амжилтгүй: %r", e)
 
 
 @app.websocket("/ws/sites/{site_id}")

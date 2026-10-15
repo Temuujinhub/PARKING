@@ -244,12 +244,50 @@ def test_write_failure_keeps_counts_for_retry(env, clock, monkeypatch):
         for _ in range(3):
             c.get('/api/payments?limit=10', headers=hdr(u['sport'], **{'X-Terminal-Id': TDB}))
     real = PC._write
-    monkeypatch.setattr(PC, '_write', lambda db, snap: (_ for _ in ()).throw(RuntimeError('db down')))
+    from sqlalchemy.exc import OperationalError
+    down = OperationalError('SELECT 1', {}, Exception('db down'))
+    monkeypatch.setattr(PC, '_write', lambda db, snap: (_ for _ in ()).throw(down))
     assert flush(env) == 0
     monkeypatch.setattr(PC, '_write', real)
     clock.t += 61
     assert flush(env) == 1
     assert rows(env)[0].request_count == 3
+
+
+def test_bad_row_dropped_without_blocking_others(env, clock, monkeypatch):
+    """Өгөгдлийн алдаатай (ж: NUL) мөр бусад мөрийг мөнхөд гацаахгүй — зөвхөн өөрөө хаягдана."""
+    u = env['u']
+    app = make_app(env)
+    with TestClient(app) as c:
+        c.get('/api/payments?limit=10', headers=hdr(u['sport'], **{'X-Terminal-Id': TDB}))
+        c.get('/api/payments?limit=10', headers=hdr(u['zuun'], **{'X-Terminal-Id': 'T-ZUUN'}))
+    real = PC._write
+
+    def flaky(db, snap):
+        if snap['user_id'] == u['sport'].id:
+            raise ValueError('A string literal cannot contain NUL (0x00) characters.')
+        return real(db, snap)
+    monkeypatch.setattr(PC, '_write', flaky)
+    assert flush(env) == 1
+    assert [r.username for r in rows(env)] == ['pos.3zuun']
+    monkeypatch.setattr(PC, '_write', real)
+    clock.t += 61
+    assert flush(env) == 0          # хаягдсан мөр давтан оролдогдохгүй
+
+
+def test_unmatched_path_stored_as_template_not_raw(env):
+    """Маршрут тааралгүй үед түүхий зам (NUL/удирдлагын тэмдэгт байж болно) DB-д орохгүй."""
+    u = env['u']['sport']
+    scope = {'type': 'http', 'method': 'GET', 'path': '/api/payments/pos/\x00x', 'query_string': b'',
+             'client': ('10.0.0.5', 5000),
+             'headers': [(b'x-app-version', b'1.5.3'), (b'x-terminal-id', TDB.encode()),
+                         (b'user-agent', b'Dart/3.4\x00\x01 (dart:io)')],
+             'state': {'auth_user': (u.id, u.username, u.role)}}
+    assert PC.capture_from_scope(scope, 404, None) is not None
+    assert flush(env) == 1
+    r = rows(env)[0]
+    assert r.last_endpoint == 'GET <unmatched>'
+    assert r.user_agent == 'Dart/3.4 (dart:io)'
 
 
 # ── 3. Heartbeat ─────────────────────────────────────────────────────────────

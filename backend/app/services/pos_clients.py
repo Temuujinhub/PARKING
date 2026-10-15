@@ -159,6 +159,13 @@ def _warn_once(kind: str, msg: str, *args, every: float = 600.0):
         log.warning(msg, *args)
 
 
+def _is_connection_error(e: BaseException) -> bool:
+    """DB холболт тасарсан эсэх — тийм бол бүх мөрийг дараа дахин; үгүй бол зөвхөн тухайн мөр буруу."""
+    from sqlalchemy.exc import InterfaceError, OperationalError
+    return isinstance(e, (OperationalError, InterfaceError)) or bool(
+        getattr(e, "connection_invalidated", False))
+
+
 def reset_state():
     """Тест/оношилгоонд — санах ойн бүх төлөвийг цэвэрлэнэ."""
     global _known_users, _known_at
@@ -321,18 +328,24 @@ def flush_due(*, force: bool = False, session_factory=None) -> int:
                     if _write(db, snap):
                         written += 1
                     db.commit()
-                except Exception:  # noqa: BLE001 — тоолуур алдагдахгүй, дараа дахин
+                except Exception as e:  # noqa: BLE001 — холболт унавал тоолуур алдагдахгүй
                     try:
                         db.rollback()
                     except Exception:  # noqa: BLE001
                         pass
-                    # DB унасан бол үлдсэн мөр бүрд connect_timeout хүлээхгүй — бүгдийг буцаана
-                    for rest in due[i:]:
-                        _restore(rest)
-                    _warn_once("write", "pos_clients: бичилт амжилтгүй — дараа дахин оролдоно",
-                               every=300.0)
-                    log.debug("pos_clients write failed", exc_info=True)
-                    break
+                    if _is_connection_error(e):
+                        # DB унасан бол үлдсэн мөр бүрд connect_timeout хүлээхгүй — бүгдийг буцаана
+                        for rest in due[i:]:
+                            _restore(rest)
+                        _warn_once("write", "pos_clients: бичилт амжилтгүй — дараа дахин оролдоно",
+                                   every=300.0)
+                        log.debug("pos_clients write failed", exc_info=True)
+                        break
+                    # Өгөгдлийн алдаа (ж: NUL тэмдэгт) — ЭНЭ мөрийг л хаяна; дараагийн мөрүүдийг
+                    # мөнхөд гацаахгүй (2026-10-15 хяналт F1)
+                    _warn_once("bad_row", "pos_clients: буруу мөрийг алгасав: %r", e, every=300.0)
+                    log.debug("pos_clients bad row dropped", exc_info=True)
+                    continue
         finally:
             db.close()
     return written
@@ -552,9 +565,12 @@ def capture_from_scope(scope, status_code: int, body: bytes | None) -> tuple[str
     ip = client[0] if client else None
     method = scope.get("method") or ""
     payment = status_code < 300 and method == "POST" and tmpl in PAYMENT_ROUTES
+    # Маршрут тааралгүй (404) бол түүхий зам НУЛ/удирдлагын тэмдэгттэй байж болно (psycopg2 NUL-ийг
+    # татгалздаг) — загварын нэрийг л, UA-г цэвэрлэж хадгална
+    endpoint = clean_text(f"{method} {tmpl if route is not None else '<unmatched>'}", 120)
     return record(user_id=user_id, username=username, terminal_id=tid, terminal_source=src,
-                  version=version, status=status, ip=ip, ua=ua_s or None,
-                  endpoint=f"{method} {tmpl}", status_code=status_code, payment=payment,
+                  version=version, status=status, ip=ip, ua=clean_text(ua_s, 120),
+                  endpoint=endpoint, status_code=status_code, payment=payment,
                   site_hint=site_hint,
                   hb=({k: hb.get(k) for k in ("printer", "battery", "network", "extra")}
                       if hb is not None else None))
