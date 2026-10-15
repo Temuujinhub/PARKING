@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 # Кодод бичсэн default secret — production-д энэ утга үлдвэл startup зогсоно (main.py)
 DEFAULT_SECRET_KEY = "change-me-in-production-9f8a7b6c5d4e"
@@ -213,6 +213,34 @@ class Settings(BaseSettings):
     # хангалттай» → 14400 = 4 цаг (≤6/өдөр). Код [3600, 86400]-д хавчина
     # (pos_clients.heartbeat_sec). «Онлайн» нь heartbeat биш, аппын ЕРДИЙН хүсэлтээр тодорхойлогдоно.
     pos_heartbeat_sec: int = 14400
+
+    @field_validator("pos_clients_enabled", mode="before")
+    @classmethod
+    def _lenient_pos_clients_enabled(cls, v):
+        # Хяналтын л функц — .env-ийн үсгийн алдаа (ж: «үгүй», хоосон) backend-ийг (хаалт/төлбөр/
+        # камер) асахгүй болгох ёсгүй. Танигдаагүй утга → УНТРААНА (аюулгүй тал), анхааруулна.
+        if isinstance(v, bool):
+            return v
+        s = str(v).split("#", 1)[0].strip().lower()
+        if s in ("1", "true", "yes", "on", "y", "t"):
+            return True
+        if s not in ("0", "false", "no", "off", "n", "f"):
+            import logging
+            logging.getLogger(__name__).warning(
+                "PARKING_POS_CLIENTS_ENABLED=%r танигдсангүй — «Холбогдсон POS» унтарсан", v)
+        return False
+
+    @field_validator("pos_heartbeat_sec", mode="before")
+    @classmethod
+    def _lenient_pos_heartbeat_sec(cls, v):
+        # «4h», хоосон г.м. буруу утга → 14400 (startup-ийг унагахгүй); хязгаарыг heartbeat_sec() хавчина
+        try:
+            return int(float(str(v).split("#", 1)[0].strip()))
+        except (TypeError, ValueError, OverflowError):
+            import logging
+            logging.getLogger(__name__).warning(
+                "PARKING_POS_HEARTBEAT_SEC=%r танигдсангүй — 14400 (4ц) хэрэглэв", v)
+            return 14400
 
     # msgbill webhook нууц (whsec_…) — Dashboard → Developers → Webhook endpoint нэмэхэд
     # НЭГ удаа харуулна. Endpoint: {public_base_url}/api/payments/msgbill/webhook.

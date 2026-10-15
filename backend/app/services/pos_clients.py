@@ -203,6 +203,7 @@ _last_terminal: dict[tuple[str, str], tuple[str, float]] = {}   # (user, ip) →
 _known_users: frozenset = frozenset()
 _known_at = 0.0
 _warned: dict[str, float] = {}
+_db_down = False   # сүүлийн бичилт холболтын алдаагаар унасан эсэх (зогсолтын flush-д)
 
 
 def _warn_once(kind: str, msg: str, *args, every: float = 600.0):
@@ -221,12 +222,19 @@ def _is_connection_error(e: BaseException) -> bool:
 
 def reset_state():
     """Тест/оношилгоонд — санах ойн бүх төлөвийг цэвэрлэнэ."""
-    global _known_users, _known_at
+    global _known_users, _known_at, _db_down
     with _lock:
         _pending.clear()
         _last_terminal.clear()
         _known_users, _known_at = frozenset(), 0.0
         _warned.clear()
+        _db_down = False
+
+
+def db_down() -> bool:
+    """Сүүлийн бичилт DB холболтын алдаагаар унасан бол True — зогсолтын үед эцсийн flush-ийг
+    алгасна (унжсан DB-д connect_timeout хүлээж restart-ийг уртасгахгүй)."""
+    return _db_down
 
 
 def set_known_users(users) -> None:
@@ -401,6 +409,7 @@ def flush_due(*, force: bool = False, session_factory=None) -> int:
         return 0
     if session_factory is None:
         from ..database import SessionLocal as session_factory
+    global _db_down
     written = 0
     with _flush_lock:
         db = session_factory()
@@ -410,12 +419,14 @@ def flush_due(*, force: bool = False, session_factory=None) -> int:
                     if _write(db, snap):
                         written += 1
                     db.commit()
+                    _db_down = False
                 except Exception as e:  # noqa: BLE001 — холболт унавал тоолуур алдагдахгүй
                     try:
                         db.rollback()
                     except Exception:  # noqa: BLE001
                         pass
                     if _is_connection_error(e):
+                        _db_down = True
                         # DB унасан бол үлдсэн мөр бүрд connect_timeout хүлээхгүй — бүгдийг буцаана
                         for rest in due[i:]:
                             _restore(rest)
@@ -784,16 +795,19 @@ def _row_visible(row, allowed: set | None) -> bool:
     return bool(sites) and set(sites) <= allowed
 
 
-def presence(last_seen: datetime | None, now: datetime, windows: dict | None = None) -> str:
+def presence(last_seen: datetime | None, now: datetime, windows: dict | None = None,
+             has_heartbeat: bool = True) -> str:
     """online (≤5 мин ямар ч хүсэлт) / idle (heartbeat-ийн хугацаанд) / offline / stale —
-    хилүүд presence_windows()-д тайлбартай."""
+    хилүүд presence_windows()-д тайлбартай. Heartbeat огт илгээгээгүй апп (одоогийн 1.5.x)-д
+    idle байхгүй: сүүлийн хүсэлтээс 5 мин өнгөрвөл «холбогдоогүй» (унтарсан терминал 5ц
+    «холбоотой» харагдахгүй)."""
     if last_seen is None:
         return "stale"
     w = windows or presence_windows()
     age = (now - last_seen).total_seconds()
     if age <= w["online_sec"]:
         return "online"
-    if age <= w["idle_sec"]:
+    if has_heartbeat and age <= w["idle_sec"]:
         return "idle"
     return "stale" if age > w["stale_sec"] else "offline"
 
@@ -968,7 +982,7 @@ def clients_report(db, user, *, site_id: str | None = None, days: int = 30,
             "version_state": vstate, "version_outdated": vstate != "ok",
             "status": r.status, "status_at": _iso(r.status_at),
             "printer": r.printer, "battery": r.battery, "network": r.network, "extra": r.extra,
-            "presence": presence(seen, now, windows),
+            "presence": presence(seen, now, windows, has_heartbeat=bool(r.heartbeat_count)),
             "last_seen_at": _iso(seen), "first_seen_at": _iso(r.first_seen_at),
             "last_ip": r.last_ip, "user_agent": r.user_agent, "last_endpoint": r.last_endpoint,
             "last_status_code": r.last_status_code,

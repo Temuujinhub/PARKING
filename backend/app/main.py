@@ -335,10 +335,11 @@ async def stop_background_tasks():
         log.warning("камерын холболт хаахад алдаа: %r", e)
     # «Холбогдсон POS»-ын бичигдээгүй ажиглалт (≤60с; heartbeat-only ≤4ц) — restart-д
     # алдагдахгүй, ≤3с. Камерын холболт хаасны ДАРАА: DB удаан бол камерын subscription хаалтыг
-    # хойшлуулахгүй. Унтраалттай бол алгасна (санах ойд юу ч байхгүй).
+    # хойшлуулахгүй. Унтраалттай эсвэл DB холболт унасан бол алгасна (унжсан DB-д
+    # connect_timeout хүлээж restart-ийг уртасгахгүй).
     try:
         from .services import pos_clients
-        if pos_clients.is_enabled():
+        if pos_clients.is_enabled() and not pos_clients.db_down():
             await asyncio.wait_for(asyncio.to_thread(pos_clients.flush_due, force=True),
                                    timeout=3.0)
     except Exception as e:  # noqa: BLE001 — зогсолтыг саатуулахгүй

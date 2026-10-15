@@ -271,7 +271,7 @@ PAX_POS_APP_GUIDE §2.2.
 ### GET /api/admin/pos-clients?site_id=&days=30  (ADMIN/SUPER_ADMIN)
 «Холбогдсон POS» (хэрэглэгч × терминал): хувилбар (`version_state` ok/behind/outdated/unknown), төлөв,
 `presence` (online ≤5 мин ямар ч хүсэлт / idle ≤ heartbeat + 25% (4ц → 5ц) / offline /
-stale: max(24ц, 2 heartbeat)-аас дээш) — `thresholds`-д сек-ээр; `last_seen_at` нь серверийн санах ойгоор (бичилтийн
+stale: max(24ц, 2 heartbeat + зөвшөөрөл)-аас дээш) — `thresholds`-д сек-ээр; `last_seen_at` нь серверийн санах ойгоор (бичилтийн
 throttle-оос хоцрохгүй), сүүлд холбогдсон, IP, 24ц/7х POS аппын төлбөр,
 e-Barimt горим (`receipt_mode` system/terminal), 7х EXTERNAL, сүүлийн баримтын төлөв. Түрээслэгчийн
 админ өөрийн зогсоолынхоо мөрийг л авна. `days≤0` → бүх түүх. `PARKING_POS_CLIENTS_ENABLED=false` үед

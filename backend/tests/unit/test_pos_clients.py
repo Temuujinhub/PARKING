@@ -248,9 +248,11 @@ def test_write_failure_keeps_counts_for_retry(env, clock, monkeypatch):
     down = OperationalError('SELECT 1', {}, Exception('db down'))
     monkeypatch.setattr(PC, '_write', lambda db, snap: (_ for _ in ()).throw(down))
     assert flush(env) == 0
+    assert PC.db_down()                 # зогсолтын эцсийн flush алгасагдана
     monkeypatch.setattr(PC, '_write', real)
     clock.t += 61
     assert flush(env) == 1
+    assert not PC.db_down()
     assert rows(env)[0].request_count == 3
 
 
@@ -567,6 +569,31 @@ def test_presence_windows_not_misfiring_with_hours_apart_heartbeats():
     assert PC.presence(None, now, w) == 'stale'
     # 1ц heartbeat → зөвшөөрөл 15 мин (доод хязгаар)
     assert PC.presence_windows(3600)['idle_sec'] == 3600 + 900
+    # heartbeat ОГТ илгээгээгүй апп (1.5.x): 5 мин-ээс хойш шууд «холбогдоогүй», 5ц «холбоотой» биш
+    assert PC.presence(ago(301), now, w, has_heartbeat=False) == 'offline'
+    assert PC.presence(ago(299), now, w, has_heartbeat=False) == 'online'
+    assert PC.presence(ago(86401), now, w, has_heartbeat=False) == 'stale'
+
+
+@pytest.mark.parametrize('raw,enabled', [
+    ('үгүй', False), ('', False), ('false', False), ('0', False),
+    ('true', True), ('ON', True), ('yes', True),
+])
+def test_bad_env_values_never_crash_startup(monkeypatch, raw, enabled):
+    """.env-ийн үсгийн алдаа (ж: яаралтай унтраах үед) backend-ийг (хаалт/төлбөр) асахгүй болгохгүй."""
+    from app.config import Settings
+    monkeypatch.setenv('PARKING_POS_CLIENTS_ENABLED', raw)
+    s = Settings(_env_file=None)
+    assert s.pos_clients_enabled is enabled
+
+
+@pytest.mark.parametrize('raw,expected', [('4h', 14400), ('', 14400), ('abc', 14400), ('1e7', 10_000_000),
+                                          ('3600', 3600), (' 7200 ', 7200), ('inf', 14400), ('nan', 14400)])
+def test_bad_heartbeat_env_values_never_crash_startup(monkeypatch, raw, expected):
+    from app.config import Settings
+    monkeypatch.setenv('PARKING_POS_HEARTBEAT_SEC', raw)
+    s = Settings(_env_file=None)
+    assert s.pos_heartbeat_sec == expected      # хязгаарыг heartbeat_sec() [3600, 86400]-д хавчина
 
 
 def test_frequent_heartbeats_do_not_multiply_db_writes(env, clock, monkeypatch):
