@@ -151,12 +151,16 @@ QPAY_REG_ERROR = ("QPay-ээр байгууллагын НӨАТ баримт а
                   "(QPay 11–14 оронтой ТТД хүлээн авдаггүй)")
 
 
-def _qpay_buyer(body: dict | None) -> tuple[str | None, str] | None:
-    """/qpay/invoice-ийн худалдан авагч. QPay `ebarimt_receiver` = ААН-ий 7 оронтой регистр
-    (MAX_LENGTH 7 — 1c114f3); ТТД өгвөл баримт 100% унана → 422 (жолооч/кассчин одоо засна).
-    Иргэний регистрийг QPay баримтад дамжуулах боломжгүй → нэргүй иргэний баримт.
-    Хуучин `customer_tin` талбар энэ endpoint-д үргэлж «ААН баримт» гэсэн утгатай тул
-    танигдахгүй утга → 422; `payer_reg_no`-ийн танигдахгүй утга /pos/confirm шиг нэргүй.
+def _qpay_buyer(body: dict | None) -> tuple[str | None, str, str | None] | None:
+    """/qpay/invoice-ийн худалдан авагч → (customer_tin, receiver_type, buyer_warning).
+    QPay `ebarimt_receiver` = ААН-ий 7 оронтой регистр (MAX_LENGTH 7 — 1c114f3) — ТТД өгвөл
+    баримт 100% унана. Иргэний регистрийг QPay баримтад дамжуулах боломжгүй → нэргүй иргэн.
+
+    Хяналт (2026-10-16): POS апп `payer_reg_no`-д ТТД (11–14) эсвэл танигдахгүй утга илгээхэд
+    422 нь QR ТӨЛБӨРИЙГ БҮХЭЛД НЬ хаадаг байв (төлбөр авах нь баримтын төрлөөс чухал) — одоо
+    нэргүй ИРГЭНИЙ баримт руу буцаж, хариунд `buyer_warning` (монгол текст) өгнө. 422 ЗӨВХӨН:
+    `receiver_type: COMPANY`-г ИЛ хүссэн (жолоочийн QR хуудас — Pay.jsx) хуучин `customer_tin`
+    7 оронтой регистр биш үед (тэр хэрэглэгч байгууллагын баримт л хүсэж байгаа — засаад дахин).
     None = худалдан авагч өгөөгүй."""
     body = body or {}
     raw_new = str(body.get("payer_reg_no") or "").strip()
@@ -164,13 +168,21 @@ def _qpay_buyer(body: dict | None) -> tuple[str | None, str] | None:
     if not raw_new and not raw_old:
         return None
     reg, rtype = _buyer(body)
-    if rtype == "COMPANY":
-        if not QPAY_COMPANY_REG.fullmatch(reg or ""):
-            raise HTTPException(422, QPAY_REG_ERROR)
-        return reg, "COMPANY"
-    if reg is None and not raw_new:
-        raise HTTPException(422, "Худалдан авагчийн дугаар танигдсангүй — " + QPAY_REG_ERROR)
-    return None, "CITIZEN"
+    if rtype == "COMPANY" and QPAY_COMPANY_REG.fullmatch(reg or ""):
+        return reg, "COMPANY", None
+    explicit_company = str(body.get("receiver_type") or "").strip().upper() in ("COMPANY", "ORGANIZATION")
+    if explicit_company and not raw_new:
+        raise HTTPException(422, QPAY_REG_ERROR)
+    if rtype == "COMPANY":   # ТТД (11–14 орон)
+        warning = (f"QPay байгууллагын баримтад ЗӨВХӨН 7 оронтой регистр хүлээн авдаг — ТТД ({reg}) "
+                   "дамжуулах боломжгүй тул ИРГЭНИЙ (нэргүй) баримт гарна. Байгууллагын баримт хэрэгтэй "
+                   "бол 7 оронтой регистрээр дахин эхлүүлнэ үү.")
+    elif reg:                # иргэний регистр
+        warning = "QPay баримтад иргэний регистр дамжуулах боломжгүй — нэргүй иргэний баримт гарна."
+    else:
+        warning = (f"Худалдан авагчийн дугаар («{(raw_new or raw_old)[:20]}») танигдсангүй — иргэний "
+                   "(нэргүй) баримт гарна. " + QPAY_REG_ERROR)
+    return None, "CITIZEN", warning
 
 
 def _err_text(v, limit: int = 400) -> str:
@@ -797,8 +809,11 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
                                   Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first():
         raise HTTPException(409, "Дансны гүйлгээг шалгаж байна. Давхар нэхэмжлэл үүсгэхгүй.")
 
-    # Худалдан авагч — нэхэмжлэл үүсгэхээс ӨМНӨ шалгана (буруу бол 422, юу ч үүсгэхгүй)
+    # Худалдан авагч — нэхэмжлэл үүсгэхээс ӨМНӨ шалгана. ТТД/танигдахгүй дугаар → нэргүй иргэн +
+    # buyer_warning (төлбөрийг ХААХГҮЙ); 422 зөвхөн ИЛ COMPANY + 7 оронтой биш customer_tin
     buyer = _qpay_buyer(body)
+    buyer_warning = buyer[2] if buyer is not None else None
+    warn = {"buyer_warning": buyer_warning} if buyer_warning else {}
 
     # Өмнөх өрийг QR-д нийлүүлж нэхэмжилнэ (body-д include_debts=false өгвөл зөвхөн
     # одоогийн төлбөр — кассын тусгай хэрэглээнд)
@@ -823,19 +838,19 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             # хадгалсан (өмнө нь [] буцаадаг байсан тул буцаж орсон жолоочид
             # банк сонгох товчнууд алга болдог байв)
             _raw = existing.raw_payload if isinstance(existing.raw_payload, dict) else {}
-            if buyer is not None and (existing.customer_tin, existing.ebarimt_receiver_type) != buyer:
+            if buyer is not None and (existing.customer_tin, existing.ebarimt_receiver_type) != buyer[:2]:
                 # Дахин ашиглах зам худалдан авагчийг ЧИМЭЭГҮЙ хаядаг байв (жолооч «Буцах» →
                 # «Байгууллага» сонгох/регистрээ засах). Баримтын хүлээн авагчийг төлбөр
                 # PAID болох үед payment-аас уншдаг тул төлөгдөөгүй нэхэмжлэлд шинэчлэх нь
                 # аюулгүй (сешн түгжээтэй). Хоосон хүсэлт (хуудас сэргээх) хуучныг ДАРАХГҮЙ.
-                existing.customer_tin, existing.ebarimt_receiver_type = buyer
+                existing.customer_tin, existing.ebarimt_receiver_type = buyer[:2]
                 db.commit()
             return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
                     "qr_text": existing.qr_text,
                     "qr_image": qpay.qr_png_b64(existing.qr_text or ""),
                     "deep_link": existing.deep_link, "urls": _raw.get("invoice_urls") or [],
                     "amount": float(existing.amount), "mock": settings.qpay_mock,
-                    **_buyer_echo(existing)}
+                    **_buyer_echo(existing), **warn}
         try:
             await qpay.cancel_invoice(existing.provider_invoice_id,
                                       acc=qpay.account_for(session.site))
@@ -850,7 +865,7 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
     # НӨАТ-ийн баримтын хүлээн авагч: ААН-ий 7 оронтой регистр (payer_reg_no/customer_tin) →
     # COMPANY, үгүй бол иргэн (CITIZEN) — _qpay_buyer (2026-10-16)
     receiver_data = None
-    payment.customer_tin, payment.ebarimt_receiver_type = buyer or (None, "CITIZEN")
+    payment.customer_tin, payment.ebarimt_receiver_type = buyer[:2] if buyer else (None, "CITIZEN")
     if payment.ebarimt_receiver_type == "COMPANY":
         receiver_data = {"register": payment.customer_tin}
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
@@ -952,7 +967,7 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             "qr_text": payment.qr_text, "qr_image": inv.get("qr_image", ""),
             "deep_link": payment.deep_link, "urls": inv.get("urls", []),
             "amount": float(payment.amount), "debt_amount": debt_total,
-            "mock": inv.get("mock", False), **_buyer_echo(payment)}
+            "mock": inv.get("mock", False), **_buyer_echo(payment), **warn}
 
 
 async def _webhook_handler(payment_id: str, token: str, qpay_payment_id: str,
@@ -2110,16 +2125,20 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
     jobs, changed = [], {}
     if target is not None and payment.status != "PAID":
         raise HTTPException(400, "Баримт үүсгэж чадсангүй: Төлбөр PAID биш")
+    if target is not None:
+        from ..services import financial_jobs as FJ
+        try:
+            to_qpay = FJ.receipt_provider(payment) == "QPAY"
+        except Exception:  # noqa: BLE001 — сувгийн тохиргоо уншигдахгүй бол QPay биш гэж
+            to_qpay = False
+        if to_qpay and target[1] == "COMPANY" and not QPAY_COMPANY_REG.fullmatch(target[0] or ""):
+            raise HTTPException(422, QPAY_REG_ERROR)
+        if to_qpay and target[1] == "CITIZEN":
+            # QPay иргэний регистрийг баримтад дамжуулдаггүй (нэргүй иргэн) — _qpay_buyer-тэй ижил;
+            # хадгалвал төлбөр/баримтын мөр «нэрийн баримт» мэт харагдаж ТЕГ-тэй зөрнө (2026-10-16 хяналт)
+            target = (None, "CITIZEN")
     if target is not None and not has_external:
         from ..models import FinancialJob
-        from ..services import financial_jobs as FJ
-        if target[1] == "COMPANY" and not QPAY_COMPANY_REG.fullmatch(target[0] or ""):
-            try:
-                to_qpay = FJ.receipt_provider(payment) == "QPAY"
-            except Exception:  # noqa: BLE001 — сувгийн тохиргоо уншигдахгүй бол QPay биш гэж
-                to_qpay = False
-            if to_qpay:
-                raise HTTPException(422, QPAY_REG_ERROR)
         jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
                 .order_by(FinancialJob.id).with_for_update().all())
         recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
@@ -2146,7 +2165,8 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
                 db.rollback()
                 db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_REFUSED", entity="payment",
                                 entity_id=payment_id,
-                                detail={"reason": "RECEIVER_CHANGE_LOCKED", "error": res.get("error"),
+                                detail={"reason": "RECEIVER_CHANGE_LOCKED", "code": res.get("code"),
+                                        "error": res.get("error"),
                                         "to": {"customer_tin": target[0], "receiver_type": target[1]},
                                         "blockers": res.get("blockers"),
                                         **({"duplicate_of_pos": True} if res.get("duplicate_of_pos") else {})}))
@@ -2191,6 +2211,10 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
     db.commit()
     if refused:
         raise HTTPException(409, res.get("error"))
+    if res.get("receiver_rejected"):
+        # Худалдан авагчийн дугаараас болж татгалзсан ажлыг ИЖИЛ дугаараар дахин илгээхгүй —
+        # «Дугаар засах»/«Иргэнээр» (2026-10-16 хяналт)
+        raise HTTPException(409, res["error"])
     if res.get("created"):
         return res
     if not res.get("ok") and not res.get("pending"):

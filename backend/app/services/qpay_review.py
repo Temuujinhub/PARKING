@@ -114,7 +114,7 @@ ATTEMPT_MN = {
     "PENDING": "үр дүн бичигдээгүй (процесс тасарсан/хадгалалт унасан)",
     "SENT": "ДДТД авч SENT болсон",
     "REJECTED": "QPay 4xx-ээр тодорхой татгалзсан",
-    "HTTP_ERROR": "QPay 5xx/408 — тодорхойгүй",
+    "HTTP_ERROR": "QPay 5xx/408/409 эсвэл «аль хэдийн үүссэн» — тодорхойгүй",
     "NETWORK": "timeout/холболтын алдаа — тодорхойгүй",
     "NO_BILL": "QPay billId буцаасангүй — тодорхойгүй",
     "BAD_BILL": "QPay-ийн billId ДДТД биш — тодорхойгүй",
@@ -276,8 +276,10 @@ def error_text(res: dict) -> str | None:
 
 
 def classify_attempt(res: dict, done: bool) -> str:
-    """create_and_assign-ийн үр дүн → оролдлогын код (ATTEMPT_MN). Зөвхөн QPay 4xx (408-аас
-    бусад) нь «баримт үүсээгүй» гэж ТОДОРХОЙ; бусад бүх алдаа тодорхойгүй."""
+    """create_and_assign-ийн үр дүн → оролдлогын код (ATTEMPT_MN). Зөвхөн QPay 4xx (408/409-өөс
+    бусад, «аль хэдийн/давхар/үүссэн/in progress» текстгүй) нь «баримт үүсээгүй» гэж ТОДОРХОЙ;
+    бусад бүх алдаа тодорхойгүй. 409 — financial_jobs.provider_error-тэй ижил (2026-10-16 хяналт:
+    «EBARIMT_ALREADY_CREATED» г.м create-ийн 409 баримт үүссэнийг илэрхийлж болно)."""
     if done:
         return "SENT"
     if res.get("save_error"):
@@ -288,10 +290,21 @@ def classify_attempt(res: dict, done: bool) -> str:
         return "CONFLICT"
     st = res.get("http_status")
     if st:
-        return "REJECTED" if 400 <= int(st) < 500 and int(st) != 408 else "HTTP_ERROR"
+        return "REJECTED" if _definite_4xx(st, error_text(res)) else "HTTP_ERROR"
     if res.get("error"):
         return "NETWORK"
     return "NO_BILL"
+
+
+def _definite_4xx(status, text) -> bool:
+    """QPay create-ийн HTTP алдаа баримт ҮҮСЭЭГҮЙг батлах уу: 4xx, 408/409 биш, «аль хэдийн/
+    давхар/үүссэн/in progress» текстгүй (financial_jobs._MAYBE_CREATED_RE — нэг тодорхойлолт)."""
+    from .financial_jobs import _MAYBE_CREATED_RE
+    try:
+        st = int(status)
+    except (TypeError, ValueError):
+        return False
+    return 400 <= st < 500 and st not in (408, 409) and not _MAYBE_CREATED_RE.search(str(text or ""))
 
 
 # ───────────────────────────── оролдлогын бүртгэл ─────────────────────────────
@@ -356,7 +369,7 @@ def prior_attempts(recs: list, audits: list, *, exclude: str | None = None) -> l
                     http_status=d.get("http_status"), bill_id=d.get("bill_id"))
             elif d.get("action") == "CREATE":          # оролдлогын id-гүй хуучин мөр (01bc5dd)
                 st = d.get("http_status")
-                oc = ("SENT" if d.get("ok") else "REJECTED" if st and 400 <= int(st) < 500 and int(st) != 408
+                oc = ("SENT" if d.get("ok") else "REJECTED" if st and _definite_4xx(st, d.get("error"))
                       else "UNKNOWN")
                 put(f"audit:{a.id}", a.created_at, oc, http_status=st, bill_id=d.get("ebarimt_id"))
         elif a.action == DIAG_ACTION and d.get("create"):

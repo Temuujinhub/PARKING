@@ -98,7 +98,10 @@ OPEN ──(exit камерт уншигдана)──► AWAITING_PAYMENT ─�
 ## 3. Төлбөр
 
 ### POST /api/payments/qpay/invoice  (нэвтрэлт шаардахгүй)
-`{"session_id": "uuid", "customer_tin": "1234567" (сонголт — ААН баримт)}` → QPay нэхэмжлэл.
+`{"session_id": "uuid", "payer_reg_no"? | "customer_tin"?: "1234567" (ААН-ий 7 оронтой регистр),
+"receiver_type"?: "COMPANY"}` → QPay нэхэмжлэл. ТТД/иргэний регистр/танигдахгүй дугаар → нэргүй иргэний
+баримт + хариунд `buyer_warning` (төлбөрийг хаахгүй, 2026-10-16); **422** зөвхөн `receiver_type: COMPANY`
+ИЛ + `customer_tin` 7 оронтой биш үед. Хариунд `receipt_type`, `payer_reg_no`.
 
 Нэхэмжлэл нь **e-Barimt-тэй** нэхэмжлэхийн кодоор (`EB_EASY_2PARKING_INVOICE`) үүсэх ба
 бүтээгдэхүүн бүрээр `lines` (`classification_code`, НӨАТ 4 орны нарийвчлалтай) задлагдана.
@@ -246,18 +249,32 @@ EXTERNAL-ийг retry/бөөн нөхөлт/цуцлалт хөндөхгүй (r
 **Хүлээн авагч солих** (2026-10-16): `{"customer_tin": "…"}` (ААН регистр/ТТД/иргэний регистр) эсвэл
 `{"receiver_type": "CITIZEN"}`. Сувагт огт илгээгээгүй ажил → байранд нь засна. Төлбөрийн БҮХ мөр
 CANCELLED (цуцлалт батлагдсан) эсвэл сувгийн ТОДОРХОЙ татгалзал (ажил `REJECTED` — create-ийн HTTP
-400/404/409/422, ДДТД/billId хэзээ ч ирээгүй) бол хуучин ажлыг ӨӨРЧЛӨХГҮЙ, ШИНЭ баримтын мөр + ажил
+400/404/422, ДДТД/billId хэзээ ч ирээгүй, өмнөх АЛЬ Ч оролдлого тодорхойгүй байгаагүй — `raw.uncertain`)
+бол хуучин ажлыг ӨӨРЧЛӨХГҮЙ, ШИНЭ баримтын мөр + ажил
 ШИНЭ түлхүүрээр (`pay-{payment_id}-rcv-{n}`) → `200 {pending, receiver_changed, receipts[], replaced[],
 keys[], from, to}`; хуучин татгалзсан мөр CANCELLED («баримт үүсээгүй»), AuditLog
 `EBARIMT_RECEIVER_CHANGE` (хэн, хуучин/шинэ хүлээн авагч). SENT/REVIEW/UNKNOWN/RETRY/SENDING мөртэй
 бол **409** (`EBARIMT_RETRY_REFUSED`, эхлээд `cancel-ebarimt`). QPay сувагт байгууллага зөвхөн
-7 оронтой регистр — өөр бол **422**. Тодорхой татгалзсан ажлыг хүлээн авагчгүй `retry-ebarimt` ижил
-түлхүүрээр дахин илгээнэ (баримт үүсээгүй нь мэдэгдэж буй); тодорхойгүй (REVIEW) бол `review_required`.
+7 оронтой регистр — өөр бол **422**; иргэний регистр → нэргүй иргэн (QPay дамжуулдаггүй). Тодорхой
+татгалзсан ажлыг хүлээн авагчгүй `retry-ebarimt` ижил түлхүүрээр дахин илгээнэ (баримт үүсээгүй нь
+мэдэгдэж буй) — харин худалдан авагчийн дугаараас болж татгалзсан (`REJECTED_RECEIVER`) бол **409**
+(«Дугаар засах»/«Иргэнээр»), бөөн нөхөлт алгасна (`skipped_receiver_rejected`); тодорхойгүй (REVIEW) бол
+`review_required`.
+
+Мөрийн тоо/дүнгийн хамгаалалт (2026-10-16 хяналт) — бас **409** (`code` аудитад): орлогдоогүй мөр ЯГ 1,
+эсвэл олон бол зөвхөн үндсэн (`pay-{id}`) + өрийн (`pay-{id}-comp-*`) хуваалт бөгөөд дүнгийн нийлбэр =
+төлбөрийн дүн (`MULTI_LEAF`); QPay — ЯГ 1 мөр (`QPAY_MULTI`), өөр төлбөр ижил QPay payment_id-тэй бол
+(`QPAY_SHARED`), QPay-ийн ИЛГЭЭГДСЭН баримтыг цуцалсны дараах дахин create TEST дээр батлагдаагүй тул
+`PARKING_QPAY_RECREATE_AFTER_CANCEL=true` (анхдагч false) хүртэл (`QPAY_RECREATE`). Суваг ЦУЦЛАГДСАН
+хуучин ДДТД-г буцаавал шинэ мөр SENT болохгүй — REVIEW «… цуцалсан ДДТД-г буцаав — тулгана уу».
 
 Сувгийн алдаа (2026-10-16): `vat_receipts.receipt_url` / `financial_jobs.last_error`-д HTTP статус +
 цэвэрлэсэн хариуны бие (≤300, токен/түлхүүргүй), `vat_receipts.raw.error = {class, provider,
 http_status, text}`; `GET /api/reports/vat-receipts` мөрөнд `error_class` (`REJECTED_RECEIVER` |
-`REJECTED` | `UNCERTAIN`).
+`REJECTED` | `UNCERTAIN`), `error_http_status`, `superseded`, `can_change_receiver` (Ибаримт хуудасны
+«Байгууллагаар (дахин) гаргах»/«Дугаар засах»/«Иргэнээр» — `change_receiver`-тэй НЭГ дүрэм), SENT мөрөнд
+`cancel_ddtds` (`cancel-ebarimt` цуцлах БҮХ ДДТД). Create-ийн HTTP **409** болон «аль хэдийн/үүссэн/
+in progress» текст = ТОДОРХОЙГҮЙ (хоёр суваг); тодорхойгүй оролдлого `raw.uncertain`-д үүрд бичигдэнэ.
 
 ### POST /api/reports/vat-reconcile/cancel-duplicates  (vat/reports)
 `{payment_ids[], note, dry_run=true, teg?: {payment_id: {teg_ddtd, teg_register}}}` — `teg`-ийг

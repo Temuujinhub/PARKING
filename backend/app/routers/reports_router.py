@@ -1794,6 +1794,14 @@ async def _run_bulk_retry(pay_ids: list[str]) -> None:
                     j["external_skipped"] = j.get("external_skipped", 0) + 1
                     res = None
                     continue
+                if res.get("receiver_rejected"):
+                    # Суваг худалдан авагчийн дугаарыг татгалзсан — ИЖИЛ дугаараар дахин илгээвэл
+                    # дахин унана; «Дугаар засах»/«Иргэнээр»-ээр гараар (2026-10-16 хяналт)
+                    db.rollback()
+                    j["skipped"] += 1
+                    j["skipped_receiver_rejected"] = j.get("skipped_receiver_rejected", 0) + 1
+                    res = None
+                    continue
                 if res.get("ok") or "error" in res:
                     try:
                         db.commit()
@@ -1909,15 +1917,24 @@ def vat_receipts(date_from: str | None = None, date_to: str | None = None,
     """НӨАТ баримтын жагсаалт. Багана тус бүрийн шүүлтүүр (plate/ddtd/lottery/
     site/provider/status/amount) + `q` глобал хайлт. Шүүлт `limit`-ээс ӨМНӨ
     ажиллана — тиймээс сүүлийн 200-д багтаагүй хуучин баримт ч олдоно."""
-    from ..services.financial_jobs import error_class
+    from ..services.financial_jobs import error_class, receiver_change_flags
     query = _vat_receipts_query(db, user, date_from, date_to, q, plate, ddtd,
                                 lottery, site, provider, status, amount)
     rows = query.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
     # error_class (2026-10-16): сувгийн алдааны ангилал — REJECTED_RECEIVER бол Ибаримт хуудас
-    # «Дугаар засах»/«Иргэнээр»-ийг санал болгоно (текстийн regex биш)
-    return [to_dict(r, extra={"plate_number": plate_, "site_name": site_name,
-                              "error_class": error_class(r) if r.status in ("FAILED", "REVIEW") else None})
-            for r, plate_, site_name in rows]
+    # «Дугаар засах»/«Иргэнээр»-ийг санал болгоно (текстийн regex биш).
+    # superseded / can_change_receiver / cancel_ddtds (2026-10-16 хяналт): товчийг СЕРВЕРИЙН
+    # дүрмээр (change_receiver-тэй нэг — мөрийн тоо/дүн/QPay) — UI raw уншиж таамаглахгүй
+    flags = receiver_change_flags(db, [r for r, _p, _s in rows])
+    out = []
+    for r, plate_, site_name in rows:
+        cls = error_class(r) if r.status in ("FAILED", "REVIEW") else None
+        err = (r.raw or {}).get("error") if isinstance(r.raw, dict) else None
+        out.append(to_dict(r, extra={
+            "plate_number": plate_, "site_name": site_name, "error_class": cls,
+            "error_http_status": (err.get("http_status") if cls and isinstance(err, dict) else None),
+            **flags.get(r.id, {"superseded": False, "can_change_receiver": False, "cancel_ddtds": []})}))
+    return out
 
 
 @router.get("/vat-receipts/excel")

@@ -516,6 +516,9 @@ def _attempts(db, rid):
     (httpx.ConnectError("reset"), None, "NETWORK"),
     (http_error(500, {"message": "Internal"}), None, "HTTP_ERROR"),
     (http_error(408, {"message": "Request Timeout"}), None, "HTTP_ERROR"),
+    # 409 / «аль хэдийн үүссэн» — баримт үүссэн байж болно (2026-10-16 хяналт)
+    (http_error(409, {"message": "EBARIMT_ALREADY_CREATED"}), None, "HTTP_ERROR"),
+    (http_error(400, {"message": "Энэ төлбөрт И-баримт үүссэн байна"}), None, "HTTP_ERROR"),
     (None, "", "NO_BILL"),                              # 200, гэхдээ billId-гүй
     (Crash(), None, "PENDING"),                         # үр дүн огт бичигдээгүй
 ])

@@ -136,6 +136,11 @@ class Settings(BaseSettings):
     qpay_branch_code: str = "PARKING"
     # Баримтын district_code (үйл ажиллагаа явуулж буй байршил, 4 орон)
     qpay_district_code: str = "3505"
+    # QPay-ийн ИЛГЭЭГДСЭН баримтыг цуцалсны (DELETE ebarimt_v3) дараа ИЖИЛ QPay гүйлгээнд
+    # хүлээн авагч солиж ШИНЭ баримт үүсгэх (financial_jobs.change_receiver) — TEST дээр
+    # батлагдаагүй (QPay цуцалсан ДДТД-г буцааж болзошгүй, 2026-10-16 хяналт) тул анхдагч OFF:
+    # Ибаримт хуудас SENT QPay баримтад «Байгууллагаар дахин гаргах» харуулахгүй, сервер 409.
+    qpay_recreate_after_cancel: bool = False
 
     @property
     def qpay_base_url(self) -> str:

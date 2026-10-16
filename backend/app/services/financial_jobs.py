@@ -35,12 +35,17 @@ log = logging.getLogger("parking.financial_jobs")
 # өгдөг байв (audit1014: 10-р сарын байгууллагын 6 баримт гацсан — QPay 5 + msgbill 1;
 # HTTPStatusError-ийн 6-гийнх нь шалтгааныг текст хаягдсан тул тогтоох боломжгүй).
 # Одоо: HTTP статус + цэвэрлэсэн (нууцгүй) хариуны бие ≤300 тэмдэгт хадгална; ҮҮСГЭХ
-# хүсэлтийн HTTP 400/404/409/422 = суваг хүсэлтийг ТАТГАЛЗСАН (баримт үүсээгүй) →
+# хүсэлтийн HTTP 400/404/422 = суваг хүсэлтийг ТАТГАЛЗСАН (баримт үүсээгүй) →
 # FAILED + ангилал (REJECTED / REJECTED_RECEIVER). Timeout/холболт/5xx/billId-гүй 200 бол
 # ТОДОРХОЙГҮЙ хэвээр (UNKNOWN/REVIEW, msgbill-д ижил түлхүүрээр RETRY) — QPay create
 # идемпотент БИШ (2026-08-19 f7bb0ae7: зэрэгцээ 2 дуудлага 2 өөр ДДТД) тул тодорхойгүй
 # үр дүнгийн дараа хэзээ ч автоматаар дахин create хийхгүй.
-REJECT_HTTP = frozenset({400, 404, 409, 422})
+# Хяналт (2026-10-16): HTTP 409 (Conflict) нь create-д «баримт аль хэдийн бий / хүсэлт
+# боловсруулагдаж байна» гэсэн утгатай байж болох тул ХОЁР сувагт ТОДОРХОЙГҮЙ (409-ийг
+# REJECT_HTTP-ээс хасав) — «EBARIMT_ALREADY_CREATED», «ALREADY_EXISTS», «ebarimt_already_issued»,
+# «Энэ төлбөрт И-баримт үүссэн байна», msgbill «REQUEST_IN_PROGRESS» өмнө нь REJECTED болж
+# «Дугаар засах»/шинэ түлхүүрээр ДАВХАР баримт гаргах замыг нээдэг байв.
+REJECT_HTTP = frozenset({400, 404, 422})
 ERR_REJECTED = "REJECTED"                    # суваг татгалзсан — баримт үүсээгүй
 ERR_REJECTED_RECEIVER = "REJECTED_RECEIVER"  # … худалдан авагчийн дугаараас болж
 ERR_UNCERTAIN = "UNCERTAIN"                  # үр дүн тодорхойгүй — сувгаар тулгана
@@ -53,15 +58,23 @@ ERROR_TEXT_MAX = 300
 _RECEIVER_RE = re.compile(r"customer_?tin|receiver|payer|buyer|худалдан\s*авагч|регистр|"
                           r"(?<![a-z])regist(?:er|ration)(?![a-z])|(?<![a-z])tin(?![a-z])|MAX_LENGTH", re.I)
 _MERCHANT_RE = re.compile(r"merchant|түрээслэгч|POS API instance", re.I)
-# 4xx ч «баримт аль хэдийн бий / түлхүүр давхардсан» гэсэн утгатай бол тодорхой биш
-_MAYBE_CREATED_RE = re.compile(r"already\s+(?:exist|created|issued)|duplicate|idempoten|"
-                               r"давхар|аль\s*хэдийн", re.I)
+# 4xx ч «баримт аль хэдийн бий / түлхүүр давхардсан / хүсэлт боловсруулагдаж байна» гэсэн
+# утгатай бол тодорхой биш (2026-10-16 хяналт: «EBARIMT_ALREADY_CREATED», «ALREADY_EXISTS»,
+# «ebarimt_already_issued», «… И-баримт үүссэн байна», «REQUEST_IN_PROGRESS» барьдаггүй байв)
+_MAYBE_CREATED_RE = re.compile(r"already[\s_-]*(?:exist|creat|issu)|ALREADY|duplicate|idempoten|"
+                               r"давхар|аль\s*хэдийн|үүссэн|in.?progress|processing", re.I)
 _SECRET_RES = (
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer ***"),
+    # «Authorization: Basic …» — өмнө нь зөвхөн «Basic» гэдэг үг ***-ээр солигдож, түлхүүр нь
+    # ил үлддэг байв (2026-10-16 хяналт)
+    (re.compile(r"(?i)\b(basic|bearer)\s+\S+"), r"\1 ***"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9._-]+"), "***"),           # JWT
     (re.compile(r"\b(?:bsk|whsec|sk|pk)_[A-Za-z0-9_-]{6,}"), "***"),           # msgbill/webhook түлхүүр
+    # JSON-ийн хашилттай утга (зайтай нууц үг ч) — «"password": "my secret pass"»
+    (re.compile(r'(?i)("(?:[A-Za-z_-]*(?:password|secret|token)|api_?key|x-api-key|authorization)"'
+                r'\s*:\s*)"[^"]*"'), r'\1"***"'),
     (re.compile(r'(?i)("?(?:access_token|refresh_token|token|api_?key|x-api-key|password|'
-                r'secret|authorization)"?\s*[:=]\s*)"?[^",\s}]+'), r"\1***"),
+                r'secret|authorization)"?\s*[:=]\s*)(?!(?:basic|bearer)\s|"?\*\*\*)"?[^",\s}]+'),
+     r"\1***"),
 )
 
 
@@ -96,8 +109,9 @@ def provider_error(exc: Exception, provider: str | None, *, creating: bool) -> t
     """Сувгийн алдаа → (текст ≤300, ангилал, HTTP статус).
 
     ТОДОРХОЙ татгалзал (REJECTED/REJECTED_RECEIVER) нь ЗӨВХӨН баримт ҮҮСГЭХ хүсэлтийн
-    (QPay ebarimt_v3/create, msgbill POST /partner/receipts) HTTP 400/404/409/422, хариунд
-    «аль хэдийн/давхар/idempotency» гэсэн утга агуулаагүй үед. GET (provider_ref мэдэгдэж
+    (QPay ebarimt_v3/create, msgbill POST /partner/receipts) HTTP 400/404/422, хариунд
+    «аль хэдийн/давхар/idempotency/үүссэн/in progress» гэсэн утга агуулаагүй үед. 409 нь
+    ҮРГЭЛЖ тодорхойгүй (баримт бий эсвэл хүсэлт боловсруулагдаж байж болно). GET (provider_ref мэдэгдэж
     буй msgbill) — 404 ч баримт үүсээгүйг батлахгүй. PosAPI-ийн create идемпотент биш,
     гэрээ нь тодорхойгүй тул ангилахгүй. Сүлжээ/timeout-ийн текст хариуны биегүй тул зөвхөн
     ангийн нэр (хуучнаараа — нууц агуулж болзошгүй)."""
@@ -115,11 +129,21 @@ def provider_error(exc: Exception, provider: str | None, *, creating: bool) -> t
     else:
         return type(exc).__name__, ERR_UNCERTAIN, None
     cls = ERR_UNCERTAIN
-    if (creating and provider in ("QPAY", "MSGBILL") and status in REJECT_HTTP
-            and not _MAYBE_CREATED_RE.search(text)):
+    if (creating and provider in ("QPAY", "MSGBILL") and not maybe_created(status, text)):
         cls = (ERR_REJECTED_RECEIVER if _RECEIVER_RE.search(text) and not _MERCHANT_RE.search(text)
                else ERR_REJECTED)
     return text, cls, status
+
+
+def maybe_created(status, text) -> bool:
+    """Create-ийн HTTP алдаа баримт ҮҮСЭЭГҮЙг БАТЛАХГҮЙ юу: REJECT_HTTP (400/404/422)-ээс
+    бусад статус (409, 401, 429, 5xx …) эсвэл «аль хэдийн/давхар/үүссэн/in progress» текст.
+    qpay_review._definite_4xx ч 409 болон ижил текстийн regex-ийг (_MAYBE_CREATED_RE) ашиглана."""
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return status not in REJECT_HTTP or bool(_MAYBE_CREATED_RE.search(str(text or "")))
 
 
 def error_class(rec) -> str | None:
@@ -127,6 +151,40 @@ def error_class(rec) -> str | None:
     raw = getattr(rec, "raw", None)
     err = raw.get("error") if isinstance(raw, dict) else None
     return err.get("class") if isinstance(err, dict) else None
+
+
+# ── ТОДОРХОЙГҮЙ ОРОЛДЛОГЫН «НААЛДАМТГАЙ» ТЭМДЭГ (2026-10-16 хяналт) ────────────
+# raw.error нь зөвхөн СҮҮЛИЙН оролдлогыг хадгалдаг: ReadTimeout (баримт үүссэн байж болно)
+# → дараагийн оролдлого 4xx бол мөр «тодорхой татгалзсан» мэт харагдаж, хүлээн авагч
+# солилт ШИНЭ түлхүүрээр хоёр дахь баримт гаргах боломжтой байв. Аль нэг оролдлого
+# тодорхойгүй бол raw.uncertain-д ҮҮРД бичнэ (хэзээ ч арилгахгүй) — definitely_rejected үүнийг
+# хардаг тул ийм мөрийг сувгаар тулгалгүйгээр орлуулахгүй.
+UNCERTAIN_KEY = "uncertain"
+
+
+def mark_uncertain(rec, *, attempt=None, text: str | None = None, source: str = "outbox") -> None:
+    """Тодорхойгүй оролдлогыг мөрийн raw.uncertain-д нэмнэ (merge, commit хийхгүй)."""
+    if rec is None:
+        return
+    raw = dict(rec.raw) if isinstance(rec.raw, dict) else {}
+    cur = raw.get(UNCERTAIN_KEY)
+    u = dict(cur) if isinstance(cur, dict) else {}
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    u.setdefault("first_at", now)
+    u["last_at"] = now
+    u["count"] = int(u.get("count") or 0) + 1
+    if attempt is not None:
+        u["attempts"] = (list(u.get("attempts") or []) + [attempt])[-10:]
+    u["source"] = source
+    if text:
+        u["last"] = safe_text(text, 160)
+    raw[UNCERTAIN_KEY] = u
+    rec.raw = raw
+
+
+def had_uncertain(rec) -> bool:
+    raw = getattr(rec, "raw", None)
+    return isinstance(raw, dict) and bool(raw.get(UNCERTAIN_KEY))
 
 
 def payment_site(payment):
@@ -181,16 +239,22 @@ def terminal_issues_receipt(db, payment) -> bool:
     /pos/confirm-ын карт; толгойгүй хуучин аппын хэрэглэгчийг _mark_pos_app POSAPP болгож
     тэмдэглэдэг), (2) арга CARD/CASH, (3) тохиргоо асаалттай — ерөнхий анхдагч 2026-10-15-аас
     УНТРААЛТТАЙ (10-14-нд асаалттай байсан; аппын шинэ хувилбар Ontime-гүй), ерөнхий эсвэл
-    зогсоолд асааж энэ арга сонгогдсон, (4) ААН-ийн (ТТД-тэй) баримт БИШ — терминал (Ontime) ИРГЭНИЙ баримт
+    зогсоолд асааж энэ арга сонгогдсон, (4) ААН-ийн баримт БИШ — терминал (Ontime) ИРГЭНИЙ баримт
     хэвлэдэг тул байгууллагын НӨАТ-ын баримтыг систем гаргасаар байна (түүхэн цуцлалт
-    `vat_cancel_duplicates --pos-app` ч ААН-ийг хөндөхгүй — нэг бодлого). Зогсоол
+    `vat_cancel_duplicates --pos-app` ч ААН-ийг хөндөхгүй; тэр нь customer_tin-тэй БҮХ төлбөрийг —
+    иргэний регистрийг ч — алгасдаг, илүү болгоомжтой). Зогсоол
     тодорхойгүй бол ерөнхий утга. Тохиргоо уншигдахгүй бол False — систем баримт
-    гаргана: баримтгүй үлдэхээс давхардал дээр."""
+    гаргана: баримтгүй үлдэхээс давхардал дээр.
+    (4)-ийг ЗӨВХӨН хүлээн авагчийн төрлөөр (COMPANY) шийднэ — 2026-10-16 хяналт: дурын
+    customer_tin-ээр алгасдаг байсан тул /cash-д иргэний регистр (АА00112233) өгвөл терминалын
+    баримт + msgbill баримт ДАВХАР гардаг байв. receiver_type хоосон (хуучин мөр) бол
+    enqueue_receipt-тэй ижил: customer_tin-тэй → COMPANY."""
     method = (payment.payment_method or "").upper()
     if method not in ("CARD", "CASH") or not is_pos_app_payment(payment):
         return False
-    if (getattr(payment, "ebarimt_receiver_type", None) == "COMPANY"
-            or (getattr(payment, "customer_tin", None) or "").strip()):
+    rtype = (getattr(payment, "ebarimt_receiver_type", None)
+             or ("COMPANY" if (getattr(payment, "customer_tin", None) or "").strip() else "CITIZEN"))
+    if rtype == "COMPANY":
         return False
     site = payment_site(payment)
     try:
@@ -284,8 +348,14 @@ def record_terminal_receipt(db, payment, teg_ddtd, *, replaced=(), username="sys
     return rec
 
 
+def qpay_receipt(payment) -> bool:
+    """Энэ төлбөрийн (шинэ) баримтыг QPay ebarimt_v3 гаргах уу — receipt_provider-ийн эхний
+    салбар; сайт/msgbill тохиргоо уншихгүй (жагсаалтын туг бөөнөөр бодоход)."""
+    return bool(settings.qpay_ebarimt and payment.provider == "QPAY" and payment.provider_payment_id)
+
+
 def receipt_provider(payment):
-    if settings.qpay_ebarimt and payment.provider == "QPAY" and payment.provider_payment_id:
+    if qpay_receipt(payment):
         return "QPAY"
     return "MSGBILL" if msgbill.account_enabled_for(payment_site(payment), payment.payment_method) else "POSAPI"
 
@@ -424,13 +494,38 @@ def _reissue_external(db, payment, rec, mark=None):
 # хүсэлтийн нотолгоо), харин ШИНЭ VatReceipt + FinancialJob-ийг ШИНЭ түлхүүрээр
 # (pay-{payment_id}-rcv-{n}) үүсгэнэ. Зөвшөөрөх нөхцөл — төлбөрийн БҮХ мөр:
 #   • CANCELLED (сувгаар цуцлалт батлагдсан), эсвэл
-#   • сувгийн ТОДОРХОЙ татгалзал (ажил REJECTED, ДДТД/billId/provider_ref хэзээ ч ирээгүй), эсвэл
+#   • сувгийн ТОДОРХОЙ татгалзал (ажил REJECTED, ДДТД/billId/provider_ref хэзээ ч ирээгүй,
+#     тодорхойгүй оролдлого ОГТ байгаагүй — raw.uncertain), эсвэл
 #   • сувагт ОГТ илгээгээгүй (ажил attempts 0).
 # UNKNOWN/REVIEW/SENT/PENDING(RETRY)/SENDING/CANCEL_PENDING/EXTERNAL → 409 хэвээр.
+#
+# Хяналт (2026-10-16) — МӨРИЙН ТОО/ДҮН: орлогдоогүй (leaf) мөр БҮРИЙГ дахин гаргадаг байсан тул
+# нэг төлбөрт бүтэн дүнтэй 2 мөртэй төлбөрийг (audit1014: QPay 10146653, a153bd38, ba638bc4,
+# c1a1108d, f7bb0ae7 — хоёулаа SENT, ажилгүй; эсвэл хуучин цуцалсан давхар мөр) цуцлаад солиход
+# нэг payment_id дээр 2 create, 2 идэвхтэй баримт (төлбөрөөс 2 дахин их) гарах байв. Одоо:
+#   • leaf ЯГ 1, эсвэл олон бол ЗӨВХӨН үндсэн (pay-{id}) + өрийн (pay-{id}-comp-*) хуваалт
+#     (орлуулалтын гинжийг эх түлхүүр хүртэл мөшгөнө) БА дүнгийн нийлбэр = төлбөрийн дүн;
+#   • QPay: ЯГ 1 leaf, өөр төлбөр ИЖИЛ QPay payment_id-тэй бол татгалзана (qpay_review-тэй нэг дүрэм);
+#   • QPay-ийн ИЛГЭЭГДСЭН баримтыг цуцалсны (DELETE) дараах дахин create TEST дээр батлагдаагүй
+#     (QPay цуцалсан ДДТД-г буцааж болзошгүй) — settings.qpay_recreate_after_cancel (анхдагч OFF).
+# Ибаримт хуудасны товч ЭНЭ дүрмээр (receiver_change_flags → vat-receipts `can_change_receiver`).
 RCV_KEY = "pay-{pid}-rcv-{n}"
 RECEIVER_LOCKED = ("Хүлээн авагчийг солих боломжгүй: баримт илгээгдсэн/үр дүн тодорхойгүй мөр байна. "
                    "ИЛГЭЭГДСЭН баримтыг эхлээд «Цуцлах»-аар сувгаар цуцална уу; «Тулгах шаардлагатай» "
                    "(REVIEW) баримтыг сувгаар тулгаж ДДТД-г батална уу — давхар баримт гаргахгүй.")
+RECEIVER_MULTI = ("Хүлээн авагчийг солих боломжгүй: энэ төлбөрт орлогдоогүй {n} баримтын мөр байна "
+                  "(нийт {total}₮, төлбөр {amount}₮) — мөр бүрээс ШИНЭ баримт гарч ДАВХАРДАНА. "
+                  "Санхүү эхлээд давхар мөрүүдийг сувгаар тулгана уу (ДДТД түүх).")
+QPAY_RECEIVER_MULTI = ("Хүлээн авагчийг солих боломжгүй: QPay төлбөрт {n} баримтын мөр байна — QPay нэг "
+                       "гүйлгээнд НЭГ л баримт; дахин гаргавал нэг payment_id дээр олон create болно. "
+                       "Санхүү QPay-тэй тулгана уу.")
+QPAY_RECEIVER_SHARED = ("Хүлээн авагчийг солих боломжгүй: энэ QPay гүйлгээ (payment_id {pid}) өөр төлбөрийн "
+                        "мөрт ч бүртгэгдсэн — QPay create нөгөө төлбөрийн баримтыг буцааж эсвэл давхар баримт "
+                        "үүсгэж болзошгүй. Санхүү тулгана уу.")
+QPAY_RECREATE_REFUSAL = ("Хүлээн авагчийг солих боломжгүй: QPay-ийн ИЛГЭЭГДСЭН баримтыг цуцалсны дараа ижил "
+                         "QPay гүйлгээнд шинэ баримт үүсгэх (DELETE → create) нь TEST дээр батлагдаагүй — QPay "
+                         "цуцалсан ДДТД-г буцааж болзошгүй. Санхүү QPay-тэй тулгана уу "
+                         "(батлагдсаны дараа PARKING_QPAY_RECREATE_AFTER_CANCEL=true).")
 
 
 def _jobs_by_receipt(jobs) -> dict:
@@ -473,11 +568,14 @@ def never_sent(rec, jobs) -> bool:
 
 
 def definitely_rejected(rec, jobs) -> bool:
-    """Сувгийн ТОДОРХОЙ татгалзал: ажил REJECTED (HTTP 400/404/409/422 create-д), мөр FAILED,
-    ДДТД/billId/provider_ref хэзээ ч ирээгүй, qpay_review-ийн тодорхойгүй оролдлогогүй."""
+    """Сувгийн ТОДОРХОЙ татгалзал: ажил REJECTED (HTTP 400/404/422 create-д), мөр FAILED,
+    ДДТД/billId/provider_ref хэзээ ч ирээгүй, qpay_review-ийн тодорхойгүй оролдлогогүй, БА
+    өмнөх АЛЬ Ч оролдлого тодорхойгүй байгаагүй (raw.uncertain — ж: ReadTimeout → 422)."""
     if not jobs or rec.status != "FAILED" or any(j.status != REJECTED_JOB for j in jobs):
         return False
     if (rec.ebarimt_id or "").strip() or (rec.provider_ref or "").strip():
+        return False
+    if had_uncertain(rec):
         return False
     raw = rec.raw if isinstance(rec.raw, dict) else {}
     if any(isinstance(v, dict) and (v.get("invalid_bill_id") or v.get("bill_id")) for v in raw.values()):
@@ -493,30 +591,50 @@ def _next_rcv_index(payment_id, jobs) -> int:
     return max(seen, default=0) + 1
 
 
-def change_receiver(db, payment, *, customer_tin, receiver_type, username="system",
-                    allow_duplicate=False, mark=None) -> dict:
-    """Хүлээн авагчийг (ААН регистр/ТТД ↔ иргэн) солиж ШИНЭ баримт гаргана. Commit хийхгүй.
+def _money(v) -> Decimal:
+    return Decimal(str(v if v is not None else 0)).quantize(Decimal("0.01"))
 
-    Буцаах: {"ok": False, "pending": True, "receiver_changed": True, receipts, replaced, keys,
-    from, to} эсвэл {"ok": False, "conflict": True, "error"} (дуудагч 409, rollback).
-    Хуучин мөр: CANCELLED хэвээр (raw.superseded_by), ТАТГАЛЗСАН/илгээгээгүй мөр нь CANCELLED
-    («баримт үүсээгүй» тэмдэгтэй) болно — нэг төлбөрт НЭГ л идэвхтэй баримт (мөр бүрд)."""
-    db.query(Payment).enable_eagerloads(False).filter_by(id=payment.id).with_for_update().one()
-    jobs = (db.query(FinancialJob).filter(FinancialJob.payment_id == payment.id,
-            FinancialJob.kind == "RECEIPT").order_by(FinancialJob.id)
-            .populate_existing().with_for_update().all())
-    recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
-            .order_by(VatReceipt.created_at, VatReceipt.id).populate_existing().with_for_update().all())
+
+def _root_key(rec_id, by_id: dict, keymap: dict) -> str | None:
+    """Мөрийн ЭХ түлхүүр: орлуулалтын гинжийг (raw.receiver_change.replaces, replace-{id})
+    анхны мөр хүртэл мөшгөнө — pay-{id} (үндсэн), pay-{id}-comp-{comp} (өр) г.м. Ажилгүй
+    (09-19-өөс өмнөх) мөр → None."""
+    seen, rid = set(), rec_id
+    while rid and rid not in seen:
+        seen.add(rid)
+        r = by_id.get(rid)
+        raw = r.raw if r is not None and isinstance(r.raw, dict) else {}
+        rc = raw.get("receiver_change")
+        if isinstance(rc, dict) and rc.get("replaces"):
+            rid = rc["replaces"]
+            continue
+        key = keymap.get(rid) or ""
+        if key.startswith("replace-"):
+            rid = key[len("replace-"):]
+            continue
+        return key or None
+    return None
+
+
+def receiver_change_plan(payment, recs, jobs, *, shared_qpay: bool = False,
+                         assume_cancel_sent: bool = False) -> dict:
+    """Хүлээн авагч солих боломжтой эсэх — change_receiver ба Ибаримт хуудасны товч
+    (vat-receipts `can_change_receiver`) НЭГ дүрэм. DB-д хүрэхгүй.
+
+    assume_cancel_sent=True — UI «Байгууллагаар дахин гаргах» эхлээд «Цуцлах»-ыг дууддаг:
+    манай (системийн) SENT баримтыг цуцлагдсан гэж үзэж шалгана.
+    Буцаах: {"ok": True, leaves, reasons, by_rec} эсвэл {"ok": False, code, error, blockers?}."""
     if not recs:
-        return {"ok": False, "conflict": True,
+        return {"ok": False, "code": "NO_RECEIPT",
                 "error": "Энэ төлбөрт НӨАТ баримтын мөр алга — санхүү тулгана уу"}
-    if not allow_duplicate and duplicate_guarded(recs):
-        return {**DUPLICATE_REFUSAL, "conflict": True}
     by_rec = _jobs_by_receipt(jobs)
     reasons, blockers = {}, []
     for r in recs:
         js = by_rec.get(r.id, [])
         if r.status == "CANCELLED":
+            reasons[r.id] = "CANCELLED"
+        elif (assume_cancel_sent and r.status == "SENT" and (r.ebarimt_id or "").strip()
+              and is_system_receipt(r)):
             reasons[r.id] = "CANCELLED"
         elif definitely_rejected(r, js):
             reasons[r.id] = error_class(r) or ERR_REJECTED
@@ -526,11 +644,134 @@ def change_receiver(db, payment, *, customer_tin, receiver_type, username="syste
             blockers.append({"receipt_id": r.id, "status": r.status,
                              "jobs": [f"{j.status}/{j.attempts}" for j in js]})
     if blockers:
-        return {"ok": False, "conflict": True, "error": RECEIVER_LOCKED, "blockers": blockers}
+        return {"ok": False, "code": "LOCKED", "error": RECEIVER_LOCKED, "blockers": blockers}
     leaves = leaf_receipts(recs, jobs)
     if not leaves:
-        return {"ok": False, "conflict": True,
+        return {"ok": False, "code": "NO_LEAF",
                 "error": "Орлох баримтын мөр тодорхойгүй — санхүү тулгана уу"}
+    to_qpay = qpay_receipt(payment)
+    if to_qpay or any((r.provider or "") == "QPAY" for r in leaves):
+        if len(leaves) != 1:
+            return {"ok": False, "code": "QPAY_MULTI", "error": QPAY_RECEIVER_MULTI.format(n=len(leaves))}
+        if shared_qpay:
+            return {"ok": False, "code": "QPAY_SHARED",
+                    "error": QPAY_RECEIVER_SHARED.format(pid=payment.provider_payment_id)}
+        if to_qpay and not settings.qpay_recreate_after_cancel and any(
+                (r.provider or "") == "QPAY" and (r.ebarimt_id or "").strip()
+                and reasons.get(r.id) == "CANCELLED" for r in recs):
+            return {"ok": False, "code": "QPAY_RECREATE", "error": QPAY_RECREATE_REFUSAL}
+    elif len(leaves) > 1:
+        main = f"pay-{payment.id}"
+        comp = re.compile(rf"^pay-{re.escape(str(payment.id))}-comp-.+")
+        keymap: dict = {}
+        for j in jobs:
+            keymap.setdefault(j.receipt_id, str((j.payload or {}).get("idempotency_key") or ""))
+        by_id = {r.id: r for r in recs}
+        roots = [_root_key(r.id, by_id, keymap) for r in leaves]
+        total = sum((_money(r.amount) for r in leaves), Decimal("0.00"))
+        split = (roots.count(main) == 1 and len(set(roots)) == len(roots)
+                 and all(k == main or (k and comp.match(k)) for k in roots))
+        if not split or total != _money(payment.amount):
+            return {"ok": False, "code": "MULTI_LEAF", "roots": roots,
+                    "error": RECEIVER_MULTI.format(n=len(leaves), total=f"{total:,.0f}",
+                                                   amount=f"{_money(payment.amount):,.0f}")}
+    return {"ok": True, "leaves": leaves, "reasons": reasons, "by_rec": by_rec}
+
+
+def receiver_change_flags(db, receipts) -> dict:
+    """Ибаримт жагсаалтын (vat-receipts) мөр бүрд: {superseded, can_change_receiver, cancel_ddtds}.
+
+    can_change_receiver — «Байгууллагаар (дахин) гаргах»/«Дугаар засах»/«Иргэнээр» товчийг
+    харуулах эсэх: change_receiver-тэй НЭГ дүрэм (receiver_change_plan; SENT мөрөнд «Цуцлах»-ыг
+    тооцно). cancel_ddtds — SENT мөрөнд: cancel-ebarimt ЭНЭ төлбөрийн цуцлах БҮХ ДДТД (баталгаажуулалтын
+    текстэд). Төлбөр бүрийн БҮХ мөр/ажлыг бөөнөөр уншина (жагсаалтад багтаагүй мөр ч тооцогдоно)."""
+    from sqlalchemy import func
+    pids = sorted({r.payment_id for r in receipts if r.payment_id})
+    out: dict = {}
+    if not pids:
+        return out
+    pays, recs_by, jobs_by = {}, {}, {}
+    for i in range(0, len(pids), 500):
+        chunk = pids[i:i + 500]
+        for p in db.query(Payment).enable_eagerloads(False).filter(Payment.id.in_(chunk)).all():
+            pays[p.id] = p
+        for r in (db.query(VatReceipt).filter(VatReceipt.payment_id.in_(chunk))
+                  .order_by(VatReceipt.created_at, VatReceipt.id).all()):
+            recs_by.setdefault(r.payment_id, []).append(r)
+        for j in (db.query(FinancialJob).filter(FinancialJob.payment_id.in_(chunk),
+                                                FinancialJob.kind == "RECEIPT")
+                  .order_by(FinancialJob.id).all()):
+            jobs_by.setdefault(j.payment_id, []).append(j)
+    qids = sorted({(p.provider_payment_id or "").strip() for p in pays.values()
+                   if (p.provider_payment_id or "").strip()})
+    shared: set = set()
+    for i in range(0, len(qids), 500):
+        shared.update(pid for (pid,) in db.query(Payment.provider_payment_id)
+                      .filter(Payment.provider_payment_id.in_(qids[i:i + 500]))
+                      .group_by(Payment.provider_payment_id).having(func.count(Payment.id) > 1).all())
+    plans, gone_by = {}, {}
+
+    def plan(pid, assume):
+        if (pid, assume) not in plans:
+            p = pays.get(pid)
+            plans[(pid, assume)] = (
+                receiver_change_plan(p, recs_by.get(pid, []), jobs_by.get(pid, []),
+                                     shared_qpay=(p.provider_payment_id or "").strip() in shared,
+                                     assume_cancel_sent=assume)
+                if p is not None and p.status == "PAID" else {"ok": False})
+        return plans[(pid, assume)]
+
+    for r in receipts:
+        pid = r.payment_id
+        recs, jobs = recs_by.get(pid, []), jobs_by.get(pid, [])
+        if pid not in gone_by:
+            gone_by[pid] = superseded_ids(recs, jobs)
+        raw = r.raw if isinstance(r.raw, dict) else {}
+        sup = r.id in gone_by[pid] or bool(raw.get("superseded"))
+        sent = r.status == "SENT" and bool((r.ebarimt_id or "").strip())
+        own = [j for j in jobs if j.receipt_id == r.id]
+        eligible = (not sup and is_system_receipt(r)
+                    and (sent or r.status == "CANCELLED"
+                         or (r.status == "FAILED" and definitely_rejected(r, own))))
+        out[r.id] = {
+            "superseded": sup,
+            "can_change_receiver": bool(eligible and plan(pid, sent)["ok"]),
+            "cancel_ddtds": ([x.ebarimt_id for x in recs
+                              if x.status in ("SENT", "CANCEL_PENDING") and x.ebarimt_id] if sent else []),
+        }
+    return out
+
+
+def change_receiver(db, payment, *, customer_tin, receiver_type, username="system",
+                    allow_duplicate=False, mark=None) -> dict:
+    """Хүлээн авагчийг (ААН регистр/ТТД ↔ иргэн) солиж ШИНЭ баримт гаргана. Commit хийхгүй.
+
+    Буцаах: {"ok": False, "pending": True, "receiver_changed": True, receipts, replaced, keys,
+    from, to} эсвэл {"ok": False, "conflict": True, "error", code} (дуудагч 409, rollback).
+    Хуучин мөр: CANCELLED хэвээр (raw.superseded_by), ТАТГАЛЗСАН/илгээгээгүй мөр нь CANCELLED
+    («баримт үүсээгүй» тэмдэгтэй) болно — нэг төлбөрт НЭГ л идэвхтэй баримт (мөр бүрд).
+    Мөрийн тоо/дүн/QPay-ийн хамгаалалт: receiver_change_plan."""
+    db.query(Payment).enable_eagerloads(False).filter_by(id=payment.id).with_for_update().one()
+    jobs = (db.query(FinancialJob).filter(FinancialJob.payment_id == payment.id,
+            FinancialJob.kind == "RECEIPT").order_by(FinancialJob.id)
+            .populate_existing().with_for_update().all())
+    recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
+            .order_by(VatReceipt.created_at, VatReceipt.id).populate_existing().with_for_update().all())
+    if not recs:
+        return {"ok": False, "conflict": True, "code": "NO_RECEIPT",
+                "error": "Энэ төлбөрт НӨАТ баримтын мөр алга — санхүү тулгана уу"}
+    if not allow_duplicate and duplicate_guarded(recs):
+        return {**DUPLICATE_REFUSAL, "conflict": True}
+    shared = False
+    if qpay_receipt(payment) or any((r.provider or "") == "QPAY" for r in recs):
+        from .qpay_review import shared_qpay_payment
+        shared = shared_qpay_payment(db, payment)
+    plan = receiver_change_plan(payment, recs, jobs, shared_qpay=shared)
+    if not plan["ok"]:
+        return {"ok": False, "conflict": True, "code": plan["code"],
+                "review_required": plan["code"] != "LOCKED", "error": plan["error"],
+                "blockers": plan.get("blockers")}
+    leaves, reasons, by_rec = plan["leaves"], plan["reasons"], plan["by_rec"]
     old = {"customer_tin": payment.customer_tin, "receiver_type": payment.ebarimt_receiver_type}
     new = {"customer_tin": customer_tin, "receiver_type": receiver_type}
     payment.customer_tin, payment.ebarimt_receiver_type = customer_tin, receiver_type
@@ -581,6 +822,15 @@ def change_receiver(db, payment, *, customer_tin, receiver_type, username="syste
             "error": "Шинэ хүлээн авагчаар баримтын ажил хадгалагдлаа — дахин төлөхгүй",
             "receipts": [r.id for r in created], "replaced": [r.id for r in leaves],
             "keys": keys, "reasons": reasons, "from": old, "to": new}
+
+
+# «Дахин үүсгэх»/бөөн нөхөлт — худалдан авагчийн дугаараас болж ТАТГАЛЗСАН ажлыг ИЖИЛ дугаараар
+# дахин илгээвэл дахин унана (2026-10-16 хяналт): татгалзаж «Дугаар засах»/«Иргэнээр» руу заана.
+RECEIVER_REJECTED_REFUSAL = ("Суваг худалдан авагчийн дугаарыг ТАТГАЛЗСАН (баримт үүсээгүй) — ижил дугаараар "
+                             "дахин илгээвэл дахин унана. Ибаримт хуудасны «Дугаар засах» (зөв регистр) эсвэл "
+                             "«Иргэнээр»-ийг ашиглана уу.")
+UNCERTAIN_RETRY_REFUSAL = ("Энэ баримтын өмнөх оролдлогын үр дүн ТОДОРХОЙГҮЙ байсан (баримт үүссэн байж "
+                           "болно) — сувгаар тулгаж ДДТД-г батална уу; дахин илгээгээгүй")
 
 
 def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplicate=False,
@@ -691,9 +941,19 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
             return {"ok": False, "review_required": True,
                     "error": "Баримт өмнө үүссэн байж болно. Сувгаар тулгаж ДДТД-г батална уу; дахин илгээгээгүй"}
         pending_jobs.append((job, rec))
+    rejected = [(job, rec) for job, rec in pending_jobs if job.status == REJECTED_JOB]
+    if any(rec is not None and error_class(rec) == ERR_REJECTED_RECEIVER for _, rec in rejected):
+        # Худалдан авагчийн дугаараас болж татгалзсан — ИЖИЛ дугаараар дахин илгээвэл дахин
+        # унана (2026-10-16 хяналт); бөөн нөхөлт алгасна (receiver_rejected)
+        return {"ok": False, "receiver_rejected": True, "error": RECEIVER_REJECTED_REFUSAL}
+    if any(rec is not None and had_uncertain(rec) and (job.payload or {}).get("provider") != "MSGBILL"
+           for job, rec in rejected):
+        # Өмнөх оролдлого тодорхойгүй (timeout/5xx …) байсан QPay/PosAPI create-ийг дахин
+        # илгээхгүй — тэр оролдлогоор баримт үүссэн байж болно (msgbill ижил түлхүүрээр аюулгүй)
+        return {"ok": False, "review_required": True, "error": UNCERTAIN_RETRY_REFUSAL}
     for job, rec in pending_jobs:
         if job.status == REJECTED_JOB:
-            # Суваг хүсэлтийг ТОДОРХОЙ татгалзсан (HTTP 400/404/409/422) — баримт үүсээгүй
+            # Суваг хүсэлтийг ТОДОРХОЙ татгалзсан (HTTP 400/404/422) — баримт үүсээгүй
             # тул ИЖИЛ ажлыг (ижил түлхүүр/хүлээн авагч) дахин илгээх нь аюулгүй. Оператор
             # «Дахин үүсгэх»/бөөн нөхөлтөөр л (ж: QPay-ийн мерчант талын түр татгалзал);
             # дугаар буруу бол «Дугаар засах»/«Иргэнээр» (change_receiver) — шинэ мөр.
@@ -701,6 +961,11 @@ def retry_payment_receipts(db, payment, *, reissue_external=False, allow_duplica
             job.lease_token, job.lease_until = None, None
             if rec is not None:
                 rec.status, rec.receipt_url = "PENDING", None
+                # Хуучин ангиллыг (raw.error) ИДЭВХТЭЙ гэж харуулахгүй — түүх errors_prev-д
+                raw = dict(rec.raw) if isinstance(rec.raw, dict) else {}
+                if "error" in raw:
+                    raw["errors_prev"] = (list(raw.get("errors_prev") or []) + [raw.pop("error")])[-5:]
+                    rec.raw = raw
             continue
         if job.status == "BLOCKED" and job.attempts == 0:
             if terminal_now is None:
@@ -754,6 +1019,13 @@ def claim_one(db, now=None):
         rec = db.get(VatReceipt, job.receipt_id)
         if rec and not rec.ebarimt_id:
             rec.status, rec.receipt_url = "REVIEW", job.last_error
+            # Ангилал ТОДОРХОЙГҮЙ (өмнөх оролдлогын REJECTED ангилал үлдэхгүй) + наалдамтгай тэмдэг
+            rec.raw = {**(rec.raw if isinstance(rec.raw, dict) else {}),
+                       "error": {"class": ERR_UNCERTAIN, "provider": job.payload.get("provider"),
+                                 "http_status": None, "text": job.last_error, "job_status": job.status,
+                                 "attempt": job.attempts,
+                                 "at": now.isoformat(timespec="seconds")}}
+            mark_uncertain(rec, attempt=job.attempts, text=job.last_error, source="claim_one")
         db.commit()
         return "quarantined"
     job.status = "SENDING"
@@ -867,7 +1139,28 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
             return
         if rec and result.get("msgbillId"):
             rec.provider_ref = result["msgbillId"]
-        if rec and result.get("billId"):
+        # Хяналт (2026-10-16): цуцалсны дараа дахин create хийхэд суваг (QPay) ЦУЦЛАГДСАН хуучин
+        # ДДТД-г буцааж болзошгүй — тэр дугаарыг шинэ мөрөнд SENT гэж бичвэл ТЕГ-т цуцлагдсан
+        # баримтыг «байгууллагын баримт» гэж хэвлэнэ. SENT болгохгүй — тулгалт (REVIEW/UNKNOWN).
+        returned_cancelled = None
+        if rec and result.get("billId") and not (rec.ebarimt_id or "").strip():
+            bill = str(result["billId"]).strip()
+            if db.query(VatReceipt.id).filter(VatReceipt.payment_id == job.payment_id,
+                                              VatReceipt.id != rec.id,
+                                              VatReceipt.status == "CANCELLED",
+                                              VatReceipt.ebarimt_id == bill).first() is not None:
+                returned_cancelled = bill
+                label = {"QPAY": "QPay", "MSGBILL": "msgbill", "POSAPI": "PosAPI"}.get(
+                    data.get("provider") or "", "Суваг")
+                error = f"{label} цуцалсан ДДТД-г буцаав — тулгана уу (ДДТД {bill})"
+                err_class, err_status = ERR_UNCERTAIN, None
+                rec.raw = {**(rec.raw if isinstance(rec.raw, dict) else {}),
+                           "returned_cancelled": {"bill_id": bill, "provider": data.get("provider"),
+                                                  "lottery": result.get("lottery"),
+                                                  "at": datetime.utcnow().isoformat(timespec="seconds")}}
+                log.error("баримт %s (payment=%s): суваг ЦУЦЛАГДСАН ДДТД %s-г буцаав — SENT болгосонгүй",
+                          rec.id, job.payment_id, bill)
+        if rec and result.get("billId") and not returned_cancelled:
             assigned = assign_ebarimt_id(db, rec, result["billId"], source="outbox",
                 lottery=None if data.get("receiver_type") == "COMPANY" else result.get("lottery"),
                 raw={**{k: (result.get("raw") or {}).get(k) for k in
@@ -894,7 +1187,9 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
                 # «Дахин үүсгэх»-ээр шийднэ (retry_payment_receipts, change_receiver).
                 job.status = REJECTED_JOB
             else:
-                job.status = "RETRY" if safe_retry and job.attempts < 24 else "UNKNOWN"
+                # Цуцлагдсан ДДТД буцаасан бол дахин илгээхгүй (msgbill ижил түлхүүрээр ч ижлийг буцаана)
+                job.status = ("RETRY" if safe_retry and job.attempts < 24 and not returned_cancelled
+                              else "UNKNOWN")
                 job.next_attempt_at = datetime.utcnow() + timedelta(seconds=min(3600, 30 * 2**min(job.attempts, 7)))
             job.last_error = error
             if rec and not rec.ebarimt_id:
@@ -908,6 +1203,9 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
                                          "text": error, "job_status": job.status,
                                          "attempt": job.attempts,
                                          "at": datetime.utcnow().isoformat(timespec="seconds")}}
+                    if not rejected:
+                        # Наалдамтгай: дараагийн 4xx энэ мөрийг «тодорхой татгалзсан» болгохгүй
+                        mark_uncertain(rec, attempt=job.attempts, text=error)
         else:
             job.status, job.last_error = "DONE", None
         job.lease_until, job.lease_token = None, None

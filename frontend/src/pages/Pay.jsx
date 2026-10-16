@@ -130,7 +130,10 @@ export default function Pay() {
     setBusy(true); setError('')
     try {
       const body = { session_id: session.session_id }
-      if (vatType === 'ORG') body.customer_tin = orgTin.trim()
+      // receiver_type: COMPANY — жолооч «Байгууллага»-г ИЛ сонгосон: 7 оронтой биш бол сервер 422
+      // (чимээгүй иргэний баримт болгохгүй). Сонголтгүй (POS апп) хүсэлтийг сервер хаахгүй — иргэн
+      // + buyer_warning (2026-10-16 хяналт)
+      if (vatType === 'ORG') { body.customer_tin = orgTin.trim(); body.receiver_type = 'COMPANY' }
       // One explicit request. An uncertain provider response requires reconciliation.
       const inv = await publicApi('/api/payments/qpay/invoice', { method: 'POST', body })
       setPayment(inv)
