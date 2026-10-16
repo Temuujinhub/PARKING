@@ -140,16 +140,19 @@ PAID болмогц систем хаалтыг автоматаар нээж, e
 `print_data` + `qr_data`-г шууд хэвлэнэ (доор §11).
 
 ### POST /api/payments/cash  (OPERATOR+)
-`{"session_id": "uuid", "customer_tin"?: "ААН ТТД", + гадна баримтын талбарууд (доор)}` —
-кассын бэлэн мөнгөний төлбөр. Хаалт автоматаар нээгдэнэ, e-Barimt систем үүсгэнэ.
+`{"session_id": "uuid", "payer_reg_no"?: "ААН регистр/ТТД/иргэний регистр", + гадна баримтын
+талбарууд (доор)}` — кассын бэлэн мөнгөний төлбөр. Хаалт автоматаар нээгдэнэ, e-Barimt систем
+үүсгэнэ. Худалдан авагч `pos/confirm`-той ИЖИЛ дүрмээр (`payer_reg_no`, хуучин `customer_tin`;
+2026-10-16 хүртэл `payer_reg_no`-г уншдаггүй байв); хариунд `receipt_type`, `payer_reg_no`.
 Хариу (2026-10-15-аас): `{ok, status, payment_id, amount, session_status, amount_due, …,
 barrier_*}` + `pos/confirm`-той ИЖИЛ хэвлэх багц `ebarimt_id, lottery_code, qr_data, receipt,
 print_data` (POS аппын хүсэлтэд msgbill баримтыг шууд илгээж ≤6с хүлээнэ — доор; веб касс
 хүлээхгүй).
 
 ### POST /api/payments/transfer  (pay_transfer эрхтэй)
-`{"session_id": "uuid", "customer_tin"?, + гадна баримтын талбарууд}` — дансаар (шилжүүлгээр)
-төлбөр баталгаажуулах (online operator). e-Barimt msgbill-ээр BANK_TRANSFER аргаар үүснэ.
+`{"session_id": "uuid", "payer_reg_no"? | "customer_tin"?, + гадна баримтын талбарууд}` — дансаар
+(шилжүүлгээр) төлбөр баталгаажуулах (online operator). e-Barimt msgbill-ээр BANK_TRANSFER аргаар
+үүснэ. Худалдан авагч `cash`-тэй ижил; хариунд `receipt_type`, `payer_reg_no`.
 
 ### POST /api/payments/pos/confirm  (OPERATOR+, **PAX аппын гол endpoint**)
 Карт амжилттай уншигдсаны ДАРАА дуудна:
@@ -239,6 +242,22 @@ EXTERNAL-ийг retry/бөөн нөхөлт/цуцлалт хөндөхгүй (r
 гэж ТЕГ тулгалтаар цуцалсан (`DUPLICATE_OF_POS_TERMINAL`) баримтыг **409**-өөр хамгаална —
 `{"allow_duplicate": true}` ил зөвшөөрлөөр л. Бүгд цуцлагдсан төлбөрийн орлох мөр тохиргоо
 асаалттай тул EXTERNAL болж бүртгэгдвэл `200 {created: true, external: true}`.
+
+**Хүлээн авагч солих** (2026-10-16): `{"customer_tin": "…"}` (ААН регистр/ТТД/иргэний регистр) эсвэл
+`{"receiver_type": "CITIZEN"}`. Сувагт огт илгээгээгүй ажил → байранд нь засна. Төлбөрийн БҮХ мөр
+CANCELLED (цуцлалт батлагдсан) эсвэл сувгийн ТОДОРХОЙ татгалзал (ажил `REJECTED` — create-ийн HTTP
+400/404/409/422, ДДТД/billId хэзээ ч ирээгүй) бол хуучин ажлыг ӨӨРЧЛӨХГҮЙ, ШИНЭ баримтын мөр + ажил
+ШИНЭ түлхүүрээр (`pay-{payment_id}-rcv-{n}`) → `200 {pending, receiver_changed, receipts[], replaced[],
+keys[], from, to}`; хуучин татгалзсан мөр CANCELLED («баримт үүсээгүй»), AuditLog
+`EBARIMT_RECEIVER_CHANGE` (хэн, хуучин/шинэ хүлээн авагч). SENT/REVIEW/UNKNOWN/RETRY/SENDING мөртэй
+бол **409** (`EBARIMT_RETRY_REFUSED`, эхлээд `cancel-ebarimt`). QPay сувагт байгууллага зөвхөн
+7 оронтой регистр — өөр бол **422**. Тодорхой татгалзсан ажлыг хүлээн авагчгүй `retry-ebarimt` ижил
+түлхүүрээр дахин илгээнэ (баримт үүсээгүй нь мэдэгдэж буй); тодорхойгүй (REVIEW) бол `review_required`.
+
+Сувгийн алдаа (2026-10-16): `vat_receipts.receipt_url` / `financial_jobs.last_error`-д HTTP статус +
+цэвэрлэсэн хариуны бие (≤300, токен/түлхүүргүй), `vat_receipts.raw.error = {class, provider,
+http_status, text}`; `GET /api/reports/vat-receipts` мөрөнд `error_class` (`REJECTED_RECEIVER` |
+`REJECTED` | `UNCERTAIN`).
 
 ### POST /api/reports/vat-reconcile/cancel-duplicates  (vat/reports)
 `{payment_ids[], note, dry_run=true, teg?: {payment_id: {teg_ddtd, teg_register}}}` — `teg`-ийг

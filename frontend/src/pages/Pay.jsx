@@ -84,7 +84,7 @@ export default function Pay() {
     setOrgTin(v)
     setOrgInfo(null)
     clearTimeout(orgDebounceRef.current)
-    if (v.length !== 7 && v.length < 10) return
+    if (v.length !== 7) return
     setOrgChecking(true)
     orgDebounceRef.current = setTimeout(async () => {
       try {
@@ -121,8 +121,10 @@ export default function Pay() {
   }
 
   const payQpay = async () => {
-    if (vatType === 'ORG' && !/^\d{7}$|^\d{10,14}$/.test(orgTin.trim())) {
-      setError('Байгууллагын ТТД буруу байна (7 эсвэл 10+ оронтой тоо)')
+    // QPay `ebarimt_receiver` = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7);
+    // сервер ч өөр утгад 422 өгнө (2026-10-16)
+    if (vatType === 'ORG' && !/^\d{7}$/.test(orgTin.trim())) {
+      setError('Байгууллагын 7 оронтой регистр оруулна уу (ТТД биш)')
       return
     }
     setBusy(true); setError('')
@@ -377,8 +379,8 @@ export default function Pay() {
                 {vatType === 'ORG' && (
                   <>
                     <input className="input mt-2 font-mono text-center" inputMode="numeric"
-                      placeholder="Байгууллагын ТТД (регистр)" value={orgTin} maxLength={14}
-                      onChange={(e) => onOrgTinChange(e.target.value)} aria-label="Байгууллагын ТТД" />
+                      placeholder="Байгууллагын регистр (7 орон)" value={orgTin} maxLength={7}
+                      onChange={(e) => onOrgTinChange(e.target.value)} aria-label="Байгууллагын регистр" />
                     {orgChecking && (
                       <div className="mt-2 text-xs text-slate-400 flex items-center gap-1.5">
                         <Loader2 className="animate-spin" size={13} aria-hidden /> Нэр шалгаж байна…

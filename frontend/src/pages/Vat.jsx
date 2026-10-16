@@ -1,5 +1,5 @@
 // Ибаримт — НӨАТ баримтын жагсаалт + ТЕГ мэдээ илгээлт
-import { AlertTriangle, Ban, FileSpreadsheet, History, QrCode, RefreshCw, Send, X } from 'lucide-react'
+import { AlertTriangle, Ban, Building2, FileSpreadsheet, History, QrCode, RefreshCw, Send, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate } from '../api'
 import { useDownload } from '../hooks/useDownload'
@@ -23,6 +23,20 @@ const PROVIDER_OPTS = [['', 'Суваг: бүгд'], ['QPAY', 'QPay'], ['MSGBILL
 // үүсгээгүй. Алдаа ч биш, манай баримт ч биш: «Дахин үүсгэх»/«Цуцлах» харагдахгүй.
 const PROVIDER_LABEL = { MSGBILL: 'msgbill.mn', QPAY: 'QPay', TERMINAL: 'POS терминал',
   POSAPI: 'PosAPI', 'POS-TERMINAL': 'POS терминал (Ontime)' }
+// Манай систем гаргасан баримт (receipts.SYSTEM_PROVIDERS) — зөвхөн эдгээрийг цуцалж ДАХИН
+// гаргана; терминал/гадны баримтыг (ONTIME, TERMINAL, EXT-*) цуцлах нь манай бүртгэлийг л
+// хасдаг тул дахин гаргавал ТЕГ-т давхар баримт болно
+const SYSTEM_PROVIDERS = ['QPAY', 'MSGBILL', 'POSAPI']
+// Сувгийн алдааны ангилал (2026-10-16, сервер raw.error.class / error_class):
+//   REJECTED_RECEIVER — суваг худалдан авагчийн дугаараас болж ТАТГАЛЗСАН (баримт үүсээгүй)
+//   REJECTED          — суваг татгалзсан (баримт үүсээгүй), дугаартай холбоогүй
+//   UNCERTAIN         — үр дүн тодорхойгүй (timeout/5xx) — сувгаар тулгана, дахин илгээхгүй
+const ERR_CLASS_LABEL = {
+  REJECTED_RECEIVER: 'Суваг худалдан авагчийн дугаарыг татгалзсан — баримт үүсээгүй',
+  REJECTED: 'Суваг татгалзсан — баримт үүсээгүй',
+  UNCERTAIN: 'Үр дүн тодорхойгүй — сувгаар тулгана',
+}
+const errClass = (r) => r.error_class || r.raw?.error?.class || null
 
 export default function Vat() {
   // ЛОКАЛ огноо (toISOString нь UTC — УБ-д шөнө 00:00–08:00-д «өчигдөр» гаргадаг байв)
@@ -145,6 +159,7 @@ export default function Vat() {
   // Бүтэлгүйтсэн баримтыг дахин үүсгэх — ТӨЛБӨРИЙГ ДАХИН АВАХГҮЙ.
   // QPay талд «И баримт» тохиргоо идэвхжсэний дараа хуучин баримтуудыг нөхөхөд.
   // opts: {receiver_type:'CITIZEN'} — иргэний баримт болгож; {customer_tin} — зөв дугаараар.
+  // Буцаах: true — сервер хүсэлтийг хүлээн авсан (ДДТД эсвэл ажил хадгалагдсан).
   const retry = async (r, opts = null) => {
     setRetrying(r.id)
     try {
@@ -154,23 +169,26 @@ export default function Vat() {
       // created: тохиргоо асаалттай зогсоолд орлох мөрийг «POS терминал гаргасан» гэж бүртгэв
       else toast(res.error || 'Баримтын ажил хүлээгдэж байна; дахин төлөхгүй', res.pending || res.created ? 'success' : 'error')
       reloadRows(); reloadFails()
+      return true
     } catch (e) {
       // 2026-10-13: POS терминалын давхардал гэж ТЕГ тулгалтаар цуцалсан баримт — сервер
       // 409 өгнө. Ил тод зөвшөөрөлгүйгээр дахин үүсгэвэл давхардал буцаж үүснэ.
       if (/POS терминал/.test(e.message) && /ДАВХАРДСАН/.test(e.message) && !opts?.allow_duplicate
         && window.confirm(`${e.message}\n\nДАВХАР баримт үүсгэхийг зөвшөөрөх үү?`)) {
-        await retry(r, { ...(opts || {}), allow_duplicate: true })
-        return
+        return await retry(r, { ...(opts || {}), allow_duplicate: true })
       }
       toast(e.message, 'error')
+      return false
     } finally { setRetrying(null) }
   }
   // Худалдан авагчийн дугаар буруу (QPay «customerTin», ТЕГ-т байхгүй регистр) —
   // иргэний баримт болгох эсвэл зөв дугаар өгөх. 2026-09-06: 6853959 регистртэй
   // төлбөрийн баримтыг засах ямар ч арга UI-д байгаагүй.
   // Зөвхөн ХУДАЛДАН АВАГЧИЙН дугаарын алдаа — QPay-ийн мерчант талын «… ТТД бүртгэлгүй»
-  // (түрээслэгчийн жагсаалт) алдаанд энэ товчнууд ХАМААГҮЙ (2026-09-06: буруу гарч байв)
-  const badTin = (r) => r.status === 'FAILED' && /customerTin|customer_tin|худалдан авагч/i.test(r.receipt_url || '')
+  // (түрээслэгчийн жагсаалт) алдаанд энэ товчнууд ХАМААГҮЙ (2026-09-06: буруу гарч байв).
+  // 2026-10-16: текстийн regex биш СЕРВЕРИЙН АНГИЛЛААР (REJECTED_RECEIVER) — outbox алдааны
+  // текстийг «HTTPStatusError» гэж хаядаг байсан тул товч 09-19-өөс хойш хэзээ ч гардаггүй байв
+  const badTin = (r) => r.status === 'FAILED' && errClass(r) === 'REJECTED_RECEIVER'
   const retryAsCitizen = (r) => {
     if (!window.confirm(`${r.plate_number || ''} — худалдан авагчийн дугаар (${r.customer_tin || '?'}) буруу.\n`
       + 'ИРГЭНИЙ (нэргүй) баримт болгож дахин үүсгэх үү? Байгууллага НӨАТ-аа буцаан авах боломжгүй болно.')) return
@@ -187,12 +205,61 @@ export default function Vat() {
       + 'Анхаар: терминал баримт хэвлэсэн бол ТЕГ-т нэг борлуулалт 2 баримттай болно.')) return
     retry(r, { reissue_external: true, no_terminal_receipt: true })
   }
-  const retryWithTin = (r) => {
-    const v = prompt(`${r.plate_number || ''} — зөв дугаар оруул (ААН регистр 7 орон / ТТД 11–14 орон / иргэний регистр АА00112233):`,
-      r.customer_tin || '')
-    if (v === null || !v.trim()) return
-    retry(r, { customer_tin: v.trim() })
+  // «Дугаар засах» / «Байгууллагаар (дахин) гаргах» — регистр оруулж, татвар төлөгчийн НЭРИЙГ
+  // (GET /api/payments/ebarimt/payer) харж баталгаажуулна. SENT баримтыг ЭХЛЭЭД цуцлаж (одоогийн
+  // «Цуцлах»), дараа нь шинэ хүлээн авагчаар гаргана — сервер цуцлалт батлагдаагүй (SENT/REVIEW…)
+  // баримтын хүлээн авагчийг солихгүй (409), хуучин хүсэлтийг өөрчлөхгүй, ШИНЭ мөр үүсгэнэ.
+  const [co, setCo] = useState(null)   // {row, reg, info, checking, busy, step}
+  const openCo = (r) => setCo({ row: r, reg: /^\d+$/.test(r.customer_tin || '') ? r.customer_tin : '',
+    info: null, checking: false, busy: false, step: '' })
+  const coQpay = co?.row?.provider === 'QPAY'
+  // QPay ebarimt_receiver = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7)
+  const coValid = !!co && (/^\d{7}$/.test(co.reg) || (!coQpay && /^\d{11,14}$/.test(co.reg)))
+  useEffect(() => {
+    if (!co || !coValid) return
+    const v = co.reg
+    let stop = false
+    setCo((c) => c && ({ ...c, checking: true, info: null }))
+    const t = setTimeout(async () => {
+      let info
+      try { info = await api(`/api/payments/ebarimt/payer?reg_no=${encodeURIComponent(v)}`) }
+      catch (e) { info = { error: e.message } }   // ж: «cashier» эрхгүй — нэрийг шалгахгүйгээр үргэлжилж болно
+      if (!stop) setCo((c) => (c && c.reg === v ? { ...c, info, checking: false } : c))
+    }, 400)
+    return () => { stop = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [co?.reg, coValid])
+  const submitCo = async () => {
+    const r = co.row
+    const reg = co.reg
+    const name = co.info?.found ? co.info.name : null
+    const needCancel = r.status === 'SENT'
+    if (!window.confirm(`${r.plate_number || ''} — ${fmt(r.amount)}₮\n`
+      + (needCancel ? `1) Одоогийн баримтыг (ДДТД ${r.ebarimt_id}) ТЕГ-т ЦУЦЛАНА — мөнгө буцаахгүй.\n2) ` : '')
+      + `Байгууллагын баримт гаргана: ${reg}${name ? ` — ${name}` : ' (нэр шалгагдаагүй)'}\n\nҮргэлжлүүлэх үү?`)) return
+    setCo((c) => ({ ...c, busy: true }))
+    if (needCancel) {
+      setCo((c) => ({ ...c, step: 'Одоогийн баримтыг цуцалж байна…' }))
+      setCancelling(r.id)
+      try {
+        await api(`/api/payments/${r.payment_id}/cancel-ebarimt`,
+          { method: 'POST', body: { note: `Байгууллагаар дахин гаргах (${reg})` } })
+      } catch (e) {
+        // Цуцлалт батлагдаагүй (msgbill CANCEL_PENDING г.м) — шинэ баримт ГАРГАХГҮЙ
+        toast(`${e.message} — шинэ баримт гаргаагүй`, 'error')
+        reloadRows(); setCo(null); return
+      } finally { setCancelling(null) }
+    }
+    setCo((c) => ({ ...c, step: 'Шинэ баримт үүсгэж байна…' }))
+    const ok = await retry(r, { customer_tin: reg })
+    if (!ok && needCancel) {
+      toast('Баримт ЦУЦЛАГДСАН боловч шинэ баримт үүссэнгүй — тэр мөрийн «Байгууллагаар гаргах»-аар дахин оролдоно уу', 'error')
+    }
+    setCo(null)
   }
+  // SENT (системийн) баримт → цуцлаад дахин гаргах; CANCELLED (орлогдоогүй) → шууд гаргах
+  const canCo = (r) => SYSTEM_PROVIDERS.includes(r.provider)
+    && ((r.status === 'SENT' && r.ebarimt_id) || (r.status === 'CANCELLED' && !r.raw?.superseded_by && !r.raw?.superseded))
 
   // Баримт ЦУЦЛАХ (буцаалт) — мөнгө буцаахгүй, зөвхөн татварын баримт.
   // Суваг бүрээр: QPay → DELETE ebarimt_v3, PosAPI → DELETE /rest/receipt,
@@ -414,6 +481,12 @@ export default function Vat() {
               {r.provider && <div className="text-[10px] text-slate-500 mt-0.5">{PROVIDER_LABEL[r.provider] || r.provider}</div>}
             </td>
             <td className={`td text-[11px] max-w-[14rem] break-words ${['CANCELLED', 'EXTERNAL'].includes(r.status) ? 'text-slate-400' : 'text-amber-400'}`}>
+              {['FAILED', 'REVIEW'].includes(r.status) && errClass(r) && (
+                <div className={`font-semibold ${errClass(r) === 'UNCERTAIN' ? 'text-sky-300' : 'text-rose-300'}`}>
+                  {ERR_CLASS_LABEL[errClass(r)] || errClass(r)}
+                  {r.raw?.error?.http_status ? ` · HTTP ${r.raw.error.http_status}` : ''}
+                </div>
+              )}
               {['FAILED', 'REVIEW', 'CANCELLED', 'CANCEL_PENDING', 'EXTERNAL'].includes(r.status) ? (r.receipt_url || '—') : ''}
             </td>
             <td className="td whitespace-nowrap">
@@ -446,7 +519,7 @@ export default function Vat() {
                 )}
                 {badTin(r) && (<>
                   <button className="btn-secondary py-1 px-2 text-xs text-amber-300" disabled={retrying === r.id}
-                    onClick={() => retryWithTin(r)} title="Зөв регистр/ТТД оруулж байгууллагын баримтыг дахин үүсгэнэ">
+                    onClick={() => openCo(r)} title="Зөв регистр/ТТД оруулж (нэрийг нь шалгаад) байгууллагын баримтыг шинээр үүсгэнэ">
                     Дугаар засах
                   </button>
                   <button className="btn-secondary py-1 px-2 text-xs text-amber-300" disabled={retrying === r.id}
@@ -454,6 +527,15 @@ export default function Vat() {
                     Иргэнээр
                   </button>
                 </>)}
+                {canCo(r) && (
+                  <button className="btn-secondary py-1 px-2 text-xs text-sky-300"
+                    disabled={retrying === r.id || cancelling === r.id} onClick={() => openCo(r)}
+                    title={r.status === 'SENT'
+                      ? 'Одоогийн баримтыг цуцлаад (мөнгө буцаахгүй) байгууллагын регистрээр ШИНЭ баримт гаргана'
+                      : 'Цуцалсан баримтын оронд байгууллагын регистрээр шинэ баримт гаргана'}>
+                    <Building2 size={12} /> {r.status === 'SENT' ? 'Байгууллагаар дахин гаргах' : 'Байгууллагаар гаргах'}
+                  </button>
+                )}
                 {(r.status === 'SENT' || r.status === 'CANCEL_PENDING') && r.ebarimt_id && (
                   <button className="btn-secondary py-1 px-2 text-xs text-red-400" disabled={cancelling === r.id}
                     onClick={() => cancel(r)}
@@ -552,6 +634,56 @@ export default function Vat() {
             </div>
           )
         })()}
+      </Modal>
+
+      <Modal open={!!co} onClose={() => !co?.busy && setCo(null)} focusTrap
+        title={co?.row?.status === 'SENT' ? 'Байгууллагаар дахин гаргах' : co?.row?.status === 'FAILED' ? 'Худалдан авагчийн дугаар засах' : 'Байгууллагаар гаргах'}>
+        {co && (
+          <div className="space-y-3 text-sm">
+            <div className="text-xs text-slate-400">
+              <b className="font-mono text-slate-200">{co.row.plate_number || '—'}</b> · {fmt(co.row.amount)}₮ ·{' '}
+              {PROVIDER_LABEL[co.row.provider] || co.row.provider}
+              {co.row.ebarimt_id && <span className="font-mono"> · ДДТД {co.row.ebarimt_id}</span>}
+            </div>
+            {co.row.status === 'SENT' && (
+              <p className="text-xs text-amber-300">
+                Эхлээд одоогийн баримтыг ТЕГ-т цуцална (мөнгө буцаахгүй). Цуцлалт батлагдсаны дараа л шинэ
+                байгууллагын баримт гарна — батлагдаагүй бол (msgbill «хүлээгдэж буй») шинэ баримт гаргахгүй.
+              </p>
+            )}
+            <label className="block">
+              <span className="text-xs text-slate-400">
+                {coQpay ? 'Байгууллагын регистр (7 орон — QPay ТТД хүлээн авдаггүй)' : 'Байгууллагын регистр (7 орон) эсвэл ТТД (11–14 орон)'}
+              </span>
+              <input className="input font-mono mt-1" inputMode="numeric" autoFocus maxLength={coQpay ? 7 : 14}
+                value={co.reg} disabled={co.busy} aria-label="Байгууллагын регистр"
+                onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); setCo((c) => ({ ...c, reg: v, info: null, checking: false })) }} />
+            </label>
+            <div className="min-h-[2.5rem] text-xs" aria-live="polite">
+              {co.checking && <span className="text-slate-400">Татвар төлөгчийг шалгаж байна…</span>}
+              {!co.checking && co.info?.found && (
+                <div className="text-emerald-300"><b className="text-sm">{co.info.name}</b>
+                  {co.info.tin && <span className="font-mono text-slate-400"> · ТТД {co.info.tin}</span>}</div>
+              )}
+              {!co.checking && co.info && !co.info.error && co.info.available !== false && !co.info.found && (
+                <span className="text-rose-300">Ийм дугаартай татвар төлөгч олдсонгүй — дугаараа нягтална уу (суваг татгалзаж болно).</span>
+              )}
+              {!co.checking && co.info && (co.info.error || co.info.available === false) && (
+                <span className="text-amber-300">Нэр шалгах боломжгүй{co.info.error ? ` (${co.info.error})` : ''} — дугаараа өөрөө нягтална уу.</span>
+              )}
+              {!co.checking && !co.info && co.reg && !coValid && (
+                <span className="text-slate-500">{coQpay ? '7 оронтой регистр оруулна уу' : '7 эсвэл 11–14 оронтой дугаар оруулна уу'}</span>
+              )}
+            </div>
+            {co.step && <div className="text-xs text-sky-300">⏳ {co.step}</div>}
+            <div className="flex justify-end gap-2">
+              <button className="btn-secondary" disabled={co.busy} onClick={() => setCo(null)}>Болих</button>
+              <button className="btn-primary" disabled={!coValid || co.busy || co.checking} onClick={submitCo}>
+                {co.row.status === 'SENT' ? 'Цуцлаад байгууллагаар гаргах' : 'Байгууллагаар гаргах'}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal open={!!qrReceipt} onClose={() => setQrReceipt(null)} title="e-Barimt баримтын QR">

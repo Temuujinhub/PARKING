@@ -334,9 +334,17 @@ UTC-ээс хойшхи төлбөрийг ЗӨВХӨН `source=POSAPP` тамг
 ```
 POST /api/payments/cash
 X-App-Version: 1.4.0
-{ "session_id": "...", "expected_amount": 2000, "customer_tin": "1234567" (сонголт),
+{ "session_id": "...", "expected_amount": 2000, "payer_reg_no": "5037409" (сонголт),
   "ebarimt_id": "…", "lottery_code": "…", "qr_data": "…", "ebarimt_provider": "ONTIME" }
 ```
+
+**`payer_reg_no` (сонголт)** — худалдан авагчийн дугаар, **`/pos/confirm`-той ЯГ ИЖИЛ дүрэм** (§3.4-ийн
+хүснэгт): ААН регистр (7 орон) / ТТД (11–14 орон) → байгууллагын (ORGANIZATION, сугалаагүй) баримт;
+иргэний регистр (АА00112233) → иргэний нэрийн баримт; хоосон/танигдахгүй → нэргүй иргэний баримт
+(алдаа өгөхгүй). Хуучин `customer_tin` талбар ижил утгатай ажилласаар (хоёулаа ирвэл `payer_reg_no`).
+⚠️ **2026-10-16 хүртэл `/cash` `payer_reg_no`-г үл тоодог байсан** (зөвхөн `customer_tin`) — аппаар бэлнээр
+төлсөн байгууллагын баримт чимээгүйгээр иргэний баримт болдог байв (бэлэн 0/6,239). `/transfer`,
+`/compensations/{id}/pay`, `/qpay/invoice` ч мөн адил `payer_reg_no`-г уншдаг болсон.
 
 `ebarimt_*` — терминал бэлэн төлбөрт баримт хэвлэсэн бол (дээрхтэй ижил дүрэм; шинэ апп илгээхгүй).
 
@@ -345,6 +353,7 @@ X-App-Version: 1.4.0
 ```jsonc
 {
   "ok": true, "status": "PAID", "payment_id": "…", "amount": 2000.0,
+  "receipt_type": "ORGANIZATION", "payer_reg_no": "5037409",   // сервер хүлээн авсан худалдан авагч (2026-10-16)
   "session_status": "PAID", "amount_due": 0, "needs_additional_payment": false, "overpaid_amount": 0,
   "barrier_opened": true, "barrier_command_status": "SUCCESS", "barrier_command_id": "…",
   "exit_deadline": "…", "exit_waiting": true, "gate_acknowledged": true, "physical_gate_state": "UNKNOWN",
@@ -352,6 +361,11 @@ X-App-Version: 1.4.0
   "receipt": { … §3.5 … }, "print_data": { "lines": [ … ] }
 }
 ```
+
+`receipt_type`/`payer_reg_no` (дээд түвшинд ба `receipt.*`-д) — сервер ЯМАР худалдан авагчаар баримт
+гаргахыг буцаана: оператор байгууллагын регистр оруулсан атлаа `CITIZEN` ирвэл дугаар танигдаагүй гэсэн
+үг — дэлгэцэнд «Байгууллагын баримт гарсангүй» гэж харуулна (баримтыг дараа нь Ибаримт хуудсаар
+«Байгууллагаар дахин гаргах» боломжтой).
 
 Хэвлэх дүрэм §3.5-тай ижил (`PENDING` бол `/print`-ийг дахин татна). Баримтыг шууд илгээж ≤6с
 хүлээх нь ЗӨВХӨН POS аппын төлбөрт (`source=POSAPP` — `X-App-Version` толгойтой хүсэлт, мөн
@@ -493,9 +507,16 @@ GET /api/payments?limit=10               // сүүлийн төлбөрүүд (�
 
 ```
 1) POST /api/payments/qpay/invoice
-   { "session_id": "...", "customer_tin": "1234567" (сонголт: ААН баримт) }
-   → { payment_id, qr_image (base64 PNG), qr_text, deep_link, urls[], amount }
+   { "session_id": "...", "payer_reg_no": "1234567" (сонголт: ААН-ий 7 оронтой РЕГИСТР) }
+   → { payment_id, qr_image (base64 PNG), qr_text, deep_link, urls[], amount,
+       receipt_type: "ORGANIZATION"|"CITIZEN", payer_reg_no }
 ```
+
+- **QPay-ийн хязгаар:** QPay e-Barimt нь байгууллагыг ЗӨВХӨН **7 оронтой регистрээр** хүлээн авна
+  (`ebarimt_receiver` MAX_LENGTH 7) — §3.4a lookup-ын `tin` (11–14 орон)-ийг БҮҮ илгээ. ТТД эсвэл
+  танигдахгүй `customer_tin` өгвөл **422** «…7 оронтой РЕГИСТР оруулна уу» (нэхэмжлэл үүсэхгүй —
+  регистрээ засаад дахин). Иргэний регистрийг QPay баримтад дамжуулах боломжгүй тул нэргүй иргэний
+  баримт (`receipt_type: CITIZEN`). Хуучин `customer_tin` талбар ажилласаар.
 
 - Хариунд ирсэн **`qr_image`-г дэлгэцэн дээр том харуулна** (эсвэл `qr_text`-ийг өөрөө QR болгоно).
   Энэ бол QPay талаас ирсэн дата — POS апп зөвхөн харуулах үүрэгтэй.

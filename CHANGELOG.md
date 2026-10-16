@@ -26,6 +26,34 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-16 — Байгууллагын НӨАТ баримт: `payer_reg_no` бүх төлбөрт, сувгийн татгалзлын текст/ангилал, хүлээн авагч солих
+
+Гомдол: «байгууллагаар НӨАТ гаргахад алдаа». audit1014 (READ ONLY хуулбар): байгууллагын баримттай
+төлбөр — бэлэн **0/6,239**, дансаар **0/932**, харин карт 42/3,202 (картын ААН-ийн 45/45 нь `payer_reg_no`-той),
+QPay 490/25,320. PAX апп худалдан авагчийг `payer_reg_no`-оор илгээдэг — `/pos/confirm` л уншдаг байв.
+10-р сард байгууллагын 6 баримт REVIEW-д гацсан (QPay 5 `HTTPStatusError` + msgbill 1): outbox
+(de4ce4e, 09-19) зөвхөн алдааны ангийн нэрийг хадгалдаг тул QPay-ийн «receipt.customerTin … [0-9]{11,14}»
+(регистр ТЕГ-т алга) зэрэг ТОДОРХОЙ татгалзал тулгалт шаардсан төлөвт орж, «Дугаар засах»/«Иргэнээр»
+хэзээ ч гардаггүй, «Дахин үүсгэх» 400, хүлээн авагч солих retry 09-19-өөс хойш ҮРГЭЛЖ 409 байв.
+Схем өөрчлөгдөхгүй (ангилал `vat_receipts.raw.error`, ажлын төлөв `financial_jobs.status=REJECTED`).
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| fix | **F1 — `payer_reg_no` бүх төлбөрт**: `payments_router._buyer()` (`/pos/confirm`-той ЯГ ИЖИЛ — `msgbill.classify_reg_no(payer_reg_no or customer_tin)`: 7/11–14 орон → COMPANY, иргэний регистр → нэрийн CITIZEN, танигдахгүй → нэргүй, алдаагүй) — `/cash`, `/transfer`, `/compensations/{id}/pay`, `/pos/confirm` нэг функцээр; хариунд `receipt_type`, `payer_reg_no`. `/qpay/invoice`: ААН зөвхөн 7 оронтой регистр (ТТД/танигдахгүй `customer_tin` → **422**, нэхэмжлэл үүсэхгүй), иргэний регистр → нэргүй иргэн; дахин ашиглах нэхэмжлэлд худалдан авагч өгвөл шинэчилнэ (хоосон хүсэлт дарахгүй). Жолоочийн QR хуудас (Pay.jsx) 7 оронтой регистр | (энэ commit) | ⏳ | ⏳ |
+| fix | **F2 — сувгийн алдааны текст + ангилал** (`financial_jobs.provider_error/safe_text`): `last_error`/`receipt_url`-д HTTP статус + цэвэрлэсэн хариуны бие ≤300 (Bearer/JWT/`bsk_`/token/api_key → ***); create-ийн HTTP 400/404/409/422 («аль хэдийн/давхар/idempotency»-гүй) → баримт **FAILED**, ажил **REJECTED** (автоматаар давтахгүй), `raw.error.class` = `REJECTED_RECEIVER` (customerTin/ebarimt_receiver/payer/регистр/MAX_LENGTH; мерчант/түрээслэгчийн алдаа биш) эсвэл `REJECTED`. Timeout/холболт/5xx/billId-гүй 200, msgbill GET-ийн алдаа → хуучнаараа UNKNOWN/REVIEW (QPay create идемпотент биш) эсвэл msgbill RETRY. msgbill FAILED-ийн `error` текст хадгалагдана. Тодорхой татгалзсан ажлыг «Дахин үүсгэх»/бөөн нөхөлт ижил түлхүүрээр дахин илгээнэ; `vat-receipts` мөрөнд `error_class` | (энэ commit) | ⏳ | ⏳ |
+| fix | **F3 — хүлээн авагч солих** (`financial_jobs.change_receiver`): `retry-ebarimt {customer_tin \| receiver_type:CITIZEN}` — төлбөрийн бүх мөр CANCELLED (цуцлалт батлагдсан) эсвэл тодорхой татгалзсан (REJECTED, ДДТД/billId/provider_ref хэзээ ч ирээгүй) бол хуучин ажлын payload-ыг ХӨНДӨХГҮЙ, ШИНЭ мөр + ажил ШИНЭ түлхүүрээр `pay-{id}-rcv-{n}`; татгалзсан мөр CANCELLED («баримт үүсээгүй», `raw.superseded`), нэг мөрд нэг идэвхтэй баримт; AuditLog `EBARIMT_RECEIVER_CHANGE` (хэн, хуучин/шинэ). SENT/REVIEW/UNKNOWN/RETRY/SENDING/CANCEL_PENDING → 409 + `EBARIMT_RETRY_REFUSED` (өмнө аудитгүй байв); QPay-д ААН 7 оронтой биш → 422; POS-ийн давхардал гэж цуцалсан бол `allow_duplicate`. Сувагт огт илгээгээгүй ажил хуучнаараа байранд нь засагдана (цуцлагдсан мөрийн ажлыг хөндөхгүй). Цуцалсан «Дахин үүсгэх» орлогдсон мөрийг тооцохгүй (сүүлийн мөрийг орлоно) | (энэ commit) | ⏳ | ⏳ |
+| feat | Ибаримт (Vat.jsx): «Дугаар засах»/«Иргэнээр» ангиллаар (`REJECTED_RECEIVER`, текстийн regex биш); «Шалтгаан»-д ангилал + HTTP статус + хадгалсан текст; SENT системийн баримтад **«Байгууллагаар дахин гаргах»** — регистр → `GET /api/payments/ebarimt/payer` нэр → баталгаажуулалт → одоогийн «Цуцлах» → батлагдвал шинэ хүлээн авагчаар retry (цуцлалт батлагдаагүй бол шинэ баримт гаргахгүй); орлогдоогүй CANCELLED мөрөнд «Байгууллагаар гаргах». Эрх өөрчлөгдөөгүй (vat/reports; нэр шалгалт `cashier` эрхгүй бол «шалгах боломжгүй») | (энэ commit) | ⏳ | ⏳ |
+| docs | `PAX_POS_APP_GUIDE.md` §3.4b `/cash`-ийн `payer_reg_no` + хариуны `receipt_type/payer_reg_no`, §3.7 QPay 7 оронтой регистр/422; `API_REFERENCE.md` cash/transfer/retry-ebarimt | (энэ commit) | — | — |
+| test | `tests/unit/test_company_receipt.py` (39): F1 бэлэн/дансаар/өр/QR (7 орон, 422, дахин ашиглалт); F2 QPay 400 customerTin/MAX_LENGTH dict → REJECTED_RECEIVER, мерчантын 400 → REJECTED, msgbill 422 → FAILED, ReadTimeout/502/409 «already exists» → REVIEW (давтахгүй), msgbill 5xx/GET 404 → RETRY, текст ≤300 + нууцгүй, ангиллын 10 тохиолдол (INVALID_TIN, merchantTin, idempotency 409, 429, GET, PosAPI, 401), татгалзсаны дараах «Дахин үүсгэх» ижил payload; F3 цуцалсны дараа шинэ түлхүүр (rcv-1, rcv-2), татгалзсаны дараа ААН/иргэн, UNKNOWN/RETRY/SENDING/SENT → 409, илгээгээгүй → байранд нь, давхардлын хамгаалалт, нэг идэвхтэй баримт | (энэ commit) | — | — |
+
+Нөхөлт (deploy-ийн дараа): гацсан 6 REVIEW баримт (ажил UNKNOWN, текстгүй `HTTPStatusError`) энэ засвараар
+автоматаар FAILED болохгүй — шалтгаан нь тодорхойгүй хэвээр тул `tools/qpay_review_resolve.py` (ТЕГ экспорттой)
+эсвэл «баримт холбох»-оор. Гомдол гаргасан байгууллагын БЭЛЭН төлбөрийн иргэний баримтыг Ибаримт хуудаснаас
+«Байгууллагаар дахин гаргах»-аар (цуцлах → шинэ ААН баримт). POS аппын `/cash`-д `payer_reg_no` илгээдэг
+эсэхийг POS хөгжүүлэгчээр батлах (CASH-ийн raw_payload-д хүсэлтийн бие хадгалагддаггүй).
+
+---
+
 ## 2026-10-15 — MonPay: түншээс үл хамаарах машин бүртгэл/bill/байршлын зам + MonPay-д API баримт
 
 Эзэн: «socialpay-д зориулсан документийг monpay-д зориулсан болгож өөрчилж өг; test server дээр key

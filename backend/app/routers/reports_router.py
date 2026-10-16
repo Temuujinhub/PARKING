@@ -1909,10 +1909,14 @@ def vat_receipts(date_from: str | None = None, date_to: str | None = None,
     """НӨАТ баримтын жагсаалт. Багана тус бүрийн шүүлтүүр (plate/ddtd/lottery/
     site/provider/status/amount) + `q` глобал хайлт. Шүүлт `limit`-ээс ӨМНӨ
     ажиллана — тиймээс сүүлийн 200-д багтаагүй хуучин баримт ч олдоно."""
+    from ..services.financial_jobs import error_class
     query = _vat_receipts_query(db, user, date_from, date_to, q, plate, ddtd,
                                 lottery, site, provider, status, amount)
     rows = query.order_by(VatReceipt.created_at.desc()).limit(min(limit, 1000)).all()
-    return [to_dict(r, extra={"plate_number": plate_, "site_name": site_name})
+    # error_class (2026-10-16): сувгийн алдааны ангилал — REJECTED_RECEIVER бол Ибаримт хуудас
+    # «Дугаар засах»/«Иргэнээр»-ийг санал болгоно (текстийн regex биш)
+    return [to_dict(r, extra={"plate_number": plate_, "site_name": site_name,
+                              "error_class": error_class(r) if r.status in ("FAILED", "REVIEW") else None})
             for r, plate_, site_name in rows]
 
 

@@ -119,6 +119,60 @@ def _external_receipt(body: dict | None) -> dict | None:
             "msgbillId": (str(body.get("ebarimt_ref") or "")[:80] or None)}
 
 
+# ── ХУДАЛДАН АВАГЧ (НӨАТ баримтын хүлээн авагч) — НЭГ дүрэм (2026-10-16) ────────
+# PAX апп худалдан авагчийг `payer_reg_no`-оор илгээдэг (/pos/confirm 08-21-ээс уншдаг,
+# 1c18c7c), харин /cash, /transfer, өрийн төлөлт, /qpay/invoice ЗӨВХӨН `customer_tin`-ийг
+# уншдаг байв (e3e7036) → аппаар бэлнээр төлсөн байгууллагын баримт чимээгүйгээр ИРГЭНИЙ
+# (сугалаатай, ТТД-гүй) баримт болдог: audit1014 — бэлэн 0/6,239, дансаар 0/932 нь
+# байгууллагын баримттай, ижил зогсоолд карт 42/3,202 (картын ААН-ийн 45/45 нь payer_reg_no-той).
+def _buyer(body: dict | None) -> tuple[str | None, str]:
+    """(customer_tin, ebarimt_receiver_type) — /pos/confirm-той ЯГ ИЖИЛ: `payer_reg_no`
+    (шинэ) эсвэл `customer_tin` (хуучин)-ийг msgbill.classify_reg_no-оор таньна. ААН регистр
+    (7) / ТТД (11–14) → COMPANY; иргэний регистр (АА00112233) → CITIZEN нэрийн баримт;
+    хоосон/танигдахгүй → CITIZEN нэргүй (алдаа өгөхгүй — мөнгө аль хэдийн авсан)."""
+    body = body or {}
+    reg, rtype = msgbill.classify_reg_no(body.get("payer_reg_no") or body.get("customer_tin"))
+    return reg, ("COMPANY" if rtype == "ORGANIZATION" else "CITIZEN")
+
+
+def _apply_buyer(payment: Payment, body: dict | None) -> None:
+    payment.customer_tin, payment.ebarimt_receiver_type = _buyer(body)
+
+
+def _buyer_echo(payment: Payment) -> dict:
+    """Хариунд худалдан авагчийг буцаана (/pos/confirm-ын receipt.receipt_type/payer_reg_no-той
+    ижил утга) — апп «байгууллагаар гарсан уу» гэдгийг шууд харна."""
+    return {"receipt_type": "ORGANIZATION" if payment.ebarimt_receiver_type == "COMPANY" else "CITIZEN",
+            "payer_reg_no": payment.customer_tin}
+
+
+QPAY_COMPANY_REG = re.compile(r"[0-9]{7}")
+QPAY_REG_ERROR = ("QPay-ээр байгууллагын НӨАТ баримт авахад байгууллагын 7 оронтой РЕГИСТР оруулна уу "
+                  "(QPay 11–14 оронтой ТТД хүлээн авдаггүй)")
+
+
+def _qpay_buyer(body: dict | None) -> tuple[str | None, str] | None:
+    """/qpay/invoice-ийн худалдан авагч. QPay `ebarimt_receiver` = ААН-ий 7 оронтой регистр
+    (MAX_LENGTH 7 — 1c114f3); ТТД өгвөл баримт 100% унана → 422 (жолооч/кассчин одоо засна).
+    Иргэний регистрийг QPay баримтад дамжуулах боломжгүй → нэргүй иргэний баримт.
+    Хуучин `customer_tin` талбар энэ endpoint-д үргэлж «ААН баримт» гэсэн утгатай тул
+    танигдахгүй утга → 422; `payer_reg_no`-ийн танигдахгүй утга /pos/confirm шиг нэргүй.
+    None = худалдан авагч өгөөгүй."""
+    body = body or {}
+    raw_new = str(body.get("payer_reg_no") or "").strip()
+    raw_old = str(body.get("customer_tin") or "").strip()
+    if not raw_new and not raw_old:
+        return None
+    reg, rtype = _buyer(body)
+    if rtype == "COMPANY":
+        if not QPAY_COMPANY_REG.fullmatch(reg or ""):
+            raise HTTPException(422, QPAY_REG_ERROR)
+        return reg, "COMPANY"
+    if reg is None and not raw_new:
+        raise HTTPException(422, "Худалдан авагчийн дугаар танигдсангүй — " + QPAY_REG_ERROR)
+    return None, "CITIZEN"
+
+
 def _err_text(v, limit: int = 400) -> str:
     """Алдааг ЗААВАЛ текст болгоно — QPay 400-ийн `message` нь dict байж болно
     ({"ebarimt_receiver": {"type": "MAX_LENGTH", ...}}). 2026-09-06: тэр dict шууд
@@ -743,6 +797,9 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
                                   Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first():
         raise HTTPException(409, "Дансны гүйлгээг шалгаж байна. Давхар нэхэмжлэл үүсгэхгүй.")
 
+    # Худалдан авагч — нэхэмжлэл үүсгэхээс ӨМНӨ шалгана (буруу бол 422, юу ч үүсгэхгүй)
+    buyer = _qpay_buyer(body)
+
     # Өмнөх өрийг QR-д нийлүүлж нэхэмжилнэ (body-д include_debts=false өгвөл зөвхөн
     # одоогийн төлбөр — кассын тусгай хэрэглээнд)
     include_debts = bool(body.get("include_debts", True))
@@ -766,11 +823,19 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             # хадгалсан (өмнө нь [] буцаадаг байсан тул буцаж орсон жолоочид
             # банк сонгох товчнууд алга болдог байв)
             _raw = existing.raw_payload if isinstance(existing.raw_payload, dict) else {}
+            if buyer is not None and (existing.customer_tin, existing.ebarimt_receiver_type) != buyer:
+                # Дахин ашиглах зам худалдан авагчийг ЧИМЭЭГҮЙ хаядаг байв (жолооч «Буцах» →
+                # «Байгууллага» сонгох/регистрээ засах). Баримтын хүлээн авагчийг төлбөр
+                # PAID болох үед payment-аас уншдаг тул төлөгдөөгүй нэхэмжлэлд шинэчлэх нь
+                # аюулгүй (сешн түгжээтэй). Хоосон хүсэлт (хуудас сэргээх) хуучныг ДАРАХГҮЙ.
+                existing.customer_tin, existing.ebarimt_receiver_type = buyer
+                db.commit()
             return {"payment_id": existing.id, "invoice_id": existing.provider_invoice_id,
                     "qr_text": existing.qr_text,
                     "qr_image": qpay.qr_png_b64(existing.qr_text or ""),
                     "deep_link": existing.deep_link, "urls": _raw.get("invoice_urls") or [],
-                    "amount": float(existing.amount), "mock": settings.qpay_mock}
+                    "amount": float(existing.amount), "mock": settings.qpay_mock,
+                    **_buyer_echo(existing)}
         try:
             await qpay.cancel_invoice(existing.provider_invoice_id,
                                       acc=qpay.account_for(session.site))
@@ -782,14 +847,12 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
 
     payment = _create_payment(db, session, "QPAY", "QR", include_debts=include_debts)
     payment.source = "POS" if body.get("source") == "POS" else "QR"  # кассын пос эсвэл утас
-    # НӨАТ-ийн баримтын хүлээн авагчийн төрөл: ТТД өгвөл ААН (COMPANY), үгүй бол иргэн (CITIZEN)
+    # НӨАТ-ийн баримтын хүлээн авагч: ААН-ий 7 оронтой регистр (payer_reg_no/customer_tin) →
+    # COMPANY, үгүй бол иргэн (CITIZEN) — _qpay_buyer (2026-10-16)
     receiver_data = None
-    if body.get("customer_tin"):
-        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
-        payment.ebarimt_receiver_type = "COMPANY"
+    payment.customer_tin, payment.ebarimt_receiver_type = buyer or (None, "CITIZEN")
+    if payment.ebarimt_receiver_type == "COMPANY":
         receiver_data = {"register": payment.customer_tin}
-    else:
-        payment.ebarimt_receiver_type = "CITIZEN"
     callback = f"{settings.public_base_url}/api/payments/qpay/webhook?payment_id={payment.id}"
     if settings.qpay_webhook_secret:
         callback += f"&token={settings.qpay_webhook_secret}"
@@ -889,7 +952,7 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
             "qr_text": payment.qr_text, "qr_image": inv.get("qr_image", ""),
             "deep_link": payment.deep_link, "urls": inv.get("urls", []),
             "amount": float(payment.amount), "debt_amount": debt_total,
-            "mock": inv.get("mock", False)}
+            "mock": inv.get("mock", False), **_buyer_echo(payment)}
 
 
 async def _webhook_handler(payment_id: str, token: str, qpay_payment_id: str,
@@ -1003,9 +1066,9 @@ async def _retire_qpay(db, session):
 @router.post("/cash")
 async def cash_payment(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require("cashier")), request: Request = None):
-    """Кассын бэлэн мөнгөний төлбөр. body: {session_id, customer_tin?,
-    ebarimt_id?/lottery_code?/qr_data?/ebarimt_provider? — гадна үүссэн баримт}.
-    X-App-Version толгойтой (POS апп) бол source=POSAPP."""
+    """Кассын бэлэн мөнгөний төлбөр. body: {session_id, payer_reg_no? (эсвэл хуучин
+    customer_tin?) — /pos/confirm-той ижил дүрэм (_buyer), ebarimt_id?/lottery_code?/qr_data?/
+    ebarimt_provider? — гадна үүссэн баримт}. X-App-Version толгойтой (POS апп) бол source=POSAPP."""
     session = db.get(ParkingSession, body.get("session_id", ""))
     if not session:
         raise HTTPException(404, "Session олдсонгүй")
@@ -1015,9 +1078,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     payment = _create_payment(db, session, "CASH", "CASH", cashier=user, allow_qpay=True)
     _assert_expected_amount(payment, body)
     await _retire_qpay(db, session)
-    if body.get("customer_tin"):
-        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
-        payment.ebarimt_receiver_type = "COMPANY"
+    _apply_buyer(payment, body)   # payer_reg_no | customer_tin (2026-10-16 — өмнө нь зөвхөн customer_tin)
     _mark_pos_app(payment, request, user=user, db=db, site_id=session.site_id)
     # Гадна системд (POS/өөр e-Barimt API) үүссэн баримт ирвэл түүнийг бүртгэнэ
     await _finalize_paid(db, payment, external_receipt=_external_receipt(body))
@@ -1043,7 +1104,7 @@ async def cash_payment(body: dict, db: Session = Depends(get_db),
     payment = db.get(Payment, pid)
     return {"ok": True, "status": payment.status, "payment_id": payment.id,
             "amount": float(payment.amount), **payment_outcome(db, payment),
-            **_print_payload(db, payment)}
+            **_print_payload(db, payment), **_buyer_echo(payment)}
 
 
 # ─────────────────────────── Касс (дансаар / шилжүүлэг) ───────────────────────────
@@ -1055,7 +1116,8 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
     Оператор жолоочид зогсоолын дансыг хэлж, шилжүүлэг ОРЖ ИРСНИЙГ хуулгаас
     хараад энэ endpoint-оор баталгаажуулна → хаалт нээгдэж, e-Barimt үүснэ
     (eBarimt 3.0-д шилжүүлгийн тусдаа код байхгүй тул CASH кодоор бүртгэгдэнэ).
-    body: {session_id, customer_tin?} — ТТД өгвөл байгууллагын B2B баримт."""
+    body: {session_id, payer_reg_no? | customer_tin?} — ААН регистр/ТТД өгвөл байгууллагын
+    B2B баримт (/pos/confirm-той ижил дүрэм — _buyer)."""
     from ..auth import has_permission
     if not has_permission(user, "pay_transfer"):
         raise HTTPException(403, "Танд «Дансаар» төлбөр авах эрх байхгүй — "
@@ -1069,11 +1131,7 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
     payment = _create_payment(db, session, "TRANSFER", "TRANSFER", cashier=user, allow_qpay=True)
     _assert_expected_amount(payment, body)
     await _retire_qpay(db, session)
-    if body.get("customer_tin"):
-        payment.customer_tin = str(body["customer_tin"]).strip()[:20]
-        payment.ebarimt_receiver_type = "COMPANY"
-    else:
-        payment.ebarimt_receiver_type = "CITIZEN"
+    _apply_buyer(payment, body)
     await _finalize_paid(db, payment, external_receipt=_external_receipt(body))
     site = session.site
     db.add(AuditLog(username=user.username, action="TRANSFER_PAYMENT", entity="payment",
@@ -1084,7 +1142,8 @@ async def transfer_payment(body: dict, db: Session = Depends(get_db),
                             "account": getattr(site, "bank_account", None)}))
     db.commit()
     return {"ok": True, "status": payment.status, "payment_id": payment.id,
-            "amount": float(payment.amount), **payment_outcome(db, payment)}
+            "amount": float(payment.amount), **payment_outcome(db, payment),
+            **_buyer_echo(payment)}
 
 
 # ─────────────────────────── PAX A9000 POS ───────────────────────────
@@ -1508,9 +1567,7 @@ async def pos_confirm(body: dict, request: Request, db: Session = Depends(get_db
     # нэр дээр гарч сугалаанд оролцоно; ААН регистр (7 орон)/ТТД (11–14) өгвөл
     # байгууллагын баримт. Танигдахгүй утга нэргүй баримт болно (алдаа өгөхгүй —
     # POS дээр жолооч буруу бичихэд төлбөр таслагдах ёсгүй).
-    reg, rtype = msgbill.classify_reg_no(body.get("payer_reg_no") or body.get("customer_tin"))
-    payment.customer_tin = reg
-    payment.ebarimt_receiver_type = "COMPANY" if rtype == "ORGANIZATION" else "CITIZEN"
+    _apply_buyer(payment, body)   # /cash, /transfer, өрийн төлөлттэй НЭГ дүрэм
     import time as _t
     _c0 = _t.monotonic()
     # Терминал өөрөө e-Barimt гаргасан бол (банкны PosLink-ийн Ибаримт үйлчилгээ)
@@ -2025,34 +2082,6 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
                                                   VatReceipt.status == "EXTERNAL").first() is not None
     if has_external and not reissue:
         raise HTTPException(409, EXTERNAL_REFUSAL)
-    jobs = []
-    if (body.get("customer_tin") or body.get("receiver_type")) and not has_external:
-        from ..models import FinancialJob
-        jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
-                .order_by(FinancialJob.id).with_for_update().all())
-        if not jobs or any(j.attempts or j.status == "SENDING" for j in jobs):
-            raise HTTPException(409, "Өмнөх баримтыг эхлээд сувгаар тулгаж цуцална уу; илгээсэн оролдлогын дүн/хүлээн авагчийг өөрчлөхгүй")
-    changed = {}
-    if body.get("customer_tin"):
-        reg, rtype = msgbill.classify_reg_no(body.get("customer_tin"))
-        if not reg:
-            raise HTTPException(400, "Худалдан авагчийн дугаар танигдсангүй — ААН регистр (7 орон), "
-                                     "ТТД (11–14 орон) эсвэл иргэний регистр (АА00112233)")
-        payment.customer_tin = reg
-        payment.ebarimt_receiver_type = "COMPANY" if rtype == "ORGANIZATION" else "CITIZEN"
-        changed = {"customer_tin": reg, "receiver_type": payment.ebarimt_receiver_type}
-    elif (body.get("receiver_type") or "").upper() == "CITIZEN":
-        changed = {"was_tin": payment.customer_tin, "receiver_type": "CITIZEN"}
-        payment.customer_tin = None
-        payment.ebarimt_receiver_type = "CITIZEN"
-    if changed:
-        for job in jobs:
-            job.payload = {**job.payload, "customer_tin": payment.customer_tin,
-                           "receiver_type": payment.ebarimt_receiver_type}
-            receipt = db.get(VatReceipt, job.receipt_id)
-            if receipt:
-                receipt.customer_tin = payment.customer_tin
-        db.flush()
     allow_dup = bool(body.get("allow_duplicate"))
     no_terminal = bool(body.get("no_terminal_receipt"))
     # Админ «терминал хэвлээгүй»/«давхардлыг зөвшөөрөх»-ийг ил тодоор баталсан дахин гаргалт —
@@ -2064,6 +2093,79 @@ async def retry_ebarimt_endpoint(payment_id: str, body: dict | None = None,
         mark = {"reason": REISSUED_NO_TERMINAL, "by": user.username, "source": "ui",
                 "no_terminal_receipt": no_terminal, "allow_duplicate": allow_dup,
                 "at": datetime.utcnow().isoformat(timespec="seconds")}
+    # Шинэ хүлээн авагч (2026-10-16 — F3): өмнө нь аль нэг ажил attempts>0 бол ҮРГЭЛЖ 409 —
+    # баримт ≤5с-д илгээгддэг тул «Цуцлах»-ын дараа ч, тодорхой татгалзлын дараа ч засах зам
+    # байгаагүй. Одоо: (а) идэвхтэй мөр бүр сувагт ОГТ илгээгээгүй → ажлыг байранд нь засна
+    # (хуучнаараа); (б) бүх мөр CANCELLED / тодорхой татгалзсан → ШИНЭ мөр + ШИНЭ түлхүүр
+    # (financial_jobs.change_receiver); (в) бусад (SENT/REVIEW/UNKNOWN/RETRY/SENDING) → 409.
+    target = None
+    if body.get("customer_tin"):
+        reg, rtype = msgbill.classify_reg_no(body.get("customer_tin"))
+        if not reg:
+            raise HTTPException(400, "Худалдан авагчийн дугаар танигдсангүй — ААН регистр (7 орон), "
+                                     "ТТД (11–14 орон) эсвэл иргэний регистр (АА00112233)")
+        target = (reg, "COMPANY" if rtype == "ORGANIZATION" else "CITIZEN")
+    elif (body.get("receiver_type") or "").upper() == "CITIZEN":
+        target = (None, "CITIZEN")
+    jobs, changed = [], {}
+    if target is not None and payment.status != "PAID":
+        raise HTTPException(400, "Баримт үүсгэж чадсангүй: Төлбөр PAID биш")
+    if target is not None and not has_external:
+        from ..models import FinancialJob
+        from ..services import financial_jobs as FJ
+        if target[1] == "COMPANY" and not QPAY_COMPANY_REG.fullmatch(target[0] or ""):
+            try:
+                to_qpay = FJ.receipt_provider(payment) == "QPAY"
+            except Exception:  # noqa: BLE001 — сувгийн тохиргоо уншигдахгүй бол QPay биш гэж
+                to_qpay = False
+            if to_qpay:
+                raise HTTPException(422, QPAY_REG_ERROR)
+        jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
+                .order_by(FinancialJob.id).with_for_update().all())
+        recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
+                .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
+        by_rec = FJ._jobs_by_receipt(jobs)
+        active = [r for r in recs if r.status != "CANCELLED"]
+        if active and all(FJ.never_sent(r, by_rec.get(r.id, [])) for r in active):
+            # Сувагт огт илгээгээгүй — хүсэлт, түлхүүр хаана ч бүртгэгдээгүй тул ИДЭВХТЭЙ мөрийн
+            # ажлыг байранд нь засна (цуцлагдсан мөрийн ажлыг ХӨНДӨХГҮЙ)
+            changed = {"from": {"customer_tin": payment.customer_tin,
+                                "receiver_type": payment.ebarimt_receiver_type},
+                       "customer_tin": target[0], "receiver_type": target[1]}
+            payment.customer_tin, payment.ebarimt_receiver_type = target
+            for r in active:
+                for job in by_rec.get(r.id, []):
+                    job.payload = {**job.payload, "customer_tin": payment.customer_tin,
+                                   "receiver_type": payment.ebarimt_receiver_type}
+                r.customer_tin = payment.customer_tin
+            db.flush()
+        else:
+            res = FJ.change_receiver(db, payment, customer_tin=target[0], receiver_type=target[1],
+                                     username=user.username, allow_duplicate=allow_dup, mark=mark)
+            if res.get("conflict"):
+                db.rollback()
+                db.add(AuditLog(username=user.username, action="EBARIMT_RETRY_REFUSED", entity="payment",
+                                entity_id=payment_id,
+                                detail={"reason": "RECEIVER_CHANGE_LOCKED", "error": res.get("error"),
+                                        "to": {"customer_tin": target[0], "receiver_type": target[1]},
+                                        "blockers": res.get("blockers"),
+                                        **({"duplicate_of_pos": True} if res.get("duplicate_of_pos") else {})}))
+                db.commit()
+                raise HTTPException(409, res["error"])
+            db.add(AuditLog(username=user.username, action="EBARIMT_RECEIVER_CHANGE", entity="payment",
+                            entity_id=payment_id,
+                            detail={"from": res["from"], "to": res["to"], "by": user.username,
+                                    "receipts": res["receipts"], "replaced": res["replaced"],
+                                    "keys": res["keys"], "reasons": res["reasons"],
+                                    **({"allow_duplicate": True} if allow_dup else {})}))
+            db.commit()
+            return res
+    elif target is not None:
+        # EXTERNAL + «Систем баримт гаргах»: хүлээн авагч төлбөр дээр, _reissue_external уншина
+        changed = {"from": {"customer_tin": payment.customer_tin,
+                            "receiver_type": payment.ebarimt_receiver_type},
+                   "customer_tin": target[0], "receiver_type": target[1]}
+        payment.customer_tin, payment.ebarimt_receiver_type = target
     res = await retry_ebarimt(db, payment, reissue_external=reissue and has_external,
                               allow_duplicate=allow_dup, no_terminal_receipt=no_terminal,
                               username=user.username, mark=mark)

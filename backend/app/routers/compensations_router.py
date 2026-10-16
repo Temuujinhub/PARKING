@@ -192,7 +192,10 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
     rate = Decimal(str(settings.vat_rate))
     vat = ((amount * rate / (1 + rate)).quantize(Decimal("0.01"))
            if settings.vat_inclusive and rate > 0 else Decimal("0"))
-    tin = str(body.get("customer_tin") or "").strip()[:20] or None
+    # Худалдан авагч: payer_reg_no | customer_tin — /pos/confirm, /cash-тэй НЭГ дүрэм (2026-10-16;
+    # өмнө нь дурын customer_tin-ийг COMPANY гэж үзэж, payer_reg_no-г огт уншдаггүй байв)
+    from .payments_router import _buyer, _buyer_echo
+    tin, receiver_type = _buyer(body)
     shift = (db.query(CashierShift).filter(CashierShift.user_id == user.id,
         CashierShift.status == "OPEN", CashierShift.site_id == comp.site_id).first())
     now = datetime.utcnow()
@@ -200,8 +203,7 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
         provider="CASH" if method == "CASH" else "POS", payment_method=method, source="POS",
         sender_invoice_no=f"DEBT-{comp.id}", amount=amount, vat_amount=vat,
         status="PAID", paid_at=now, cashier_id=user.id, shift_id=shift.id if shift else None,
-        terminal_id=terminal, customer_tin=tin,
-        ebarimt_receiver_type="COMPANY" if tin else "CITIZEN",
+        terminal_id=terminal, customer_tin=tin, ebarimt_receiver_type=receiver_type,
         raw_payload={"compensation_id": comp.id, "plate_number": comp.plate_number,
                      "card_evidence": "operator_receipt_reference" if method == "CARD" else None})
     from .payments_router import _mark_pos_app
@@ -219,7 +221,8 @@ async def pay_compensation(comp_id: str, body: dict | None = None, db: Session =
         "method": method, "payment_id": pay.id, "terminal_id": terminal,
         "transaction_id": reference, "evidence": pay.raw_payload["card_evidence"]}))
     db.commit()
-    return {**to_dict(comp), "method": method, "payment_id": pay.id, "receipt_status": receipt.status}
+    return {**to_dict(comp), "method": method, "payment_id": pay.id, "receipt_status": receipt.status,
+            **_buyer_echo(pay)}
 
 
 @router.post("/{comp_id}/cancel")
