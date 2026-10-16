@@ -1145,14 +1145,20 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
         returned_cancelled = None
         if rec and result.get("billId") and not (rec.ebarimt_id or "").strip():
             bill = str(result["billId"]).strip()
-            if db.query(VatReceipt.id).filter(VatReceipt.payment_id == job.payment_id,
-                                              VatReceipt.id != rec.id,
-                                              VatReceipt.status == "CANCELLED",
-                                              VatReceipt.ebarimt_id == bill).first() is not None:
+            cancelled_same = db.query(VatReceipt.id).filter(
+                VatReceipt.payment_id == job.payment_id, VatReceipt.id != rec.id,
+                VatReceipt.status == "CANCELLED", VatReceipt.ebarimt_id == bill).first() is not None
+            # Хамгаалалт (10-16 хяналт): энэ ДДТД аль хэдийн ӨӨР идэвхтэй мөрөнд (аль ч төлбөр)
+            # бүртгэлтэй бол хоёр дахь SENT мөр үүсгэхгүй — нэг ДДТД = нэг баримт
+            live_other = (not cancelled_same) and db.query(VatReceipt.id).filter(
+                VatReceipt.id != rec.id, VatReceipt.ebarimt_id == bill,
+                VatReceipt.status.in_(("SENT", "CANCEL_PENDING"))).first() is not None
+            if cancelled_same or live_other:
                 returned_cancelled = bill
                 label = {"QPAY": "QPay", "MSGBILL": "msgbill", "POSAPI": "PosAPI"}.get(
                     data.get("provider") or "", "Суваг")
-                error = f"{label} цуцалсан ДДТД-г буцаав — тулгана уу (ДДТД {bill})"
+                error = (f"{label} цуцалсан ДДТД-г буцаав — тулгана уу (ДДТД {bill})" if cancelled_same
+                         else f"{label} өөр баримтад бүртгэлтэй ДДТД-г буцаав — тулгана уу (ДДТД {bill})")
                 err_class, err_status = ERR_UNCERTAIN, None
                 rec.raw = {**(rec.raw if isinstance(rec.raw, dict) else {}),
                            "returned_cancelled": {"bill_id": bill, "provider": data.get("provider"),

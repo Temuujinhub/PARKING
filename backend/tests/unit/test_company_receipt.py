@@ -1017,3 +1017,27 @@ def test_qpay_citizen_register_maps_to_anonymous_citizen(db, monkeypatch):
     assert (pay.customer_tin, pay.ebarimt_receiver_type) == (None, 'CITIZEN')
     run_outbox(db)
     assert create.await_args.args[1] == 'CITIZEN' and create.await_args.kwargs['receiver'] is None
+
+
+def test_ddtd_already_live_on_other_payment_is_not_sent_twice(db, monkeypatch):
+    """Суваг өөр төлбөрийн ИДЭВХТЭЙ баримтын ДДТД-г буцаавал хоёр дахь SENT мөр үүсгэхгүй (10-16)."""
+    p1, rec1, create = _qpay_sent_citizen(db, monkeypatch)       # rec1 SENT QDDTD
+    st = db.get(M.ParkingSite, db.get(M.ParkingSession, db.get(M.Payment, p1.id).session_id).site_id)
+    s2 = parking(db, plate='5678УБА', st=st)
+    p2 = M.Payment(session_id=s2.id, provider='QPAY', payment_method='QR', amount=1000, vat_amount=91,
+                   status='PAID', paid_at=datetime.utcnow(), sender_invoice_no='co-QPAY-2',
+                   provider_payment_id='781636913529999', customer_tin=None, ebarimt_receiver_type='CITIZEN')
+    db.add(p2); db.flush()
+    J.enqueue_receipt(db, p2, description='Зогсоолын үйлчилгээ · 5678УБА')
+    db.commit()
+    [j2] = rows(db, M.FinancialJob, payment_id=p2.id)
+    j2.payload = {**j2.payload, 'receiver_type': 'CITIZEN', 'customer_tin': None}
+    db.commit()
+    monkeypatch.setattr(J.qpay, 'create_ebarimt', AsyncMock(return_value={'billId': QDDTD, 'lottery': 'AA 2'}))
+    run_outbox(db)
+    [rec2] = rows(db, M.VatReceipt, payment_id=p2.id)
+    assert rec2.status == 'REVIEW' and rec2.ebarimt_id is None
+    assert 'өөр баримтад бүртгэлтэй ДДТД-г буцаав' in rec2.receipt_url
+    assert J.error_class(rec2) == 'UNCERTAIN' and not J.definitely_rejected(rec2, [db.get(M.FinancialJob, j2.id)])
+    assert db.get(M.VatReceipt, rec1.id).status == 'SENT'
+    assert db.query(M.VatReceipt).filter_by(ebarimt_id=QDDTD, status='SENT').count() == 1
