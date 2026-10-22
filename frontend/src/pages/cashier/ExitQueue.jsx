@@ -1,6 +1,7 @@
 // Гарах гэж буй машинууд (төлбөр хүлээж буй) — real-time жагсаалт
 import { RefreshCw } from 'lucide-react'
 import { fmt, fmtDate, fmtDur } from '../../api'
+import { PaymentWaitSince } from '../../components/PaymentWait'
 
 export default function ExitQueue({ exits, selected, onSelect, onRefresh }) {
   return (
@@ -34,6 +35,7 @@ export default function ExitQueue({ exits, selected, onSelect, onRefresh }) {
                 <span className="text-red-400 font-medium"> · ⚠ өр {s.debt?.amount ? `${fmt(s.debt.amount)}₮` : 'бий'}</span>
               )}
             </div>
+            <PaymentWaitSince session={s} className="mt-0.5" />
           </button>
         ))}
       </div>

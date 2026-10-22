@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 
 from ..auth import (enforce_site, get_current_user, operator_site, operator_sites,
                     require, require_role, scoped_site)
+from ..config import settings
 from ..database import get_db
 from ..services.device_auth import camera_credentials
 from ..models import (AuditLog, Compensation, Device, LprEvent, ParkingSession, ParkingSite,
-                      Payment, User)
+                      Payment, RegisteredDriver, User)
 from ..serializers import to_dict
 from ..session_logic import (amount_due, close_session_forced, get_open_session,
                              normalize_plate, paid_total, session_fee_info)
@@ -178,10 +179,52 @@ def _attach_close_info(db: Session, dicts: list[dict], user: User) -> list[dict]
     return dicts
 
 
+def _parse_day(value: str, name: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value[:10])
+    except ValueError:
+        raise HTTPException(400, f"{name}: огноо YYYY-MM-DD хэлбэртэй байх ёстой") from None
+
+
+def _local_day_bounds(date_from: str | None, date_to: str | None):
+    """UI-ийн «YYYY-MM-DD»-г УЛААНБААТАРЫН өдөр гэж ойлгож naive UTC зааг руу
+    хөрвүүлнэ (reports_router._range-тэй ижил дүрэм).
+
+    2026-10-22 (system test №35): өмнө нь огноог шууд UTC гэж харьцуулдаг байсан
+    тул «09-03» шүүлт = УБ-ын 09-03 08:00 … 09-04 08:00 болж, 9/4-ний өглөө орсон
+    машин 9/3-ны түүхэнд харагдаж, 9/3-ны 00–08 цагийнх алга болдог байв.
+    Түүх ба Excel хоёуланд."""
+    tz = timedelta(hours=settings.tz_offset_hours)
+    start = _parse_day(date_from, "date_from") - tz if date_from else None
+    end = _parse_day(date_to, "date_to") + timedelta(days=1) - tz if date_to else None
+    return start, end
+
+
+# Түүхийн эрэмбэ (system test №59) — гарсан цагаар эрэмбэлэхэд гараагүй (NULL)
+# мөрүүд төгсгөлд. id нь ижил цагтай мөрүүдийн дарааллыг хуудас хооронд тогтвортой барина.
+_SORTS = {
+    "entry_desc": (ParkingSession.entry_time.desc(),),
+    "entry_asc": (ParkingSession.entry_time.asc(),),
+    "exit_desc": (ParkingSession.exit_time.desc().nullslast(),),
+    "exit_asc": (ParkingSession.exit_time.asc().nullslast(),),
+}
+
+
+def _session_order(sort: str | None):
+    cols = _SORTS.get(sort or "entry_desc")
+    if cols is None:
+        raise HTTPException(400, f"sort: {', '.join(_SORTS)}-ийн аль нэг")
+    return (*cols, ParkingSession.id.desc())
+
+
 def _sessions_query(db: Session, user: User, site_id, status, plate,
-                    date_from, date_to, inner, debt):
+                    date_from, date_to, inner, debt, date_field: str = "entry",
+                    company: str | None = None):
     """Түүхийн жагсаалт + Excel экспортын НЭГ шүүлтүүр — хоёр endpoint яг ижил
-    үр дүн өгнө (экспорт нь дэлгэцэн дээр харагдаж буйгаа л татна)."""
+    үр дүн өгнө (экспорт нь дэлгэцэн дээр харагдаж буйгаа л татна).
+
+    `date_field` — огнооны муж ОРСОН (entry, анхдагч) эсвэл ГАРСАН (exit) цагаар.
+    `company` — гэрээт байгууллагын нэрээр (бүртгэлтэй машинуудын дугаар)."""
     site_id, site_ids = scoped_site(user, site_id)  # оператор зөвхөн өөрийн зогсоолууд
     q = db.query(ParkingSession)
     if inner:
@@ -207,10 +250,20 @@ def _sessions_query(db: Session, user: User, site_id, status, plate,
         q = q.filter(ParkingSession.status.in_(status.split(",")))
     if plate:
         q = q.filter(ParkingSession.plate_number.ilike(f"%{normalize_plate(plate)}%"))
-    if date_from:
-        q = q.filter(ParkingSession.entry_time >= datetime.fromisoformat(date_from))
-    if date_to:
-        q = q.filter(ParkingSession.entry_time < datetime.fromisoformat(date_to) + timedelta(days=1))
+    if company and company.strip():
+        # Байгууллагын бүртгэлтэй машинуудын түүх (system test №61). Бүртгэл нь
+        # хожим цуцлагдсан/дууссан ч тухайн дугаарын түүх хэвээр харагдана.
+        q = q.filter(ParkingSession.plate_number.in_(
+            db.query(RegisteredDriver.plate_number)
+            .filter(func.lower(func.trim(RegisteredDriver.company)) == company.strip().lower())))
+    if date_field not in ("entry", "exit"):
+        raise HTTPException(400, "date_field: entry эсвэл exit")
+    col = ParkingSession.exit_time if date_field == "exit" else ParkingSession.entry_time
+    start, end = _local_day_bounds(date_from, date_to)
+    if start is not None:
+        q = q.filter(col >= start)
+    if end is not None:
+        q = q.filter(col < end)
     return q
 
 
@@ -221,13 +274,15 @@ def list_sessions(
     limit: int = 100, offset: int = 0, with_fee: bool = False, inner: str | None = None,
     debt: int = 0,
     session_id: UUID | None = None,
+    sort: str = "entry_desc", date_field: str = "entry", company: str | None = None,
     db: Session = Depends(get_db), user: User = Depends(require("history", "cashier", "check")),
 ):
-    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
+    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt,
+                        date_field=date_field, company=company)
     if session_id is not None:
         q = q.filter(ParkingSession.id == str(session_id))
     total = q.count()
-    rows = q.order_by(ParkingSession.entry_time.desc()).offset(offset).limit(min(limit, 500)).all()
+    rows = q.order_by(*_session_order(sort)).offset(offset).limit(min(limit, 500)).all()
     out = _attach_debt(db, [_session_out(db, s, with_fee=with_fee) for s in rows])
     return {"total": total, "rows": _attach_close_info(db, out, user)}
 
@@ -239,74 +294,100 @@ def sessions_excel(
     site_id: str | None = None, status: str | None = None, plate: str | None = None,
     date_from: str | None = None, date_to: str | None = None,
     inner: str | None = None, debt: int = 0, session_id: UUID | None = None,
+    sort: str = "entry_desc", date_field: str = "entry", company: str | None = None,
     db: Session = Depends(get_db), user: User = Depends(require("history")),
 ):
-    """Түүхийн шүүлтүүрийн үр дүнг бүхэлд нь (дээд тал нь 20000 мөр) Excel-ээр."""
-    from .reports_excel import TZ, _xlsx
-    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt)
+    """Түүхийн шүүлтүүрийн үр дүнг ШУУД (дээд тал нь 20000 мөр) Excel-ээр.
+    Том муж (1–3 сар) нь арын экспортоор: POST /api/sessions/export."""
+    from .reports_excel import _xlsx
+    from ..services.history_export import HEADERS, WIDTHS, build_rows, total_row
+    q = _sessions_query(db, user, site_id, status, plate, date_from, date_to, inner, debt,
+                        date_field=date_field, company=company)
     if session_id is not None:
         q = q.filter(ParkingSession.id == str(session_id))
-    rows = q.order_by(ParkingSession.entry_time.desc()).limit(20000).all()
+    rows = q.order_by(*_session_order(sort)).limit(20000).all()
+    data = build_rows(db, rows)
+    return _xlsx("tuuh", "Түүх", HEADERS, data, widths=WIDTHS,
+                 total_row=total_row(len(data), sum(r[7] for r in data), sum(r[8] for r in data)))
 
-    # Төлбөрийн хэрэгслүүд — нэг query-гээр бүх session-ий PAID төлбөрийг авна
-    pay_label = {"QPAY": "QPay QR", "POS": "Карт (ПОС)", "CASH": "Бэлэн",
-                 "TRANSFER": "Дансаар", "WALLET": "Данс (хэтэвч)"}
-    pays: dict[str, list] = {}
-    if rows:
-        ids = [s.id for s in rows]
-        for p in (db.query(Payment)
-                  .filter(Payment.session_id.in_(ids), Payment.status == "PAID").all()):
-            pays.setdefault(p.session_id, []).append(p)
 
-    status_label = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
-                    "PAID": "Төлсөн", "CLOSED": "Гарсан", "FREE": "Үнэгүй",
-                    "MANUAL_CLOSED": "Хаасан"}
+# ─── Том экспорт: арын процесс (system test №62) ───
+_EXPORT_FILTERS = ("site_id", "status", "plate", "date_from", "date_to", "inner", "debt",
+                   "date_field", "company")
 
-    def _loc(dt):
-        return (dt + TZ).strftime("%Y-%m-%d %H:%M") if dt else ""
 
-    closed = _close_map(db, [s.id for s in rows])
+def _export_filters(body: dict) -> dict:
+    f = {k: body.get(k) or None for k in _EXPORT_FILTERS}
+    f["debt"] = 1 if body.get("debt") in (1, "1", True) else 0
+    f["date_field"] = f["date_field"] or "entry"
+    return f
 
-    def _closed_label(s):
-        c = closed.get(s.id)
-        if not c:
-            return "", ""
-        label = c["label"]
-        if c["action"] == "MANUAL_EXIT":
-            label = _MANUAL_PAID if pays.get(s.id) else _MANUAL_FREE
-        who = "Систем" if c["auto"] else c["by"]
-        return f"{label} — {who}", (c.get("reason_label") or c.get("reason") or "")
 
-    data = []
-    for s in rows:
-        plist = pays.get(s.id, [])
-        c_label, c_reason = _closed_label(s)
-        _dn = _device_names(db)
-        data.append([
-            s.plate_number,
-            s.site.name if s.site else "",
-            _loc(s.entry_time), _loc(s.exit_time),
-            (_dn.get(s.entry_device_id) or {}).get("name") or "",
-            (_dn.get(s.exit_device_id) or {}).get("name") or "",
-            int(s.duration_minutes or 0),
-            float(s.total_fee or 0),
-            float(sum(float(p.amount) for p in plist)),
-            ", ".join(pay_label.get(p.provider, p.provider) for p in plist),
-            s.discount.name if s.discount else "",
-            status_label.get(s.status, s.status),
-            c_label, c_reason,
-            (s.note or "")[:200],
-        ])
-    total_row = ["Нийт", "", "", "", "", "", "", sum(r[7] for r in data),
-                 sum(r[8] for r in data), "", "", f"{len(data)} мөр", "", "", ""]
-    return _xlsx(
-        "tuuh", "Түүх",
-        ["Дугаар", "Зогсоол", "Орсон", "Гарсан", "Орох камер", "Гарах камер",
-         "Хугацаа (мин)", "Дүн (₮)",
-         "Төлсөн (₮)", "Төлбөрийн хэрэгсэл", "Хөнгөлөлт", "Төлөв", "Хаасан",
-         "Шалтгаан", "Тэмдэглэл"],
-        data, widths=[11, 18, 17, 17, 16, 16, 13, 12, 12, 20, 14, 16, 26, 28, 30],
-        total_row=total_row)
+@router.post("/export")
+def start_export(body: dict, db: Session = Depends(get_db),
+                 user: User = Depends(require("history"))):
+    """Түүхийн шүүлтүүрийн БҮХ мөрийг арын процесст XLSX болгоно (1–3 сар).
+    Шууд job буцаана; UI GET /export/{id}-ээр явцыг асууж, бэлэн болмогц татна."""
+    from ..services import history_export as HX
+    filters = _export_filters(body or {})
+    sort = (body or {}).get("sort") or "entry_desc"
+    _session_order(sort)                                    # буруу утгыг шууд 400
+    # Шүүлтүүрийг ОДОО шалгана (буруу огноо/хүрээ процесс эхлэхээс өмнө 400 болно)
+    _sessions_query(db, user, **filters)
+    start, end = _local_day_bounds(filters["date_from"], filters["date_to"])
+    if start is None or end is None:
+        if not filters["plate"]:
+            raise HTTPException(400, "Огнооны муж (эхлэх, дуусах) сонгоно уу — нэг экспорт "
+                                     f"{settings.history_export_max_days} хоног хүртэл")
+    elif (end - start).days > settings.history_export_max_days:
+        raise HTTPException(400, f"Огнооны муж {settings.history_export_max_days} хоногоос "
+                                 "хэтэрсэн — хэд хувааж татна уу")
+    name = "_".join(x for x in ("tuuh", filters["date_from"], filters["date_to"],
+                                filters["plate"]) if x)
+    try:
+        job = HX.start_job(user, filters, sort, f"{name}.xlsx")
+    except RuntimeError as busy:
+        other = HX.public(busy.args[0])
+        raise HTTPException(409, f"Өөр экспорт явагдаж байна ({other.get('username')}, "
+                                 f"{other.get('done') or 0}/{other.get('total') or '?'} мөр) — "
+                                 "дуусмагц дахин оролдоно уу") from None
+    db.add(AuditLog(username=user.username, action="HISTORY_EXPORT", entity="session",
+                    entity_id=job["id"], detail={"filters": filters, "sort": sort}))
+    db.commit()
+    return HX.public(job)
+
+
+@router.get("/export")
+def my_exports(user: User = Depends(require("history"))):
+    """Миний сүүлийн экспортууд (хуудас дахин нээхэд явц/бэлэн файл харагдана)."""
+    from ..services import history_export as HX
+    return [HX.public(j) for j in HX.list_jobs(user.id)[:10]]
+
+
+def _own_job(job_id: str, user: User) -> dict:
+    from ..services import history_export as HX
+    job = HX.read_job(job_id)
+    if not job or (job.get("user_id") != user.id and user.role != "SUPER_ADMIN"):
+        raise HTTPException(404, "Экспорт олдсонгүй (хугацаа нь дууссан байж магадгүй)")
+    return HX.refresh(job)
+
+
+@router.get("/export/{job_id}")
+def export_status(job_id: str, user: User = Depends(require("history"))):
+    from ..services import history_export as HX
+    return HX.public(_own_job(job_id, user))
+
+
+@router.get("/export/{job_id}/download")
+def export_download(job_id: str, user: User = Depends(require("history"))):
+    from fastapi.responses import FileResponse
+    from ..services import history_export as HX
+    job = _own_job(job_id, user)
+    path = HX.export_dir() / f"{job['id']}.xlsx"
+    if job.get("status") != "done" or not path.exists():
+        raise HTTPException(409, "Файл бэлэн болоогүй байна")
+    return FileResponse(path, filename=job.get("filename") or "tuuh.xlsx",
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @router.get("/check")

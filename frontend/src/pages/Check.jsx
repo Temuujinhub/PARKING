@@ -6,6 +6,7 @@ import { CarFront, Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
 import { useAuth } from '../auth'
+import { PaymentWaitSince } from '../components/PaymentWait'
 import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 import { PLATE_HINT, isPlate, normalizePlate } from '../validation'
@@ -365,6 +366,7 @@ export default function Check() {
             <td className="td text-xs">{s.is_registered ? <span className="text-accent">Тийм</span> : '-'}</td>
             <td className="td">
               <Badge value={s.status} />
+              <PaymentWaitSince session={s} className="mt-0.5" />
               {s.paused_since && (
                 <span className="ml-1 text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded"
                   title={`Дотор зогсоолд орсон ${fmtDate(s.paused_since)} — тоолуур зогссон (нийт ${s.paused_minutes || 0} мин хасагдана)`}>
