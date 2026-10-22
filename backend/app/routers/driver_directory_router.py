@@ -65,14 +65,21 @@ def driver_options(db: Session = Depends(get_db), user: User = Depends(require('
 
 
 @router.get('/drivers/company-search')
-def company_search(q: str = Query('', max_length=160), db: Session = Depends(get_db),
+def company_search(q: str = Query('', max_length=160), include_junk: bool = False,
+                   db: Session = Depends(get_db),
                    user: User = Depends(require('drivers'))):
+    """Байгууллагын нэрийн санал (гараар бүртгэх цонх, жагсаалтын шүүлт).
+    Импортоос үлдсэн хог нэрийг («Улсын дугаар», «Sheet1», «Байгууллага 1» г.м —
+    services/company_names) санал болгохгүй, тэгэхгүй бол шинэ бүртгэл рүү
+    тархана. Жагсаалтын шүүлт тэдгээрийг олж засахад include_junk=true дамжуулна."""
+    from ..services.company_names import is_junk_company
     if not q.strip():
         return []
     query = directory.scoped(db.query(D.company, func.count(D.id)), user)
-    return [{'company': c, 'count': n} for c, n in query.filter(
-        D.company.icontains(q.strip(), autoescape=True)).group_by(D.company)
-        .order_by(D.company).limit(30).all()]
+    rows = (query.filter(D.company.icontains(q.strip(), autoescape=True)).group_by(D.company)
+            .order_by(D.company).limit(100).all())
+    return [{'company': c, 'count': n} for c, n in rows
+            if include_junk or not is_junk_company(c)][:30]
 
 
 @router.post('/drivers/export')

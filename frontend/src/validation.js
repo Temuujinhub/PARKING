@@ -50,6 +50,25 @@ export const PASSWORD_HINT = 'Хамгийн багадаа 8 тэмдэгт (ү
 // ── И-мэйл ──────────────────────────────────────────────────────
 export const isEmail = (v) => !v || /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(String(v).trim())
 
+// ── Байгууллагын нэр (гэрээт машин) ─────────────────────────────
+// backend/app/services/company_names.py-тэй ИЖИЛ дүрэм: зай нэгтгэнэ, Excel-ийн
+// гарчиг/хуудасны нэр («Улсын дугаар», «Sheet1», «Байгууллага 1») байгууллага биш.
+export const normalizeCompany = (v) => String(v || '').trim().split(/\s+/).filter(Boolean).join(' ')
+const JUNK_COMPANY = new Set([
+  'улсын дугаар', 'дугаар', 'машины дугаар', 'plate', 'plate number',
+  'эзэмшигч', 'нэр', 'овог нэр', 'owner', 'name',
+  'утас', 'утасны дугаар', 'phone',
+  'албан тушаал', 'тушаал', 'position', 'тэмдэглэл',
+  'байгууллага', 'байгууллагын нэр', 'company', 'компани',
+  'data', 'sheet', 'лист', 'хуудас', 'жагсаалт', 'д/д', 'дд',
+])
+export const isJunkCompany = (v) => {
+  const k = normalizeCompany(v).toLowerCase().replace(/[.:]+$/, '').trim()
+  if (!k) return false
+  return JUNK_COMPANY.has(k) || /^(sheet|лист|хуудас|page|байгууллага|company)\s*\d+$/.test(k)
+    || !/[\p{L}]/u.test(k)
+}
+
 // ── IPv4 хаяг (камер/хаалтны төхөөрөмж) ─────────────────────────
 const OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'
 export const IPV4_RE = new RegExp(`^${OCTET}\\.${OCTET}\\.${OCTET}\\.${OCTET}$`)

@@ -2078,6 +2078,40 @@ def _driver_validate(body: dict, existing: RegisteredDriver | None = None) -> No
         raise HTTPException(400, "Үнэгүй цонхны эхлэх, дуусах цаг ижил байж болохгүй")
 
 
+def _driver_company(body: dict, existing: RegisteredDriver | None = None) -> None:
+    """Гараар бүртгэх/засах үеийн «Байгууллага», «Албан тушаал» (note) — зөвхөн
+    админы create/update endpoint-д (Excel импорт, түнш/хэтэвчийн бүртгэлийн
+    замд ХЭРЭГЛЭХГҮЙ — тэд өөрийн дүрэмтэй). body-г газар дээр нь цэвэрлэнэ.
+
+    Гэрээт (CONTRACT) идэвхтэй бүртгэлд байгууллага ЗААВАЛ (харилцагчийн №52:
+    тайлан «Байгууллагаар» гэрээт машиныг байгууллагаар нь нэгтгэдэг — 566
+    гараар үүсгэсэн гэрээт бүртгэл байгууллагагүй байв). Бусад төрөлд заавал биш.
+    Засахад зөвхөн company/contract_type ирсэн үед шалгана — хуучин бүртгэлийг
+    идэвхгүй болгох, хугацааг сунгах API дуудлага унахгүй. Импортоор орсон хог нэр
+    («Улсын дугаар» г.м)-ийг ХЭВЭЭР үлдээхийг зөвшөөрнө, харин ШИНЭЭР оруулахыг
+    хориглоно (санал болгохгүй байгаа нэрийг гараар бичиж тараахгүй)."""
+    from ..services.company_names import is_junk_company, normalize_company
+    for k in ("company", "note"):
+        if body.get(k) is not None:
+            body[k] = normalize_company(body[k]) if k == "company" else str(body[k]).strip()
+    if len(body.get("company") or "") > 160:
+        raise HTTPException(422, "Байгууллагын нэр 160 тэмдэгтээс хэтрэхгүй")
+    if existing is not None and "company" not in body and "contract_type" not in body:
+        return
+    ct = body.get("contract_type") or (existing.contract_type if existing else "MONTHLY")
+    active = body.get("is_active", existing.is_active if existing else True)
+    if ct != "CONTRACT" or active is False:
+        return
+    company = body["company"] if "company" in body else normalize_company(existing.company if existing else "")
+    if not company:
+        raise HTTPException(422, "Гэрээт машинд байгууллагын нэрийг заавал оруулна уу "
+                                 "(жагсаалтаас сонгох эсвэл шинээр бичнэ).")
+    old = normalize_company(existing.company) if existing is not None else ""
+    if is_junk_company(company) and company != old:
+        raise HTTPException(422, f"«{company}» нь байгууллагын нэр биш (Excel-ийн гарчиг/хуудасны "
+                                 "нэр) — жинхэнэ байгууллагын нэрийг оруулна уу.")
+
+
 def _driver_duplicate(db, plate: str, site_id: str | None, tenant_id: str | None,
                       exclude_id: str | None = None) -> RegisteredDriver | None:
     """Ижил дугаар ижил хамрах хүрээнд (зогсоол / «бүх зогсоол»+түрээслэгч)
@@ -2140,6 +2174,7 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
         if not site_id and not user.tenant_id:
             raise HTTPException(403, "«Бүх зогсоол» бүртгэлийг түрээслэгчийн хэрэглэгч л хийнэ — зогсоолоо сонгоно уу.")
     _driver_validate(body)
+    _driver_company(body)
     plate = body["plate_number"].upper().replace(" ", "")
     tenant_id = _site_tenant(db, site_id) if site_id else user.tenant_id
     dup = _driver_duplicate(db, plate, site_id, tenant_id)
@@ -2231,6 +2266,7 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
             if not tgt and not user.tenant_id:
                 raise HTTPException(403, "«Бүх зогсоол» болгох эрх түрээслэгчийн хэрэглэгчид л бий.")
     _driver_validate(body, d)
+    _driver_company(body, d)
     # Дугаар/хамрах хүрээ өөрчлөгдөж эсвэл идэвхжиж байвал давхардал шалгана
     new_plate = (body.get("plate_number") or d.plate_number).upper().replace(" ", "")
     new_site = body["site_id"] if "site_id" in body else d.site_id

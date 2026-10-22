@@ -6,8 +6,8 @@ import { useAuth } from '../auth'
 import { Field, Modal, Table, useToast } from '../components/ui'
 import { registrationStatus, registrationValidity, statusReasons, toggleDriver } from '../driverSelection'
 import {
-  PHONE_HINT, PLATE_HINT, clampNum, dateRangeError, isPhone, isPlate,
-  normalizePhone, normalizePlate, timeWindowError,
+  PHONE_HINT, PLATE_HINT, clampNum, dateRangeError, isJunkCompany, isPhone, isPlate,
+  normalizeCompany, normalizePhone, normalizePlate, timeWindowError,
 } from '../validation'
 
 const CONTRACT_TYPES = {
@@ -229,6 +229,11 @@ export default function Drivers() {
   const hasNested = sites.some((s) => s.has_inner_lanes)
   const nestedFor = (siteId) => siteId ? !!sites.find((s) => s.id === siteId)?.has_inner_lanes : hasNested
   const [editing, setEditing] = useState(null)
+  // Засаж эхлэх үеийн байгууллага — импортоос үлдсэн хог нэрийг («Улсын дугаар»)
+  // ХЭВЭЭР үлдээхийг зөвшөөрнө, шинээр бичихийг л хориглоно (backend-тэй ижил)
+  const [origCompany, setOrigCompany] = useState('')
+  const [companyOptions, setCompanyOptions] = useState([])
+  const openEdit = (d) => { setOrigCompany(normalizeCompany(d.company)); setEditing(d) }
   const [importing, setImporting] = useState(false)
   // «Шөнө үнэгүй» төрлийн глобал цонх (Тохиргооны эрхтэй хүн 🌙-оор өөрчилнө)
   const [nightRules, setNightRules] = useState(null)
@@ -291,11 +296,25 @@ export default function Drivers() {
     const controller = new AbortController()
     const timer = setTimeout(() => {
       if (!companyQuery.trim()) { setCompanies([]); return }
-      api(`/api/admin/drivers/company-search?q=${encodeURIComponent(companyQuery.trim())}`, { signal: controller.signal })
+      // Жагсаалтын шүүлт: хог нэртэй («Улсын дугаар» г.м) бүртгэлийг олж засахын
+      // тулд include_junk — бүртгэх цонхны санал тэднийг харуулахгүй
+      api(`/api/admin/drivers/company-search?q=${encodeURIComponent(companyQuery.trim())}&include_junk=true`, { signal: controller.signal })
         .then(setCompanies).catch(() => {})
     }, 250)
     return () => { clearTimeout(timer); controller.abort() }
   }, [companyQuery])
+  // Бүртгэх/засах цонхны «Байгууллага» санал — бичих бүрд 250мс хүлээж хайна
+  // (хог нэрийг серверээс хасаж ирүүлнэ). Шинэ нэр бичихийг ч зөвшөөрнө (datalist).
+  const companyTyped = editing ? normalizeCompany(editing.company) : ''
+  useEffect(() => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      if (!companyTyped) { setCompanyOptions([]); return }
+      api(`/api/admin/drivers/company-search?q=${encodeURIComponent(companyTyped)}`, { signal: controller.signal })
+        .then(setCompanyOptions).catch(() => {})
+    }, 250)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [companyTyped])
 
   const exportRows = async (selectedOnly) => {
     if (exporting || !rowsCurrent) return
@@ -361,10 +380,22 @@ export default function Drivers() {
     valid_to: new Date(Date.now() + 365 * 864e5).toISOString().slice(0, 10),
   }
 
+  // Гэрээт (CONTRACT) идэвхтэй бүртгэлд байгууллага заавал — тайлан «Байгууллагаар»
+  // гэрээт машиныг байгууллагаар нэгтгэдэг (харилцагчийн №52). Бусад төрөлд сонголттой.
+  const companyRequired = (d) => d.contract_type === 'CONTRACT' && d.is_active !== false
+  const companyError = (d) => {
+    const c = normalizeCompany(d.company)
+    if (companyRequired(d) && !c) return 'Байгууллага — гэрээт машинд заавал (жагсаалтаас сонгох эсвэл шинээр бичнэ)'
+    if (companyRequired(d) && isJunkCompany(c) && c !== origCompany)
+      return `Байгууллага — «${c}» нь Excel-ийн гарчиг/хуудасны нэр, жинхэнэ байгууллагын нэрийг оруулна уу`
+    return null
+  }
+
   // Формын бүх алдаа (хоосон = бүх зүйл зөв). Хадгалахын өмнө шалгана.
   const formErrors = (d) => [
     !!d.plate_number && !isPlate(d.plate_number) && `Улсын дугаар — ${PLATE_HINT}`,
     !isPhone(d.phone) && `Утас — ${PHONE_HINT}`,
+    companyError(d),
     dateRangeError(d.valid_from, d.valid_to),
     timeWindowError(d.free_from, d.free_until),
   ].filter(Boolean)
@@ -381,6 +412,8 @@ export default function Drivers() {
       const body = {
         ...editing,
         site_id: editing.site_id || null,
+        company: normalizeCompany(editing.company),
+        note: String(editing.note || '').trim(),
         monthly_fee: clampNum(editing.monthly_fee, { min: 0, max: 100_000_000 }),
       }
       if (editing.id) await api(`/api/admin/drivers/${editing.id}`, { method: 'PUT', body })
@@ -401,7 +434,7 @@ export default function Drivers() {
           <button className="btn-secondary" onClick={() => setImporting(true)}>
             <Upload size={16} /> Excel-ээс импортлох
           </button>
-          <button className="btn-primary" onClick={() => setEditing(blank)}><Plus size={16} /> Бүртгэх</button>
+          <button className="btn-primary" onClick={() => openEdit(blank)}><Plus size={16} /> Бүртгэх</button>
         </div>
       </div>
       {dups.length > 0 && (
@@ -594,8 +627,8 @@ export default function Drivers() {
             <td className="td"><span className={`inline-block px-2 py-1 rounded-md text-xs font-medium ${d.is_active ? 'bg-accent/15 text-slate-100' : 'bg-surface-muted text-slate-300'}`}>{registrationStatus(d)}</span></td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs"
-                onClick={() => setEditing({
-                  ...d, phone: normalizePhone(d.phone),
+                onClick={() => openEdit({
+                  ...d, phone: normalizePhone(d.phone), company: d.company || '', note: d.note || '',
                   valid_from: d.valid_from?.slice(0, 10), valid_to: d.valid_to?.slice(0, 10),
                 })}>
                 Засах
@@ -638,6 +671,25 @@ export default function Drivers() {
                   onChange={(e) => setEditing({ ...editing, contract_type: e.target.value })}>
                   {Object.entries(CONTRACT_TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
+              </Field>
+              {/* Байгууллага: өмнө нь гараар бүртгэх цонхонд огт байгаагүй (№52). Санал нь
+                  company-search-аас (хог нэргүй); жагсаалтад байхгүй шинэ нэр бичиж болно. */}
+              <Field label="Байгууллага" required={companyRequired(editing)}>
+                <input className={`input${companyError(editing) ? ' input-error' : ''}`}
+                  list="driver-company-options" maxLength={160} autoComplete="off"
+                  placeholder="Жагсаалтаас сонгох эсвэл шинээр бичих"
+                  value={editing.company || ''} required={companyRequired(editing)}
+                  aria-invalid={!!companyError(editing)}
+                  onChange={(e) => setEditing({ ...editing, company: e.target.value })}
+                  onBlur={(e) => setEditing({ ...editing, company: normalizeCompany(e.target.value) })} />
+                <datalist id="driver-company-options">
+                  {companyOptions.map((c) => <option key={c.company} value={c.company}>{`${c.count} бүртгэл`}</option>)}
+                </datalist>
+              </Field>
+              <Field label="Албан тушаал">
+                <input className="input" maxLength={200} value={editing.note || ''}
+                  placeholder="ж: Захирал, нягтлан"
+                  onChange={(e) => setEditing({ ...editing, note: e.target.value })} />
               </Field>
               <Field label="Зогсоол">
                 <select className="input" value={editing.site_id || ''}
