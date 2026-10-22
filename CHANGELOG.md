@@ -34,7 +34,8 @@ PROD 679abcd (10-22, bundle, health schema `94f858dfee03` батлагдсан).
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
 | feat | `/api/v1/parkings` (+socialpay) `reservable`, `reservationSpots`, `reservationFreeNow`; `/api/v1/sites` `reservable`, `reservation_spots`, `reservation_free_now` (`reservations.reservation_summary` — нэг бүлэглэсэн query) | (энэ commit) | ⏳ | ⏳ |
-| tool | `tools/test_demo_sites.py` — TEST-ийн өгөгдөл: продын зогсоол/тариф (JSON, repo-д биш) импорт, дутуу координат/багтаамжийг зохиомлоор, захиалга асаах, зохиомол дүүргэлт (`note=TEST-DEMO`), TEST түрээслэгчдэд туршилтын ТТД (mock e-Barimt). Зөвхөн staging; анхдагч харах горим | (энэ commit) | ⏳ | — |
+| feat | Касс «Гараар бүртгэх» (`/api/sessions/manual-entry`): захиалгатай машиныг харуул гараар бүртгэвэл камерын уншилттай ижил захиалгад холбогдоно (CHECKED_IN, урьдчилсан төлбөр сешнд) | (энэ commit) | ⏳ | ⏳ |
+| tool | `tools/test_demo_sites.py` — TEST-ийн өгөгдөл: продын зогсоол/тариф (JSON, repo-д биш) импорт, дутуу координат/багтаамжийг зохиомлоор, захиалга асаах, зохиомол дүүргэлт (`note=TEST-DEMO`), TEST түрээслэгчдэд туршилтын ТТД (mock e-Barimt), `--sim-devices` IP-гүй туршилтын камер (`/api/lpr/simulate`). Зөвхөн staging; анхдагч харах горим | (энэ commit) | ⏳ | — |
 | docs | `INTEGRATION_API.md` §7/§8 газрын зургийн талбарууд, TEST өгөгдөл | (энэ commit) | — | — |
 
 ---

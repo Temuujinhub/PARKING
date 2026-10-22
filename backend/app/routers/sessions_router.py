@@ -740,7 +740,23 @@ async def manual_entry(body: dict, db: Session = Depends(get_db),
         from ..services.nested import _admitted, manual_inner_entry
         if _admitted(db, _msite, plate):
             manual_inner_entry(db, _msite, plate, user.username, child=s)
+    # Урьдчилсан захиалга (2026-10-22): камер уншаагүй захиалгатай машиныг харуул гараар
+    # бүртгэвэл камерын орох уншилттай ИЖИЛ холбогдоно (урьдчилсан төлбөр энэ сешнд)
+    reservation = None
+    if _msite is not None and not _msite.parent_site_id:
+        from ..services import reservations as RSV
+        try:
+            reservation = RSV.find_for_entry(db, site_id, plate, datetime.utcnow())
+            if reservation is not None:
+                with db.begin_nested():
+                    RSV.check_in(db, reservation, s, datetime.utcnow())
+        except Exception:  # noqa: BLE001 — гараар бүртгэлийг захиалгын алдаа унагаахгүй
+            log.exception("manual-entry %s: захиалга холбож чадсангүй", plate)
+            reservation = None
     db.commit()
+    if reservation is not None and reservation.status == "CHECKED_IN":
+        from ..services.reservations import notify_staff
+        notify_staff(reservation)
     await manager.broadcast(site_id, "ENTRY_EVENT", {
         "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),
         "registered": registered is not None, "blacklisted": black is not None,

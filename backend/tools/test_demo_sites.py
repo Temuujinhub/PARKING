@@ -24,6 +24,9 @@ TEST дээр PROD-той ижил зогсоолууд, координат, б�
     --clear-occupancy    TEST-DEMO машинуудыг устгана (төлбөргүй) / хаана (төлбөртэй)
     --tenant-tin         ТТД-гүй TEST түрээслэгчдэд туршилтын ТТД `0000000` (mock e-Barimt
                          ажиллаж receipt.ready ирнэ; EBARIMT_MOCK=true үед л)
+    --sim-devices        гадна зогсоол бүрд IP-ГҮЙ орох/гарах «камер» (device_key
+                         `demo-<код>-in|out`) — `/api/lpr/simulate`-ээр машин оруулж/гаргана
+                         (PARKING_ALLOW_SIMULATE + BARRIER_MOCK). IP-гүй тул поллер холбогдохгүй
 
     cd /root/PARKING/backend
     venv/bin/python tools/test_demo_sites.py --import /root/parking-deploy-1022/prod_sites.json \\
@@ -75,6 +78,7 @@ def main():
     ap.add_argument("--occupancy", action="store_true")
     ap.add_argument("--clear-occupancy", action="store_true")
     ap.add_argument("--tenant-tin", action="store_true")
+    ap.add_argument("--sim-devices", action="store_true")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--user", default="")
     a = ap.parse_args()
@@ -82,11 +86,11 @@ def main():
         sys.exit("ТАТГАЛЗАВ: зөвхөн TEST сервер (PARKING_DEPLOY_ROLE=staging) дээр ажиллана")
     if a.apply and not a.user:
         sys.exit("--apply үед --user заавал")
-    if not a.src and (a.reservations or a.occupancy):
-        sys.exit("--reservations/--occupancy-д --import FILE (зогсоолын жагсаалт) хэрэгтэй")
+    if not a.src and (a.reservations or a.occupancy or a.sim_devices):
+        sys.exit("--reservations/--occupancy/--sim-devices-д --import FILE (зогсоолын жагсаалт) хэрэгтэй")
 
     from app.database import SessionLocal
-    from app.models import (AuditLog, ParkingSession, ParkingSite, Payment, TariffTemplate,
+    from app.models import (AuditLog, Device, ParkingSession, ParkingSite, Payment, TariffTemplate,
                             TariffTier, Tenant)
     from app.services import app_settings as A
 
@@ -181,6 +185,22 @@ def main():
                 if a.apply:
                     A.set_site_rules(db, A.RESERVATION_KEY, site.id, {"enabled": True, "spots": spots}, who)
 
+        # ── Туршилтын камер (simulate) ────────────────────────────────────
+        if a.sim_devices:
+            print("== Туршилтын камер (IP-гүй, /api/lpr/simulate)")
+            for code, site in sites.items():
+                if site.parent_site_id or not site.is_active:
+                    continue
+                for lane in ("entry", "exit"):
+                    key = f"demo-{code.lower()}-{'in' if lane == 'entry' else 'out'}"
+                    if db.query(Device.id).filter(Device.device_key == key).first():
+                        continue
+                    db.add(Device(id=str(uuid.uuid4()), site_id=site.id, device_key=key,
+                                  name=f"TEST-DEMO {'орох' if lane == 'entry' else 'гарах'} камер",
+                                  device_type="camera", lane_dir=lane, lane_no=1, ip_address="",
+                                  status="active", auto_open=False))
+                    note(f"{code:<27} {key}")
+
         # ── Туршилтын ТТД (mock e-Barimt) ─────────────────────────────────
         if a.tenant_tin:
             print("== Туршилтын ТТД")
@@ -239,7 +259,8 @@ def main():
             db.add(AuditLog(username=who, action="TEST_DEMO_SITES", entity="parking_site", entity_id="-",
                             detail={"changes": len(changes), "import": a.src,
                                     "flags": {k: getattr(a, k) for k in
-                                              ("reservations", "occupancy", "clear_occupancy", "tenant_tin")}}))
+                                              ("reservations", "occupancy", "clear_occupancy", "tenant_tin",
+                                               "sim_devices")}}))
             db.commit()
             print(f"\nХАДГАЛАВ ({len(changes)} өөрчлөлт)")
         else:

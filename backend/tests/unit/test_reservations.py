@@ -386,3 +386,16 @@ def test_parkings_map_shows_reservable_and_free_now(c):
     assert data["reservable"] is False and data["reservationSpots"] == 0
     _, rows, _ = IR.site_catalog(c.db, c.partner)
     assert rows[0]["reservable"] is False and "reservation_free_now" in rows[0]
+
+
+def test_manual_entry_by_guard_links_reservation(c, monkeypatch):
+    from app.routers import sessions_router as SR
+    monkeypatch.setattr(SR.manager, "broadcast", lambda *a, **k: asyncio.sleep(0))
+    r, _ = create(c, datetime.utcnow() + timedelta(minutes=5))
+    confirm(c, r)
+    u = M.User(username="guard", password_hash="x", role="SUPER_ADMIN")
+    c.db.add(u); c.db.commit()
+    out = asyncio.run(SR.manual_entry({"site_id": c.site.id, "plate_number": PLATE}, c.db, u))
+    c.db.refresh(r)
+    assert r.status == R.CHECKED_IN and r.session_id == out["id"]
+    assert c.db.get(M.Payment, r.payment_id).session_id == out["id"]
