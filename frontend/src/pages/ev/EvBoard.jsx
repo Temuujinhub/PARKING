@@ -1,5 +1,5 @@
 // Админ: EV цэнэглэгчдийн амьд самбар + бүртгэл + командууд (§4.4)
-import { Loader2, Plug, Plus, RefreshCw, RotateCcw, Zap } from 'lucide-react'
+import { Loader2, Pencil, Plug, Plus, RefreshCw, RotateCcw, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Field, Modal, useToast } from '../../components/ui'
@@ -29,6 +29,7 @@ export default function EvBoard() {
   const [sessions, setSessions] = useState([])
   const [sites, setSites] = useState([])
   const [reg, setReg] = useState(null)     // бүртгэх modal: {cp_id}
+  const [edit, setEdit] = useState(null)   // засах modal: цэнэглэгчийн мөр
   const [busy, setBusy] = useState(false)
 
   const load = async () => {
@@ -60,6 +61,16 @@ export default function EvBoard() {
       toast.success(`Бүртгэгдлээ — QR түлхүүр: ${r.charger_key}`)
       if (r.hub_note) toast.error(r.hub_note)
       setReg(null); load()
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+
+  const update = async (id, form) => {
+    setBusy(true)
+    try {
+      const r = await api(`/api/admin/ev/chargers/${id}`, { method: 'PUT', body: form })
+      toast.success('Хадгалагдлаа')
+      if (r.hub_note) toast.error(r.hub_note)
+      setEdit(null); load()
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
 
@@ -124,6 +135,12 @@ export default function EvBoard() {
               <div>
                 <div className="font-semibold">{c.name || c.cp_id}</div>
                 <div className="text-xs text-slate-500">{c.cp_id} · {c.site_name} · QR: {c.charger_key}</div>
+                {/* Чадал нь түншийн газрын зурагт (/api/v1/parkings) харагдана — 2026-10-22 */}
+                <div className="text-xs mt-0.5">
+                  {c.power_kw != null
+                    ? <span className="text-slate-400">{c.power_kw} кВт · {c.connector_count} бууц</span>
+                    : <span className="text-amber-400">Чадал (кВт) тохируулаагүй</span>}
+                </div>
               </div>
               <span className={`text-xs px-2 py-1 rounded-full ${c.online ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
                 {c.online ? 'Онлайн' : 'Офлайн'}
@@ -153,8 +170,12 @@ export default function EvBoard() {
               </button>
               <button onClick={() => command(c.id, 'unlock', { connector_id: 1 })} disabled={busy || !c.online}
                 className="btn-secondary text-xs disabled:opacity-40">Unlock</button>
+              <button onClick={() => setEdit(c)} disabled={busy}
+                className="btn-secondary flex items-center gap-1 text-xs ml-auto disabled:opacity-40">
+                <Pencil size={13} />Засах
+              </button>
               <a href={`/ev/${c.charger_key}`} target="_blank" rel="noreferrer"
-                className="btn-secondary text-xs ml-auto">QR хуудас</a>
+                className="btn-secondary text-xs">QR хуудас</a>
             </div>
           </div>
         ))}
@@ -199,6 +220,8 @@ export default function EvBoard() {
 
       {reg && <RegisterModal cp={reg} sites={sites} busy={busy}
         onClose={() => setReg(null)} onSave={register} />}
+      {edit && <EditModal charger={edit} busy={busy}
+        onClose={() => setEdit(null)} onSave={(form) => update(edit.id, form)} />}
     </div>
   )
 }
@@ -206,7 +229,7 @@ export default function EvBoard() {
 function RegisterModal({ cp, sites, busy, onClose, onSave }) {
   const [form, setForm] = useState({
     cp_id: cp.cp_id, name: cp.cp_id, site_id: sites[0]?.id || '',
-    connector_count: 2, auth_password: '',
+    connector_count: 2, power_kw: 40, auth_password: '',   // 40 кВт = Winline UX (зөвхөн санал)
   })
   return (
     <Modal open title={`Цэнэглэгч бүртгэх — ${cp.cp_id}`} onClose={onClose}>
@@ -225,6 +248,7 @@ function RegisterModal({ cp, sites, busy, onClose, onSave }) {
           <input type="number" min="1" max="4" className="input" value={form.connector_count}
             onChange={(e) => setForm({ ...form, connector_count: Number(e.target.value) })} />
         </Field>
+        <PowerField value={form.power_kw} onChange={(v) => setForm({ ...form, power_kw: v })} />
         <Field label="Шинэ OCPP нууц үг (заавал биш — provision нууц үгийг солино)">
           <input className="input" value={form.auth_password}
             onChange={(e) => setForm({ ...form, auth_password: e.target.value })} />
@@ -232,6 +256,43 @@ function RegisterModal({ cp, sites, busy, onClose, onSave }) {
         <button onClick={() => onSave(form)} disabled={busy || !form.site_id}
           className="btn-primary w-full justify-center">
           {busy ? <Loader2 className="animate-spin" size={18} /> : 'Бүртгэх'}
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
+// Нэрлэсэн чадал (кВт) — wallet-ийн газрын зурагт харагдана. Хоосон = тохируулаагүй.
+function PowerField({ value, onChange }) {
+  return (
+    <Field label="Чадал, кВт (газрын зурагт харагдана)">
+      <input type="number" min="0.1" max="1000" step="0.1" className="input" placeholder="ж: 40"
+        value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} />
+    </Field>
+  )
+}
+
+function EditModal({ charger, busy, onClose, onSave }) {
+  const [form, setForm] = useState({
+    name: charger.name || '', connector_count: charger.connector_count || 2,
+    power_kw: charger.power_kw ?? '',
+  })
+  return (
+    <Modal open title={`Цэнэглэгч засах — ${charger.cp_id}`} onClose={onClose}>
+      <div className="space-y-3">
+        <Field label="Нэр (газрын зурагт харагдана)">
+          <input className="input" value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </Field>
+        <Field label="Бууцны тоо">
+          <input type="number" min="1" max="4" className="input" value={form.connector_count}
+            onChange={(e) => setForm({ ...form, connector_count: Number(e.target.value) })} />
+        </Field>
+        <PowerField value={form.power_kw} onChange={(v) => setForm({ ...form, power_kw: v })} />
+        <button onClick={() => onSave({ ...form, power_kw: form.power_kw === '' ? null : form.power_kw })}
+          disabled={busy || !form.name.trim() || !(form.connector_count >= 1)}
+          className="btn-primary w-full justify-center">
+          {busy ? <Loader2 className="animate-spin" size={18} /> : 'Хадгалах'}
         </button>
       </div>
     </Modal>

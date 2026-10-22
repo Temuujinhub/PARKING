@@ -467,6 +467,10 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_comp_created_at ON compensations (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_comp_site_created ON compensations (site_id, created_at)",
 
+    # 2026-10-22 Газрын зурагт EV цэнэглэгч: нэрлэсэн чадал (кВт). nullable — NULL = тохируулаагүй,
+    # байгаа мөрийг нөхөхгүй (продын цэнэглэгчдэд EV хуудсаас гараар оруулна).
+    "ALTER TABLE ev_chargers ADD COLUMN IF NOT EXISTS power_kw NUMERIC(6,1)",
+
 ]
 
 
@@ -542,6 +546,7 @@ def check_ready():
         conn.execute(text("SELECT receipt_issuer FROM partner_keys LIMIT 0"))
         conn.execute(text("SELECT reservation_no, status, start_time, end_time, payment_id, session_id "
                           "FROM reservations LIMIT 0"))
+        conn.execute(text("SELECT power_kw FROM ev_chargers LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'

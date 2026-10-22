@@ -1007,6 +1007,9 @@ class EvCharger(Base):
     # QR стикерийн богино түлхүүр (§7.1): /ev/{charger_key}{connector}
     charger_key = Column(String(20), unique=True, nullable=False)
     connector_count = Column(Integer, nullable=False, default=2)
+    # Нэрлэсэн чадал, кВт (Winline UX = 40). Түншийн газрын зурагт (/parkings, /sites)
+    # харагдана; NULL = тохируулаагүй (хуучин мөрийг чимээгүй нөхөхгүй) — 2026-10-22
+    power_kw = Column(Numeric(6, 1), nullable=True)
     price_plan_id = Column(UUID(as_uuid=False), ForeignKey("ev_price_plans.id"), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

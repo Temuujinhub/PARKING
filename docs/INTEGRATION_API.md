@@ -53,6 +53,10 @@ PARKING_PARTNER_KEYS=toki:УРТ_НУУЦ_ТҮЛХҮҮР1,easywallet:УРТ_НУ
 ```
 `capacity=0` бол `free=null` (дүүргэлт хянадаггүй).
 
+Мөр бүрд мөн захиалга (`reservable`, `reservation_spots`, `reservation_free_now` — §8) болон
+EV цэнэглэгч (`has_ev_charger`, `ev_chargers[]` {`name`, `power_kw`, `connector_count`, `status`,
+`connectors[]` {`connector_id`, `status`}}, `ev_connectors_total`, `ev_connectors_free` — §7.1).
+
 ### 2. GET /api/v1/sessions?plate=1234УБА[&site_code=NIC] — дугаараар хайх
 
 site_code өгөхгүй бол бүх зогсоолоос хайна. Хариу:
@@ -267,7 +271,7 @@ e-Barimt `FAILED`** (`MerchantMissing`: TEST түрээслэгч «ИйзиПа
 | `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId"}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` |
 | `POST /api/v1/vehicles/delete` | `POST /api/v1/socialpay/delete` | → `OK` \| `NOT_FOUND` (Success=true) |
 | `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн + өр бүр огноотой (`debts[]`: `debtId`, `amount`, `createdAt`, `reason`, `reasonText`, `siteCode`, `siteName`, `enteredDate`, `exitedDate`, `minutesParked`; цаг `…Z`) |
-| `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes`, дүүргэлт (`capacity/occupied/free`), захиалга: `reservable`, `reservationSpots`, `reservationFreeNow` (2026-10-22; `vehicles` эрх шаардахгүй) |
+| `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes`, дүүргэлт (`capacity/occupied/free`), захиалга: `reservable`, `reservationSpots`, `reservationFreeNow`; EV цэнэглэгч: `hasEvCharger`, `evChargers[]`, `evConnectorsTotal`, `evConnectorsFree` (§7.1) (2026-10-22; `vehicles` эрх шаардахгүй) |
 
 Хариу `{"Success", "Message", "Detail"?, "data"?}` (camelCase), алдаа ч ижил хэлбэр + HTTP код
 (404/405/422 мөн). Ялгаа нь зөвхөн бүртгэлийн `created_via` (`api` / `socialpay`). Хурдны хязгаар
@@ -281,6 +285,55 @@ e-Barimt `FAILED`** (`MerchantMissing`: TEST түрээслэгч «ИйзиПа
 (гарах уншилтгүй албадан хаалтыг ч `exitConfirmed:false`-оор илгээнэ). Амжилт = 2xx БА body-д
 `"Success": true` эсвэл `"success": true`; үгүй бол 1м, 5м, 15м, 1ц, 2ц, дараа нь 4ц тутам 24ц
 хүртэл → DEAD. Дэлгэрэнгүй дүрэм: `docs/SOCIALPAY_INTEGRATION.md`.
+
+### 7.1 Газрын зураг: EV цэнэглэгч — 2026-10-22
+
+`GET|POST /api/v1/parkings` (+ `/api/v1/socialpay/parkings`) мөр бүрд — зураг дээр цэнэглэгчтэй
+зогсоолыг ялгаж (`hasEvCharger`), цэнэглэгч бүрийн нэр, чадал (кВт), бууцны (хошууны) тоо, амьд
+төлвийг харуулна:
+
+```json
+{"siteCode": "NOMADS", "name": "Номадс", "latitude": 47.91, "longitude": 106.92, "free": 12,
+ "hasEvCharger": true,
+ "evChargers": [
+   {"name": "DC #1", "powerKw": 40, "connectorCount": 2, "status": "AVAILABLE",
+    "connectors": [{"connectorId": 1, "status": "CHARGING"}, {"connectorId": 2, "status": "AVAILABLE"}]},
+   {"name": "DC #2", "powerKw": 40, "connectorCount": 2, "status": "OFFLINE",
+    "connectors": [{"connectorId": 1, "status": "OFFLINE"}, {"connectorId": 2, "status": "OFFLINE"}]}
+ ],
+ "evConnectorsTotal": 4, "evConnectorsFree": 1}
+```
+
+`/api/v1/sites` мөн адил snake_case: `has_ev_charger`, `ev_chargers[]` {`name`, `power_kw`,
+`connector_count`, `status`, `connectors[]` {`connector_id`, `status`}}, `ev_connectors_total`,
+`ev_connectors_free`.
+
+| Талбар | Утга |
+|---|---|
+| `hasEvCharger` | идэвхтэй цэнэглэгчтэй эсэх. Цэнэглэгчгүй зогсоолд `false`, `evChargers: []`, `evConnectorsTotal: 0`, `evConnectorsFree: 0` |
+| `evChargers[].powerKw` | нэрлэсэн чадал, кВт (бутархай байж болно, ж: 7.4); тохируулаагүй бол `null` |
+| `evChargers[].connectorCount` | бууцны тоо (= `connectors[]`-ийн урт, дугаар 1..N) |
+| `evChargers[].status` | цэнэглэгчийн нэгтгэсэн төлөв — бууцнуудын хамгийн «сайн» нь: `AVAILABLE` > `CHARGING` > `UNKNOWN` > `FAULTED` > `OFFLINE` |
+| `evConnectorsTotal` | зогсоолын бүх бууцны тоо |
+| `evConnectorsFree` | одоо `AVAILABLE` бууцны тоо; амьд төлөв мэдэгдэхгүй үед `null` («0 сул» гэж бүү харуул) |
+
+**Бууцны төлөв** (OCPP 1.6 → энгийн):
+
+| `status` | OCPP төлөв | Утга |
+|---|---|---|
+| `AVAILABLE` | `Available` | сул, залгаж болно |
+| `CHARGING` | `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`, `Reserved` | эзэлсэн (машин залгаастай / цэнэглэж буй / дуусгаж буй / захиалгатай) |
+| `FAULTED` | `Faulted` | гэмтэлтэй |
+| `OFFLINE` | `Unavailable`; эсвэл цэнэглэгч сервертэй холбогдоогүй | ашиглах боломжгүй |
+| `UNKNOWN` | бусад / төлөв ирээгүй / цэнэглэгчийн сервер түр хариу өгөөгүй | мэдэгдэхгүй |
+
+Цэнэглэгч бүхэлдээ (OCPP connector 0) `Faulted`/`Unavailable` бол сул бууцнууд мөн
+`FAULTED`/`OFFLINE` гэж харагдана.
+
+Тэмдэглэл: зөвхөн гадна зогсоол (доторх зогсоолд бүртгэсэн цэнэглэгч газрын зурагт гарахгүй);
+идэвхгүй цэнэглэгч гарахгүй. Амьд төлөв ~30с кэштэй — цэнэглэгчийн сервер (hub) унтарсан/удаан үед
+хариу удаашрахгүй, алдаа өгөхгүй, зөвхөн `UNKNOWN` болно. Цэнэглэгчийн дотоод таних тэмдэг (cp_id,
+QR түлхүүр) гадагш гардаггүй. Цэнэглэлт эхлүүлэх нь цэнэглэгч дээрх QR-ээр (жолоочийн хуудас).
 
 ### 8. Урьдчилсан захиалга (reservation) — 2026-10-22
 

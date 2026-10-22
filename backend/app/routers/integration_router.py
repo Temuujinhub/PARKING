@@ -321,8 +321,10 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
         q = q.filter(ParkingSite.id == partner.site_id)
     sites = q.order_by(ParkingSite.site_code).all()
     from ..services.reservations import reservation_summary
+    from ..services.ev_map import ev_site_summary
     counts = occupancy_counts(db, [s.id for s in sites])
     rsv = reservation_summary(db, sites)
+    ev = ev_site_summary(db, sites)
     sampled_at = datetime.utcnow().isoformat() + 'Z'
     out = []
     for site in sites:
@@ -344,6 +346,12 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
             "reservable": rsv[site.id]["reservable"],
             "reservation_spots": rsv[site.id]["spots"],
             "reservation_free_now": rsv[site.id]["free_now"],
+            # EV цэнэглэгч (2026-10-22): зөвхөн гадна зогсоолд; амьд төлөв hub-аас (30с кэш,
+            # ~1.5с timeout, алдаанд UNKNOWN) — services/ev_map.py
+            "has_ev_charger": ev[site.id]["has_ev_charger"],
+            "ev_chargers": ev[site.id]["ev_chargers"],
+            "ev_connectors_total": ev[site.id]["ev_connectors_total"],
+            "ev_connectors_free": ev[site.id]["ev_connectors_free"],
             "sampled_at": sampled_at,
         })
     return sites, out, sampled_at

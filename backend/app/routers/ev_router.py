@@ -302,6 +302,7 @@ async def admin_chargers(db: Session = Depends(get_db),
             "charger_key": c.charger_key, "site_id": c.site_id,
             "site_name": c.site.name if c.site else "",
             "connector_count": c.connector_count,
+            "power_kw": float(c.power_kw) if c.power_kw is not None else None,
             "price_plan_id": c.price_plan_id, "is_active": c.is_active,
             "online": h.get("online", False), "hub_status": h.get("status"),
             "vendor": h.get("vendor"), "model": h.get("model"),
@@ -313,6 +314,19 @@ async def admin_chargers(db: Session = Depends(get_db),
     known = {c.cp_id for c in rows}
     unregistered = [h for k, h in live.items() if k not in known] if allowed is None else []
     return {"chargers": out, "unregistered": unregistered, "hub_error": hub_error}
+
+
+def _power_kw(value):
+    """Нэрлэсэн чадал (кВт): хоосон → NULL (тохируулаагүй); 0 < кВт ≤ 1000, 0.1 нарийвчлал."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        kw = round(float(value), 1)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Чадал (кВт) тоо байх ёстой")
+    if not 0 < kw <= 1000:
+        raise HTTPException(422, "Чадал (кВт) 0-ээс их, 1000-аас ихгүй байна")
+    return kw
 
 
 @router.post("/api/admin/ev/chargers", status_code=201)
@@ -339,6 +353,7 @@ async def admin_charger_create(body: dict, db: Session = Depends(get_db),
     c = EvCharger(site_id=site_id, cp_id=cp_id, name=str(body.get("name") or cp_id),
                   charger_key=key,
                   connector_count=int(body.get("connector_count") or 2),
+                  power_kw=_power_kw(body.get("power_kw")),
                   price_plan_id=body.get("price_plan_id"))
     db.add(c)
     _audit(db, user.username, "EV_CHARGER_CREATE", cp_id, {"key": key})
@@ -368,10 +383,14 @@ async def admin_charger_update(charger_id: str, body: dict,
     plan_id = body.get("price_plan_id", c.price_plan_id)
     if plan_id and not plan_matches_site(db.get(EvPricePlan, plan_id), site):
         raise HTTPException(422, "Тариф энэ зогсоолд хамаарахгүй")
+    power_kw = _power_kw(body["power_kw"]) if "power_kw" in body else c.power_kw
     for f in ("name", "connector_count", "price_plan_id", "is_active", "site_id"):
         if f in body:
             setattr(c, f, body[f])
-    _audit(db, user.username, "EV_CHARGER_UPDATE", c.cp_id, body)
+    c.power_kw = power_kw
+    # Нууц үг audit-д бичигдэхгүй
+    _audit(db, user.username, "EV_CHARGER_UPDATE", c.cp_id,
+           {k: v for k, v in body.items() if k != "auth_password"})
     db.commit()
     if body.get("auth_password") or "is_active" in body:
         upd = {"status": "ACTIVE" if c.is_active else "DISABLED"}

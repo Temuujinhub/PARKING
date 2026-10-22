@@ -338,6 +338,16 @@ def _parkings(db: Session, partner) -> JSONResponse:
             "reservable": row["reservable"],
             "reservationSpots": row["reservation_spots"],
             "reservationFreeNow": row["reservation_free_now"],
+            # EV цэнэглэгч (2026-10-22) — төлөв AVAILABLE|CHARGING|OFFLINE|FAULTED|UNKNOWN (ev_map.py)
+            "hasEvCharger": row["has_ev_charger"],
+            "evChargers": [{
+                "name": ch["name"], "powerKw": ch["power_kw"],
+                "connectorCount": ch["connector_count"], "status": ch["status"],
+                "connectors": [{"connectorId": x["connector_id"], "status": x["status"]}
+                               for x in ch["connectors"]],
+            } for ch in row["ev_chargers"]],
+            "evConnectorsTotal": row["ev_connectors_total"],
+            "evConnectorsFree": row["ev_connectors_free"],
         })
     return _resp(True, "OK", data=data, sampledAt=sampled_at)
 

@@ -66,6 +66,19 @@ async def list_chargers() -> list[dict]:
     return await _get("/internal/chargers")
 
 
+def list_chargers_sync(timeout) -> list[dict]:
+    """list_chargers-ийн sync хувилбар — sync endpoint (түншийн газрын зураг, threadpool)-оос
+    event loop-гүйгээр дуудна. timeout нь httpx.Timeout (газрын зурагт ~1.5с хатуу)."""
+    try:
+        with httpx.Client(timeout=timeout) as c:
+            r = c.get(f"{_base()}/internal/chargers", headers=_headers())
+    except httpx.HTTPError as e:
+        raise HubUnavailable(f"hub холбогдсонгүй: {e}") from e
+    if r.status_code >= 400:
+        raise HubError(f"hub /internal/chargers → {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
 async def charger_status(cp_id: str) -> dict:
     return await _get(f"/internal/chargers/{cp_id}")
 
