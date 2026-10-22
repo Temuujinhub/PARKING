@@ -763,71 +763,219 @@ def by_payment(date_from: str | None = None, date_to: str | None = None, site_id
             "total": total, "free_count": free_q.count()}
 
 
-@router.get("/by-company")
-def by_company(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
-               db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Байгууллагаар (гэрээт машин) — тухайн хугацаанд байгууллага бүрийн хэдэн машин
-    хэдэн удаа орж, нийт хэдэн цаг зогссоныг нэгтгэнэ. Session-ийг бүртгэлтэй
-    машины жагсаалттай ДУГААРААР нь тулгана (тухайн зогсоолд эсвэл бүх зогсоолд
-    эрхтэй бүртгэл тоологдоно); байгууллагагүй бүртгэлийг «(байгууллагагүй)» гэж бүлэглэнэ."""
-    from ..models import RegisteredDriver
+# ── Байгууллагаар (гэрээт машин) ──────────────────────────────────────────
+# 2026-10-22 (харилцагчийн №61): «ашиглалтын цаг, машины тоо, ₮ дүн».
+# Өмнө нь хугацааны БҮХ session-ийг Python руу ачаалж дугаараар тулгадаг байсан
+# (жилийн муж ~2 сая мөр → timeout) ба ОДООГИЙН бүртгэлээр тулгадаг тул
+# гэрээний хугацаанаас гадуурх зогсолт ч гэрээтэд тоологддог байв. Одоо:
+#   • SQL-д бүртгэлтэй машины дугаараар JOIN хийж, тоо/хугацаа/төлсөн дүнг
+#     SQL-ээр нэгтгэнэ (Python руу байгууллагаар нэгтгэсэн мөр + дүнгийн бүлэг);
+#   • зогсолт нь ОРСОН ЦАГ нь тухайн бүртгэлийн valid_from..valid_to дотор
+#     байвал л тэр байгууллагад тоологдоно (бүртгэхээс өмнөх / дууссаны дараах
+#     зогсолт энгийн машин шиг төлбөртэй байсан тул гэрээтэд хамаарахгүй);
+#   • «Тарифаар тооцсон дүн» — гэрээгүй бол зогсоолын тарифаар хэд болох байсан
+#     (shadow fee). Гэрээт машинд calculate_fee 0 буцаадаг (прод 30 хоногт
+#     9,688 гэрээт зогсолтын 9,680 нь 0₮) тул байгууллагад нэхэмжлэх/гэрээний
+#     үнэ цэнийг харуулах өөр эх сурвалж байхгүй.
+from ..services.company_names import NO_COMPANY, is_junk_company  # noqa: E402
+
+# Тарифаар тооцсон дүнг бодох дээд хэмжээ (зогсолтын тоо). Дүнг (зогсоол,
+# төлбөрт минут) бүлгээр НЭГ л удаа бодно — зардал нь зогсолтын тоогоор биш
+# ялгаатай бүлгийн тоогоор өсдөг (прод 3 сар: 14,691 зогсолт → 8,374 бүлэг,
+# Python тал <0.1с). Хязгаараас давбал дүнг null болгож хугацааг богиносгохыг
+# санал болгоно — тоо/хугацааны нэгтгэл (SQL) хэвээр гарна.
+COMPANY_FEE_MAX_STAYS = 200_000
+
+
+def _company_col(D):
+    """Тайлангийн байгууллагын нэр: зайгүй, хоосон/NULL → «(байгууллагагүй)»."""
+    return func.coalesce(func.nullif(func.trim(D.company), ""), NO_COMPANY)
+
+
+def _elapsed_minutes(db, start_col, end_col):
+    """(end - start) БҮХЭЛ минут, доош нь — calculate_fee-ийн total_minutes-тэй ижил."""
+    if db.get_bind().dialect.name == "postgresql":
+        return func.floor(func.extract("epoch", end_col - start_col) / 60)
+    # SQLite (unit тест): julianday зөрүү; хөвөгч таслалын алдаанд 1e-6 нэмнэ
+    from sqlalchemy import Integer, cast
+    return cast((func.julianday(end_col) - func.julianday(start_col)) * 1440 + 1e-6, Integer)
+
+
+def _contract_stays(db, start, end, sid, detail: bool = False):
+    """Гэрээт машины зогсолтууд — subquery (мөр бүр нэг session × нэг бүртгэл, rn).
+
+    Тулгалтын дүрэм (өмнөхтэй ижил + хугацааны цонх):
+      • дугаар таарч, бүртгэл ИДЭВХТЭЙ, session-ий entry_time ∈ [valid_from, valid_to];
+      • бүртгэл тухайн зогсоолынх, эсвэл «бүх зогсоол» (site NULL) бөгөөд
+        түрээслэгч нь session-ий зогсоолын түрээслэгчтэй ижил (NULL/NULL = хуучин
+        суулгац) — түрээслэгч ДАМНАХГҮЙ.
+    Нэг session-д хэд хэдэн бүртгэл таарвал find_registered-ийн дараалал
+    (_registered_order): зогсоолын бүртгэл → «бүх зогсоол», дараа нь хамгийн урт
+    хүчинтэй. Тиймээс дуудагч ЗААВАЛ rn == 1-ээр шүүнэ — эс бол давхар тоологдоно.
+    Байгууллагаар шүүхийг rn-ийн ДАРАА (гадна query-д) хийнэ: өөр байгууллагын
+    тэргүүлэх бүртгэлтэй session энэ байгууллагад шилжихгүй.
+    paid — тухайн session дээрх PAID төлбөрийн нийлбэр (гэрээт ихэвчлэн 0)."""
+    from sqlalchemy import and_, or_, select
+
+    from ..models import RegisteredDriver as D
+    S, PS = ParkingSession, ParkingSite
+    now = datetime.utcnow()
+    mins = func.coalesce(S.duration_minutes,
+                         _elapsed_minutes(db, S.entry_time, func.coalesce(S.exit_time, now)))
+    paid = (select(func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.session_id == S.id, Payment.status == "PAID")
+            .scalar_subquery())
+    rn = func.row_number().over(partition_by=S.id,
+                                order_by=(D.site_id.is_(None), D.valid_to.desc(), D.id))
+    cols = [S.id.label("sid"), S.plate_number.label("plate"), S.site_id.label("site_id"),
+            _company_col(D).label("company"), mins.label("mins"),
+            func.coalesce(S.paused_minutes, 0).label("paused"), paid.label("paid"), rn.label("rn")]
+    if detail:
+        cols += [S.entry_time.label("entry_time"), S.exit_time.label("exit_time"),
+                 S.status.label("status"), D.full_name.label("owner"),
+                 D.contract_type.label("contract_type"), D.monthly_fee.label("monthly_fee")]
+    q = (db.query(*cols).select_from(S)
+         .join(PS, PS.id == S.site_id)
+         .join(D, and_(D.plate_number == S.plate_number, D.is_active.is_(True),
+                       S.entry_time >= D.valid_from, S.entry_time <= D.valid_to))
+         .filter(S.entry_time >= start, S.entry_time < end,
+                 or_(D.site_id == S.site_id,
+                     and_(D.site_id.is_(None), D.tenant_id.is_not_distinct_from(PS.tenant_id)))))
+    return _flt(q, S.site_id, sid).subquery()
+
+
+def _billable(m):
+    """Төлбөрт минут = нийт − доторх (nested) зогсоолд өнгөрүүлсэн (нийтээс хэтрэхгүй)."""
+    from sqlalchemy import case
+    return m.c.mins - case((m.c.paused > m.c.mins, m.c.mins), else_=m.c.paused)
+
+
+def _tariff_fee_calc(db):
+    """(site_id, төлбөрт минут) → зогсоолын тарифаар ГЭРЭЭГҮЙ бол бодогдох дүн (₮).
+
+    calculate_fee(is_registered=False): гэрээний үнэгүй цонх / эхний N минут
+    ТООЦОХГҮЙ, зогсоолын tariff_template (шатлал, free_minutes, extra_hour_price,
+    daily_cap, НӨАТ), no_charge зогсоол → 0, тарифгүй зогсоол → 0. Дүн зөвхөн
+    төлбөрт минутаас хамаардаг тул (зогсоол, минут) хос бүрийг нэг л удаа бодож,
+    зогсоол/загварыг хүсэлт дотор кэшлэнэ. Хөнгөлөлт, эмнэлгийн эрх, тарифын
+    ТҮҮХ (өнгөрсөнд өөр тариф байсан эсэх) тооцогдохгүй — одоогийн тариф."""
+    from ..billing import calculate_fee
+    sites: dict = {}
+    memo: dict = {}
+    epoch = datetime(2000, 1, 1)
+
+    def fee(site_id, minutes) -> float:
+        key = (site_id, max(0, int(minutes or 0)))
+        if key not in memo:
+            if site_id not in sites:
+                sites[site_id] = db.get(ParkingSite, site_id)
+            site = sites[site_id]
+            memo[key] = 0.0 if site is None else float(calculate_fee(
+                site.tariff_template, epoch, epoch + timedelta(minutes=key[1]),
+                no_charge=bool(getattr(site, "no_charge", False)))["total_fee"])
+        return memo[key]
+    return fee
+
+
+def _driver_scope(db, q, sid):
+    """Бүртгэлийг тайлангийн хүрээгээр (_scope) шүүнэ: тухайн зогсоолын бүртгэл +
+    тэдгээрийн түрээслэгчийн «бүх зогсоол» бүртгэл. sid нь жагсаалт (олон зогсоолтой
+    хэрэглэгч) байж болно — өмнөх код энэ үед site_tenant.get(list)-ээр унадаг байв."""
+    from sqlalchemy import and_, or_
+
+    from ..models import RegisteredDriver as D
+    if sid is None:
+        return q
+    sites = [sid] if isinstance(sid, str) else list(sid)
+    tenants = {t for (t,) in db.query(ParkingSite.tenant_id).filter(ParkingSite.id.in_(sites))}
+    conds = [D.site_id.in_(sites)]
+    real = [t for t in tenants if t]
+    if real:
+        conds.append(and_(D.site_id.is_(None), D.tenant_id.in_(real)))
+    if None in tenants:
+        conds.append(and_(D.site_id.is_(None), D.tenant_id.is_(None)))
+    return q.filter(or_(*conds))
+
+
+def _by_company_data(db, user, date_from, date_to, site_id, company=None):
+    """by_company + Excel-ийн нэгдсэн өгөгдөл (тайлбарыг by_company-оос үз)."""
+    from collections import defaultdict
+
+    from sqlalchemy import distinct
+
+    from ..models import RegisteredDriver as D
     start, end = _range(date_from, date_to)
     sid = _scope(user, site_id)
-    now = datetime.utcnow()
+    company = (company or "").strip() or None
+    m = _contract_stays(db, start, end, sid)
 
-    # plate → [(site_id|None, tenant_id, company)] — нэг дугаар олон бүртгэлтэй байж болно.
-    # «Бүх зогсоол» (site NULL) бүртгэл нь зөвхөн ӨӨРИЙН түрээслэгчийн зогсоолд тоологдоно.
-    site_tenant = {st.id: st.tenant_id for st in db.query(ParkingSite).all()}
-    drv: dict[str, list] = {}
-    reg_count: dict[str, set] = {}   # company → бүртгэлтэй машины олонлог (одоогийн жагсаалтаар)
-    for d in db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True)).all():
-        comp = (d.company or "").strip() or "(байгууллагагүй)"
-        drv.setdefault(d.plate_number, []).append((d.site_id, d.tenant_id, comp))
-        if sid is None or d.site_id == sid or (
-                d.site_id is None and d.tenant_id and d.tenant_id == site_tenant.get(sid)):
-            reg_count.setdefault(comp, set()).add(d.plate_number)
+    def _stays(*cols):
+        q = db.query(*cols).filter(m.c.rn == 1)
+        return q.filter(m.c.company == company) if company else q
 
-    sq = db.query(ParkingSession).filter(ParkingSession.entry_time >= start,
-                                         ParkingSession.entry_time < end)
-    sq = _flt(sq, ParkingSession.site_id, sid)
+    agg = {c: (int(n), int(cars), float(mins or 0), float(paid or 0))
+           for c, n, cars, mins, paid in _stays(
+               m.c.company, func.count(), func.count(distinct(m.c.plate)),
+               func.sum(m.c.mins), func.sum(m.c.paid)).group_by(m.c.company).all()}
 
-    agg: dict[str, dict] = {}
-    for s in sq.all():
-        matches = drv.get(s.plate_number)
-        if not matches:
-            continue
-        # Тухайн зогсоолд яг таарсан бүртгэл тэргүүлнэ; «бүх зогсоол» (None) бүртгэл
-        # зөвхөн session-ий зогсоолын ТҮРЭЭСЛЭГЧТЭЙ таарвал (дамнахгүй)
-        _stn = site_tenant.get(s.site_id)
-        comp = next((c for st, tn, c in matches if st == s.site_id),
-                    next((c for st, tn, c in matches
-                          if st is None and (tn == _stn if tn or _stn else True)), None))
-        if comp is None:
-            continue   # өөр зогсоолд л эрхтэй машин — энд гэрээтэд тооцохгүй
-        mins = s.duration_minutes
-        if mins is None:
-            mins = ((s.exit_time or now) - s.entry_time).total_seconds() / 60
-        a = agg.setdefault(comp, {"company": comp, "plates": set(), "sessions": 0, "minutes": 0.0})
-        a["plates"].add(s.plate_number)
-        a["sessions"] += 1
-        a["minutes"] += float(mins)
+    # Бүртгэлтэй машин — тухайн хугацаатай ДАВХЦСАН хүчинтэй, идэвхтэй бүртгэл
+    comp = _company_col(D)
+    rq = _driver_scope(db, db.query(comp, func.count(distinct(D.plate_number))), sid).filter(
+        D.is_active.is_(True), D.valid_from < end, D.valid_to >= start)
+    if company:
+        rq = rq.filter(comp == company)
+    reg = {c: int(n) for c, n in rq.group_by(comp).all()}
 
-    rows = [{"company": c,
-             "registered_cars": len(reg_count.get(c, set())),
-             "visited_cars": len(a["plates"]),
-             "sessions": a["sessions"],
-             "total_minutes": round(a["minutes"]),
-             "avg_minutes": round(a["minutes"] / a["sessions"]) if a["sessions"] else 0}
-            for c, a in agg.items()]
-    # Тухайн хугацаанд огт ирээгүй ч бүртгэлтэй байгууллагуудыг 0-тэйгээр үзүүлнэ
-    for c, plates in reg_count.items():
-        if c not in agg:
-            rows.append({"company": c, "registered_cars": len(plates), "visited_cars": 0,
-                         "sessions": 0, "total_minutes": 0, "avg_minutes": 0})
-    rows.sort(key=lambda r: -r["total_minutes"])
-    return {"rows": rows,
-            "total_sessions": sum(r["sessions"] for r in rows),
-            "total_minutes": sum(r["total_minutes"] for r in rows)}
+    total_stays = sum(a[0] for a in agg.values())
+    fees: dict | None = None
+    note = None
+    if total_stays > COMPANY_FEE_MAX_STAYS:
+        note = (f"Гэрээт зогсолт {total_stays:,} — {COMPANY_FEE_MAX_STAYS:,}-аас олон тул тарифаар "
+                "тооцсон дүнг бодсонгүй. Хугацааг богиносгоно уу (эсвэл нэг байгууллага сонгоно уу).")
+    elif total_stays:
+        fee_of = _tariff_fee_calc(db)
+        fees = defaultdict(float)
+        b = _billable(m)
+        for c, st, bm, n in _stays(m.c.company, m.c.site_id, b, func.count()).group_by(
+                m.c.company, m.c.site_id, b).all():
+            fees[c] += fee_of(st, bm) * int(n)
+    else:
+        fees = {}
+
+    rows = []
+    for c in set(agg) | set(reg):
+        n, cars, mins, paid = agg.get(c, (0, 0, 0.0, 0.0))
+        tariff = round(fees.get(c, 0.0)) if fees is not None else None
+        rows.append({"company": c, "junk": is_junk_company(c),
+                     "registered_cars": reg.get(c, 0), "visited_cars": cars,
+                     "sessions": n, "total_minutes": round(mins),
+                     "avg_minutes": round(mins / n) if n else 0,
+                     "tariff_amount": tariff, "paid_amount": round(paid, 2),
+                     "diff_amount": round(tariff - paid, 2) if tariff is not None else None})
+    rows.sort(key=lambda r: (-r["total_minutes"], r["company"]))
+    t_tariff = sum(r["tariff_amount"] for r in rows) if fees is not None else None
+    t_paid = round(sum(r["paid_amount"] for r in rows), 2)
+    return {"rows": rows, "company": company,
+            "total_sessions": total_stays,
+            "total_minutes": sum(r["total_minutes"] for r in rows),
+            # Машин нэг хугацаанд 2 байгууллагад бүртгэлтэй бол 2 удаа тоологдоно
+            "total_cars": sum(r["visited_cars"] for r in rows),
+            "total_registered": sum(r["registered_cars"] for r in rows),
+            "tariff_amount": t_tariff, "paid_amount": t_paid,
+            "diff_amount": round(t_tariff - t_paid, 2) if t_tariff is not None else None,
+            "amounts_capped": fees is None, "note": note}
+
+
+@router.get("/by-company")
+def by_company(date_from: str | None = None, date_to: str | None = None, site_id: str | None = None,
+               company: str | None = None,
+               db: Session = Depends(get_db), user: User = Depends(require("reports"))):
+    """Байгууллагаар (гэрээт машин) — байгууллага бүрийн бүртгэлтэй/ирсэн машин,
+    орсон удаа, нийт/дундаж хугацаа, «Тарифаар тооцсон дүн» (гэрээгүй бол хэд
+    болох байсан), бодит төлсөн дүн, ялгаа. Байгууллагагүй бүртгэл
+    «(байгууллагагүй)» бүлэгт. company=… өгвөл зөвхөн тэр байгууллага.
+    Тулгалт SQL-д (_contract_stays) — жилийн мужид ч бүх session ачаалахгүй."""
+    return _by_company_data(db, user, date_from, date_to, site_id, company)
 
 
 _STATUS_MN = {"OPEN": "Зогсож буй", "AWAITING_PAYMENT": "Төлбөр хүлээж буй",
@@ -840,61 +988,42 @@ _CONTRACT_MN = {"MONTHLY": "Сарын", "CONTRACT": "Гэрээт", "VIP": "VIP
 
 def _company_sessions(db, user, company: str, start, end, sid):
     """Нэг байгууллагын гэрээт машинуудын session-үүд (тооцоо нийлэх дэлгэрэнгүй).
-    by_company-тэй ИЖИЛ тулгалтын дүрэм: дугаар таарч, бүртгэл нь тухайн зогсоолд
-    эсвэл ӨӨРИЙН ТҮРЭЭСЛЭГЧИЙН бүх-зогсоолд хамаарсан байх (дамнахгүй).
-    Мөр бүрд санхүүд хэрэгтэй бүрэн мэдээлэл: эзэмшигч, гэрээний төрөл, сарын
-    хураамж, тухайн орц дээр төлсөн дүн, төлөв."""
-    from ..models import RegisteredDriver
-    q = db.query(RegisteredDriver).filter(RegisteredDriver.is_active.is_(True))
-    if company == "(байгууллагагүй)":
-        q = q.filter((RegisteredDriver.company.is_(None)) | (RegisteredDriver.company == ""))
-    else:
-        q = q.filter(RegisteredDriver.company == company)
-    site_tenant = {st.id: st.tenant_id for st in db.query(ParkingSite).all()}
-    drv: dict[str, list] = {}
-    dinfo: dict[str, RegisteredDriver] = {}
-    for d in q.all():
-        drv.setdefault(d.plate_number, []).append((d.site_id, d.tenant_id))
-        dinfo.setdefault(d.plate_number, d)
-    if not drv:
-        return []
-    now = datetime.utcnow()
-    sq = (db.query(ParkingSession)
-          .filter(ParkingSession.entry_time >= start, ParkingSession.entry_time < end,
-                  ParkingSession.plate_number.in_(list(drv)))
-          .order_by(ParkingSession.plate_number, ParkingSession.entry_time))
-    sq = _flt(sq, ParkingSession.site_id, sid)
-    sessions = sq.all()
-    # Тухайн session-ууд дээр төлөгдсөн дүн (гэрээт ихэвчлэн 0, гэхдээ нотолгоонд чухал)
-    paid_by_session = dict(
-        db.query(Payment.session_id, func.coalesce(func.sum(Payment.amount), 0))
-        .filter(Payment.status == "PAID",
-                Payment.session_id.in_([x.id for x in sessions] or ["-"]))
-        .group_by(Payment.session_id).all())
+    by_company-тэй ЯГ ижил тулгалт (_contract_stays: хугацааны цонх, зогсоол →
+    «бүх зогсоол» дараалал, түрээслэгч дамнахгүй). Мөр бүрд санхүүд хэрэгтэй
+    бүрэн мэдээлэл: эзэмшигч, гэрээний төрөл, сарын хураамж (ТУХАЙН зогсолтод
+    таарсан бүртгэлээс), тухайн орц дээр төлсөн дүн, тарифаар тооцсон дүн, төлөв.
+    Нэг байгууллагаар хязгаарлагдсан тул дүнг ямагт бодно (хязгааргүй)."""
+    m = _contract_stays(db, start, end, sid, detail=True)
+    company = (company or "").strip()
+    rows_q = (db.query(m).filter(m.c.rn == 1, m.c.company == company)
+              .order_by(m.c.plate, m.c.entry_time))
     site_names = {sid_: st for sid_, st in db.query(ParkingSite.id, ParkingSite.name).all()}
+    fee_of = _tariff_fee_calc(db)
     rows = []
-    for s in sessions:
-        matches = drv[s.plate_number]
-        _stn = site_tenant.get(s.site_id)
-        ok = any(st == s.site_id for st, tn in matches) or any(
-            st is None and (tn == _stn if tn or _stn else True) for st, tn in matches)
-        if not ok:
-            continue
-        mins = s.duration_minutes
-        if mins is None:
-            mins = ((s.exit_time or now) - s.entry_time).total_seconds() / 60
-        d = dinfo.get(s.plate_number)
-        rows.append({"plate": s.plate_number,
-                     "owner": (d.full_name if d else "") or "",
-                     "contract": _CONTRACT_MN.get(d.contract_type if d else "", (d.contract_type if d else "")),
-                     "monthly_fee": float(d.monthly_fee or 0) if d else 0.0,
-                     "site": site_names.get(s.site_id, "?"),
-                     "entry": (s.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
-                     "exit": (s.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if s.exit_time else "",
-                     "minutes": round(float(mins)),
-                     "paid": float(paid_by_session.get(s.id, 0)),
-                     "status": _STATUS_MN.get(s.status, s.status)})
+    for r in rows_q.all():
+        mins = max(0, int(r.mins or 0))
+        billable = mins - min(int(r.paused or 0), mins)
+        rows.append({"plate": r.plate,
+                     "owner": r.owner or "",
+                     "contract": _CONTRACT_MN.get(r.contract_type, r.contract_type or ""),
+                     "monthly_fee": float(r.monthly_fee or 0),
+                     "site": site_names.get(r.site_id, "?"),
+                     "entry": (r.entry_time + TZ).strftime("%Y-%m-%d %H:%M"),
+                     "exit": (r.exit_time + TZ).strftime("%Y-%m-%d %H:%M") if r.exit_time else "",
+                     "minutes": mins,
+                     "tariff_fee": fee_of(r.site_id, billable),
+                     "paid": float(r.paid or 0),
+                     "status": _STATUS_MN.get(r.status, r.status)})
     return rows
+
+
+def _company_sessions_summary(company, rows):
+    tariff = sum(r["tariff_fee"] for r in rows)
+    paid = round(sum(r["paid"] for r in rows), 2)
+    return {"company": company, "rows": rows,
+            "total_sessions": len(rows), "total_minutes": sum(r["minutes"] for r in rows),
+            "cars": len({r["plate"] for r in rows}),
+            "tariff_amount": tariff, "paid_amount": paid, "diff_amount": round(tariff - paid, 2)}
 
 
 @router.get("/by-company/sessions")
@@ -904,57 +1033,64 @@ def by_company_sessions(company: str, date_from: str | None = None, date_to: str
     """Нэг байгууллагын дэлгэрэнгүй — тухайн байгууллагад илгээж тооцоо нийлэх жагсаалт."""
     start, end = _range(date_from, date_to)
     sid = _scope(user, site_id)
-    rows = _company_sessions(db, user, company, start, end, sid)
-    return {"company": company, "rows": rows,
-            "total_sessions": len(rows), "total_minutes": sum(r["minutes"] for r in rows),
-            "cars": len({r["plate"] for r in rows})}
+    return _company_sessions_summary(company, _company_sessions(db, user, company, start, end, sid))
+
+
+def _hm(m):
+    return f"{int(m) // 60}ц {int(m) % 60:02d}м" if m else "0м"
 
 
 @router.get("/by-company/sessions/excel")
 def by_company_sessions_excel(company: str, date_from: str | None = None, date_to: str | None = None,
                               site_id: str | None = None,
                               db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Байгууллагад илгээх тооцооны Excel — мөр бүр нэг орц/гарц."""
+    """Байгууллагад илгээх тооцооны Excel — мөр бүр нэг орц/гарц (+ тарифаар тооцсон дүн)."""
     start, end = _range(date_from, date_to)
     sid = _scope(user, site_id)
     rows = _company_sessions(db, user, company, start, end, sid)
-
-    def _h(m):
-        return f"{m // 60}ц {m % 60:02d}м"
-
-    data = [[i + 1, r["plate"], r["site"], r["entry"], r["exit"] or "—", _h(r["minutes"])]
+    s = _company_sessions_summary(company, rows)
+    data = [[i + 1, r["plate"], r["owner"], r["site"], r["entry"], r["exit"] or "—",
+             _hm(r["minutes"]), r["tariff_fee"], r["paid"]]
             for i, r in enumerate(rows)]
-    total_min = sum(r["minutes"] for r in rows)
     import re as _re
     # Content-Disposition header latin-1 шаарддаг тул файлын нэрэнд зөвхөн ASCII
     safe = _re.sub(r"[^A-Za-z0-9_-]+", "_", company).strip("_")[:24] or "company"
     return _excel._xlsx(
         f"tootsoo_{safe}",
         f"{company} — гэрээт машины тооцоо {(start + TZ):%Y-%m-%d} — {(end + TZ - timedelta(days=1)):%Y-%m-%d}",
-        ["№", "Улсын дугаар", "Зогсоол", "Орсон", "Гарсан", "Зогссон хугацаа"],
-        data, widths=[6, 14, 22, 18, 18, 16],
-        total_row=["НИЙТ", f"{len({r['plate'] for r in rows})} машин", "", f"{len(rows)} удаа", "", _h(total_min)])
+        ["№", "Улсын дугаар", "Эзэмшигч", "Зогсоол", "Орсон", "Гарсан", "Зогссон хугацаа",
+         "Тарифаар тооцсон (₮)", "Төлсөн (₮)"],
+        data, widths=[6, 14, 20, 22, 18, 18, 16, 18, 12],
+        total_row=["НИЙТ", f"{s['cars']} машин", "", "", f"{s['total_sessions']} удаа", "",
+                   _hm(s["total_minutes"]), s["tariff_amount"], s["paid_amount"]])
 
 
 @router.get("/by-company/excel")
 def by_company_excel(date_from: str | None = None, date_to: str | None = None,
-                     site_id: str | None = None,
+                     site_id: str | None = None, company: str | None = None,
                      db: Session = Depends(get_db), user: User = Depends(require("reports"))):
-    """Байгууллагаар тайлангийн Excel."""
-    data = by_company(date_from, date_to, site_id, db, user)
+    """Байгууллагаар тайлангийн Excel (тарифаар тооцсон / төлсөн / ялгаа баганатай)."""
+    data = _by_company_data(db, user, date_from, date_to, site_id, company)
     start, end = _range(date_from, date_to)
 
-    def _h(m):
-        return f"{m // 60}ц {m % 60:02.0f}м" if m else "0м"
+    def _amt(v):
+        return "—" if v is None else v
 
     rows = [[r["company"], r["registered_cars"], r["visited_cars"], r["sessions"],
-             _h(r["total_minutes"]), _h(r["avg_minutes"])] for r in data["rows"]]
+             _hm(r["total_minutes"]), _hm(r["avg_minutes"]),
+             _amt(r["tariff_amount"]), r["paid_amount"], _amt(r["diff_amount"])]
+            for r in data["rows"]]
+    title = f"Байгууллагаар (гэрээт) {(start + TZ):%Y-%m-%d} — {(end + TZ - timedelta(days=1)):%Y-%m-%d}"
+    if data["note"]:
+        rows.append([data["note"]])
     return _excel._xlsx(
-        "companies",
-        f"Байгууллагаар (гэрээт) {(start + TZ):%Y-%m-%d} — {(end + TZ - timedelta(days=1)):%Y-%m-%d}",
-        ["Байгууллага", "Бүртгэлтэй машин", "Ирсэн машин", "Орсон удаа", "Нийт зогссон", "Дундаж"],
-        rows, widths=[32, 16, 14, 12, 16, 12],
-        total_row=["НИЙТ", "", "", data["total_sessions"], _h(data["total_minutes"]), ""])
+        "companies", title,
+        ["Байгууллага", "Бүртгэлтэй машин", "Машины тоо (ирсэн)", "Орсон удаа", "Нийт цаг",
+         "Дундаж/удаа", "Тарифаар тооцсон дүн (₮)", "Бодит төлсөн дүн (₮)", "Ялгаа (₮)"],
+        rows, widths=[32, 16, 18, 12, 16, 12, 22, 20, 16],
+        total_row=["НИЙТ", data["total_registered"], data["total_cars"], data["total_sessions"],
+                   _hm(data["total_minutes"]), "", _amt(data["tariff_amount"]),
+                   data["paid_amount"], _amt(data["diff_amount"])])
 
 
 def _shift_rows(db, start, end, site_id):

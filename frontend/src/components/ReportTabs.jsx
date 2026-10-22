@@ -2,7 +2,7 @@
 // өөрөө удирдана. Reports.jsx-ийг нимгэн orchestrator болгож, 450 мөрийн god-component-ийг
 // задлав. Алдаа toast-оор харагдана (өмнө нь catch(()=>{}) чимээгүй залгидаг байсан).
 import { Download } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, fmtHM, fmtMDHM } from '../api'
 import { useFetch } from '../hooks/useFetch'
 import { useDownload } from '../hooks/useDownload'
@@ -332,9 +332,15 @@ export function ShiftsTab({ from, to, siteId }) {
 
 // ── Төлбөрийн төрлөөр ──
 // ── Байгууллагаар (гэрээт машины нэгдсэн тайлан + байгууллага тус бүрийн тооцоо) ──
+// 2026-10-22 (№61): «Тарифаар тооцсон дүн» — гэрээгүй бол зогсоолын тарифаар хэд
+// болох байсан (гэрээт машин 0₮ төлдөг тул байгууллагатай тооцоо нийлэх цорын
+// ганц ₮ хэмжүүр), бодит төлсөн дүн, ялгаа. Нэгтгэл SQL-д — жилийн муж ч ажиллана.
+const companyHM = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
+const money = (v) => (v === null || v === undefined ? '—' : fmt(Math.round(v)))
+const companyQ = (c) => c ? `&company=${encodeURIComponent(c)}` : ''
+
 function CompanyDetail({ company, from, to, siteId, onClose }) {
   const download = useDownload()
-  const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
   const { data } = useFetch(
     `/api/reports/by-company/sessions?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
     { initial: null })
@@ -345,7 +351,10 @@ function CompanyDetail({ company, from, to, siteId, onClose }) {
         <div className="flex flex-wrap gap-5 text-sm text-slate-400">
           <span>Машин: <b className="font-mono text-accent">{data.cars}</b></span>
           <span>Орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
-          <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
+          <span>Нийт зогссон: <b className="font-mono text-accent">{companyHM(data.total_minutes)}</b></span>
+          <span title="Гэрээгүй бол зогсоолын тарифаар бодогдох байсан дүн">
+            Тарифаар: <b className="font-mono text-accent">{money(data.tariff_amount)}₮</b></span>
+          <span>Төлсөн: <b className="font-mono">{money(data.paid_amount)}₮</b></span>
         </div>
         <button className="btn-primary text-sm flex items-center gap-1.5"
           onClick={() => download(`/api/reports/by-company/sessions/excel?company=${encodeURIComponent(company)}&date_from=${from}&date_to=${to}${siteQ(siteId)}`,
@@ -354,7 +363,7 @@ function CompanyDetail({ company, from, to, siteId, onClose }) {
         </button>
       </div>
       <div className="max-h-[60vh] overflow-y-auto">
-        <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Төлөв']}
+        <Table headers={['№', 'Дугаар', 'Эзэмшигч', 'Зогсоол', 'Орсон', 'Гарсан', 'Хугацаа', 'Тарифаар (₮)', 'Төлсөн (₮)', 'Төлөв']}
           empty={data.rows.length === 0}>
           {data.rows.map((r, i) => (
             <tr key={i}>
@@ -364,7 +373,9 @@ function CompanyDetail({ company, from, to, siteId, onClose }) {
               <td className="td text-xs">{r.site}</td>
               <td className="td font-mono text-xs">{r.entry}</td>
               <td className="td font-mono text-xs">{r.exit || '—'}</td>
-              <td className="td font-mono">{hm(r.minutes)}</td>
+              <td className="td font-mono">{companyHM(r.minutes)}</td>
+              <td className="td font-mono">{money(r.tariff_fee)}</td>
+              <td className="td font-mono">{money(r.paid)}</td>
               <td className="td text-xs">{r.status}</td>
             </tr>
           ))}
@@ -375,37 +386,92 @@ function CompanyDetail({ company, from, to, siteId, onClose }) {
   )
 }
 
+// Нэг байгууллага сонгох — company-search (хог нэргүй) саналтай, 250мс хүлээж хайна
+function CompanyPicker({ value, onChange }) {
+  const [text, setText] = useState(value || '')
+  const [options, setOptions] = useState([])
+  useEffect(() => { setText(value || '') }, [value])
+  useEffect(() => {
+    const q = text.trim()
+    if (!q && value) onChange('')   // талбарыг хоосолбол шүүлтийг цуцална
+    if (!q || q === value) { setOptions([]); return undefined }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      api(`/api/admin/drivers/company-search?q=${encodeURIComponent(q)}`, { signal: controller.signal })
+        .then((rows) => {
+          setOptions(rows)
+          // Жагсаалтаас яг таарсныг сонгосон бол шууд шүүнэ
+          if (rows.some((r) => r.company === q)) onChange(q)
+        }).catch(() => {})
+    }, 250)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [text])
+  return (
+    <div className="flex items-center gap-1.5">
+      <input className="input w-56 py-1.5 text-sm" list="report-company-options" placeholder="Байгууллага сонгох…"
+        aria-label="Байгууллагаар шүүх" value={text} autoComplete="off"
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && onChange(text.trim())} />
+      <datalist id="report-company-options">
+        {options.map((o) => <option key={o.company} value={o.company}>{`${o.count} бүртгэл`}</option>)}
+      </datalist>
+      {value && (
+        <button className="btn-secondary text-xs py-1.5" onClick={() => { setText(''); onChange('') }}>Бүгд</button>
+      )}
+    </div>
+  )
+}
+
 export function CompanyTab({ from, to, siteId }) {
   const download = useDownload()
   const [sel, setSel] = useState(null)
-  const { data } = useFetch(`/api/reports/by-company?date_from=${from}&date_to=${to}${siteQ(siteId)}`, { initial: null })
-  if (!data) return null
-  const hm = (m) => m ? `${Math.floor(m / 60)}ц ${String(m % 60).padStart(2, '0')}м` : '0м'
+  const [company, setCompany] = useState('')
+  const { data, loading } = useFetch(
+    `/api/reports/by-company?date_from=${from}&date_to=${to}${siteQ(siteId)}${companyQ(company)}`, { initial: null })
   return (
     <>
     <div className="card">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <h2 className="font-semibold">Байгууллагаар — гэрээт машины ашиглалт</h2>
-        <button className="btn-secondary text-sm flex items-center gap-1.5"
-          onClick={() => download(`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}`)}>
-          <Download size={15} /> Нэгтгэл Excel
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <CompanyPicker value={company} onChange={setCompany} />
+          <button className="btn-secondary text-sm flex items-center gap-1.5"
+            onClick={() => download(`/api/reports/by-company/excel?date_from=${from}&date_to=${to}${siteQ(siteId)}${companyQ(company)}`)}>
+            <Download size={15} /> Нэгтгэл Excel
+          </button>
+        </div>
       </div>
+      {!data ? <div className="text-slate-500 py-6 text-center">{loading ? 'Ачаалж байна…' : ''}</div> : <>
       <div className="flex flex-wrap gap-6 text-sm mb-3 text-slate-400">
-        <span>Нийт орсон удаа: <b className="font-mono text-accent">{data.total_sessions}</b></span>
-        <span>Нийт зогссон: <b className="font-mono text-accent">{hm(data.total_minutes)}</b></span>
+        <span>Машины тоо: <b className="font-mono text-accent">{fmt(data.total_cars)}</b></span>
+        <span>Нийт орсон удаа: <b className="font-mono text-accent">{fmt(data.total_sessions)}</b></span>
+        <span>Нийт зогссон: <b className="font-mono text-accent">{companyHM(data.total_minutes)}</b></span>
+        <span title="Гэрээгүй бол зогсоолын тарифаар бодогдох байсан дүн">
+          Тарифаар тооцсон: <b className="font-mono text-accent">{money(data.tariff_amount)}₮</b></span>
+        <span>Бодит төлсөн: <b className="font-mono">{money(data.paid_amount)}₮</b></span>
       </div>
-      <Table headers={['Байгууллага', 'Бүртгэлтэй машин', 'Ирсэн машин', 'Орсон удаа', 'Нийт зогссон', 'Дундаж/удаа', '']}
+      {data.note && <div className="text-xs text-amber-400 mb-2">⚠ {data.note}</div>}
+      <Table headers={['Байгууллага', 'Бүртгэлтэй машин', 'Машины тоо', 'Орсон удаа', 'Нийт цаг', 'Дундаж/удаа',
+        'Тарифаар тооцсон (₮)', 'Бодит төлсөн (₮)', 'Ялгаа (₮)', '']}
         empty={data.rows.length === 0}>
         {data.rows.map((r) => (
           <tr key={r.company} onClick={() => setSel(r.company)}
             className={`cursor-pointer transition-colors hover:bg-surface-muted/50 ${sel === r.company ? 'bg-accent/5' : ''}`}>
-            <td className="td font-medium">{r.company}</td>
+            <td className="td font-medium">
+              {r.company}
+              {r.junk && (
+                <span className="ml-1.5 text-[10px] text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded whitespace-nowrap"
+                  title="Excel импортын гарчиг/хуудасны нэр — бүртгэлийн «Байгууллага»-г засна уу">байгууллага биш?</span>
+              )}
+            </td>
             <td className="td font-mono">{r.registered_cars}</td>
             <td className="td font-mono">{r.visited_cars}</td>
             <td className="td font-mono">{r.sessions}</td>
-            <td className="td font-mono text-accent">{hm(r.total_minutes)}</td>
-            <td className="td font-mono">{hm(r.avg_minutes)}</td>
+            <td className="td font-mono text-accent">{companyHM(r.total_minutes)}</td>
+            <td className="td font-mono">{companyHM(r.avg_minutes)}</td>
+            <td className="td font-mono">{money(r.tariff_amount)}</td>
+            <td className="td font-mono">{money(r.paid_amount)}</td>
+            <td className="td font-mono">{money(r.diff_amount)}</td>
             <td className="td whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
               <div className="flex gap-1.5 justify-end">
                 <button className="btn-secondary text-xs py-1" onClick={() => setSel(r.company)}>Тооцоо</button>
@@ -418,11 +484,28 @@ export function CompanyTab({ from, to, siteId }) {
             </td>
           </tr>
         ))}
+        {data.rows.length > 1 && (
+          <tr className="font-semibold bg-surface-muted/30">
+            <td className="td">НИЙТ</td>
+            <td className="td font-mono">{fmt(data.total_registered)}</td>
+            <td className="td font-mono">{fmt(data.total_cars)}</td>
+            <td className="td font-mono">{fmt(data.total_sessions)}</td>
+            <td className="td font-mono text-accent">{companyHM(data.total_minutes)}</td>
+            <td className="td" />
+            <td className="td font-mono">{money(data.tariff_amount)}</td>
+            <td className="td font-mono">{money(data.paid_amount)}</td>
+            <td className="td font-mono">{money(data.diff_amount)}</td>
+            <td className="td" />
+          </tr>
+        )}
       </Table>
       <p className="text-xs text-slate-500 mt-2">
         Мөр дээр дарж байгууллагын дэлгэрэнгүйг хараад «Тооцооны Excel»-ийг татаж илгээнэ.
-        Session-ийг бүртгэлтэй машины дугаартай тулгаж тоолов; ирээгүй байгууллага 0-тэй харагдана.
+        Зогсолтыг бүртгэлтэй машины дугаар + гэрээний хугацаагаар (орсон цаг нь бүртгэлийн хүчинтэй
+        хугацаанд) тулгав. «Тарифаар тооцсон» — гэрээгүй бол зогсоолын одоогийн тарифаар бодогдох
+        байсан дүн; «Ялгаа» = тарифаар − бодит төлсөн. Ирээгүй байгууллага 0-тэй харагдана.
       </p>
+      </>}
     </div>
     {sel && <CompanyDetail company={sel} from={from} to={to} siteId={siteId} onClose={() => setSel(null)} />}
     </>
