@@ -624,7 +624,11 @@ class Compensation(Base):
     site = relationship("ParkingSite", lazy="joined")
 
     # v1.9 халуун замын индекс: гарах бүрд өр шалгах
-    __table_args__ = (Index("ix_comp_plate_status", "plate_number", "status"),)
+    # 2026-10-22 (№58): Өр цэвэрлэх хуудасны огноо/цагийн муж + хуудаслалт
+    # (created_at буурахаар эрэмбэлж, зогсоолоор/бүх зогсоолоор шүүнэ)
+    __table_args__ = (Index("ix_comp_plate_status", "plate_number", "status"),
+                      Index("ix_comp_created_at", "created_at"),
+                      Index("ix_comp_site_created", "site_id", "created_at"))
 
 
 class DailySettlement(Base):

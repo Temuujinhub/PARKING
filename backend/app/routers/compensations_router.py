@@ -9,16 +9,18 @@
   4. Касс/шалгах дэлгэцэд нөхөн төлбөртэй машин улаанаар тэмдэглэгдэнэ
 """
 import logging
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from ..auth import enforce_site, operator_sites, require
+from ..config import settings
 from ..database import get_db
 from ..models import (AuditLog, BlacklistEntry, CashierShift, Compensation, ParkingSession,
-                      Payment, User)
+                      ParkingSite, Payment, User)
 from ..serializers import to_dict
 from ..session_logic import session_fee_info
 from ..ws import manager
@@ -83,13 +85,64 @@ def create_compensation(db: Session, session: ParkingSession, reason: str, usern
     return comp
 
 
-@router.get("")
-def list_compensations(status: str | None = None, plate: str | None = None,
-                       site_id: str | None = None, min_days: int = 0,
-                       limit: int = 200, db: Session = Depends(get_db),
-                       user: User = Depends(require("compensations", "reports"))):
-    """site_id = зөвхөн тэр зогсоолын өр (Өр цэвэрлэх хуудас зогсоолоор ажилладаг),
-    min_days = үүссэнээс хойш N+ хоног болсон нь (хуучин авлага ялгах)."""
+# ─── Өрийн хайлт: огноо/цагийн муж, хуудаслалт, Excel (2026-10-22, №58) ─────
+# «Хэдний өдөр хэдэн цагаас хэдэн цагийн хооронд аль зогсоол дээр ямар машин дээр
+# өр үүссэн» — Өр цэвэрлэх хуудас (Санхүү) болон Excel экспорт НЭГ шүүлтүүрээр.
+# DB нь naive UTC хадгалдаг; UI-ийн огноо/цаг нь УБ-ын хананы цаг
+# (settings.tz_offset_hours) тул заагийг энд UTC руу хөрвүүлнэ — мөрийг шууд
+# харьцуулбал муж 8 цагаар зөрнө (2026-09-03-ны «8 цагаар зөрж байна» гомдол).
+
+DEBT_LIST_MAX = 1000          # нэг хуудсанд (хуучин хязгаар хэвээр)
+DEBT_EXCEL_MAX = 50_000       # Excel-ийн дээд мөр (write_only — санах ой бага)
+
+REASON_LABELS = {
+    "unpaid_exit": "Төлбөргүй гаргасан", "night_close": "Шөнийн хаалт",
+    "shift_close": "Ээлж хаалт", "manual": "Гараар", "admin_remove": "Админ хассан",
+    "auto_close": "Авто хаалт", "log_exit": "Логоор гарсан",
+    "camera_sync": "Камерын логоор нөхсөн", "camera_sync_exit": "Камерын логоор гарсан",
+    "camera_backfill": "Камерын нөхөлт", "reconcile": "Тулгалт",
+    "system_error": "Системийн алдаа", "other": "Бусад",
+}
+STATUS_LABELS = {"PENDING": "Төлөгдөөгүй", "PAID": "Төлөгдсөн", "CANCELLED": "Цуцлагдсан"}
+
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_MINUTE_PREC = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?!:)")
+
+
+def _local_to_utc(raw: str | None, field: str, *, end: bool = False) -> datetime | None:
+    """UI-ийн огноо/цагийг (УБ-ын хананы цаг) naive UTC болгоно.
+
+    Хүлээн авах хэлбэр: `YYYY-MM-DD` · `YYYY-MM-DDTHH:MM` · `YYYY-MM-DDTHH:MM:SS`
+    (бүс заасан `…Z`/`…+08:00` бол тэр бүсээр нь). Доод зааг ОРНО (`>=`).
+    end=True — ДЭЭД зааг, ОРОХГҮЙ (`<`) хэлбэрээр буцаана, сонгосон нэгжийг бүхэлд нь
+    багтаана: зөвхөн огноо → маргаашийн 00:00 (тэр өдөр бүтнээрээ), HH:MM → +1 минут
+    (18:00 гэвэл 18:00:59 хүртэл), секундтэй → +1 секунд."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        else:
+            dt = dt - timedelta(hours=settings.tz_offset_hours)
+        if end:
+            dt += (timedelta(days=1) if _DATE_ONLY.fullmatch(s)
+                   else timedelta(minutes=1) if _MINUTE_PREC.match(s)
+                   else timedelta(seconds=1))
+    except (ValueError, OverflowError):
+        raise HTTPException(400, f"{field}: огноо/цаг буруу — YYYY-MM-DD эсвэл YYYY-MM-DDTHH:MM")
+    return dt
+
+
+def _debt_query(db: Session, user: User, *, status: str | None = None, plate: str | None = None,
+                site_id: str | None = None, min_days: int = 0, created_from: str | None = None,
+                created_to: str | None = None, reason: str | None = None,
+                now: datetime | None = None):
+    """Жагсаалт ба Excel-ийн НЭГ шүүлт (хоёр өөр үр дүн гаргахгүйн тулд).
+    Зогсоолын хүрээ: оператор/түрээслэгч зөвхөн өөрийн зогсоолуудын өр (operator_sites),
+    site_id нь хүрээнээс гадуур бол 403."""
+    now = now or datetime.utcnow()
     allowed = operator_sites(user)  # оператор зөвхөн өөрийн зогсоолуудын өр
     q = db.query(Compensation)
     if allowed:
@@ -101,31 +154,86 @@ def list_compensations(status: str | None = None, plate: str | None = None,
         q = q.filter(Compensation.status == status)
     if plate:
         q = q.filter(Compensation.plate_number.ilike(f"%{plate.upper().strip()}%"))
-    now = datetime.utcnow()
     if min_days and min_days > 0:
         q = q.filter(Compensation.created_at <= now - timedelta(days=min_days))
-    rows = q.order_by(Compensation.created_at.desc()).limit(min(limit, 1000)).all()
+    start = _local_to_utc(created_from, "created_from")
+    stop = _local_to_utc(created_to, "created_to", end=True)
+    if start and stop and start >= stop:
+        raise HTTPException(400, "Эхлэх огноо/цаг дуусахаас хойш байна")
+    if start:
+        q = q.filter(Compensation.created_at >= start)
+    if stop:
+        q = q.filter(Compensation.created_at < stop)
+    codes = [r.strip() for r in (reason or "").split(",") if r.strip()]
+    if codes:
+        q = q.filter(Compensation.reason.in_(codes))
+    return q
 
-    def _age(c):
-        return (now - c.created_at).days
+
+def _session_times(db: Session, session_ids) -> dict[str, tuple]:
+    """Өр үүссэн зогсолтын орсон/гарсан цаг — нэг query (мөр бүрт хандахгүй)."""
+    ids = [i for i in set(session_ids) if i]
+    if not ids:
+        return {}
+    return {sid: (ent, ext) for sid, ent, ext in
+            db.query(ParkingSession.id, ParkingSession.entry_time, ParkingSession.exit_time)
+            .filter(ParkingSession.id.in_(ids)).all()}
+
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+@router.get("")
+def list_compensations(status: str | None = None, plate: str | None = None,
+                       site_id: str | None = None, min_days: int = 0,
+                       created_from: str | None = None, created_to: str | None = None,
+                       reason: str | None = None, limit: int = 200, offset: int = 0,
+                       db: Session = Depends(get_db),
+                       user: User = Depends(require("compensations", "reports"))):
+    """site_id = зөвхөн тэр зогсоолын өр (Өр цэвэрлэх хуудас зогсоолоор ажилладаг),
+    min_days = үүссэнээс хойш N+ хоног болсон нь (хуучин авлага ялгах),
+    created_from/created_to = өр ҮҮССЭН огноо/цагийн муж (УБ-ын цаг, `YYYY-MM-DD` эсвэл
+    `YYYY-MM-DDTHH:MM`; зөвхөн огноотой created_to = тэр өдрийн төгсгөл хүртэл),
+    reason = шалтгааны код (таслалаар олныг), offset = хуудаслалт.
+
+    Хариу (хуучин талбарууд хэвээр + нэмэлт): rows, total/sum_amount/plates (ШҮҮЛТИЙН
+    бүх мөрийн тоо/дүн/дугаар — хуудаснаас үл хамааран), offset, limit;
+    total_pending/pending_count/total_collected/aging нь өмнөх шигээ зөвхөн
+    зогсоолын хүрээгээр (огноо/дугаарын шүүлтгүй)."""
+    allowed = operator_sites(user)
+    now = datetime.utcnow()
+    q = _debt_query(db, user, status=status, plate=plate, site_id=site_id, min_days=min_days,
+                    created_from=created_from, created_to=created_to, reason=reason, now=now)
+    total, sum_amount, plate_count = q.with_entities(
+        func.count(Compensation.id), func.coalesce(func.sum(Compensation.amount), 0),
+        func.count(func.distinct(Compensation.plate_number))).one()
+    limit = max(1, min(limit, DEBT_LIST_MAX))
+    offset = max(0, offset)
+    rows = (q.order_by(Compensation.created_at.desc(), Compensation.id.desc())
+            .offset(offset).limit(limit).all())
 
     def _bucket(days):
         return "0-7" if days <= 7 else "8-30" if days <= 30 else "31-90" if days <= 90 else "90+"
 
     # Дугаар бүрийн PENDING тоог нэг query-ээр (мөр бүрт COUNT хийхгүй)
-    from sqlalchemy import func
     plates = {c.plate_number for c in rows}
     pending_by_plate: dict[str, int] = dict(
         db.query(Compensation.plate_number, func.count())
         .filter(Compensation.plate_number.in_(plates), Compensation.status == "PENDING")
         .group_by(Compensation.plate_number).all()) if plates else {}
+    times = _session_times(db, (c.session_id for c in rows))
     out_rows = []
     for c in rows:
-        d = _age(c)
+        d = (now - c.created_at).days
+        ent, ext = times.get(c.session_id, (None, None))
         out_rows.append(to_dict(c, extra={"site_name": c.site.name if c.site else None,
                                           "days_old": d, "age_bucket": _bucket(d),
-                                          "pending_count": pending_by_plate.get(c.plate_number, 0)}))
-    # Нийлбэрүүд: төлөгдөөгүй нийт + настжуулалт (aging) + цугларсан
+                                          "pending_count": pending_by_plate.get(c.plate_number, 0),
+                                          "entry_time": _iso(ent), "exit_time": _iso(ext)}))
+    # Нийлбэрүүд: төлөгдөөгүй нийт + настжуулалт (aging) + цугларсан — SQL нэгтгэлээр
+    # (өмнө нь бүх PENDING/PAID мөрийг санах ойд ачаалж Python-оор нэмдэг байв:
+    # прод дээр «Бүх зогсоол» = 11k+ PENDING + 13k PAID мөр хүсэлт бүрт).
     pq = db.query(Compensation).filter(Compensation.status == "PENDING")
     paidq = db.query(Compensation).filter(Compensation.status == "PAID")
     if allowed:
@@ -134,15 +242,52 @@ def list_compensations(status: str | None = None, plate: str | None = None,
     if site_id:
         pq = pq.filter(Compensation.site_id == site_id)
         paidq = paidq.filter(Compensation.site_id == site_id)
-    pending = pq.all()
-    aging = {"0-7": 0.0, "8-30": 0.0, "31-90": 0.0, "90+": 0.0}
-    for c in pending:
-        aging[_bucket(_age(c))] += float(c.amount)
+
+    # (now - created_at).days <= N  ⇔  created_at > now - (N+1) хоног — _bucket-тай ЯГ ижил
+    def _in_bucket(lo_days, hi_days):
+        cond = [Compensation.created_at > now - timedelta(days=hi_days + 1)] if hi_days else []
+        if lo_days:
+            cond.append(Compensation.created_at <= now - timedelta(days=lo_days))
+        return func.coalesce(func.sum(case((and_(*cond), Compensation.amount), else_=0)), 0)
+    p_count, p_sum, a7, a30, a90, a90p = pq.with_entities(
+        func.count(Compensation.id), func.coalesce(func.sum(Compensation.amount), 0),
+        _in_bucket(0, 7), _in_bucket(8, 30), _in_bucket(31, 90), _in_bucket(91, None)).one()
+    collected = paidq.with_entities(func.coalesce(func.sum(Compensation.amount), 0)).scalar()
     return {"rows": out_rows,
-            "total_pending": float(sum(c.amount for c in pending)),
-            "pending_count": len(pending),
-            "total_collected": float(sum(c.amount for c in paidq.all())),
-            "aging": aging}
+            "total": int(total or 0), "sum_amount": float(sum_amount or 0),
+            "plates": int(plate_count or 0), "offset": offset, "limit": limit,
+            "total_pending": float(p_sum or 0),
+            "pending_count": int(p_count or 0),
+            "total_collected": float(collected or 0),
+            "aging": {"0-7": float(a7 or 0), "8-30": float(a30 or 0),
+                      "31-90": float(a90 or 0), "90+": float(a90p or 0)}}
+
+
+@router.get("/excel")
+def compensations_excel(status: str | None = None, plate: str | None = None,
+                        site_id: str | None = None, min_days: int = 0,
+                        created_from: str | None = None, created_to: str | None = None,
+                        reason: str | None = None, db: Session = Depends(get_db),
+                        user: User = Depends(require("compensations", "reports"))):
+    """Жагсаалттай ИЖИЛ шүүлтийн бүх мөр (дээд тал нь DEBT_EXCEL_MAX) Excel-ээр.
+    Цагууд УБ-ын хананы цагаар; өр үүссэн зогсолтын орсон/гарсан цаг хамт."""
+    from .reports_excel import debts_excel
+    now = datetime.utcnow()
+    q = _debt_query(db, user, status=status, plate=plate, site_id=site_id, min_days=min_days,
+                    created_from=created_from, created_to=created_to, reason=reason, now=now)
+    total = q.with_entities(func.count(Compensation.id)).scalar() or 0
+    # ORM объект биш баганаар — 50k мөрт санах ой/хурд (site нь lazy="joined" байдаг)
+    rows = (q.outerjoin(ParkingSite, ParkingSite.id == Compensation.site_id)
+            .outerjoin(ParkingSession, ParkingSession.id == Compensation.session_id)
+            .with_entities(Compensation.created_at, Compensation.plate_number, ParkingSite.name,
+                           Compensation.amount, Compensation.reason, Compensation.status,
+                           ParkingSession.entry_time, ParkingSession.exit_time,
+                           Compensation.created_by, Compensation.paid_at,
+                           Compensation.cancelled_at, Compensation.cancel_reason)
+            .order_by(Compensation.created_at.desc(), Compensation.id.desc())
+            .limit(DEBT_EXCEL_MAX).all())
+    return debts_excel(rows, now=now, total=int(total), reason_labels=REASON_LABELS,
+                       status_labels=STATUS_LABELS)
 
 
 @router.post("/{comp_id}/pay")

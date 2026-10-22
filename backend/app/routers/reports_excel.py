@@ -397,3 +397,53 @@ def vat_receipts_excel(rows):
          "Огноо", "Суваг", "Төлөв", "ААН ТТД", "Шалтгаан/алдаа"],
         data, widths=[11, 16, 36, 16, 11, 10, 20, 12, 16, 13, 45],
         total_row=total_row)
+
+
+def debts_excel(rows, *, now: datetime, total: int, reason_labels: dict, status_labels: dict):
+    """Өрийн жагсаалтын Excel (Санхүү → Өр цэвэрлэх, 2026-10-22 №58).
+
+    rows = (created_at, plate, site_name, amount, reason, status, entry_time, exit_time,
+    created_by, paid_at, cancelled_at, cancel_reason) кортежууд, created_at буурахаар.
+    Бүх цаг УБ-ын хананы цагаар; «Үүссэн огноо»/«Цаг» тусдаа багана — Excel-д өдөр/цагаар
+    шүүх, pivot хийхэд. 50k мөр хүртэл тул write_only горим (энгийн Workbook ~200MB идэнэ)."""
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+    tz = timedelta(hours=_cfg.tz_offset_hours)
+
+    def _loc(dt, fmt="%Y-%m-%d %H:%M"):
+        return (dt + tz).strftime(fmt) if dt else ""
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Өр")
+    headers = ["Үүссэн огноо", "Үүссэн цаг", "Дугаар", "Зогсоол", "Дүн (₮)", "Шалтгаан", "Төлөв",
+               "Орсон", "Гарсан", "Нас (хоног)", "Үүсгэсэн", "Төлсөн/цуцалсан", "Цуцлалтын тайлбар"]
+    for i, w in enumerate((13, 10, 11, 24, 11, 22, 13, 17, 17, 11, 14, 17, 40), 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    def _bold(values):
+        out = []
+        for v in values:
+            c = WriteOnlyCell(ws, value=v)
+            c.font = Font(bold=True)
+            out.append(c)
+        return out
+
+    ws.append(_bold(headers))
+    amount_sum = 0.0
+    plates = set()
+    for (created, plate, site_name, amount, reason, status, ent, ext, by, paid_at,
+         cancelled_at, cancel_reason) in rows:
+        amt = float(amount or 0)
+        amount_sum += amt
+        plates.add(plate)
+        ws.append([_loc(created, "%Y-%m-%d"), _loc(created, "%H:%M"), plate or "", site_name or "",
+                   amt, reason_labels.get(reason, reason or ""), status_labels.get(status, status or ""),
+                   _loc(ent), _loc(ext), (now - created).days if created else "", by or "",
+                   _loc(paid_at or cancelled_at), cancel_reason or ""])
+    ws.append(_bold(["НИЙТ", f"{len(rows)} өр", f"{len(plates)} дугаар", "", amount_sum]))
+    if total > len(rows):
+        ws.append([f"Анхаар: шүүлтэд {total} өр байгаагаас хамгийн сүүлийн {len(rows)} нь л орсон — "
+                   "огноо/зогсоолоор нарийсгаж дахин татна уу."])
+    return _excel_response(wb, "ur")

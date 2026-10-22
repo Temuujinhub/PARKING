@@ -1,19 +1,22 @@
 // Ээлж хаах — ажилтны ээлжийн орлого + хаагдах машин + шөнийн хаалт (ээлж хамт хаана)
 // + нөхөн төлбөр (өр) хэсэг. 3+ төлөгдөөгүй өртэй дугаар автоматаар хар жагсаалтад орно.
 import { Banknote, CreditCard, LogOut, MoonStar, Search } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, fmtShort } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
 
-const REASONS = { unpaid_exit: 'Төлбөргүй гаргасан', night_close: 'Шөнийн хаалт', shift_close: 'Ээлж хаалт', manual: 'Гараар', admin_remove: 'Админ хассан', auto_close: 'Авто хаалт (хугацаа хэтэрсэн)' }
+const REASONS = { unpaid_exit: 'Төлбөргүй гаргасан', night_close: 'Шөнийн хаалт', shift_close: 'Ээлж хаалт', manual: 'Гараар', admin_remove: 'Админ хассан', auto_close: 'Авто хаалт (хугацаа хэтэрсэн)', camera_sync: 'Камерын логоор нөхсөн', camera_sync_exit: 'Камерын логоор гарсан', camera_backfill: 'Камерын нөхөлт' }
+const PAGE = 200   // нэг ачаалалт; «Цааш ачаалах» дараагийнхыг нэмнэ
 const AGE_LABEL = { '0-7': '0–7 хоног', '8-30': '8–30 хоног', '31-90': '31–90 хоног', '90+': '90+ хоног' }
 const ROLE_LABEL = { SUPER_ADMIN: 'Супер админ', ADMIN: 'Админ', FINANCE: 'Санхүү', OPERATOR: 'Оператор' }
 
 export default function Compensations() {
   const toast = useToast()
   const { can, user } = useAuth()
-  const [data, setData] = useState({ rows: [], total_pending: 0, total_collected: 0, aging: {} })
+  const [data, setData] = useState({ rows: [], total: 0, sum_amount: 0, total_pending: 0, total_collected: 0, aging: {} })
+  const [loadingMore, setLoadingMore] = useState(false)
+  const reqId = useRef(0)    // зогсоол/төлөв солигдвол хуучирсан хариуг хаяна
   const [status, setStatus] = useState('PENDING')
   const [plate, setPlate] = useState('')
   const [payBusy, setPayBusy] = useState(false)
@@ -29,18 +32,35 @@ export default function Compensations() {
   // Сонгосон зогсоолоор шүүсэн жагсаалтууд
   const parkedShown = siteId ? parked.filter((s) => s.site_id === siteId) : parked
   const siteName = sites.find((s) => s.id === siteId)?.name
-  const debtsShown = siteName ? data.rows.filter((c) => c.site_name === siteName) : data.rows
+  // Өрийг СЕРВЕР зогсоолоор шүүнэ (2026-10-22). Өмнө нь site_id-гүй, 200 мөрийн хязгаартай
+  // татаад клиент дээр нэрээр шүүдэг байсан тул сүүлийн 200-д ороогүй бусад зогсоолын өр
+  // чимээгүй алга болж, «Нийт авлага» ч сонгосон зогсоолынх биш байв.
+  const debtsShown = data.rows
 
-  const load = () => {
-    const params = new URLSearchParams()
+  const load = (offset = 0) => {
+    const id = ++reqId.current
+    const params = new URLSearchParams({ limit: PAGE, offset })
     if (status) params.set('status', status)
+    if (siteId) params.set('site_id', siteId)
     if (plate.trim()) params.set('plate', plate.trim())
-    api(`/api/compensations?${params}`).then(setData).catch(() => {})
+    if (offset) setLoadingMore(true)
+    api(`/api/compensations?${params}`).then((d) => {
+      if (id !== reqId.current) return
+      setData((prev) => {
+        if (!offset) return d
+        const seen = new Set(prev.rows.map((c) => c.id))
+        return { ...d, rows: [...prev.rows, ...d.rows.filter((c) => !seen.has(c.id))] }
+      })
+    }).catch((e) => {
+      // Өмнөх зогсоолын мөр «энэ зогсоолынх» мэт үлдэхгүй
+      if (id === reqId.current && !offset) setData((prev) => ({ ...prev, rows: [], total: 0, sum_amount: 0 }))
+      if (offset) toast(e.message, 'error')
+    }).finally(() => { if (id === reqId.current) setLoadingMore(false) })
   }
   const loadShift = () => api('/api/cashier/shift/current').then(setShift).catch(() => setShift(null))
   const loadParked = () => api('/api/sessions?status=OPEN,AWAITING_PAYMENT&with_fee=true&limit=200')
     .then((d) => setParked(d.rows || [])).catch(() => {})
-  useEffect(load, [status])
+  useEffect(() => { load() }, [status, siteId]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     loadShift(); loadParked()
     api('/api/admin/sites').then(setSites).catch(() => {})
@@ -170,6 +190,7 @@ export default function Compensations() {
       <div className="flex items-center gap-2 pt-2">
         <LogOut size={16} className="text-slate-400" />
         <h2 className="text-lg font-semibold">Нөхөн төлбөр (өр цуглуулах)</h2>
+        <span className="text-sm text-slate-400">· {siteName || 'Бүх зогсоол'}</span>
       </div>
       <div className="card py-3 text-sm text-slate-400">
         Төлбөргүй гарсан/хаагдсан машинд өр үүсдэг. Дараагийн ирэлтэд нь касс дээр
@@ -188,11 +209,12 @@ export default function Compensations() {
           <input className="input font-mono" placeholder="Дугаараар хайх…" value={plate}
             onChange={(e) => setPlate(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === 'Enter' && load()} />
-          <button className="btn-secondary" onClick={load} aria-label="Хайх"><Search size={15} /></button>
+          <button className="btn-secondary" onClick={() => load()} aria-label="Хайх"><Search size={15} /></button>
         </div>
         <div className="text-sm text-right">
           Нийт авлага: <b className="font-mono text-red-400">{fmt(data.total_pending)}₮</b>
           <div className="text-xs text-slate-500">Цугларсан: {fmt(data.total_collected)}₮</div>
+          <div className="text-xs text-slate-500">Шүүлтээр: {fmt(data.total)} өр · {fmt(data.sum_amount)}₮</div>
         </div>
       </div>
 
@@ -248,6 +270,14 @@ export default function Compensations() {
           </tr>
         ))}
       </Table>
+      {debtsShown.length < data.total && (
+        <div className="flex items-center justify-center gap-3 text-sm text-slate-400">
+          <span>Харуулсан {fmt(debtsShown.length)} / {fmt(data.total)}</span>
+          <button className="btn-secondary" onClick={() => load(debtsShown.length)} disabled={loadingMore}>
+            {loadingMore ? 'Ачаалж байна…' : 'Цааш ачаалах'}
+          </button>
+        </div>
+      )}
 
       {/* Төлүүлэх — хэрэгсэл сонгож e-Barimt өгнө */}
       <Modal open={!!payModal} onClose={() => { if (!payBusy) { setPayModal(null); setPayError('') } }} title="Нөхөн төлбөр төлүүлэх">

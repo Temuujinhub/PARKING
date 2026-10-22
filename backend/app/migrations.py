@@ -462,6 +462,11 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_reservations_partner_ref ON reservations (partner_key_id, external_ref) "
     "WHERE external_ref IS NOT NULL",
 
+    # 2026-10-22 (№58) Өр цэвэрлэх: өр ҮҮССЭН огноо/цагийн муж + хуудаслалт. Зөвхөн индекс —
+    # мөр хөндөхгүй; compensations прод ~25k мөр (6.7MB) тул startup-ын транзакцид агшин.
+    "CREATE INDEX IF NOT EXISTS ix_comp_created_at ON compensations (created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_comp_site_created ON compensations (site_id, created_at)",
+
 ]
 
 
