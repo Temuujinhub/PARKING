@@ -1014,6 +1014,8 @@ def list_partner_keys(db: Session = Depends(get_db),
             "site_name": site.name if site else None,
             "is_active": k.is_active,
             "webhook_url": k.webhook_url,
+            # e-Barimt гаргагч (2026-10-22): None = ерөнхий msgbill аргууд, SYSTEM = манай систем заавал
+            "receipt_issuer": k.receipt_issuer,
             "vehicles_enabled": has_scope(k.scopes),
             "vehicle_webhook_url": k.vehicle_webhook_url,
             "vehicle_webhook_format": k.vehicle_webhook_format or "socialpay",
@@ -1082,6 +1084,30 @@ def set_partner_webhook(key_id: str, body: dict, db: Session = Depends(get_db),
     _audit(db, user, "PARTNER_WEBHOOK_SET", "partner_key", k.id, {"name": k.name, "url": k.webhook_url})
     db.commit()
     return {"ok": True, "webhook_url": k.webhook_url}
+
+
+@router.post("/partner-keys/{key_id}/receipt-issuer")
+def set_partner_receipt_issuer(key_id: str, body: dict, db: Session = Depends(get_db),
+                               user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Энэ түншийн (WALLET) төлбөрийн e-Barimt-ыг хэн гаргах. body: {issuer: "SYSTEM" | null}.
+
+    SYSTEM — EasyParking msgbill-ээр заавал гаргана (MonPay, SocialPay: түнш баримт ГАРГАХГҮЙ
+    гэж тохирсон). null — хуучин зан төлөв (msgbill-ийн ерөнхий «аргууд»-д WALLET байвал).
+    Баримтаа ӨӨРӨӨ гаргадаг түншид SYSTEM бүү тавь — ТЕГ-т нэг борлуулалт 2 баримт болно."""
+    from ..models import PartnerKey
+    enforce_global_settings(user)   # татварын баримтын суваг — бүх түрээслэгчид нөлөөлнө
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    issuer = (body.get("issuer") or "").strip().upper() or None
+    if issuer not in (None, "SYSTEM"):
+        raise HTTPException(422, "issuer нь SYSTEM эсвэл хоосон")
+    old = k.receipt_issuer
+    k.receipt_issuer = issuer
+    _audit(db, user, "PARTNER_RECEIPT_ISSUER_SET", "partner_key", k.id,
+           {"name": k.name, "old": old, "new": issuer})
+    db.commit()
+    return {"ok": True, "receipt_issuer": k.receipt_issuer}
 
 
 @router.post("/partner-keys/{key_id}/webhook/test")

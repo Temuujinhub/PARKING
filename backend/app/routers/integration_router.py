@@ -50,6 +50,114 @@ def receipt_info(db: Session, payment: Payment) -> dict | None:
             "created_at": r.created_at.isoformat() if r.created_at else None}
 
 
+def receipt_kind(db: Session, payment: Payment, rec) -> tuple[str, str | None]:
+    """Баримт юуных вэ: PARKING (зогсолт) | DEBT (өр — debt_id-тай) | RESERVATION (захиалга).
+    Өрийн баримтын outbox түлхүүр нь `pay-{payment}-comp-{өр}` (payments_router._finalize_paid)."""
+    from ..models import FinancialJob
+    if (payment.kind or "") == "RESERVATION":
+        return "RESERVATION", None
+    if (payment.kind or "") == "DEBT":
+        return "DEBT", None
+    job = (db.query(FinancialJob.payload).filter(FinancialJob.receipt_id == rec.id)
+           .order_by(FinancialJob.created_at).first())
+    key = ((job[0] or {}).get("idempotency_key") or "") if job else ""
+    marker = f"pay-{payment.id}-comp-"
+    if key.startswith(marker):
+        return "DEBT", key[len(marker):] or None
+    return "PARKING", None
+
+
+def receipt_list(db: Session, payment: Payment, qr: dict | None = None) -> list[dict]:
+    """Төлбөрийн БҮХ e-Barimt (2026-10-22) — өртэй төлбөрт зогсолт + өр тус бүрийн баримт.
+    `ebarimt` талбар (хуучин) зөвхөн хамгийн сүүлийнхийг өгдөг тул wallet бүгдийг харуулж
+    чаддаггүй байв. Цуцлагдсан (CANCELLED) мөр орохгүй. qr: {receipt_id: qr_data} — GET
+    msgbill-ээс нөхөж татсан QR (санах ойд байхгүй үед)."""
+    from ..models import VatReceipt
+    from ..services.receipts import receipt_qr
+    rows = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+                                        VatReceipt.status != "CANCELLED")
+            .order_by(VatReceipt.created_at).all())
+    out = []
+    for r in rows:
+        kind, debt_id = receipt_kind(db, payment, r)
+        out.append({"receipt_id": r.id, "kind": kind, "debt_id": debt_id,
+                    "ddtd": r.ebarimt_id, "lottery": r.lottery_code,
+                    "amount": float(r.amount or 0), "vat_amount": float(r.vat_amount or 0),
+                    "status": r.status, "provider": r.provider,
+                    "receiver_type": "COMPANY" if (r.customer_tin and payment.ebarimt_receiver_type
+                                                   == "COMPANY") else "CITIZEN",
+                    "error": (r.receipt_url or "")[:200] if r.status not in ("SENT", "EXTERNAL") else None,
+                    "qr_data": (qr or {}).get(r.id) or receipt_qr(r),
+                    "created_at": r.created_at.isoformat() if r.created_at else None})
+    return out
+
+
+async def fetch_missing_qr(db: Session, payment: Payment, limit: int = 4) -> dict:
+    """SENT msgbill баримтын QR санах ойд алга (1 цаг өнгөрсөн/restart) бол msgbill-ээс татна —
+    /print-тэй ИЖИЛ зам (financial_jobs.ensure_qr; QR-ыг DB-д хэзээ ч бичихгүй, ТЕГ №11)."""
+    from ..models import VatReceipt
+    from ..services import financial_jobs as FJ
+    from ..services.receipts import receipt_qr
+    out: dict = {}
+    rows = (db.query(VatReceipt).filter(VatReceipt.payment_id == payment.id,
+                                        VatReceipt.status == "SENT",
+                                        VatReceipt.provider == "MSGBILL").limit(limit).all())
+    for r in rows:
+        if receipt_qr(r):
+            continue
+        try:
+            qr = await FJ.ensure_qr(db, payment, r, timeout=2.5)
+        except Exception:  # noqa: BLE001 — QR-гүй хариу ч хүчинтэй
+            qr = None
+        if qr:
+            out[r.id] = qr
+    return out
+
+
+DEBT_REASONS = {
+    "unpaid_exit": "Төлбөр төлөлгүй гарсан", "auto_close": "Авто хаалт (хугацаа хэтэрсэн)",
+    "night_close": "Шөнийн хаалт", "shift_close": "Ээлж хаалт", "manual": "Гараар бүртгэсэн",
+    "admin_remove": "Админ хассан", "log_exit": "Камерын логоор гарсан",
+}
+
+
+def debt_items(db: Session, comps) -> list[dict]:
+    """Өр бүрийн дэлгэрэнгүй (2026-10-22): ХЭЗЭЭ үүссэн, аль зогсоолд, ямар айлчлалаас —
+    wallet өрийг одоогийн төлбөрөөс ТУСАД НЬ, огноотой нь харуулна. Цаг UTC (бүсгүй ISO,
+    /sessions-тэй ижил хэлбэр). Хуучнаас шинэ рүү."""
+    comps = sorted(comps, key=lambda c: c.created_at or datetime.min)
+    sids = [c.session_id for c in comps if c.session_id]
+    stays = {s.id: s for s in db.query(ParkingSession).filter(ParkingSession.id.in_(sids)).all()} if sids else {}
+    out = []
+    for c in comps:
+        stay = stays.get(c.session_id)
+        site = c.site
+        out.append({
+            "debt_id": c.id, "amount": float(c.amount),
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "reason": c.reason, "reason_text": DEBT_REASONS.get(c.reason or "", c.reason or ""),
+            "site_code": site.site_code if site else None, "site_name": site.name if site else None,
+            "session_id": c.session_id,
+            "entry_time": stay.entry_time.isoformat() if stay and stay.entry_time else None,
+            "exit_time": stay.exit_time.isoformat() if stay and stay.exit_time else None,
+            "duration_minutes": int(stay.duration_minutes) if stay and stay.duration_minutes is not None else None,
+        })
+    return out
+
+
+def payment_breakdown(db: Session, payment: Payment) -> dict:
+    """Нэгдсэн (include_debts) төлбөрийн задаргаа: зогсолт + өр тус бүр (огноотой)."""
+    from ..models import Compensation
+    snap = payment.fee_snapshot or {}
+    ids = [d.get("id") for d in snap.get("debts") or [] if d.get("id")]
+    comps = db.query(Compensation).filter(Compensation.id.in_(ids)).all() if ids else []
+    debt_amount = round(sum(float(d.get("amount") or 0) for d in snap.get("debts") or []), 2)
+    parking = (round(min(float(payment.amount), float(snap["parking_amount"])), 2)
+               if "parking_amount" in snap else round(float(payment.amount) - debt_amount, 2))
+    return {"parking_amount": parking, "debt_amount": debt_amount, "debt_count": len(ids),
+            "debts": debt_items(db, comps)}
+
+
 def _payment_event(db: Session, payment: Payment, event: str) -> dict:
     from .payments_router import settlement_info
     sess = db.get(ParkingSession, payment.session_id) if payment.session_id else None
@@ -61,6 +169,7 @@ def _payment_event(db: Session, payment: Payment, event: str) -> dict:
             "plate": sess.plate_number if sess else None,
             "site_code": site.site_code if site else None,
             "site_name": site.name if site else None,
+            **payment_breakdown(db, payment),
             "ebarimt": receipt_info(db, payment), **settlement_info(db, payment)}
 
 
@@ -172,7 +281,7 @@ def _check_payment_scope(db, partner, payment):
     _check_site_scope(partner, session.site_id)
 
 
-def _session_payload(db: Session, s: ParkingSession) -> dict:
+def _session_payload(db: Session, s: ParkingSession, with_debts: bool = True) -> dict:
     """Түншид өгөх session-ий бүрэн мэдээлэл: хугацаа, тариф, төлөх үлдэгдэл."""
     fee = session_fee_info(db, s)
     due = amount_due(db, s, fee)
@@ -191,7 +300,17 @@ def _session_payload(db: Session, s: ParkingSession) -> dict:
         "is_free": fee["is_free"],
         "status": s.status,
         "paid": s.status == "PAID" and due <= 0,
+        # Өр (2026-10-22): одоогийн төлбөрөөс ТУСДАА, өр бүр үүссэн огноотой — wallet
+        # «Өмнөх өр»-ийг тусад нь харуулж, include_debts=true-ээр хамт төлүүлнэ
+        **(_debt_summary(db, s) if with_debts else {}),
     }
+
+
+def _debt_summary(db: Session, s: ParkingSession) -> dict:
+    from .payments_router import _pending_debts
+    comps = _pending_debts(db, s.plate_number, s.site)
+    amount = round(sum(float(c.amount) for c in comps), 2)
+    return {"debt_amount": amount, "debt_count": len(comps), "debts": debt_items(db, comps)}
 
 
 def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict], str]:
@@ -299,9 +418,9 @@ def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
                                          ParkingSession.updated_at).desc())
                 .limit(200).all())
 
-    def _row(s: ParkingSession) -> dict:
+    def _row(s: ParkingSession, with_debts: bool = True) -> dict:
         exit_at = s.exit_time or s.updated_at
-        return _session_payload(db, s) | {
+        return _session_payload(db, s, with_debts) | {
             "exit_read_at": exit_at.isoformat() if exit_at else None,
             "exit_time": s.exit_time.isoformat() if s.exit_time else None,
         }
@@ -309,7 +428,8 @@ def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
     out = {"minutes": minutes,
            "waiting": [_row(s) for s in _rows(["AWAITING_PAYMENT"])]}
     if include_completed:
-        out["completed"] = [_row(s) for s in _rows(["PAID", "CLOSED", "FREE"])]
+        # Гарч дууссан мөрөнд өрийн задаргаа хэрэггүй (≤200 мөр × өрийн query-ээс сэргийлнэ)
+        out["completed"] = [_row(s, with_debts=False) for s in _rows(["PAID", "CLOSED", "FREE"])]
     return out
 
 
@@ -349,7 +469,8 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
         if abs(float(existing.amount) - current_due) > 0.01:
             raise HTTPException(409, "Үнэ өөрчлөгдсөн. Өмнөх wallet оролдлогыг баталгаажуулах эсвэл цуцална уу")
         return {"payment_id": existing.id, "amount": float(existing.amount),
-                "vat_amount": float(existing.vat_amount), "status": "PENDING"}
+                "vat_amount": float(existing.vat_amount), "status": "PENDING",
+                "plate_number": session.plate_number, **payment_breakdown(db, existing)}
 
     payment = _create_payment(db, session, partner, "WALLET", include_debts=include_debts)
     payment.partner_key_id = partner.key_id
@@ -366,7 +487,8 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
             "vat_amount": float(payment.vat_amount), "status": "PENDING",
             "plate_number": session.plate_number,
             "parking_amount": round(float(payment.amount) - debt_amount, 2),
-            "debt_amount": debt_amount, "debt_count": len(debts)}
+            "debt_amount": debt_amount, "debt_count": len(debts),
+            "debts": debt_items(db, getattr(payment, "_debt_comps", None) or [])}
 
 
 @router.post("/payments/{payment_id}/cancel")
@@ -441,19 +563,29 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
             payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
-            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}
+            **payment_breakdown(db, payment),
+            "ebarimt": receipt_info(db, payment), "ebarimts": receipt_list(db, payment),
+            **payment_outcome(db, payment)}
 
 
 @router.get("/payments/{payment_id}")
-def payment_status(payment_id: str, db: Session = Depends(get_db),
-                   partner: PartnerAuth = Depends(require_partner)):
+async def payment_status(payment_id: str, db: Session = Depends(get_db),
+                         partner: PartnerAuth = Depends(require_partner)):
     from .payments_router import payment_outcome
     payment = db.get(Payment, payment_id)
     if not payment or payment.provider != partner:
         raise HTTPException(404, "Payment олдсонгүй")
     _check_payment_scope(db, partner, payment)
+    # QR санах ойд алга (1 цаг өнгөрсөн/restart) бол msgbill-ээс нөхнө (2026-10-22)
+    qr = await fetch_missing_qr(db, payment) if payment.status == "PAID" else {}
+    latest, rows = receipt_info(db, payment), receipt_list(db, payment, qr)
+    if latest is not None and not latest.get("qr_data") and latest.get("ddtd"):
+        latest["qr_data"] = next((r["qr_data"] for r in rows if r["ddtd"] == latest["ddtd"]), None)
     return {"payment_id": payment.id, "status": payment.status,
             "amount": float(payment.amount),
             "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
-            # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан
-            "ebarimt": receipt_info(db, payment), **payment_outcome(db, payment)}
+            **payment_breakdown(db, payment),
+            # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан.
+            # `ebarimt` = хамгийн сүүлийн баримт (хуучин), `ebarimts` = БҮХ баримт (зогсолт + өр)
+            "ebarimt": latest, "ebarimts": rows,
+            **payment_outcome(db, payment)}

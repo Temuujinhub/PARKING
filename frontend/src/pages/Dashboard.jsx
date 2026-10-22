@@ -1,4 +1,4 @@
-import { Activity, Banknote, Building2, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
+import { Activity, Banknote, Building2, CalendarClock, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { StatCard } from '../components/ui'
@@ -13,6 +13,11 @@ const EVENT_LABELS = {
   PLATE_UNREADABLE: { label: '⚠ Дугаар буруу уншигдав — орох хаалт түр саатав', color: 'text-amber-400', icon: Car },
   EXIT_NO_SESSION: { label: 'Бүртгэлгүй гарах оролдлого', color: 'text-red-400', icon: Car },
   BARRIER_MANUAL_OPEN: { label: 'Хаалт гараар нээв', color: 'text-purple-400', icon: Activity },
+  // Урьдчилсан захиалга (wallet, 2026-10-22)
+  RESERVATION_CONFIRMED: { label: 'Шинэ захиалга (wallet) — байр бэлдэх', color: 'text-blue-300', icon: CalendarClock },
+  RESERVATION_ARRIVED: { label: 'Захиалгатай машин ирлээ', color: 'text-accent', icon: CalendarClock },
+  RESERVATION_CANCELLED: { label: 'Захиалга цуцлагдлаа', color: 'text-slate-400', icon: CalendarClock },
+  RESERVATION_NO_SHOW: { label: 'Захиалгатай машин ирсэнгүй', color: 'text-amber-400', icon: CalendarClock },
 }
 
 export default function Dashboard() {
@@ -256,6 +261,7 @@ export default function Dashboard() {
                   <span className="text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded">дотоод хаалт</span>
                 )}
                 {ev.data?.total_fee !== undefined && <span className="font-mono">{fmt(ev.data.total_fee)}₮</span>}
+                {ev.data?.reservation_no && <span className="text-[10px] text-blue-300 bg-blue-500/10 px-1.5 py-0.5 rounded font-mono">{ev.data.reservation_no}</span>}
                 <span className="ml-auto text-xs text-slate-500 font-mono">{fmtDate(ev.ts).split(' ')[1] || ''}</span>
               </div>
             )

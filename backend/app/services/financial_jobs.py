@@ -354,10 +354,35 @@ def qpay_receipt(payment) -> bool:
     return bool(settings.qpay_ebarimt and payment.provider == "QPAY" and payment.provider_payment_id)
 
 
+def partner_receipt_issuer(payment) -> str | None:
+    """Түншийн (WALLET) төлбөрийн түлхүүрт заасан баримт гаргагч — 'SYSTEM' эсвэл None.
+
+    2026-10-22: прод msgbill-ийн ерөнхий аргуудад WALLET байхгүй тул MonPay/SocialPay-ийн
+    төлбөр PosAPI руу унаж FAILED болдог байв; WALLET-ийг ерөнхийд асаавал баримтаа өөрөө
+    гаргадаг түншид ТЕГ давхардал үүснэ. Тиймээс түлхүүр тус бүрээр (partner_keys.receipt_issuer)."""
+    if (getattr(payment, "payment_method", None) or "").upper() != "WALLET":
+        return None
+    key_id = getattr(payment, "partner_key_id", None)
+    if not key_id:
+        return None
+    try:
+        from sqlalchemy.orm import object_session
+        from ..models import PartnerKey
+        db = object_session(payment)
+        key = db.get(PartnerKey, key_id) if db is not None else None
+    except Exception:  # noqa: BLE001 — тестийн хуурамч объект
+        return None
+    issuer = (getattr(key, "receipt_issuer", None) or "").strip().upper()
+    return issuer if issuer == "SYSTEM" else None
+
+
 def receipt_provider(payment):
     if qpay_receipt(payment):
         return "QPAY"
-    return "MSGBILL" if msgbill.account_enabled_for(payment_site(payment), payment.payment_method) else "POSAPI"
+    site = payment_site(payment)
+    if partner_receipt_issuer(payment) == "SYSTEM" and msgbill.api_key_for(site).enabled:
+        return "MSGBILL"   # ерөнхий «аргууд»-аас үл хамааран (түлхүүрийн тохиргоо)
+    return "MSGBILL" if msgbill.account_enabled_for(site, payment.payment_method) else "POSAPI"
 
 
 def enqueue_receipt(db, payment, *, amount=None, vat=None, session_id=None,
@@ -439,9 +464,15 @@ def enqueue_receipt_ready(db, payment, receipt):
     if not original or db.query(FinancialJob.id).filter_by(job_key=key).first():
         return
     event_id = str(uuid.uuid4())
+    from ..routers.integration_router import receipt_kind
+    kind, debt_id = receipt_kind(db, payment, receipt)
+    # kind/debt_id/vat_amount (2026-10-22): өртэй төлбөрт аль баримт аль өрийнх вэ гэдгийг
+    # wallet ялгаж харуулна (зогсолт · өр тус бүр · захиалга). amount нь текст хэвээр (хуучин).
     event = {"event": "receipt.ready", "event_id": event_id, "payment_id": payment.id,
              "receipt_id": receipt.id, "ddtd": receipt.ebarimt_id,
-             "lottery": receipt.lottery_code, "amount": str(receipt.amount), "status": "SENT"}
+             "lottery": receipt.lottery_code, "amount": str(receipt.amount),
+             "vat_amount": str(receipt.vat_amount), "kind": kind, "debt_id": debt_id,
+             "status": "SENT"}
     db.add(FinancialJob(id=event_id, job_key=key, kind="PARTNER", payment_id=payment.id,
         payload={"url": original.payload["url"], "partner": original.payload["partner"], "event": event}))
 
@@ -1045,7 +1076,10 @@ async def deliver(job_id, lease_token, factory=SessionLocal):
             return
         data, kind, receipt_id = dict(job.payload), job.kind, job.receipt_id
         payment = db.get(Payment, job.payment_id)
-        if payment is None or payment.status != "PAID":
+        # Захиалгын event (reservation.cancelled г.м) буцаагдсан (REFUNDED) төлбөрт ч явна
+        reservation_event = kind == "PARTNER" and str(
+            ((data.get("event") or {}).get("event") or "")).startswith("reservation.")
+        if payment is None or (payment.status != "PAID" and not reservation_event):
             job.status, job.last_error = "BLOCKED", "Payment is not PAID"
             db.commit()
             return

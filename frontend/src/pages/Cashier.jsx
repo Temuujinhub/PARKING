@@ -3,7 +3,7 @@
 import { AlertTriangle, CarFront, FlaskConical, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fmt, preferredSite, rememberSite, wsConnect } from '../api'
+import { api, fmt, fmtHM, preferredSite, rememberSite, wsConnect } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
 import { paymentOutcome } from '../paymentOutcome'
@@ -14,6 +14,7 @@ import FreeExitModal from './cashier/FreeExitModal'
 import ManualEntryModal, { minutesAgo } from './cashier/ManualEntryModal'
 import PaymentPanel from './cashier/PaymentPanel'
 import QpayModal from './cashier/QpayModal'
+import ReservationsPanel from './cashier/ReservationsPanel'
 import ShiftCloseModal from './cashier/ShiftCloseModal'
 import SpecialExitModal from './cashier/SpecialExitModal'
 import TodayExitsTable from './cashier/TodayExitsTable'
@@ -37,6 +38,7 @@ export default function Cashier() {
   const [qpayInfo, setQpayInfo] = useState(null)
   const [manualEntry, setManualEntry] = useState(null) // {plate_number, entry_time, offset}
   const [blAlert, setBlAlert] = useState(null) // хар жагсаалтын машин орж ирсэн анхааруулга
+  const [rsvTick, setRsvTick] = useState(0)     // захиалгын самбарыг WS event-ээр шинэчлэх
 
   const currentSite = useRef(siteId)
   currentSite.current = siteId
@@ -90,6 +92,16 @@ export default function Cashier() {
       if (ev?.type === 'BLACKLIST_ALERT' && ev.data?.lane === 'entry') {
         setBlAlert({ ...ev.data, at: new Date().toISOString() })
       }
+      // Урьдчилсан захиалга (wallet) — харуулд байр бэлдүүлэх мэдэгдэл
+      const r = ev?.data || {}
+      const win = `${fmtHM(r.start_time)}–${fmtHM(r.end_time)}`
+      const rsvMsg = {
+        RESERVATION_CONFIRMED: [`📅 Шинэ захиалга: ${r.plate} · ${win} (${r.reservation_no}, ${r.provider}) — байр бэлдээрэй`, 'success'],
+        RESERVATION_ARRIVED: [`✅ Захиалгатай машин ирлээ: ${r.plate} (${r.reservation_no})`, 'success'],
+        RESERVATION_CANCELLED: [`Захиалга цуцлагдлаа: ${r.plate} · ${win} (${r.reservation_no})`, 'info'],
+        RESERVATION_NO_SHOW: [`Захиалгатай машин ирсэнгүй: ${r.plate} (${r.reservation_no}) — байр чөлөөлөгдлөө`, 'info'],
+      }[ev?.type]
+      if (rsvMsg) { toast(...rsvMsg); setRsvTick((t) => t + 1) }
     })
     const poll = setInterval(() => loadExits(siteId), 15000)
     return () => { close(); clearInterval(poll); loadGeneration.current += 1 }
@@ -328,6 +340,8 @@ export default function Cashier() {
       )}
 
       <CashierStats overview={overview} shift={shift} />
+
+      <ReservationsPanel siteId={siteId} refreshKey={rsvTick} />
 
       <label className="card flex flex-wrap items-center gap-3">Төлбөр хүлээж буй гарах эгнээ
         <select className="input min-h-11 max-w-md" value={laneId} disabled={busy || !!qpayInfo} onChange={event => {

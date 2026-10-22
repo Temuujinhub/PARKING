@@ -23,7 +23,7 @@ from . import app_settings as A
 
 # ── Дүрмийн бүртгэл ────────────────────────────────────────────────────────
 # (бүлэг, түлхүүр, нэр, тайлбар, нэгж, ямар үед үйлчилдэг)
-# unit: "hour" | "min" | "sec" | "mnt" | "count" | "bool" | "choice" | "time"
+# unit: "hour" | "min" | "sec" | "mnt" | "count" | "day" | "bool" | "choice" | "time"
 CATALOG: list[dict] = [
     {"group": A.EXITRULES_KEY, "key": "payment_hold_minutes", "unit": "min",
      "name": "Төлбөр төлөх үеийн үнийг барих хугацаа",
@@ -300,6 +300,49 @@ CATALOG: list[dict] = [
      "not_applied": "Толгойтой хүсэлт (апп өөрөө танигдана), веб касс"},
 ]
 
+CATALOG += [
+    # ── Урьдчилсан захиалга (wallet-ийн /api/v1/reservations, 2026-10-22) ────────────
+    {"group": A.RESERVATION_KEY, "key": "enabled", "unit": "bool",
+     "name": "Wallet-аар урьдчилж захиалга авах",
+     "desc": "Асаалттай бол MonPay, SocialPay зэрэг түншийн апп энэ зогсоолд байр урьдчилж "
+             "захиалж, төлбөрийг нь урьдчилж авна. Захиалга баталгаажмагц харуулын дэлгэц "
+             "(Касс, Хяналтын самбар)-д мэдэгдэл очно. Анхдагч УНТРААЛТТАЙ.",
+     "applies": "POST /api/v1/reservations", "not_applied": "Доторх (nested) зогсоол"},
+    {"group": A.RESERVATION_KEY, "key": "spots", "unit": "count",
+     "name": "Захиалгад зориулсан байрны тоо",
+     "desc": "Нэг цагт давхцах захиалгын дээд тоо. 0 = захиалга авахгүй. Харуул эдгээр "
+             "байрыг тэмдэглэж, захиалгатай машинд үлдээнэ.",
+     "applies": "Захиалга үүсгэх үеийн сул байрны шалгалт", "not_applied": "Захиалгагүй машин"},
+    {"group": A.RESERVATION_KEY, "key": "min_minutes", "unit": "min",
+     "name": "Захиалгын хамгийн богино хугацаа", "desc": "Анхдагч 60 минут.",
+     "applies": "Захиалга үүсгэх", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "max_minutes", "unit": "min",
+     "name": "Захиалгын хамгийн урт хугацаа", "desc": "Анхдагч 720 минут (12 цаг).",
+     "applies": "Захиалга үүсгэх", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "max_days_ahead", "unit": "day",
+     "name": "Хэдэн хоногийн өмнөөс захиалж болох", "desc": "Анхдагч 7 хоног.",
+     "applies": "Захиалга үүсгэх", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "min_lead_minutes", "unit": "min",
+     "name": "Эхлэхээс өмнөх хамгийн бага хугацаа",
+     "desc": "Захиалга эхлэхээс дор хаяж N минутын өмнө үүсгэнэ. 0 = одоо эхлэх захиалга зөвшөөрнө.",
+     "applies": "Захиалга үүсгэх", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "hold_minutes", "unit": "min",
+     "name": "Төлбөр хүлээх (байр барих) хугацаа",
+     "desc": "Захиалга үүсээд төлбөр баталгаажих хүртэл байрыг барина. Хугацаандаа "
+             "баталгаажаагүй бол EXPIRED болж байр чөлөөлөгдөнө.",
+     "applies": "PENDING_PAYMENT захиалга", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "arrive_early_minutes", "unit": "min",
+     "name": "Эрт ирэхийг зөвшөөрөх хугацаа",
+     "desc": "Эхлэхээс N минут эрт орсон машиныг захиалгад холбоно (урьдчилж төлсөн дүн "
+             "тэр зогсолтоос хасагдана). Эрт ирсэн хугацаа энгийн тарифаар тооцогдоно.",
+     "applies": "Орох камерын уншилт", "not_applied": "—"},
+    {"group": A.RESERVATION_KEY, "key": "cancel_free_minutes", "unit": "min",
+     "name": "Үнэгүй цуцлах хугацаа",
+     "desc": "Эхлэхээс N минутын өмнө хүртэл цуцалбал бүтэн буцаалт (e-Barimt цуцлагдана). "
+             "Түүнээс хойш цуцалбал буцаалтгүй (байр л чөлөөлөгдөнө).",
+     "applies": "POST /api/v1/reservations/{id}/cancel", "not_applied": "Ирсэн/дууссан захиалга"},
+]
+
 # ЗӨВХӨН зогсоолоор тохируулагдах дүрмүүд (A.SITE_ONLY) — «Ерөнхий» табд хадгалагдахгүй
 for _row in CATALOG:
     if _row["key"] in A.SITE_ONLY.get(_row["group"], set()):
@@ -342,6 +385,7 @@ _GROUP_NAMES = {
     A.BLACKLIST_KEY: "Өр ба хар жагсаалт",
     A.AUTOCLOSE_KEY: "Авто цэвэрлэгээ ба өр үүсгэх",
     A.EBARIMT_KEY: "e-Barimt (НӨАТ баримт) — POS терминал (PAX апп)",
+    A.RESERVATION_KEY: "Урьдчилсан захиалга (wallet)",
 }
 
 # Тоон дүрмийн ЗӨВШӨӨРӨГДӨХ ДЭЭД хязгаар — өмнө нь зөвхөн UI (AutoCloseSection
@@ -369,8 +413,19 @@ MAX: dict[tuple[str, str], int] = {
     (A.AUTOCLOSE_KEY, "paid_exit_hours"): 720,
     (A.AUTOCLOSE_KEY, "entry_only_free_hours"): 720,
     (A.AUTOCLOSE_KEY, "stale_hours"): 720,
+    (A.RESERVATION_KEY, "spots"): 10_000,
+    (A.RESERVATION_KEY, "min_minutes"): 1440,
+    (A.RESERVATION_KEY, "max_minutes"): 10_080,
+    (A.RESERVATION_KEY, "max_days_ahead"): 90,
+    (A.RESERVATION_KEY, "min_lead_minutes"): 1440,
+    (A.RESERVATION_KEY, "hold_minutes"): 60,
+    (A.RESERVATION_KEY, "arrive_early_minutes"): 240,
+    (A.RESERVATION_KEY, "cancel_free_minutes"): 10_080,
 }
 MIN: dict[tuple[str, str], int] = {
+    (A.RESERVATION_KEY, "min_minutes"): 15,
+    (A.RESERVATION_KEY, "max_minutes"): 15,
+    (A.RESERVATION_KEY, "hold_minutes"): 1,
     (A.BARRIER_KEY, "dedup_seconds"): 3,
     (A.BARRIER_KEY, "entry_burst_seconds"): 1,
     (A.BARRIER_KEY, "reopen_cooldown_sec"): 1,

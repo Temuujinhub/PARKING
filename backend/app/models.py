@@ -740,11 +740,68 @@ class PartnerKey(Base):
     # spec-ээр; 'extended' = нэмэлт талбартай (services/partner_vehicles.py).
     vehicle_webhook_url = Column(String(300), nullable=True)
     vehicle_webhook_format = Column(String(20), nullable=True)
+    # 2026-10-22: энэ түншийн (WALLET) төлбөрийн e-Barimt-ыг ХЭН гаргах вэ.
+    #   NULL     — хуучин зан төлөв: msgbill-ийн ерөнхий «аргууд»-д WALLET байвал msgbill, үгүй бол PosAPI
+    #   'SYSTEM' — EasyParking msgbill-ээр ЗААВАЛ гаргана — WALLET-ийг ерөнхийд асаахгүйгээр (MonPay,
+    #              SocialPay). Ерөнхийд асаавал баримтаа өөрөө гаргадаг түншид ТЕГ давхардал үүснэ.
+    receipt_issuer = Column(String(10), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     created_by = Column(String(60), default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class Reservation(Base):
+    """Зогсоолын урьдчилсан захиалга (2026-10-22) — wallet-ийн апп (MonPay, SocialPay …)-аар.
+
+    Урсгал: түнш захиалга үүсгэнэ (PENDING_PAYMENT — `hold_minutes` хугацаанд байр барина,
+    дүнг систем тарифаар бодно) → хэрэглэгчээс мөнгө татна → confirm (CONFIRMED: зогсоолын
+    харуулын дэлгэцэнд мэдэгдэл, e-Barimt) → машин орох камерт уншигдмагц сешнтэй холбогдоно
+    (CHECKED_IN: урьдчилж төлсөн дүн тэр сешний төлбөрөөс хасагдана, илүү зогссон хугацааг
+    гарахдаа энгийн тарифаар төлнө) → сешн хаагдахад COMPLETED. Цуцлалт/буцаалтын дүрэм,
+    байрны тоо зогсоол бүрээр (app_settings `reservation_rules`). services/reservations.py."""
+    __tablename__ = "reservations"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    # Харуулд хэлэх богино код (ж: R7K3F9) — давтагдашгүй
+    reservation_no = Column(String(12), nullable=False, unique=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=True, index=True)
+    provider = Column(String(60), nullable=False)          # түншийн нэр (Payment.provider-тэй ижил)
+    site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=False, index=True)
+    plate_number = Column(String(20), nullable=False, index=True)
+    start_time = Column(DateTime, nullable=False)           # UTC
+    end_time = Column(DateTime, nullable=False)             # UTC
+    duration_minutes = Column(Integer, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    vat_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    # PENDING_PAYMENT | CONFIRMED | CHECKED_IN | COMPLETED | CANCELLED | EXPIRED | NO_SHOW
+    status = Column(String(20), nullable=False, default="PENDING_PAYMENT", index=True)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=True, index=True)
+    session_id = Column(UUID(as_uuid=False), ForeignKey("parking_sessions.id"), nullable=True, index=True)
+    # Түншийн өөрийн захиалгын дугаар — давтан create-д ижил захиалга буцаана (идемпотент)
+    external_ref = Column(String(120), nullable=True)
+    external_user_id = Column(String(64), nullable=True)
+    contact_phone = Column(String(20), nullable=True)
+    hold_expires_at = Column(DateTime, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
+    checked_in_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(String(60), nullable=True)
+    cancel_reason = Column(Text, nullable=True)
+    refund_amount = Column(Numeric(12, 2), nullable=True)
+    raw = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    site = relationship("ParkingSite", lazy="joined")
+
+    __table_args__ = (
+        Index("ix_reservations_site_window", "site_id", "status", "start_time", "end_time"),
+        Index("ix_reservations_plate_status", "plate_number", "status"),
+        Index("uq_reservations_partner_ref", "partner_key_id", "external_ref", unique=True,
+              postgresql_where=text("external_ref IS NOT NULL")),
+    )
 
 
 class PartnerVehicle(Base):

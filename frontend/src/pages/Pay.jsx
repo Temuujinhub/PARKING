@@ -1,15 +1,17 @@
 // Public /pay — жолоочийн QR төлбөрийн хуудас (нэвтрэлтгүй, mobile-first)
-// Урсгал: QR уншина → дугаараа оруулна (эсвэл сүүлд уншигдсанаас сонгоно) → QPay → нээгдэнэ
+// Урсгал: QR уншина → дугаараа оруулна (эсвэл сүүлд уншигдсанаас сонгоно) → «Төлбөр төлөх» →
+// төлбөрийн хэрэгсэл сонгоно (QPay; бусад хэтэвч «Coming soon» — payMethods.js) → QPay → нээгдэнэ
 //
 // Зогсоолыг 2 хэлбэрээр заана (аль аль нь дэмжигдэнэ — талбайд хоёулаа хэвлэгдсэн):
 //   /pay?site=SITE01                — зогсоолын кодоор
 //   /checkout/<uuid>, /check-cost/<uuid> — зогсоолын id-гаар
-import { ArrowLeft, Car, CheckCircle2, Clock, CreditCard, Loader2 } from 'lucide-react'
+import { ArrowLeft, Car, CheckCircle2, ChevronRight, Clock, CreditCard, Loader2, Wallet } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { fmt, fmtDur } from '../api'
 import { LogoMark, LogoText } from '../components/Logo'
 import { paymentOutcome } from '../paymentOutcome'
+import { PAY_METHODS } from '../payMethods'
 
 async function publicApi(path, opts = {}) {
   const res = await fetch(path, {
@@ -45,6 +47,8 @@ export default function Pay() {
   const [recent, setRecent] = useState([])
   const [plate, setPlate] = useState('')
   const [session, setSession] = useState(null)
+  // «Төлбөр төлөх» дарсны дараа — төлбөрийн хэрэгсэл сонгох алхам (QPay руу шууд үсрэхгүй)
+  const [choosing, setChoosing] = useState(false)
   const [payment, setPayment] = useState(null)
   const [paid, setPaid] = useState(false)
   const [error, setError] = useState('')
@@ -115,15 +119,22 @@ export default function Pay() {
     setBusy(true); setError('')
     try {
       const s = await publicApi(`/api/public/sessions?plate=${encodeURIComponent(target)}&site=${siteCode}`)
-      setSession(s)
+      setSession(s); setChoosing(false)
       if (s.paid) setPaid({ session_status: s.status, amount_due: s.amount_due })
     } catch (e) { setError(e.message) } finally { setBusy(false) }
   }
 
+  // QPay `ebarimt_receiver` = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7);
+  // сервер ч өөр утгад 422 өгнө (2026-10-16). Хэрэгсэл сонгохоос ӨМНӨ шалгана.
+  const orgTinInvalid = () => vatType === 'ORG' && !/^\d{7}$/.test(orgTin.trim())
+
+  const goChoose = () => {
+    if (orgTinInvalid()) { setError('Байгууллагын 7 оронтой регистр оруулна уу (ТТД биш)'); return }
+    setError(''); setChoosing(true)
+  }
+
   const payQpay = async () => {
-    // QPay `ebarimt_receiver` = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7);
-    // сервер ч өөр утгад 422 өгнө (2026-10-16)
-    if (vatType === 'ORG' && !/^\d{7}$/.test(orgTin.trim())) {
+    if (orgTinInvalid()) {
       setError('Байгууллагын 7 оронтой регистр оруулна уу (ТТД биш)')
       return
     }
@@ -210,7 +221,7 @@ export default function Pay() {
             <button className="btn-primary w-full justify-center" disabled={busy}
               onClick={async () => {
                 clearTimeout(receiptPollRef.current); receiptGeneration.current += 1
-                setPaid(false); setPayment(null); setReceipt(null); setReceiptPaymentId(null)
+                setPaid(false); setPayment(null); setChoosing(false); setReceipt(null); setReceiptPaymentId(null)
                 await search(session?.plate_number || plate)
               }}>Үлдэгдэл төлбөрийг шалгах</button>
           ) : payment && ['gate_attention', 'unknown'].includes(outcome.kind) ? (
@@ -326,10 +337,56 @@ export default function Pay() {
     )
   }
 
+  if (session && choosing) {
+    const amount = session.amount_total ?? session.total_fee
+    return (
+      <Shell site={site}>
+        <button onClick={() => { setChoosing(false); setError('') }}
+          className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer"><ArrowLeft size={15} /> Буцах</button>
+        <div className="space-y-4">
+          <div className="text-center">
+            <div className="text-sm text-slate-400">{session.plate_number} · Төлөх дүн</div>
+            <div className="text-3xl font-bold font-mono text-accent">{fmt(amount)}₮</div>
+          </div>
+          <h2 className="text-base font-semibold flex items-center gap-2">
+            <Wallet size={17} aria-hidden /> Төлбөрийн хэрэгсэл сонгоно уу
+          </h2>
+          <ul className="space-y-2" aria-label="Төлбөрийн хэрэгсэл">
+            {PAY_METHODS.map((m, i) => (
+              <li key={m.code}>
+                <button type="button" disabled={!m.ready || busy} aria-disabled={!m.ready}
+                  onClick={m.ready ? payQpay : undefined}
+                  title={m.ready ? `${m.name}-ээр төлөх` : `${m.name} — удахгүй (Coming soon)`}
+                  className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl border text-left transition-colors
+                    ${m.ready
+                      ? 'bg-surface-muted/50 border-surface-border hover:border-accent cursor-pointer focus-visible:ring-2 focus-visible:ring-accent'
+                      : 'bg-surface-muted/20 border-surface-border/50 opacity-45 grayscale cursor-not-allowed'}`}>
+                  <span className="text-xs text-slate-500 w-4 text-right font-mono">{i + 1}.</span>
+                  <span className={`w-10 h-10 rounded-xl ${m.color} text-white flex items-center justify-center text-sm font-bold shrink-0`}
+                    aria-hidden>{m.badge}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block font-semibold">{m.name}</span>
+                    <span className="block text-xs text-slate-400 truncate">{m.hint}</span>
+                  </span>
+                  {m.ready
+                    ? (busy ? <Loader2 size={18} className="animate-spin text-accent" aria-label="QR үүсгэж байна" />
+                      : <ChevronRight size={18} className="text-slate-400" aria-hidden />)
+                    : <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-surface-border text-slate-400">
+                        Coming soon</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <ErrorBox error={error} />
+        </div>
+      </Shell>
+    )
+  }
+
   if (session) {
     return (
       <Shell site={site}>
-        <button onClick={() => { setSession(null); setError('') }} className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer">
+        <button onClick={() => { setSession(null); setChoosing(false); setError('') }} className="flex items-center gap-1 text-sm text-slate-400 mb-4 cursor-pointer">
           <ArrowLeft size={15} /> Буцах
         </button>
         <div className="space-y-4">
@@ -409,9 +466,8 @@ export default function Pay() {
                 )}
               </div>
               <ErrorBox error={error} />
-              <button onClick={payQpay} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">
-                {busy ? <Loader2 className="animate-spin" size={18} /> : <CreditCard size={18} />}
-                {busy ? 'QR үүсгэж байна…' : 'QPay-ээр төлөх'}
+              <button onClick={goChoose} disabled={busy} className="btn-primary w-full justify-center text-base py-3.5">
+                <CreditCard size={18} /> Төлбөр төлөх
               </button>
             </>
           )}

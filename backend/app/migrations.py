@@ -444,6 +444,24 @@ MIGRATIONS = [
     "heartbeat_count BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMP NOT NULL)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_clients_user_terminal ON pos_clients (user_id, terminal_id)",
 
+    # 2026-10-22 Wallet: зогсоолын урьдчилсан захиалга (ШИНЭ хүснэгт, create_all дээр үүснэ) +
+    # түнш тутмын e-Barimt гаргагч (partner_keys-д nullable багана; NULL = хуучин зан төлөв).
+    "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS receipt_issuer VARCHAR(10)",
+    "CREATE TABLE IF NOT EXISTS reservations (id UUID PRIMARY KEY, reservation_no VARCHAR(12) NOT NULL UNIQUE, "
+    "partner_key_id UUID REFERENCES partner_keys(id), provider VARCHAR(60) NOT NULL, "
+    "site_id UUID NOT NULL REFERENCES parking_sites(id), plate_number VARCHAR(20) NOT NULL, "
+    "start_time TIMESTAMP NOT NULL, end_time TIMESTAMP NOT NULL, duration_minutes INTEGER NOT NULL, "
+    "amount NUMERIC(12,2) NOT NULL, vat_amount NUMERIC(12,2) NOT NULL, status VARCHAR(20) NOT NULL, "
+    "payment_id UUID REFERENCES payments(id), session_id UUID REFERENCES parking_sessions(id), "
+    "external_ref VARCHAR(120), external_user_id VARCHAR(64), contact_phone VARCHAR(20), "
+    "hold_expires_at TIMESTAMP, confirmed_at TIMESTAMP, checked_in_at TIMESTAMP, completed_at TIMESTAMP, "
+    "cancelled_at TIMESTAMP, cancelled_by VARCHAR(60), cancel_reason TEXT, refund_amount NUMERIC(12,2), "
+    "raw JSON NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS ix_reservations_site_window ON reservations (site_id, status, start_time, end_time)",
+    "CREATE INDEX IF NOT EXISTS ix_reservations_plate_status ON reservations (plate_number, status)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_reservations_partner_ref ON reservations (partner_key_id, external_ref) "
+    "WHERE external_ref IS NOT NULL",
+
 ]
 
 
@@ -516,6 +534,9 @@ def check_ready():
         conn.execute(text("SELECT job_key, status, awaiting_exit FROM partner_vehicle_events LIMIT 0"))
         conn.execute(text("SELECT user_id, terminal_id, pos_version, status, last_seen_at, "
                           "request_count FROM pos_clients LIMIT 0"))
+        conn.execute(text("SELECT receipt_issuer FROM partner_keys LIMIT 0"))
+        conn.execute(text("SELECT reservation_no, status, start_time, end_time, payment_id, session_id "
+                          "FROM reservations LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'

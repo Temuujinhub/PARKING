@@ -256,6 +256,9 @@ def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
         "amountDue": due,
         "debtAmount": debt_amount,
         "debtCount": len(debts),
+        # Өр бүр ХЭЗЭЭ үүссэн, аль зогсоолын ямар айлчлалаас (2026-10-22) — Bill дээр
+        # одоогийн төлбөрөөс тусад нь огноотой харуулна. Хуучнаас шинэ рүү.
+        "debts": _bill_debts(db, debts),
         "amountDueWithDebts": round(due + debt_amount, 2),
         "exitBlockReason": block,
         "exitBlockReasonWithDebts": block_with_debts,
@@ -266,6 +269,18 @@ def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
         "paymentId": intent.id if intent else None,
         "paymentAmount": float(intent.amount) if intent else None,
     }
+
+
+def _bill_debts(db: Session, debts) -> list[dict]:
+    from .integration_router import debt_items
+
+    def z(v):
+        return PV.iso_z(datetime.fromisoformat(v)) if v else None
+    return [{"debtId": d["debt_id"], "amount": d["amount"], "createdAt": z(d["created_at"]),
+             "reason": d["reason"], "reasonText": d["reason_text"],
+             "siteCode": d["site_code"], "siteName": d["site_name"],
+             "enteredDate": z(d["entry_time"]), "exitedDate": z(d["exit_time"]),
+             "minutesParked": d["duration_minutes"]} for d in debt_items(db, debts)]
 
 
 @router.post("/bill")

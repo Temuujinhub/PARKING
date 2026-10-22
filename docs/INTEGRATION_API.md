@@ -12,10 +12,13 @@ tokI, Easy Wallet, MonPay, SocialPay зэрэг гадаад төлбөрийн 
 > **Прод дээрх одоогийн байдал (2026-10-15):** msgbill-ийн арга `CARD,CASH,QR,TRANSFER` — WALLET-гүй,
 > тиймээс түншийн (`payment_method=WALLET`) төлбөрийн баримт PosAPI руу унаж `FAILED` (BLOCKED)
 > болдог. **«Хэтэвч» (WALLET)-ийг msgbill-д ГЛОБАЛААР БҮҮ асаа:** баримтаа өөрөө гаргадаг түншийн
-> төлбөрт ч систем баримт гаргаж ТЕГ-т давхардуулна. MonPay-ийн төлбөрт системийн баримтыг түнш
-> (түлхүүр) тус бүрээр асаах өөрчлөлт ХЭРЭГЖЭЭГҮЙ — MonPay PROD-д гарахаас өмнө хийнэ. Түншийн
-> FAILED хуучин баримтыг бөөнөөр «Дахин үүсгэх»-ийн өмнө тухайн түнш өөрөө баримт гаргасан эсэхийг
-> ТЕГ экспортоор тулгана.
+> төлбөрт ч систем баримт гаргаж ТЕГ-т давхардуулна. Түншийн FAILED хуучин баримтыг бөөнөөр «Дахин
+> үүсгэх»-ийн өмнө тухайн түнш өөрөө баримт гаргасан эсэхийг ТЕГ экспортоор тулгана.
+>
+> **2026-10-22:** түлхүүр тус бүрээр асаах тохиргоо ХЭРЭГЖСЭН — Тохиргоо → Холболт → Гадаад API →
+> мөрийн «e-Barimt: EasyParking заавал гаргана» (`partner_keys.receipt_issuer = SYSTEM`). Тэр
+> түлхүүрийн WALLET төлбөрт msgbill-ийн ерөнхий аргуудаас үл хамааран систем баримт гаргана; бусад
+> түнш (хоосон) хуучнаараа. Дэлгэрэнгүй, TEST/PROD шалгах хуудас — §6.5–6.6.
 
 ## Холболт идэвхжүүлэх (сервер талд)
 
@@ -62,8 +65,22 @@ site_code өгөхгүй бол бүх зогсоолоос хайна. Хари
   "base_fee": 1818, "vat_amount": 182, "discount_amount": 0,
   "total_fee": 2000,
   "amount_due": 2000,     // ← ЭНЭ дүнг хэрэглэгчээс нэхэмжилнэ
-  "is_free": false, "status": "AWAITING_PAYMENT", "paid": false}]}
+  "is_free": false, "status": "AWAITING_PAYMENT", "paid": false,
+  "debt_amount": 3000, "debt_count": 1,      // ← өмнөх өр — amount_due-д БАГТААГҮЙ (2026-10-22)
+  "debts": [{"debt_id": "…", "amount": 3000,
+             "created_at": "2026-10-01T05:31:00",           // өр ҮҮССЭН цаг (UTC)
+             "reason": "unpaid_exit", "reason_text": "Төлбөр төлөлгүй гарсан",
+             "site_code": "KH", "site_name": "Кэй Эйч",
+             "session_id": "…", "entry_time": "2026-10-01T02:00:00",   // өр үүсгэсэн айлчлал
+             "exit_time": "2026-10-01T05:30:00", "duration_minutes": 210}]}]}
 ```
+
+**Өр (2026-10-22):** `debts` нь энэ машины (ТУХАЙН зогсоолын байгууллагын зогсоолуудын) төлөгдөөгүй
+өрүүд, хуучнаас шинэ рүү. Wallet өрийг одоогийн төлбөрөөс (`amount_due`) ТУСАД НЬ, өр бүр хэзээ,
+аль зогсоолд үүссэнтэй нь харуулна; хамт төлүүлэх бол intent-д `include_debts: true` (§3). Өргүй бол
+`debts: []`. `reason`: `unpaid_exit` (төлөлгүй гарсан), `auto_close` (хугацаа хэтэрч авто хаагдсан),
+`night_close`, `shift_close`, `manual`, `admin_remove`, `log_exit` — харуулахдаа `reason_text`.
+Айлчлалгүй (гараар бүртгэсэн) өрт `session_id`/`entry_time`/`exit_time` нь `null`.
 
 ### 2.1 GET /api/v1/recent-exits — бүх зогсоолын гарцын урсгал (2026-09-01)
 
@@ -101,8 +118,10 @@ Wallet энэ `amount`-аар хэрэглэгчээс мөнгө авна. Ид
 
 `"include_debts": true` (заавал биш, 2026-10-14; анхдагч `false` — хуучин зан төлөв): тухайн
 түрээслэгчийн зогсоолуудын төлөгдөөгүй өрийг QR-тэй ижил нэг intent-д нийлүүлнэ — хариунд
-`parking_amount`, `debt_amount`, `debt_count`; confirm нь өрүүдийг PAID болгоно. Өр 3+ (анхдагч
-`block_exit_debt_count`) машиныг зөвхөн зогсолтын төлбөрөөр гарц НЭЭГДЭХГҮЙ.
+`parking_amount`, `debt_amount`, `debt_count` болон **`debts`** (энэ intent-д багтсан өр бүр — §2-ийн
+хэлбэр, үүссэн огноотой; 2026-10-22); confirm нь өрүүдийг PAID болгоно. Өр 3+ (анхдагч
+`block_exit_debt_count`) машиныг зөвхөн зогсолтын төлбөрөөр гарц НЭЭГДЭХГҮЙ. Хүлээгдэж буй intent-ийг
+давтан буцаахад ч ижил задаргаа (`parking_amount`, `debt_amount`, `debts`) ирнэ.
 
 ### 4. POST /api/v1/payments/{payment_id}/confirm — баталгаажуулах
 
@@ -118,9 +137,25 @@ Body: `{"transaction_id": "TX123", "amount": 2000}` — `amount` **заавал 
 
 ### 5. GET /api/v1/payments/{payment_id} — төлөв шалгах
 
-`{"payment_id": "...", "status": "PENDING|PAID|CANCELLED", "amount": 2000, "paid_at": ..., "ebarimt": {...}|null}`
+`{"payment_id": "...", "status": "PENDING|PAID|CANCELLED", "amount": 2000, "paid_at": ...,
+"parking_amount": 1000, "debt_amount": 1000, "debt_count": 1, "debts": [...],
+"ebarimt": {...}|null, "ebarimts": [...]}`
 
-### 6. e-Barimt (НӨАТ-ын баримт) — 2026-09-13
+`parking_amount`/`debts` — төлбөрийн задаргаа (зогсолт ба өр тус бүр, огноотой; 2026-10-22).
+`ebarimts` — БҮХ баримт (§6). Confirm-ийн хариу мөн ижил талбартай.
+
+### 6. e-Barimt (НӨАТ-ын баримт) — 2026-09-13; 2026-10-22 шинэчилсэн
+
+**Товч:** баримтыг EasyParking гаргана → түнш **(1)** `receipt.ready` webhook-оор ДДТД/сугалааг
+авна, **(2)** `GET /payments/{id}`-ээр QR-тай бүрэн мэдээллийг (`ebarimts[]` — бүх баримт) авна,
+**(3)** хэрэглэгчдээ харуулна. Түнш ЭНЭ төлбөрт өөрөө e-Barimt гаргахгүй.
+
+| Алхам | Хаанаас | Юу ирэх |
+|---|---|---|
+| confirm-ийн хариу | `POST /payments/{id}/confirm` | `ebarimts[]` ихэвчлэн `status: PENDING`, `ddtd: null` (баримт хэдхэн секундэд) |
+| баримт гармагц | webhook `receipt.ready` (баримт тус бүрд нэг) | `ddtd`, `lottery`, `amount`, `vat_amount`, `kind` (PARKING/DEBT/RESERVATION), `debt_id` |
+| QR | `GET /payments/{id}` → `ebarimts[i].qr_data` | QR текст. Санах ойд 1ц; түүнээс хойш msgbill-ийн баримтын QR-ыг сервер msgbill-ээс НӨХӨЖ татна (≤2.5с) |
+| webhook-гүй түнш | confirm-оос 2–3с-ийн дараа, дараа нь 5–10с тутам 1 мин хүртэл `GET` | дээрхтэй ижил |
 
 Төлбөр PAID болмогц систем баримтыг өөрөө үүсгэнэ (QPay/msgbill). Түнш баримтыг
 хоёр замаар авна:
@@ -143,10 +178,24 @@ Body: `{"transaction_id": "TX123", "amount": 2000}` — `amount` **заавал 
 Түншийн confirm баримтыг ХҮЛЭЭХГҮЙ (баримт outbox ажилтнаар хэдхэн секундэд үүснэ) — тиймээс
 confirm-ийн хариунд `ebarimt.status` ихэвчлэн `PENDING`, `ddtd: null`. Эцсийн ДДТД-г
 `receipt.ready` webhook-оор эсвэл 2–3 секундын дараа `GET /payments/{id}`-ээр авна.
-`include_debts=true` үед нэг төлбөрт хэд хэдэн баримт (зогсолт + өр тус бүр) үүсч, `ebarimt`
-талбарт хамгийн сүүлд үүссэн НЭГ нь л харагдана — бүгдийг `receipt.ready` (баримт тус бүрд нэг)-ээр.
-QR-ыг ЗӨВХӨН `GET /payments/{id}` өгнө (хамгийн сүүлийн баримтынх, 1 цагийн түр санах ой — restart-д
-арилна); `payment.paid`-аас `qr_data`-г хасдаг, `receipt.ready`-д байхгүй.
+`include_debts=true` үед нэг төлбөрт хэд хэдэн баримт (зогсолт + өр тус бүр) үүснэ. `ebarimt` талбар
+(хуучин, хэвээр) хамгийн сүүлд үүссэн НЭГийг л харуулдаг тул **`ebarimts` массивыг ашиглана**
+(2026-10-22) — баримт бүр:
+
+```json
+"ebarimts": [
+  {"receipt_id": "…", "kind": "PARKING", "debt_id": null, "ddtd": "0301…", "lottery": "SO 63177600",
+   "amount": 1000, "vat_amount": 91, "status": "SENT", "provider": "MSGBILL",
+   "receiver_type": "CITIZEN", "error": null, "qr_data": "…", "created_at": "…"},
+  {"receipt_id": "…", "kind": "DEBT", "debt_id": "<§2-ийн debts[].debt_id>", "ddtd": "0301…", …}]
+```
+
+`kind`: `PARKING` (зогсолт), `DEBT` (өр — `debt_id`-аар §2/§3-ийн `debts[]`-тэй холбоно),
+`RESERVATION` (урьдчилсан захиалга, §8). Цуцлагдсан баримт жагсаалтад орохгүй.
+QR (`qr_data`) — ЗӨВХӨН `GET /payments/{id}` (+ confirm-ийн хариу, кэштэй бол); `payment.paid`-аас
+`qr_data`-г хасдаг, `receipt.ready`-д байхгүй. QR-ыг DB-д хадгалдаггүй (ТЕГ шаардлага): санах ойд
+1 цаг, дараа нь msgbill-ийн баримтынхыг сервер msgbill-ээс дахин татаж өгнө (2026-10-22); QPay/PosAPI
+сувгийн баримтын QR 1 цагийн дараа `null`.
 
 **б) Webhook (POST)** — Тохиргоо → Холболт → Гадаад API → түлхүүрийн «Webhook (төлбөр + баримт)»
 талбарт түншийн URL оруулбал (төлбөр батлагдах ҮЕД URL тохируулсан байх ёстой) систем 2 төрлийн
@@ -161,8 +210,13 @@ event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking
  "session_status": "PAID", "amount_due": 0, "needs_additional_payment": false, "overpaid_amount": 0}
 
 {"event": "receipt.ready", "event_id": "…", "payment_id": "…", "receipt_id": "…",
- "ddtd": "0301…", "lottery": "SO 63177600", "amount": "2000.00", "status": "SENT"}
+ "ddtd": "0301…", "lottery": "SO 63177600", "amount": "2000.00", "vat_amount": "182.00",
+ "kind": "PARKING", "debt_id": null, "status": "SENT"}
 ```
+
+`receipt.ready`-ийн `kind`/`debt_id`/`vat_amount` — 2026-10-22-нд нэмэгдсэн (`amount`, `vat_amount`
+нь ТЕКСТ — хуучин хэлбэрийг эвдэхгүйн тулд). `payment.paid` мөн `parking_amount`, `debt_amount`,
+`debt_count`, `debts[]`-тэй.
 
 - Амжилт = HTTP 2xx (body-г шалгахгүй). Хугацаа 10с.
 - Амжилтгүй бол давтана: 1, 2, 4, 8, 16, 32 мин, дараа нь цаг тутам — нийт 24 оролдлого (~18 цаг),
@@ -177,6 +231,33 @@ event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking
   байж болно. Машин бүртгэлийн «Турших» нь format-аас үл хамааран зөвхөн
   `{"data":{"plateNo","enteredDate"}}` илгээнэ (`Idempotency-Key: test-…`).
 
+#### 6.5 Баримт хэн гаргах — түлхүүр тус бүрээр (2026-10-22)
+
+| `receipt_issuer` (Тохиргоо → Холболт → Гадаад API → мөрийн «e-Barimt») | Зан төлөв |
+|---|---|
+| хоосон (анхдагч) | msgbill-ийн ерөнхий «аргууд»-д `WALLET` байвал msgbill, үгүй бол PosAPI. **Прод дээр WALLET алга → баримт `FAILED`** |
+| `SYSTEM` — «EasyParking заавал гаргана» | Энэ түлхүүрийн WALLET төлбөр бүрд msgbill-ээр (зогсоолын түрээслэгчийн эсвэл ерөнхий данс) баримт гаргана — ерөнхий аргуудыг өөрчлөхгүй. MonPay, SocialPay-д |
+
+Баримтаа ӨӨРӨӨ гаргадаг түншид `SYSTEM` бүү тавь (ТЕГ давхардал). Тохиргоог зөвхөн бүх зогсоолын
+ADMIN/SUPER_ADMIN өөрчилнө, аудит логт (`PARTNER_RECEIPT_ISSUER_SET`) үлдэнэ.
+
+#### 6.6 Шалгалт 2026-10-22 (TEST 152.42.235.199) ба PROD-д гарах шалгах хуудас
+
+TEST DB-ээр: хэтэвчийн PAID төлбөр 14 (socialpay 11, mobifinance 2 — 10-22, ardwallet 1) — **14-үүлээ
+e-Barimt `FAILED`** (`MerchantMissing`: TEST түрээслэгч «ИйзиПаркинг ХХК»-д e-Barimt мерчант/ТТД
+алга; mock баримт ч гарахгүй). Мөн **нэг ч түлхүүрт webhook URL тохируулаагүй** — `payment.paid`/
+`receipt.ready` нэг ч удаа илгээгдээгүй (PARTNER job 0). Өөрөөр хэлбэл түншүүд TEST дээр ДДТД хэзээ ч
+хүлээн аваагүй — API-ийн алдаа биш, тохиргооны дутуу.
+
+| # | Ажил | Хаана |
+|---|---|---|
+| 1 | Түншийн webhook URL-ыг түлхүүрт тавих (төлбөр батлагдахаас ӨМНӨ) — эс бөгөөс `receipt.ready` ирэхгүй | TEST, PROD |
+| 2 | TEST: `PARKING_EBARIMT_MOCK_RECEIPTS=true` (асаалттай) + туршилтын зогсоолын түрээслэгчид туршилтын ТТД/мерчант (эсвэл түрээслэгчгүй ZZ- зогсоол) | TEST |
+| 3 | Түлхүүрт «e-Barimt: EasyParking заавал гаргана» (`SYSTEM`) — MonPay (`mobifinance`), `socialpay` | TEST, PROD |
+| 4 | PROD: msgbill түлхүүр (түрээслэгчийн эсвэл ерөнхий) идэвхтэй эсэх; ерөнхий аргуудад WALLET-ийг НЭМЭХГҮЙ | PROD |
+| 5 | Хуучин FAILED хэтэвчийн баримтыг «Дахин үүсгэх»-ийн өмнө түнш өөрөө баримт гаргаагүйг ТЕГ экспортоор тулгах | PROD |
+| 6 | Нэг бодит төлбөрөөр: confirm → `receipt.ready` → `GET` → `ebarimts[].qr_data` | PROD |
+
 ### 7. Машин бүртгэл, bill, байршил, орох/гарах мэдэгдэл (SocialPay 2026-10-14; MonPay г.м 2026-10-15)
 
 `vehicles` эрхтэй түлхүүрээр. Хоёр ижил зам — ЯГ ИЖИЛ handler, хариу, эрх, хязгаар:
@@ -185,7 +266,7 @@ event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking
 |---|---|---|
 | `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId"}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` |
 | `POST /api/v1/vehicles/delete` | `POST /api/v1/socialpay/delete` | → `OK` \| `NOT_FOUND` (Success=true) |
-| `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн |
+| `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн + өр бүр огноотой (`debts[]`: `debtId`, `amount`, `createdAt`, `reason`, `reasonText`, `siteCode`, `siteName`, `enteredDate`, `exitedDate`, `minutesParked`; цаг `…Z`) |
 | `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes` (`vehicles` эрх шаардахгүй) |
 
 Хариу `{"Success", "Message", "Detail"?, "data"?}` (camelCase), алдаа ч ижил хэлбэр + HTTP код
@@ -200,6 +281,102 @@ event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking
 (гарах уншилтгүй албадан хаалтыг ч `exitConfirmed:false`-оор илгээнэ). Амжилт = 2xx БА body-д
 `"Success": true` эсвэл `"success": true`; үгүй бол 1м, 5м, 15м, 1ц, 2ц, дараа нь 4ц тутам 24ц
 хүртэл → DEAD. Дэлгэрэнгүй дүрэм: `docs/SOCIALPAY_INTEGRATION.md`.
+
+### 8. Урьдчилсан захиалга (reservation) — 2026-10-22
+
+Хэрэглэгч wallet-аас зогсоолд байр урьдчилж захиалж, төлбөрийг урьдчилж төлнө. Баталгаажмагц
+зогсоолын **харуулын дэлгэц** (Касс — «Урьдчилсан захиалга» самбар + мэдэгдэл, Хяналтын самбар)-д
+шууд мэдэгдэл очно. Машиныг дугаараар нь таньдаг (QR/код шаардлагагүй): захиалгын цонхонд орох камерт
+уншигдмагц захиалга сешнтэй холбогдож, **урьдчилж төлсөн дүн тэр зогсолтын төлбөрөөс хасагдана**.
+Захиалсан хугацаандаа гарвал хаалт төлбөргүй нээгдэнэ; илүү зогссон бол зөвхөн зөрүүг ердийн
+тарифаар (QR/касс/wallet) төлнө. Загвар: SpotHero/ParkWhiz/JustPark-ийн «урьдчилж төлсөн цонх +
+дугаараар нэвтрэх + үнэгүй цуцлах хугацаа».
+
+**Зогсоолд асаах:** Тохиргоо → Төлбөрийн дүрэм → «Урьдчилсан захиалга (wallet)» — зогсоол бүрээр:
+`enabled`, `spots` (захиалгад зориулсан байр), `min_minutes` (60), `max_minutes` (720),
+`max_days_ahead` (7), `min_lead_minutes` (0), `hold_minutes` (10), `arrive_early_minutes` (15),
+`cancel_free_minutes` (30). Анхдагч УНТРААЛТТАЙ. Доторх (nested) зогсоолд захиалга авахгүй.
+
+**Үнэ:** систем зогсоолын тарифаар захиалсан цонхны (start → end) дүнг бодно — сешний төлбөртэй ЯГ
+ИЖИЛ томъёо. Түнш дүн бодохгүй.
+
+**Төлөвүүд:** `PENDING_PAYMENT` (байрыг `hold_minutes` барина) → `CONFIRMED` → `CHECKED_IN` (машин
+орсон) → `COMPLETED` (гарсан). Мөн `EXPIRED` (төлбөр хугацаандаа батлагдаагүй), `CANCELLED`,
+`NO_SHOW` (цонх дуусталаа ирээгүй — буцаалтгүй).
+
+| Endpoint | Эрх | |
+|---|---|---|
+| `GET /api/v1/reservations/availability?site_code=&start_time=&duration_minutes=` | read | Сул байр + үнэ (байр барихгүй) |
+| `POST /api/v1/reservations` | pay | Үүсгэх → `PENDING_PAYMENT` (201). `transaction_id`+`amount`-тай бол шууд `CONFIRMED` (нэг алхам) |
+| `POST /api/v1/reservations/{id}/confirm` | pay | `{"transaction_id", "amount"?}` — мөнгө татсаны дараа |
+| `POST /api/v1/reservations/{id}/cancel` | pay | `{"reason"?, "accept_no_refund"?}` → `refund_amount` |
+| `GET /api/v1/reservations/{id}` | read | Төлөв + `ebarimt`/`ebarimts` |
+| `GET /api/v1/reservations?plate=&user_id=&external_ref=&status=` | read | Энэ түлхүүрийн захиалгууд (≤200) |
+
+**Үүсгэх (create):**
+
+```json
+POST /api/v1/reservations
+{"site_code": "NOMADS", "plate_number": "1234УБА",
+ "start_time": "2026-10-23T10:00:00+08:00",   // цагийн бүс ЗААВАЛ (Z эсвэл +08:00)
+ "duration_minutes": 120,                      // эсвэл "end_time"
+ "external_ref": "MP-ORDER-778",               // зөвлөнө: давтан create-д ижил захиалга (идемпотент)
+ "user_id": "100264", "phone": "99112233",     // заавал биш
+ "transaction_id": "MP-TX-1", "amount": 2000}  // заавал биш — нэг алхмаар батлах үед
+→ 201
+{"reservation_id": "…", "reservation_no": "R7K3F9", "status": "PENDING_PAYMENT",
+ "plate_number": "1234УБА", "site_code": "NOMADS", "site_name": "Номадс", "address": "…",
+ "start_time": "2026-10-23T02:00:00.000Z", "end_time": "2026-10-23T04:00:00.000Z",
+ "duration_minutes": 120, "amount": 2000.0, "vat_amount": 182.0, "currency": "MNT",
+ "payment_id": "…", "transaction_id": null, "external_ref": "MP-ORDER-778", "user_id": "100264",
+ "arrive_from": "2026-10-23T01:45:00.000Z", "free_cancel_until": "2026-10-23T01:30:00.000Z",
+ "cancellable": true, "refund_if_cancelled_now": 0.0,
+ "created_at": "…", "hold_expires_at": "2026-10-22T07:40:00.000Z",
+ "confirmed_at": null, "checked_in_at": null, "completed_at": null, "cancelled_at": null,
+ "cancel_reason": null, "refund_amount": null, "session_id": null,
+ "ebarimt": null, "ebarimts": []}        // баримт confirm-ийн дараа үүснэ (kind: RESERVATION)
+```
+
+Цаг бүгд UTC «…Z» (мс). `reservation_no` — харуулд хэлэх богино код.
+
+**Хоёр урсгал:** (а) **2 алхам (зөвлөнө):** availability → create (байр барина) → хэрэглэгчээс
+`amount` татах → confirm. (б) **1 алхам:** availability-ийн `amount`-ыг татаад create-д
+`transaction_id`+`amount`-тай илгээнэ; амжилтгүй (байр дууссан г.м) бол мөнгийг буцаах эрсдэлтэй.
+
+**Цуцлалт:** `PENDING_PAYMENT` — ямагт (мөнгө татаагүй). `CONFIRMED` + `free_cancel_until`-аас өмнө
+— **бүтэн буцаалт** (`refund_amount` = `amount`; систем e-Barimt-ыг цуцална; мөнгийг ТҮНШ буцаана).
+Түүнээс хойш цонх дуусах хүртэл — 409 `NO_REFUND_WINDOW`; `accept_no_refund: true` илгээвэл
+буцаалтгүй цуцалж байрыг чөлөөлнө. Ирсэн/дууссан → 409 `NOT_CANCELLABLE`. Давтан цуцлалт → 200
+(идемпотент). Хэсэгчилсэн буцаалт байхгүй.
+
+**Машин ирэх:** `arrive_from` (эхлэхээс `arrive_early_minutes` эрт) → `end_time` хооронд орох камерт
+ЯГ ЭНЭ дугаар уншигдвал `CHECKED_IN`. «Зөвхөн бүртгэлтэй» зогсоолд ч захиалгатай машин нэвтэрнэ. Эрт
+ирсэн хугацаа энгийн тарифаар; захиалснаас богино зогсвол буцаалтгүй. Түнш confirm хийхэд машин аль
+хэдийн (энэ цонхонд) орчихсон бол шууд холбогдоно.
+
+**Алдаа** `{"detail": "<Монгол тайлбар>", "code": "<КОД>", …}`:
+
+| HTTP | code | |
+|---|---|---|
+| 400 | `INVALID_PLATE` / `INVALID_USER_ID` / `NOT_SUPPORTED` / `NOTHING_TO_CHARGE` / `AMOUNT_MISMATCH` | дугаар (кирилл), доторх зогсоол, 0₮ цонх, дүн зөрсөн (`amount` талбартай) |
+| 403 | `FORBIDDEN` | түлхүүр өөр зогсоолоор хязгаарлагдсан |
+| 404 | `SITE_NOT_FOUND` / `NOT_FOUND` | |
+| 409 | `RESERVATIONS_DISABLED` / `NO_AVAILABILITY` / `DUPLICATE_RESERVATION` / `EXTERNAL_REF_CONFLICT` | захиалга авдаггүй, байр алга, машин энэ цагт захиалгатай, external_ref өөр параметртэй |
+| 409 | `ALREADY_CONFIRMED` / `RESERVATION_CANCELLED` / `HOLD_EXPIRED` / `NO_REFUND_WINDOW` / `NOT_CANCELLABLE` | confirm/cancel-ийн төлөв |
+| 422 | `INVALID_TIME` / `INVALID_DURATION` / `INVALID_WINDOW` / `START_TOO_SOON` / `START_TOO_FAR` / `INVALID_REQUEST` | |
+
+`HOLD_EXPIRED`: барих хугацаа дууссан ч байр сул хэвээр бол confirm хүлээн авагдана; байр дууссан
+бол 409 — татсан мөнгийг хэрэглэгчид буцаана.
+
+**Webhook** (төлбөрийн webhook URL руу, §6-тай ижил толгой/давталт): `reservation.confirmed`,
+`reservation.checked_in`, `reservation.completed`, `reservation.cancelled`, `reservation.no_show` —
+`{"event", "event_id", "reservation": {…дээрх объект…}}`. Захиалгын e-Barimt гармагц
+`receipt.ready` (`kind: RESERVATION`) ирнэ.
+
+**e-Barimt:** confirm-оор урьдчилсан төлбөрийн баримт гарна (`kind: RESERVATION`); илүү зогссон
+зөрүүг гарахдаа төлөхөд тусдаа баримт. Бүтэн буцаалтад баримт цуцлагдана.
+
+**Харуулын жагсаалт (ажилтан, JWT):** `GET /api/reservations?site_id=&scope=upcoming|today|all`.
 
 ## Жишээ урсгал (curl)
 

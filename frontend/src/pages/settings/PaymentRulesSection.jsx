@@ -19,7 +19,7 @@ import OpenReasonsCard from './OpenReasonsCard'
 // засна (өмнө нь «Авто цэвэрлэгээ» таб давхар засдаг байсныг арилгав, 2026-09-03)
 const GLOBAL = 'global'
 
-const UNIT_LABEL = { hour: 'цаг', min: 'мин', sec: 'сек', mnt: '₮', count: 'ш' }
+const UNIT_LABEL = { hour: 'цаг', min: 'мин', sec: 'сек', mnt: '₮', count: 'ш', day: 'хоног' }
 
 const POLICY_LABEL = {
   open: 'Шууд нээнэ',

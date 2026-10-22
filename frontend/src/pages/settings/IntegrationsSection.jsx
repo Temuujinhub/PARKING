@@ -994,6 +994,17 @@ function PartnerApiPanel() {
     } catch (err) { toast(err.message, 'error') }
   }
 
+  // Түншийн (хэтэвч) төлбөрийн e-Barimt-ыг хэн гаргах (2026-10-22): хоосон = msgbill-ийн ерөнхий
+  // «аргууд»-д WALLET байвал; SYSTEM = EasyParking заавал (MonPay/SocialPay — түнш баримт гаргахгүй)
+  const setIssuer = async (k, issuer) => {
+    if (issuer === 'SYSTEM' && !confirm(`«${k.name}»-ийн төлбөр бүрд EasyParking e-Barimt гаргана.\n\n`
+      + 'Түнш өөрөө баримт ГАРГАДАГГҮЙ гэдгийг баталгаажуулсан уу? (эс бөгөөс ТЕГ-т давхар баримт болно)')) return
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/receipt-issuer`, { method: 'POST', body: { issuer: issuer || null } })
+      toast('e-Barimt гаргагч хадгалагдлаа'); load()
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const revoke = async (k) => {
     // Нэрийг нь бичүүлж баталгаажуулна — 2026-09-15 админ ardwallet-ийг андуурч хаасан
     // (өөр хүмүүс тэр түлхүүрээр тест хийж байсан). Хаасныг «Сэргээх»-ээр буцааж болно.
@@ -1055,6 +1066,15 @@ function PartnerApiPanel() {
                           </span>
                         )}
                       </div>
+                      {k.scopes.includes('pay') && (
+                        <label className="flex items-center gap-1.5 text-[11px] text-slate-400">e-Barimt:
+                          <select className="input py-0.5 text-[11px] w-auto" value={k.receipt_issuer || ''}
+                            onChange={(e) => setIssuer(k, e.target.value)} aria-label={`${k.name} e-Barimt гаргагч`}>
+                            <option value="">Ерөнхий дүрэм (msgbill аргууд)</option>
+                            <option value="SYSTEM">EasyParking заавал гаргана</option>
+                          </select>
+                        </label>
+                      )}
                     </div>
                   ) : <span className="text-slate-500">—</span>}
                 </td>

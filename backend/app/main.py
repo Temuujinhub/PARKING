@@ -31,7 +31,7 @@ from .routers import (
     admin_router, auth_router, barriers_router, cashier_router, compensations_router,
     dr_router, ev_router, health_router, integration_router, legacy_router, lpr_router,
     payments_router, public_router, reports_router, sessions_router, billing_router,
-    wallet_router, hospital_router, exit_review_router, socialpay_router,
+    wallet_router, hospital_router, exit_review_router, socialpay_router, reservations_router,
 )
 from .ws import manager
 
@@ -87,6 +87,9 @@ for r in (auth_router, lpr_router, admin_router, sessions_router, payments_route
     app.include_router(r.router)
 # Түншээс үл хамаарах машин бүртгэл/bill/байршил (MonPay г.м): /api/v1/vehicles/*, /api/v1/parkings
 app.include_router(socialpay_router.neutral_router)
+# Урьдчилсан захиалга (wallet): /api/v1/reservations/* + харуулын жагсаалт /api/reservations
+app.include_router(reservations_router.router)
+app.include_router(reservations_router.staff_router)
 # /api/v1/socialpay/* (+ дээрх замууд)-ийн 404/405/422-ыг {"Success": false, …} болгоно (бусад API хэвээр)
 socialpay_router.install_error_handlers(app)
 
@@ -295,6 +298,11 @@ async def start_vat_auto_send():
     # (хаалт/LPR замаас тусдаа; түнш тохируулаагүй бол 10с тутам нэг хөнгөн query)
     from .services.partner_vehicles import supervisor as partner_vehicles_supervisor
     _bg_task(partner_vehicles_supervisor(), "partner-vehicles")
+
+    # Урьдчилсан захиалга: төлбөр хүлээх хугацаа дууссан → EXPIRED, ирээгүй → NO_SHOW,
+    # сешн хаагдсан → COMPLETED (минут тутам; захиалгагүй үед хоосон 3 query)
+    from .services.reservations import supervisor as reservations_supervisor
+    _bg_task(reservations_supervisor(), "reservations")
 
     # EV: RemoteStart-аас хойш 90с-д эхлээгүй цэнэглэлтийн hold-ыг буцаана (§6.4)
     if settings.evhub_url:

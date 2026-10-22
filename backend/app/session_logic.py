@@ -1517,7 +1517,18 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     from .services.app_settings import get_blacklist_rules
     _bl_rules = get_blacklist_rules(db, site_id)
     black_blocks = bool(black) and _bl_rules["block_entry"]
-    denied = restricted and registered is None and not black_blocks
+    # Урьдчилсан захиалга (wallet, 2026-10-22): энэ цагт БАТАЛГААЖСАН захиалгатай машин
+    # «зөвхөн бүртгэлтэй» зогсоолд ч нэвтэрнэ; ШИНЭ сешнд урьдчилсан төлбөр нь холбогдоно.
+    # Захиалгын аливаа алдаа орох хаалтыг хэзээ ч гацаахгүй (services/reservations.py).
+    reservation = None
+    if not existing:
+        try:
+            from .services.reservations import find_for_entry
+            reservation = find_for_entry(db, site_id, plate, now)
+        except Exception:  # noqa: BLE001
+            log.exception("[entry] %s: захиалга шалгаж чадсангүй", plate)
+            reservation = None
+    denied = restricted and registered is None and reservation is None and not black_blocks
 
     # Nested: энэ зогсоол өөр зогсоолын ДОТОР бол гадна session-ий төлбөрийн
     # тоолуурыг зогсооно. Давхар уншилтад найдвартай (аль хэдийн зогссоныг
@@ -1535,9 +1546,22 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         on_inner_entry(db, _site, plate, now if existing else session.entry_time,
                        child=None if existing else session)
 
+    if reservation is not None and not (denied or black_blocks):
+        try:
+            with db.begin_nested():   # savepoint — алдаа гарвал зөвхөн холболт буцна
+                from .services.reservations import check_in
+                check_in(db, reservation, session, now)
+        except Exception:  # noqa: BLE001
+            log.exception("[entry] %s: захиалга %s-ийг холбож чадсангүй", plate,
+                          getattr(reservation, "reservation_no", "?"))
+            reservation = None
+
     db.add(LprEvent(site_id=site_id, device_id=device.id, plate_number=plate,
                     lane_dir="entry", confidence=confidence, accepted=True, raw=strip_images(raw)))
     db.commit()
+    if reservation is not None and reservation.status == "CHECKED_IN":
+        from .services.reservations import notify_staff
+        notify_staff(reservation)   # харуулын дэлгэц: «захиалгатай машин ирлээ»
     # Зургийг ард нь татаж хадгална (хаалт нээхийг хүлээлгэхгүй)
     schedule_capture(session.id, device.ip_address, plate, "entry", raw,
                              camera_credentials(device))
@@ -1608,6 +1632,8 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         "session_id": session.id, "plate": plate, "entry_time": session.entry_time.isoformat(),
         "registered": registered is not None, "blacklisted": black is not None,
         "denied": denied, "held": held, "barrier_opened": barrier_opened,
+        "reservation_no": reservation.reservation_no if reservation is not None
+        and reservation.status == "CHECKED_IN" else None,
     })
     # Орох LED дэлгэцэнд орсон цаг + дугаар + мэндчилгээ (Managed горимд камер өөрөө
     # харуулахгүй тул сервер илгээнэ; blacklist бол харуулахгүй). Хаалт нээхийг
@@ -2312,7 +2338,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Үлдэгдэл тооцох: өмнө нь төлсөн бол (grace хэтэрсэн тохиолдол) зөвхөн зөрүүг нэхнэ.
     # Тарифын шатлал ахиагүй бол зөрүү 0 — нэмэлт төлбөргүйгээр гаргана.
     due = amount_due(db, session, fee)
-    if due <= 0 and session.paid_at:
+    # paid_total: урьдчилсан захиалгын төлбөр (paid_at-гүй, сешнд холбогдсон) бүрэн хүрэлцвэл
+    # мөн нээнэ — эс бөгөөс 0₮ үлдэгдэлтэй AWAITING_PAYMENT-д гацна (2026-10-22)
+    if due <= 0 and (session.paid_at or paid_total(db, session) > 0):
         session.status = "PAID"
         return await _close_and_open(db, device, session, now, fee, source="auto_exit",
                                      allow_open=allow_open)

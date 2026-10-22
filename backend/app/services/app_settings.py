@@ -25,6 +25,8 @@ CAMHEALTH_KEY = "camhealth_rules"
 EBARIMT_KEY = "ebarimt_rules"
 # «Холбогдсон POS» таб (2026-10-15): POS аппын хувилбарын доод хязгаар г.м
 POSAPP_KEY = "pos_app_rules"
+# Урьдчилсан захиалга (2026-10-22, wallet-ийн /api/v1/reservations) — зогсоол бүрээр
+RESERVATION_KEY = "reservation_rules"
 # Дүрэм БИШ, ТӨЛӨВ (watermark г.м) — валидацигүй, чөлөөт JSON
 CAMSYNC_STATE = "camsync_state"
 CAMHEALTH_STATE = "camhealth_state"
@@ -240,6 +242,19 @@ DEFAULTS: dict[str, dict] = {
         # жагсаалт НЭГТГЭГДЭНЭ (хэрэглэгч зогсоолоос үл хамааран POS аппынх).
         "pos_terminal_users": "",
     },
+    RESERVATION_KEY: {
+        # Wallet-ийн апп-аар урьдчилж захиалах (services/reservations.py). Анхдагч УНТРААЛТТАЙ —
+        # зогсоол бүрд «Захиалга авах» + байрны тоо (spots) тохируулсны дараа л захиалга авна.
+        "enabled": False,
+        "spots": 0,                   # захиалгад зориулсан байрны тоо (давхцах цонхонд)
+        "min_minutes": 60,            # захиалгын хамгийн богино хугацаа
+        "max_minutes": 720,           # хамгийн урт (12 цаг)
+        "max_days_ahead": 7,          # хэдэн хоногийн өмнөөс захиалж болох
+        "min_lead_minutes": 0,        # эхлэхээс дор хаяж N минутын өмнө (0 = одоо эхэлж болно)
+        "hold_minutes": 10,           # төлбөр хүлээх хугацаа (PENDING_PAYMENT байр барина)
+        "arrive_early_minutes": 15,   # эхлэхээс N минут эрт ирсэн машиныг захиалгад тооцно
+        "cancel_free_minutes": 30,    # эхлэхээс N минутын өмнө хүртэл цуцалбал бүтэн буцаалт
+    },
     POSAPP_KEY: {
         # Хамгийн бага ЗӨВШӨӨРӨХ POS аппын хувилбар (ж: "1.5.3"). Хоосон = тавиагүй — тэр үед
         # «Холбогдсон POS» таб хамгийн сүүлд харагдсан хувилбараас хоцорсныг шараар тодруулна.
@@ -320,6 +335,9 @@ PER_SITE: dict[str, set[str]] = {
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
                   "reopen_cooldown_sec", "exit_dedup_reopen"},
     EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_methods", "pos_terminal_users"},
+    RESERVATION_KEY: {"enabled", "spots", "min_minutes", "max_minutes", "max_days_ahead",
+                      "min_lead_minutes", "hold_minutes", "arrive_early_minutes",
+                      "cancel_free_minutes"},
     # DRIVERTYPE_KEY (шөнийн цонх) ЗОРИУД байхгүй: энэ нь тодорхой МАШИНУУДАД
     # (NIGHT төрлийн гэрээт) олгодог нөхцөл тул зогсоолд биш, Бүртгэлтэй машин
     # хуудасны 🌙 тохиргоонд харьяалагдана (2026-09-03).
@@ -584,6 +602,10 @@ def entry_plate_policy(db, site_id: str | None) -> tuple[str, int]:
 
 def get_exit_rules(db, site_id: str | None = None) -> dict:
     return get_rules(db, EXITRULES_KEY, site_id)
+
+
+def get_reservation_rules(db, site_id: str | None = None) -> dict:
+    return get_rules(db, RESERVATION_KEY, site_id)
 
 
 def get_barrier_rules(db, site_id: str | None = None) -> dict:

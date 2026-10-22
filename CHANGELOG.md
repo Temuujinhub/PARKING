@@ -26,6 +26,30 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-10-22 — Wallet API: урьдчилсан захиалга, өрийн огноо, QR хуудасны төлбөрийн хэрэгсэл, хэтэвчийн e-Barimt
+
+Хүсэлт: wallet хөгжүүлэгчдэд өгсөн API-д (1) зогсоолын захиалга (create/cancel, урьдчилж төлөөд
+баталгаажмагц харуулын дэлгэцэнд мэдэгдэл), (2) өртэй машины өр бүр хэзээ үүссэн огноо, (3) гарц дээрх
+QR хуудсанд төлбөрийн хэрэгсэл сонгох алхам (QPay · EasyWallet · SocialPay · MonPay · Ард — бэлэн биш нь
+«Coming soon», бүдэг); e-Barimt-ыг хэтэвчид дамжуулах API-г шалгаж баримтад тодорхой оруулах.
+Шалгалт (TEST DB): хэтэвчийн 14 PAID төлбөрийн 14 нь e-Barimt FAILED (`MerchantMissing`), нэг ч түлхүүрт
+webhook URL алга → түншүүд ДДТД хэзээ ч аваагүй; прод-д WALLET msgbill аргад алга (MonPay/SocialPay
+go-live хориг). Схем: шинэ хүснэгт `reservations`, `partner_keys.receipt_issuer` (nullable) — startup
+migration, хуучин мөр хөндөхгүй.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | **Урьдчилсан захиалга** (`services/reservations.py`, `routers/reservations_router.py`): `/api/v1/reservations` availability/create/confirm/cancel/get/list — үнэ зогсоолын тарифаар (сешнтэй ижил `calculate_fee`), зогсоол бүрийн байрны тоо (`reservation_rules.spots`, advisory lock-оор давхар зарагдахгүй), `hold_minutes` байр барина, нэг алхмын create (`transaction_id`), `external_ref` идемпотент, цуцлалт: `cancel_free_minutes`-ийн өмнө бүтэн буцаалт (Payment `REFUNDED` + e-Barimt цуцлах), дараа нь `accept_no_refund`. Урьдчилсан төлбөр `Payment(kind=RESERVATION, site_id)`; орох камерт уншигдмагц (`arrive_early_minutes`) сешнтэй холбогдож `paid_total`-д тоологдоно, «зөвхөн бүртгэлтэй» зогсоолд ч нэвтэрнэ. Арын sweep (минут тутам): EXPIRED / NO_SHOW / COMPLETED. Түншид `reservation.*` webhook (төлбөрийн outbox), `receipt.ready kind=RESERVATION` | (энэ commit) | ⏳ | ⏳ |
+| fix | Гарах: урьдчилсан төлбөр сешний дүнг бүрэн хааж байвал (`paid_at`-гүй) 0₮ үлдэгдэлтэй AWAITING_PAYMENT-д гацахгүй — `due <= 0 and (paid_at or paid_total > 0)` | (энэ commit) | ⏳ | ⏳ |
+| feat | Харуулын дэлгэц: Касс — «Урьдчилсан захиалга» самбар (ойрын 24ц + идэвхтэй) + `RESERVATION_CONFIRMED/ARRIVED/CANCELLED/NO_SHOW` мэдэгдэл; Хяналтын самбарын event урсгалд; Тохиргоо → Төлбөрийн дүрэм → «Урьдчилсан захиалга (wallet)» бүлэг (зогсоол бүрээр) | (энэ commit) | ⏳ | ⏳ |
+| feat | **Өрийн огноо**: `GET /api/v1/sessions` (+recent-exits) `debt_amount/debt_count/debts[]` (өр бүр `created_at`, `reason_text`, зогсоол, өр үүсгэсэн айлчлалын орсон/гарсан цаг); intent/confirm/GET payment/`payment.paid` — `parking_amount`, `debt_amount`, `debts[]` задаргаа; `/vehicles/bill` (+socialpay) `debts[]` camelCase | (энэ commit) | ⏳ | ⏳ |
+| feat | **Хэтэвчийн e-Barimt**: `ebarimts[]` (БҮХ баримт — `kind` PARKING/DEBT/RESERVATION, `debt_id`) GET/confirm-д; QR санах ойд алга бол msgbill-ээс нөхөж татна (`ensure_qr`, /print-тэй ижил); `receipt.ready`-д `kind`, `debt_id`, `vat_amount`; түлхүүр тутмын `receipt_issuer=SYSTEM` («EasyParking заавал гаргана») — WALLET-ийг msgbill-ийн ерөнхий аргад асаахгүйгээр MonPay/SocialPay-д баримт гаргана (Тохиргоо → Холболт → Гадаад API, `POST /api/admin/partner-keys/{id}/receipt-issuer`) | (энэ commit) | ⏳ | ⏳ |
+| feat | Жолоочийн QR хуудас (Pay.jsx): «Төлбөр төлөх» → төлбөрийн хэрэгсэл сонгох алхам (`payMethods.js`: 1 QPay, 2 EasyWallet, 3 SocialPay, 4 MonPay, 5 Ард апп — бэлэн биш нь бүдэг «Coming soon», дарагдахгүй) | (энэ commit) | ⏳ | ⏳ |
+| docs | `INTEGRATION_API.md` §2/§3/§5 өр, §6 e-Barimt (товч хүснэгт, `ebarimts`, §6.5 гаргагч, §6.6 TEST шалгалт + PROD шалгах хуудас), §7 bill, §8 захиалга; wallet-д илгээх Word `EasyParking_Wallet_API_v1.1.docx` | (энэ commit) | — | — |
+| test | `tests/unit/test_reservations.py` (14: үнэ/батлах/идемпотент, дүрэм, байр/давхар/external_ref, буцаалтын цонх, орох→0₮ гарц, илүү зогсолтын зөрүү, confirm-оос өмнө орсон машин, registered_only, sweep, HTTP хэлбэр, өрийн огноо, баримтын төрөл, receipt_issuer); `tests/postgres/test_reservations_pg.py` (сүүлийн байрын уралдаан 6 урсгал → 1, PG дээрх confirm/cancel); `test_deep_flow_regressions` — async `payment_status` | (энэ commit) | — | — |
+
+---
+
 ## 2026-10-16 — Байгууллагын НӨАТ баримт: `payer_reg_no` бүх төлбөрт, сувгийн татгалзлын текст/ангилал, хүлээн авагч солих
 
 Гомдол: «байгууллагаар НӨАТ гаргахад алдаа». audit1014 (READ ONLY хуулбар): байгууллагын баримттай

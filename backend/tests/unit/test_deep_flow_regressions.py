@@ -116,7 +116,7 @@ def test_partner_confirm_and_status_enforce_current_site_scope(db):
         asyncio.run(IR.confirm_payment(intent['payment_id'],{'amount':1000,'transaction_id':'scope-test'},db,wrong))
     assert error.value.status_code==403
     with pytest.raises(HTTPException) as error:
-        IR.payment_status(intent['payment_id'],db,wrong)
+        asyncio.run(IR.payment_status(intent['payment_id'],db,wrong))
     assert error.value.status_code==403
     assert db.get(M.Payment,intent['payment_id']).status=='PENDING'
 
@@ -412,7 +412,7 @@ def test_same_named_partner_key_cannot_use_other_key_intent_or_hook(db):
     a=partner('SAME',s.site_id);a.key_id=keys[0].id
     b=partner('SAME',s.site_id);b.key_id=keys[1].id
     intent=IR.create_payment_intent({'session_id':s.id},db,a)
-    with pytest.raises(HTTPException): IR.payment_status(intent['payment_id'],db,b)
+    with pytest.raises(HTTPException): asyncio.run(IR.payment_status(intent['payment_id'],db,b))
     assert IR._webhook_url_for(db,a)==keys[0].webhook_url
 
 
@@ -435,7 +435,7 @@ def test_partner_name_cannot_impersonate_internal_payment_instrument(db,provider
     existing=M.Payment(session_id=s.id,provider=provider,payment_method='WALLET',
                        sender_invoice_no='reserved-name',amount=1000)
     db.add(existing);db.commit()
-    with pytest.raises(HTTPException): IR.payment_status(existing.id,db,p)
+    with pytest.raises(HTTPException): asyncio.run(IR.payment_status(existing.id,db,p))
 
 
 def test_partner_confirm_without_amount_uses_intent_amount(db):
