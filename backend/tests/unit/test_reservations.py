@@ -369,3 +369,20 @@ def test_receipt_kinds_and_partner_receipt_issuer(c, monkeypatch):
     assert FJ.receipt_provider(pay) == "MSGBILL"
     pay.payment_method = "CARD"     # түншийн тохиргоо зөвхөн WALLET төлбөрт
     assert FJ.receipt_provider(pay) == "POSAPI"
+
+
+def test_parkings_map_shows_reservable_and_free_now(c):
+    import json
+    from app.routers.socialpay_router import _parkings
+    data = json.loads(_parkings(c.db, c.partner).body)["data"][0]
+    assert data["reservable"] is True and data["reservationSpots"] == 1 and data["reservationFreeNow"] == 1
+    r, _ = create(c, datetime.utcnow() + timedelta(minutes=2))
+    confirm(c, r)
+    r.start_time = datetime.utcnow() - timedelta(minutes=1); c.db.commit()   # одоо идэвхтэй
+    data = json.loads(_parkings(c.db, c.partner).body)["data"][0]
+    assert data["reservationFreeNow"] == 0
+    A.set_site_rules(c.db, A.RESERVATION_KEY, c.site.id, {"enabled": False}, "test"); c.db.commit()
+    data = json.loads(_parkings(c.db, c.partner).body)["data"][0]
+    assert data["reservable"] is False and data["reservationSpots"] == 0
+    _, rows, _ = IR.site_catalog(c.db, c.partner)
+    assert rows[0]["reservable"] is False and "reservation_free_now" in rows[0]

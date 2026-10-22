@@ -173,6 +173,25 @@ def reserved_count(db, site_id: str, start: datetime, end: datetime, now: dateti
     return int(q.scalar() or 0)
 
 
+def reservation_summary(db, sites, now: datetime | None = None) -> dict:
+    """Газрын зурагт (/parkings, /sites): зогсоол бүр захиалга авдаг эсэх, байрны тоо, ОДОО
+    сул захиалгын байр. Тодорхой цонхны сул байрыг availability-ээр шалгана."""
+    now = now or datetime.utcnow()
+    ids = [s.id for s in sites]
+    busy = dict(db.query(Reservation.site_id, func.count(Reservation.id)).filter(
+        Reservation.site_id.in_(ids), Reservation.start_time <= now, Reservation.end_time > now,
+        _blocking(now)).group_by(Reservation.site_id).all()) if ids else {}
+    out = {}
+    for s in sites:
+        rules = get_reservation_rules(db, s.id)
+        spots = int(rules["spots"] or 0)
+        on = (bool(rules["enabled"]) and spots > 0 and not s.parent_site_id
+              and not bool(getattr(s, "no_charge", False)))
+        out[s.id] = {"reservable": on, "spots": spots if on else 0,
+                     "free_now": max(0, spots - int(busy.get(s.id, 0))) if on else 0}
+    return out
+
+
 def _lock_site(db, site_id: str) -> None:
     """Нэг зогсоолын захиалгуудыг цувруулна — хоёр зэрэг хүсэлт сүүлийн нэг байрыг хоёулаа авахгүй."""
     try:

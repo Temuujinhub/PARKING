@@ -267,7 +267,7 @@ e-Barimt `FAILED`** (`MerchantMissing`: TEST түрээслэгч «ИйзиПа
 | `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId"}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` |
 | `POST /api/v1/vehicles/delete` | `POST /api/v1/socialpay/delete` | → `OK` \| `NOT_FOUND` (Success=true) |
 | `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн + өр бүр огноотой (`debts[]`: `debtId`, `amount`, `createdAt`, `reason`, `reasonText`, `siteCode`, `siteName`, `enteredDate`, `exitedDate`, `minutesParked`; цаг `…Z`) |
-| `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes` (`vehicles` эрх шаардахгүй) |
+| `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes`, дүүргэлт (`capacity/occupied/free`), захиалга: `reservable`, `reservationSpots`, `reservationFreeNow` (2026-10-22; `vehicles` эрх шаардахгүй) |
 
 Хариу `{"Success", "Message", "Detail"?, "data"?}` (camelCase), алдаа ч ижил хэлбэр + HTTP код
 (404/405/422 мөн). Ялгаа нь зөвхөн бүртгэлийн `created_via` (`api` / `socialpay`). Хурдны хязгаар
@@ -376,7 +376,18 @@ POST /api/v1/reservations
 **e-Barimt:** confirm-оор урьдчилсан төлбөрийн баримт гарна (`kind: RESERVATION`); илүү зогссон
 зөрүүг гарахдаа төлөхөд тусдаа баримт. Бүтэн буцаалтад баримт цуцлагдана.
 
+**Газрын зураг:** `GET /api/v1/parkings`-ийн мөр бүр `reservable` (захиалга авдаг эсэх),
+`reservationSpots` (захиалгын байрны тоо), `reservationFreeNow` (ОДОО сул захиалгын байр) — `/api/v1/sites`
+мөн `reservable`, `reservation_spots`, `reservation_free_now`. Wallet: зураг дээр зогсоол (`latitude`,
+`longitude`), дүүргэлт (`free`/`capacity`), «Захиалах» товч (`reservable`) → сонгосон цонхонд
+`availability` → `create`. Захиалгын байр нь ерөнхий багтаамжаас ТУСДАА (зогсоол дүүрэн ч захиалгын байр
+сул байж болно — тэр байрыг харуул захиалгатай машинд үлдээдэг).
+
 **Харуулын жагсаалт (ажилтан, JWT):** `GET /api/reservations?site_id=&scope=upcoming|today|all`.
+
+**TEST дээр турших өгөгдөл:** `backend/tools/test_demo_sites.py` — продын зогсоолуудыг (нэр, хаяг,
+координат, тариф, тохиргоо) TEST-д хуулж, дутуу координат/багтаамжийг зохиомлоор нөхөж, захиалга асааж,
+зохиомол машинаар (note `TEST-DEMO`) дүүргэлт үүсгэнэ. Зөвхөн `PARKING_DEPLOY_ROLE=staging` дээр.
 
 ## Жишээ урсгал (curl)
 

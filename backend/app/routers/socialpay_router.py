@@ -334,6 +334,10 @@ def _parkings(db: Session, partner) -> JSONResponse:
             "capacity": row["capacity"], "occupied": row["occupied"], "free": row["free"],
             "freeMinutes": int(getattr(template, "free_minutes", 0) or 0),
             "noCharge": bool(getattr(site, "no_charge", False)),
+            # Урьдчилсан захиалга (2026-10-22) — тодорхой цонхны сул байр: /reservations/availability
+            "reservable": row["reservable"],
+            "reservationSpots": row["reservation_spots"],
+            "reservationFreeNow": row["reservation_free_now"],
         })
     return _resp(True, "OK", data=data, sampledAt=sampled_at)
 

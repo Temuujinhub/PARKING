@@ -320,7 +320,9 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
     if partner.site_id:
         q = q.filter(ParkingSite.id == partner.site_id)
     sites = q.order_by(ParkingSite.site_code).all()
+    from ..services.reservations import reservation_summary
     counts = occupancy_counts(db, [s.id for s in sites])
+    rsv = reservation_summary(db, sites)
     sampled_at = datetime.utcnow().isoformat() + 'Z'
     out = []
     for site in sites:
@@ -338,6 +340,10 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
             "occupancy_percent": round(occupied * 100 / site.capacity, 1) if site.capacity else None,
             "over_capacity": occupied > site.capacity if site.capacity else False,
             "occupancy_source": "open_sessions", "occupancy_is_estimate": True,
+            # Урьдчилсан захиалга (2026-10-22): захиалга авдаг эсэх + ОДОО сул захиалгын байр
+            "reservable": rsv[site.id]["reservable"],
+            "reservation_spots": rsv[site.id]["spots"],
+            "reservation_free_now": rsv[site.id]["free_now"],
             "sampled_at": sampled_at,
         })
     return sites, out, sampled_at
