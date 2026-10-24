@@ -11,6 +11,7 @@ import { useParams, useSearchParams } from 'react-router-dom'
 import { fmt, fmtDur } from '../api'
 import { LogoMark, LogoText } from '../components/Logo'
 import { paymentOutcome } from '../paymentOutcome'
+import { fallbackMessage, fallbackPrefix, runOnce } from '../plateLookup'
 import { PAY_METHODS } from '../payMethods'
 
 async function publicApi(path, opts = {}) {
@@ -65,6 +66,9 @@ export default function Pay() {
   const [orgInfo, setOrgInfo] = useState(null)
   const [orgChecking, setOrgChecking] = useState(false)
   const pollRef = useRef(null)
+  // Давхар дарах / Enter дарж барихаас сэргийлнэ (10-24: нэг машиныг 2 минутад 47 удаа хайсан)
+  const searchingRef = useRef(false)
+  const payingRef = useRef(false)
   const debounceRef = useRef(null)
   const orgDebounceRef = useRef(null)
 
@@ -113,7 +117,7 @@ export default function Pay() {
     }, 350)
   }
 
-  const search = async (p) => {
+  const search = (p) => runOnce(searchingRef, async () => {
     const target = (p || plate).toUpperCase().replace(/\s/g, '')
     if (!target) return
     setBusy(true); setError('')
@@ -123,19 +127,18 @@ export default function Pay() {
       if (s.paid) setPaid({ session_status: s.status, amount_due: s.amount_due })
     } catch (e) {
       setError(e.message)
-      // Камер үсгийг өөрөөр уншсан байж болно (2026-10-24 BTALBAI «дугаар олдохгүй») —
-      // эхний 4 цифрээр таарах машинуудыг санал болгоно
-      if (e.status === 404 && target.length > 4) {
+      // Олдоогүй бол (зөвхөн цифр бичсэн, эсвэл камер үсгийг өөрөөр уншсан) эхний
+      // цифрүүдээр таарах машинуудыг санал болгоно (2026-10-24/25 «дугаар олдохгүй»)
+      const q = e.status === 404 ? fallbackPrefix(target) : null
+      if (q) {
         try {
-          const list = await publicApi(`/api/public/search?site=${siteCode}&q=${encodeURIComponent(target.slice(0, 4))}`)
-          if (list.length) {
-            setMatches(list)
-            setError('Яг энэ дугаараар олдсонгүй — камер үсгийг өөрөөр уншсан байж магадгүй. Доорх жагсаалтаас машинаа сонгоно уу.')
-          }
+          const list = await publicApi(`/api/public/search?site=${siteCode}&q=${encodeURIComponent(q)}`)
+          setMatches(list)
+          setError(fallbackMessage(target, list.length))
         } catch {}
       }
     } finally { setBusy(false) }
-  }
+  })
 
   // QPay `ebarimt_receiver` = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7);
   // сервер ч өөр утгад 422 өгнө (2026-10-16). Хэрэгсэл сонгохоос ӨМНӨ шалгана.
@@ -146,7 +149,8 @@ export default function Pay() {
     setError(''); setChoosing(true)
   }
 
-  const payQpay = async () => {
+  const payQpay = () => runOnce(payingRef, payQpayOnce)
+  const payQpayOnce = async () => {
     if (orgTinInvalid()) {
       setError('Байгууллагын 7 оронтой регистр оруулна уу (ТТД биш)')
       return
@@ -525,7 +529,7 @@ export default function Pay() {
           <input id="plate" className="input text-center text-2xl font-mono tracking-widest py-3.5 uppercase"
             placeholder="1234 АБВ" value={plate} maxLength={10} autoComplete="off"
             onChange={(e) => onPlateChange(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && search()} />
+            onKeyDown={(e) => e.key === 'Enter' && !e.repeat && search()} />
         </div>
         {matches.length > 0 && (
           <div className="space-y-2" aria-live="polite">
