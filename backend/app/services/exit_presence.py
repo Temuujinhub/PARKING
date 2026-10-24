@@ -49,10 +49,15 @@ def payment_presence_seconds(db, site_id):
 
 
 def same_vehicle_read(read_plate, stay_plate):
-    """A read of this stay's car: exact text or a measured OCR confusion (the
-    read that was matched by `ocr_confusion_match` carries the camera text)."""
-    from ..session_logic import plates_ocr_confusable
-    return bool(read_plate) and (read_plate == stay_plate or plates_ocr_confusable(read_plate, stay_plate))
+    """A read of this stay's car: exact text, a measured OCR confusion, or a
+    truncated (invalid-format) read of it (the read matched by
+    `ocr_confusion_match` carries the camera text). 2026-10-24: the paying
+    car's own truncated re-read («4380НК» after 4380УНК) used to count as
+    another car and block the payment opening; '?' still does."""
+    from ..session_logic import plates_ocr_confusable, plates_truncated_read
+    return bool(read_plate) and (read_plate == stay_plate
+                                 or plates_ocr_confusable(read_plate, stay_plate)
+                                 or plates_truncated_read(read_plate, stay_plate))
 
 
 def fresh_presence(db, stay, now=None):

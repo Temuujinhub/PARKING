@@ -246,3 +246,86 @@ def test_cgi_low_confidence_retains_metadata_but_heartbeat_is_not_a_rejection(ct
     e=c.db.query(M.LprEvent).one()
     assert not e.accepted and e.confidence==14 and e.raw['Vehicle']['Confidence']==92
     assert s.status=='OPEN' and not c.commands and c.messages[-1][0]=='EXIT_REVIEW_REQUIRED'
+
+
+# ── 2026-10-24 Барилгачдын талбай: тайрагдсан гарах уншилт / QR OCR хайлт ──
+
+@pytest.mark.parametrize('read,stay_plate,ok', [
+    ('7237УН', '7237УНП', True),     # сүүлийн үсэг тайрагдсан
+    ('4380НК', '4380УНК', True),     # дундаас нэг үсэг унасан
+    ('237УНП', '7237УНП', True),     # эхний цифр тайрагдсан
+    ('9942УУ', '9942УНИ', False),    # тайралт + орлуулалт — таамаглахгүй
+    ('?', '1234УБА', False),
+    ('1234УБ', '1234УБ', False),
+    ('1234УБА', '1234УБА', False),   # зөв формат = өөр машин байж болно
+    ('УНП72', '7237УНП', False),     # дараалал алдагдсан
+    ('7237', '7237УНП', False),      # хэт богино
+])
+def test_truncated_read_rule(read, stay_plate, ok):
+    assert SL.plates_truncated_read(read, stay_plate) is ok
+
+
+def test_truncated_exit_read_then_qr_payment_opens_that_lane(ctx):
+    # 7237УНП 10-21 18:13: камер «7237УН» уншиж review болсон → QR төлбөр нээгдээгүй
+    c=ctx;s=stay(c,plate='7237УНП')
+    asyncio.run(SL.handle_exit(c.db,c.cams[1],'7237УН',90,{}))
+    assert s.status=='AWAITING_PAYMENT' and s.exit_device_id==c.cams[1].id and not c.commands
+    audit=c.db.query(M.AuditLog).filter_by(action='EXIT_OCR_MATCH').one()
+    assert audit.detail['rule']=='truncated_read' and s.plate_number=='7237УНП'
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and c.commands==[(c.bars[1].id,s.id,'payment')]
+
+
+def test_paid_car_truncated_read_opens_its_gate(ctx):
+    c=ctx;s=stay(c,plate='1589УКО');asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='PAID' and not c.commands
+    asyncio.run(SL.handle_exit(c.db,c.cams[0],'1589УК',94,{}))
+    assert s.status=='CLOSED' and c.commands[0][0]==c.bars[0].id
+
+
+def test_truncated_read_with_two_candidates_stays_in_review(ctx):
+    c=ctx;a=stay(c,plate='7237УНП');b=stay(c,plate='7237УНК')
+    r=asyncio.run(SL.handle_exit(c.db,c.cams[0],'7237УН',90,{}))
+    assert r['reason']=='invalid_plate_review' and a.status==b.status=='OPEN' and not c.commands
+
+
+def test_own_truncated_reread_does_not_block_payment_opening(ctx):
+    # 4380УНК 10-21 05:25 зөв уншилт, 05:30 «4380НК» (review) → шилжүүлэг 05:36 нээгдээгүй
+    c=ctx;s=stay(c,plate='4380УНК');read(c,s,c.cams[0],age=600)
+    c.db.add(M.LprEvent(site_id=c.site.id,device_id=c.cams[0].id,plate_number='4380НК',lane_dir='exit',
+             confidence=86,accepted=False,reject_reason='invalid_plate_review',raw={},
+             created_at=datetime.utcnow()-timedelta(seconds=300)));c.db.commit()
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and c.commands==[(c.bars[0].id,s.id,'payment')]
+
+
+def _public_lookup(c, monkeypatch, typed):
+    from starlette.requests import Request
+    from app.routers import public_router as PUB
+    monkeypatch.setattr(PUB,'session_fee_info',lambda *a,**kw:dict(FEE))
+    monkeypatch.setattr(PUB,'amount_due',lambda *a,**kw:1000)
+    req=Request({'type':'http','headers':[],'client':('198.51.100.7',1)})
+    return PUB.find_session(typed,'SYNTH',req,c.db)
+
+
+@pytest.mark.parametrize('typed,stored', [
+    ('6537УБН', '6537УБК'),   # орох камер Н-ийг К гэж уншсан (хэмжигдсэн хос)
+    ('9035УНУ', '9035УНҮ'),   # Ү/У
+    ('6537YBH', '6537УБК'),   # латин үсгээр бичсэн
+    ('7237УНП', '7237УН'),    # орох камер тайрсан
+])
+def test_qr_lookup_finds_single_ocr_variant(ctx, monkeypatch, typed, stored):
+    c=ctx;s=stay(c,plate=stored)
+    out=_public_lookup(c,monkeypatch,typed)
+    assert out['session_id']==s.id and out['matched_by']=='ocr' and out['plate_number']==stored
+
+
+def test_qr_lookup_exact_and_ambiguous(ctx, monkeypatch):
+    from fastapi import HTTPException
+    c=ctx;s=stay(c,plate='6537УБН')
+    out=_public_lookup(c,monkeypatch,'6537 убн')
+    assert out['session_id']==s.id and out['matched_by'] is None
+    s.status='CLOSED';stay(c,plate='5979УКТ');stay(c,plate='5979УАТ');c.db.commit()
+    with pytest.raises(HTTPException) as err:
+        _public_lookup(c,monkeypatch,'5979УНТ')   # 2 нэр дэвшигч — таамаглахгүй
+    assert err.value.status_code==404

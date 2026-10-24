@@ -121,7 +121,20 @@ export default function Pay() {
       const s = await publicApi(`/api/public/sessions?plate=${encodeURIComponent(target)}&site=${siteCode}`)
       setSession(s); setChoosing(false)
       if (s.paid) setPaid({ session_status: s.status, amount_due: s.amount_due })
-    } catch (e) { setError(e.message) } finally { setBusy(false) }
+    } catch (e) {
+      setError(e.message)
+      // Камер үсгийг өөрөөр уншсан байж болно (2026-10-24 BTALBAI «дугаар олдохгүй») —
+      // эхний 4 цифрээр таарах машинуудыг санал болгоно
+      if (e.status === 404 && target.length > 4) {
+        try {
+          const list = await publicApi(`/api/public/search?site=${siteCode}&q=${encodeURIComponent(target.slice(0, 4))}`)
+          if (list.length) {
+            setMatches(list)
+            setError('Яг энэ дугаараар олдсонгүй — камер үсгийг өөрөөр уншсан байж магадгүй. Доорх жагсаалтаас машинаа сонгоно уу.')
+          }
+        } catch {}
+      }
+    } finally { setBusy(false) }
   }
 
   // QPay `ebarimt_receiver` = ААН-ий 7 оронтой РЕГИСТР (ТТД-г хүлээн авдаггүй — MAX_LENGTH 7);
@@ -393,6 +406,17 @@ export default function Pay() {
           <div className="text-center">
             <div className="font-mono text-3xl font-bold tracking-wider">{session.plate_number}</div>
           </div>
+          {session.matched_by === 'ocr' && (
+            <div role="status" className="text-sm text-amber-300 bg-amber-500/10 rounded-xl px-4 py-3 space-y-2">
+              <p>
+                Таны бичсэн <span className="font-mono font-semibold">{session.typed_plate}</span> дугаараар
+                бүртгэл олдсонгүй. Камер <span className="font-mono font-semibold">{session.plate_number}</span> гэж
+                уншсан бүртгэл байна — таны машин бол төлбөрөө үргэлжлүүлнэ үү.
+              </p>
+              <button onClick={() => { setSession(null); setChoosing(false); setPaid(false); setError('Операторт хандана уу.') }}
+                className="text-xs underline text-amber-200 cursor-pointer">Миний машин биш</button>
+            </div>
+          )}
           <div className="bg-surface-muted/40 rounded-xl p-4 grid grid-cols-2 gap-y-2.5 text-sm">
             <span className="text-slate-400 flex items-center gap-1.5"><Clock size={14} aria-hidden /> Орсон цаг</span>
             <span className="font-mono text-right">{fmtTime(session.entry_time)}</span>

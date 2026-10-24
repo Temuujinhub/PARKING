@@ -310,6 +310,27 @@ def plates_ocr_confusable(a: str, b: str, max_diff: int = 2) -> bool:
         for x, y in d)
 
 
+def plates_truncated_read(read: str, stay: str) -> bool:
+    """Гарах камерын ТАЙРАГДСАН уншилт (формат буруу) энэ бүтэн дугаарынх уу.
+
+    2026-10-24 Барилгачдын талбай: гарах камер шөнө уншилтын 15–33%-ийг тайрч
+    уншдаг («7237УН» ← 7237УНП, «4380НК» ← 4380УНК). Ийм уншилт review болж
+    хаалт нээгдэхгүй, дараа нь QR-аар төлсөн ч `waiting_for_exit_read` /
+    `exit_presence_unconfirmed` болж «төлөөд нээгдээгүй» үлддэг байв (өдөрт 6–10).
+
+    Дүрэм: уншилт стандарт формат БИШ, ≥5 тэмдэгт; бүтэн дугаараас 1–2 тэмдэгт
+    ХАССАН (дараалал хадгалсан) хувилбар — `_ocr_canon`-оор жигдэлсний дараа.
+    Формат буруу текст өөр бодит машины дугаар байж чадахгүй ч олон сешнд
+    таарч болно — тохоох газар ГАНЦ нэр дэвшигч шаардана (`ocr_confusion_match`)."""
+    if not read or not stay or is_valid_plate(read) or not is_valid_plate(stay):
+        return False
+    a, b = _ocr_canon(read), _ocr_canon(stay)
+    if len(a) < 5 or not 1 <= len(b) - len(a) <= 2:
+        return False
+    rest = iter(b)
+    return all(ch in rest for ch in a)
+
+
 def plates_burst_similar(prev: str, new: str, max_diff: int = 2) -> bool:
     """Орох камерын burst цонхонд (6с) дараалан ирсэн хоёр уншилт НЭГ МАШИН уу.
 
@@ -422,6 +443,7 @@ def near_active_stays(db: Session, plate: str, site_id: str) -> list[ParkingSess
     return [s for s in opens if s.plate_number != plate and (
         plates_reread_similar(plate, s.plate_number)
         or plates_ocr_confusable(plate, s.plate_number)
+        or plates_truncated_read(plate, s.plate_number)
         or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
             and s.plate_number in plate))]
 
@@ -432,19 +454,39 @@ def ocr_confusion_match(db: Session, plate: str, site_id: str) -> ParkingSession
 
     Нөхцөл: (1) зогсоолын идэвхтэй бүртгэлүүдээс ОЙРОЛЦОО (≤2 тэмдэгт, тайралт,
     дутуу орох уншилт) нь ЯГ НЭГ; (2) тэр нэг нь `plates_ocr_confusable`.
-    Ойролцоо 2+ бол хоёрдмол — review. Уншсан дугаар ГЭРЭЭТ бол зөвхөн тэр
+    Ойролцоо 2+ бол хоёрдмол — review. Тайрагдсан (формат буруу) уншилт ч
+    ганц нэр дэвшигчтэй бол тохоно (`plates_truncated_read`, 2026-10-24).
+    Уншсан дугаар ГЭРЭЭТ бол зөвхөн тэр
     бүртгэл гэрээт БИШ үед (орох камер гэрээт машиныг буруу уншсан — аудит
     10-12 #7: 11 машин, 330,000₮ хий өр) тааруулж, дугаарыг нь засна."""
     if not plate:
         return None
     near = near_active_stays(db, plate, site_id)
-    if len(near) == 1 and plates_ocr_confusable(plate, near[0].plate_number):
+    if len(near) == 1 and (plates_ocr_confusable(plate, near[0].plate_number)
+                           or plates_truncated_read(plate, near[0].plate_number)):
         s = near[0]
         if (find_registered(db, plate, site_id) is not None
                 and (s.is_registered or find_registered(db, s.plate_number, site_id) is not None)):
             return None   # хоёул гэрээт — хэнийх нь болохыг тааж болохгүй
         return s
     return None
+
+
+def truncated_match_allowed(db: Session, s: ParkingSession, now: datetime) -> bool:
+    """Тайрагдсан уншилтаар тохоосон сешнд гарах урсгал үргэлжлэх эсэх.
+
+    Тайрагдсан текст ганц сешнтэй таарсан ч өөр (сешнгүй) машин байж болно:
+    30 хоногийн replay (09-21…10-22, 1,053 ганц тохиролт) — 748 нь тэр мөчид
+    гарсан машин, 46 (~5%) нь тохоосон машин дараа нь ЯГ уншигдаж гарсан. Тиймээс
+    машиныг ТААМГААР үнэгүй/гэрээт/данснаас гаргахгүй — зөвхөн ТӨЛСӨН сешн
+    (хаалт нээнэ) эсвэл төлбөр хүлээх сешн (AWAITING_PAYMENT, нээхгүй; дараагийн
+    QR төлбөр тэр эгнээг нээнэ)."""
+    if s.status == "PAID":
+        return True
+    if s.is_registered or find_registered(db, s.plate_number, s.site_id) is not None:
+        return False
+    fee = session_fee_info(db, s, at=now)
+    return not fee["is_free"] and amount_due(db, s, fee) > 0
 
 
 # Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
@@ -1976,6 +2018,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # the blanket review stopped ~80% of former EXIT_OCR_MATCH openings).
     ocr_session = (None if get_open_session(db, plate, site_id)
                    else ocr_confusion_match(db, plate, site_id))
+    truncated = (ocr_session is not None
+                 and plates_truncated_read(plate, ocr_session.plate_number))
+    if truncated and not truncated_match_allowed(db, ocr_session, now):
+        ocr_session, truncated = None, False   # үнэгүй/гэрээт — review хэвээр
     # Төлбөргүй доторх зогсоолын гарах уншилт — доторх сешнгүй ч гадна сешн нь
     # ЗОГССОН машин (2026-10-14: 26-аас 25 review). Доорх эхний review-үүдийг
     # алгасаж, ердийн сэргээлтийн (auto_reopen) дараа `_inner_exit_fallback`-аар
@@ -2150,7 +2196,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                         action="EXIT_PLATE_CORRECT" if corrected else "EXIT_OCR_MATCH",
                         entity="session", entity_id=session.id,
                         detail={"read_plate": plate, "entry_plate": old_plate,
-                                "corrected": corrected, "rule": "ocr_confusion",
+                                "corrected": corrected,
+                                "rule": ("truncated_read" if plates_truncated_read(plate, old_plate)
+                                         else "ocr_confusion"),
                                 "device_id": device.id}))
         log.info(f"[exit] {'дугаар засав' if corrected else 'OCR зөрүү тохов'}: "
                  f"{old_plate} → {plate} (session {session.id})")
@@ -2349,7 +2397,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Үлдэгдэл ХҮРЭЛЦВЭЛ: хасаад шууд нээнэ — жолооч юу ч хийхгүй.
     # ХҮРЭЛЦЭХГҮЙ бол: байгааг нь хасаад үлдсэн дүнд ердийн QR урсгал.
     # Данс нь EV-ээс хамааралгүй бие даасан боломж — бүх жолоочид ажиллана.
-    if due > 0 and _xr.get("wallet_auto_deduct", True):
+    if due > 0 and _xr.get("wallet_auto_deduct", True) and not truncated:
         try:
             deducted, covered = await _wallet_auto_deduct(db, session, due)
         except Exception:  # the debit and PAID marker must roll back together

@@ -222,13 +222,29 @@ def test_invalid_format_digit_letter_confusion_matches(ctx):
     assert r.get('session_id') == s.id and audits(c, 'EXIT_OCR_MATCH')
 
 
-@pytest.mark.parametrize('read_plate,reason', [('6234УБА', 'plate_mismatch_review'),
-                                               ('234УБА', 'invalid_plate_review')])
-def test_genuine_difference_or_truncation_stays_in_review(ctx, read_plate, reason):
+def test_genuine_difference_stays_in_review(ctx):
     c = ctx; s = stay(c, plate='1234УБА')
-    r = exit_read(c, read_plate)
-    assert r['action'] == 'review_required' and r['reason'] == reason
+    r = exit_read(c, '6234УБА')
+    assert r['action'] == 'review_required' and r['reason'] == 'plate_mismatch_review'
     assert s.status == 'OPEN' and not audits(c, 'EXIT_OCR_MATCH')
+
+
+def test_truncation_attaches_unpaid_stay_without_opening(ctx):
+    # 2026-10-24: тайрагдсан уншилт ганц ТӨЛБӨРТЭЙ сешнд тохоно (QR төлбөр тэр
+    # эгнээг нээнэ), гэхдээ өөрөө хаалт нээхгүй.
+    c = ctx; s = stay(c, plate='1234УБА')
+    r = exit_read(c, '234УБА')
+    assert r['action'] == 'awaiting_payment' and s.status == 'AWAITING_PAYMENT' and not c.commands
+    assert audits(c, 'EXIT_OCR_MATCH')[0].detail['rule'] == 'truncated_read'
+
+
+def test_truncation_never_opens_free_stay(ctx, monkeypatch):
+    c = ctx; s = stay(c, plate='1234УБА')
+    free = dict(FEE, is_free=True, total_fee=0)
+    monkeypatch.setattr(SL, 'session_fee_info', lambda *a, **kw: dict(free))
+    r = exit_read(c, '234УБА')
+    assert r['action'] == 'review_required' and r['reason'] == 'invalid_plate_review'
+    assert s.status == 'OPEN' and not c.commands and not audits(c, 'EXIT_OCR_MATCH')
 
 
 def test_two_nearby_stays_are_ambiguous(ctx):

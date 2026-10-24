@@ -259,11 +259,40 @@ def search_plates(site: str, q: str, request: Request, db: Session = Depends(get
     return out
 
 
+def _ocr_lookup(db: Session, plate: str, site_id: str) -> ParkingSession | None:
+    """Жолоочийн бичсэн дугаар ЯГ олдоогүй үед камерын OCR хувилбараар хадгалагдсан
+    ГАНЦ идэвхтэй бүртгэл (2026-10-24 Барилгачдын талбай: «дугаар олдохгүй»).
+
+    Сешн нь орох камерын уншсан текстээр үүсдэг; камер К↔Н, А↔Д, Б↔Е андуурах,
+    үсэг тайрах (BTALBAI 10-21: гарсан машины 3.1%-д орох/гарах дугаар зөрсөн)
+    үед жолооч жинхэнэ дугаараа бичээд олдохгүй байв. Тохоох нь: `_ocr_canon`-оор
+    ижил (Ү/У, В/Б, 0/О…), хэмжигдсэн андуурал (`plates_ocr_confusable`), эсвэл
+    орох камер тайрсан (`plates_truncated_read`). 2+ нэр дэвшигч бол хоёрдмол —
+    олдсонгүй хэвээр (жолооч 4 цифрээр хайж жагсаалтаас сонгоно)."""
+    from ..session_logic import _ocr_canon, plates_ocr_confusable, plates_truncated_read
+    opens = (db.query(ParkingSession)
+             .filter(ParkingSession.site_id == site_id,
+                     ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
+             .all())
+    canon = _ocr_canon(plate)
+    near = [s for s in opens if s.plate_number != plate and (
+        _ocr_canon(s.plate_number) == canon
+        or plates_ocr_confusable(plate, s.plate_number)
+        or plates_truncated_read(s.plate_number, plate))]
+    return near[0] if len(near) == 1 else None
+
+
 @router.get("/sessions")
 def find_session(plate: str, site: str, request: Request, db: Session = Depends(get_db)):
-    """Дугаараар нээлттэй session хайна (төлбөрийн задаргаатай)."""
+    """Дугаараар нээлттэй session хайна (төлбөрийн задаргаатай).
+
+    ЯГ олдоогүй бол камерын OCR хувилбараар ганц бүртгэл хайна — хариунд
+    `matched_by: "ocr"` + `typed_plate`; хуудас жолоочоос «таны машин уу» гэж
+    баталгаажуулна."""
     _throttle_public(request, "sessions")
-    plate = normalize_plate(plate)
+    from ..services.driver_import import normalize_plate as normalize_typed
+    typed = normalize_typed(normalize_plate(plate))   # латин үсэг → кирилл
+    plate = typed
     if not plate:
         raise HTTPException(400, "Дугаараа оруулна уу")
     site_obj = find_site(db, site)
@@ -274,8 +303,15 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
                 ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
         .order_by(ParkingSession.entry_time.desc()).first()
     )
+    matched_by = None
+    if not s:
+        s = _ocr_lookup(db, plate, site_obj.id)
+        matched_by = "ocr" if s else None
+        log.info("QR хайлт: %s «%s» %s", site_obj.site_code, plate,
+                 f"→ OCR «{s.plate_number}»" if s else "олдсонгүй")
     if not s:
         raise HTTPException(404, "Энэ дугаартай нээлттэй бүртгэл олдсонгүй. Дугаараа шалгана уу.")
+    plate = s.plate_number   # өр нь бүртгэлийн дугаараар
     fee = session_fee_info(db, s)
     due = amount_due(db, s, fee)
     # Өмнөх өр (нөхөн төлбөр) — QR-ийн нэхэмжлэхэд нийлүүлж төлүүлдэг тул задаргааг харуулна
@@ -303,4 +339,6 @@ def find_session(plate: str, site: str, request: Request, db: Session = Depends(
         "status": s.status,
         "paid": s.status == "PAID" and due + debt <= 0,
         "exit_deadline": s.exit_deadline.isoformat() if s.exit_deadline else None,
+        # ЯГ биш, камерын OCR хувилбараар олдсон — хуудас баталгаажуулна
+        "matched_by": matched_by, "typed_plate": typed,
     }
