@@ -320,6 +320,13 @@ def test_qr_lookup_finds_single_ocr_variant(ctx, monkeypatch, typed, stored):
     assert out['session_id']==s.id and out['matched_by']=='ocr' and out['plate_number']==stored
 
 
+def test_qr_lookup_canon_match_beats_confusable_neighbours(ctx, monkeypatch):
+    # TEST-ийн дараалсан дугаарууд: «1002ДМ0» → 1002ДМО (О/0), 1007ДМО/1012ДМО нь 2↔7, 0↔1 хосоор ойролцоо
+    c=ctx;s=stay(c,plate='1002ДМО');stay(c,plate='1007ДМО');stay(c,plate='1012ДМО')
+    out=_public_lookup(c,monkeypatch,'1002ДМ0')
+    assert out['session_id']==s.id and out['matched_by']=='ocr'
+
+
 def test_qr_lookup_exact_and_ambiguous(ctx, monkeypatch):
     from fastapi import HTTPException
     c=ctx;s=stay(c,plate='6537УБН')

@@ -275,9 +275,12 @@ def _ocr_lookup(db: Session, plate: str, site_id: str) -> ParkingSession | None:
                      ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"]))
              .all())
     canon = _ocr_canon(plate)
+    # 1-р шат: жигдэлсний дараа ЯГ ижил (Ү/У, О/0) — андуурлын хосоос хүчтэй нотолгоо
+    same = [s for s in opens if s.plate_number != plate and _ocr_canon(s.plate_number) == canon]
+    if same:
+        return same[0] if len(same) == 1 else None
     near = [s for s in opens if s.plate_number != plate and (
-        _ocr_canon(s.plate_number) == canon
-        or plates_ocr_confusable(plate, s.plate_number)
+        plates_ocr_confusable(plate, s.plate_number)
         or plates_truncated_read(s.plate_number, plate))]
     return near[0] if len(near) == 1 else None
 
