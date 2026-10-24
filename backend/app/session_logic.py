@@ -331,6 +331,24 @@ def plates_truncated_read(read: str, stay: str) -> bool:
     return all(ch in rest for ch in a)
 
 
+def plates_paid_near(read: str, stay: str) -> bool:
+    """Төлсөн сешн ба гарах камерын REVIEW уншилт нэг машиных байж болох уу (F5).
+
+    2026-10-24: орох камер буруу/тайрч уншсан (0539УАП, 3163УУ), гарах камер
+    ЗӨВ уншсан (0539УАТ, 3163УЕУ) → гарах уншилт review, жолооч буруу нэртэй
+    сешнийг төлсөн ч хаалт нээгдэхгүй — оператор гараар гаргадаг байв.
+    Дүрэм (`plates_reread_similar`-аас ЧАНГА — ≤2 дурын тэмдэгт биш):
+    хэмжигдсэн андуурал, хоёр чиглэлийн тайралт, эсвэл жигдэлсний дараа
+    ЯГ 1 тэмдэгт. Хэрэглэх газар ганц нэр дэвшигч, ганц камер шаардана."""
+    if not read or not stay or read == stay:
+        return False
+    if (plates_ocr_confusable(read, stay) or plates_truncated_read(read, stay)
+            or plates_truncated_read(stay, read)):
+        return True
+    a, b = _ocr_canon(read), _ocr_canon(stay)
+    return len(a) == len(b) and sum(1 for x, y in zip(a, b) if x != y) <= 1
+
+
 def plates_burst_similar(prev: str, new: str, max_diff: int = 2) -> bool:
     """Орох камерын burst цонхонд (6с) дараалан ирсэн хоёр уншилт НЭГ МАШИН уу.
 
@@ -444,6 +462,7 @@ def near_active_stays(db: Session, plate: str, site_id: str) -> list[ParkingSess
         plates_reread_similar(plate, s.plate_number)
         or plates_ocr_confusable(plate, s.plate_number)
         or plates_truncated_read(plate, s.plate_number)
+        or plates_truncated_read(s.plate_number, plate)   # орох тайрсан, гарах зөв (3163УУ ← 3163УЕУ)
         or (valid and not is_valid_plate(s.plate_number) and len(s.plate_number) >= 3
             and s.plate_number in plate))]
 
@@ -487,6 +506,7 @@ def truncated_match_allowed(db: Session, s: ParkingSession, now: datetime) -> bo
         return False
     fee = session_fee_info(db, s, at=now)
     return not fee["is_free"] and amount_due(db, s, fee) > 0
+
 
 
 # Гарах уншилтад бүртгэл олдоогүй үед хэр хуучин хаалтыг сэргээхийг зөвшөөрөх
@@ -2669,11 +2689,30 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     # Flush the read created by an in-process wallet checkout before querying it.
     db.flush()
     exit_device, event, waiting_reason = fresh_presence(db, session, now)
+    review_read = False
+    if exit_device is None and waiting_reason == 'waiting_for_exit_read':
+        # F5 (2026-10-24): гарах уншилт review болсон (орох буруу, гарах зөв г.м.)
+        # ч ойролцоо дугаартай ГАНЦ камерт сүүлийн 5 минутад уншигдсан бол тэр эгнээ
+        from .services.exit_presence import review_read_presence
+        rcam, revent = review_read_presence(db, session, now)
+        if rcam is not None:
+            exit_device, event, waiting_reason, review_read = rcam, revent, None, True
     if exit_device:
         fee = fee_snapshot or session_fee_info(db, session, at=now)
         waiting_reason = exit_policy_block(db, session, now)
         if not waiting_reason and _find_barrier(db, session.site_id, exit_device):
-            await _close_and_open(db, exit_device, session, now, fee, source="payment")
+            if review_read:
+                from .models import AuditLog
+                session.exit_device_id = exit_device.id
+                db.add(AuditLog(username='system', action='PAYMENT_REVIEW_READ_OPEN',
+                    entity='session', entity_id=session.id,
+                    detail={'session_plate': session.plate_number, 'read_plate': event.plate_number,
+                            'review_reason': event.reject_reason, 'event_id': event.id,
+                            'read_at': event.created_at.isoformat(), 'camera_id': exit_device.id,
+                            'lane_no': exit_device.lane_no}))
+            # Review уншилт нь ЯГ дугаар биш — exit_confirmed=False (тайлан/сэргээлтэд ялгагдана)
+            await _close_and_open(db, exit_device, session, now, fee, source="payment",
+                                  exit_confirmed=not review_read)
             return
         waiting_reason = waiting_reason or 'exit_mapping_invalid'
     elif pos_lane is not None:

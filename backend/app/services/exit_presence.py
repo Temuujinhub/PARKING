@@ -97,6 +97,53 @@ def fresh_presence(db, stay, now=None):
     return cam, anchor, None
 
 
+REVIEW_READ_SECONDS = 300
+REVIEW_READ_REASONS = ('plate_mismatch_review', 'no_matching_stay_review', 'invalid_plate_review')
+
+
+def review_read_presence(db, stay, now=None):
+    """F5 (2026-10-24): the stay has no exit lane, but a REVIEW exit read of a
+    near plate (`plates_paid_near`: measured OCR pair, truncation either way,
+    or one character) happened in the last 5 minutes. Opens only if those reads
+    are on ONE live outer exit camera, the read is near no other active stay,
+    and no other car ('?' included) was read on that camera since.
+    ялалт 0539УАП/0539УАТ, Айр нэтворк 3163УУ/3163УЕУ: paid, then the operator
+    had to open by hand. Returns (camera, event) or (None, None)."""
+    from ..models import ParkingSession
+    from ..session_logic import plates_paid_near
+    now = now or datetime.utcnow()
+    since = max(stay.entry_time, now - timedelta(seconds=REVIEW_READ_SECONDS))
+    events = (db.query(LprEvent).options(defer(LprEvent.raw)).filter(
+        LprEvent.site_id == stay.site_id, LprEvent.lane_dir == 'exit',
+        LprEvent.accepted.is_(False), LprEvent.reject_reason.in_(REVIEW_READ_REASONS),
+        LprEvent.created_at >= since, LprEvent.created_at <= now)
+        .order_by(LprEvent.created_at.desc(), LprEvent.id.desc()).limit(200).all())
+    hits = [e for e in events if plates_paid_near(e.plate_number, stay.plate_number)]
+    if not hits or len({e.device_id for e in hits}) != 1:
+        return None, None
+    anchor = hits[0]
+    cam = db.get(Device, anchor.device_id)
+    site = db.get(ParkingSite, stay.site_id)
+    if (not cam or not site or not site.is_active or cam.site_id != stay.site_id
+            or cam.status != 'active' or cam.device_type != 'camera'
+            or cam.lane_dir not in ('exit', 'both') or cam.nested_inner or not cam.ip_address):
+        return None, None
+    if isinstance(anchor.raw, dict) and anchor.raw.get('_server_open_eligible') is False:
+        return None, None
+    others = db.query(ParkingSession.plate_number).filter(
+        ParkingSession.site_id == stay.site_id, ParkingSession.id != stay.id,
+        ParkingSession.status.in_(['OPEN', 'AWAITING_PAYMENT', 'PAID'])).all()
+    if any(p == anchor.plate_number or plates_paid_near(anchor.plate_number, p) for (p,) in others):
+        return None, None   # уншилт өөр сешнтэй ч ойролцоо — хоёрдмол
+    newer = (db.query(LprEvent.plate_number).filter(
+        LprEvent.site_id == stay.site_id, LprEvent.device_id == cam.id, LprEvent.lane_dir == 'exit',
+        LprEvent.created_at > anchor.created_at, LprEvent.created_at <= now).all())
+    if any(not (same_vehicle_read(p, stay.plate_number) or plates_paid_near(p, stay.plate_number))
+           for (p,) in newer):
+        return None, None
+    return cam, anchor
+
+
 def infer_pos_context(db, stay):
     """Per-transaction observation, never a permanent terminal assignment."""
     cam, event, reason = fresh_presence(db, stay)

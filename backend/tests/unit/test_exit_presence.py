@@ -336,3 +336,72 @@ def test_qr_lookup_exact_and_ambiguous(ctx, monkeypatch):
     with pytest.raises(HTTPException) as err:
         _public_lookup(c,monkeypatch,'5979УНТ')   # 2 нэр дэвшигч — таамаглахгүй
     assert err.value.status_code==404
+
+
+# ── F5 (2026-10-24): орох буруу/тайрсан, гарах зөв → review → төлбөр тэр эгнээг нээнэ ──
+
+def no_flat_fee(c):
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'wallet_auto_deduct':False,'no_session_fee':0},'test');c.db.commit()
+
+
+def review(c, plate, cam=None):
+    return asyncio.run(SL.handle_exit(c.db,cam or c.cams[1],plate,95,{}))
+
+
+@pytest.mark.parametrize('read,stay_plate', [('0539УАТ','0539УАП'),   # ялалт: Т↔П, 1 тэмдэгт
+                                             ('3163УЕУ','3163УУ')])   # Айр нэтворк: орох тайрсан
+def test_payment_opens_lane_of_near_review_read(ctx, read, stay_plate):
+    c=ctx;no_flat_fee(c);s=stay(c,plate=stay_plate)
+    r=review(c,read)
+    assert r['action']=='review_required' and s.status=='OPEN' and not c.commands
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and c.commands==[(c.bars[1].id,s.id,'payment')]
+    assert s.exit_device_id==c.cams[1].id and s.exit_confirmed is False
+    audit=c.db.query(M.AuditLog).filter_by(action='PAYMENT_REVIEW_READ_OPEN').one()
+    assert audit.detail['read_plate']==read and audit.detail['lane_no']==2
+
+
+def test_paid_first_then_near_exit_read_still_reviews(ctx):
+    # Гарах уншилт ойролцоох ТӨЛСӨН сешний эрхийг ашиглахгүй (test_exit_review, 10-10) —
+    # F5 нь зөвхөн ТӨЛБӨРИЙН мөчид (жолооч гарцад байх үед) үйлчилнэ.
+    c=ctx;no_flat_fee(c);s=stay(c,plate='0539УАП')
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    r=review(c,'0539УАТ')
+    assert r['action']=='review_required' and s.status=='PAID' and not c.commands
+
+
+def test_unpaid_stay_near_exit_read_still_reviews(ctx):
+    c=ctx;no_flat_fee(c);s=stay(c,plate='0539УАП')
+    assert review(c,'0539УАТ')['action']=='review_required' and s.status=='OPEN'
+
+
+@pytest.mark.parametrize('fault', ['two_cameras','other_car_after','unknown_after','old','two_stays','far_plate'])
+def test_near_review_read_is_not_enough(ctx, fault):
+    c=ctx;no_flat_fee(c);s=stay(c,plate='0539УАП')
+    if fault=='far_plate':
+        review(c,'0538УАТ')                       # 2 тэмдэгт (8, Т) — чанга дүрэм хүлээн авахгүй
+    else:
+        review(c,'0539УАТ')
+    if fault=='two_cameras': review(c,'0539УАТ',c.cams[0])
+    if fault=='other_car_after': review(c,'9999УБА')
+    if fault=='unknown_after':
+        c.db.add(M.LprEvent(site_id=c.site.id,device_id=c.cams[1].id,plate_number='?',lane_dir='exit',
+                 confidence=0,accepted=False,reject_reason='CGI: plate not parsed',raw={}));c.db.commit()
+    if fault=='old':
+        for e in c.db.query(M.LprEvent).all(): e.created_at-=timedelta(minutes=6)
+        c.db.commit()
+    if fault=='two_stays': stay(c,plate='0539УАК')   # уншилт хоёр сешнтэй ойролцоо
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='PAID' and not c.commands
+    assert not c.db.query(M.AuditLog).filter_by(action='PAYMENT_REVIEW_READ_OPEN').count()
+
+
+@pytest.mark.parametrize('read,stay_plate,ok', [
+    ('0539УАТ','0539УАП',True),    # 1 тэмдэгт
+    ('3163УЕУ','3163УУ',True),     # урвуу тайралт
+    ('1041УНС','1041УКС',True),    # хэмжигдсэн хос
+    ('4845УАР','4825УАТ',False),   # 2 дурын тэмдэгт
+    ('0538УАТ','0539УАП',False),
+])
+def test_paid_near_rule(read, stay_plate, ok):
+    assert SL.plates_paid_near(read, stay_plate) is ok
