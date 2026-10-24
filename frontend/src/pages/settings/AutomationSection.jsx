@@ -120,16 +120,9 @@ function CamSyncCard({ toast }) {
               </span>
             </span>
           </label>
-          <label className="flex items-start gap-2 text-sm cursor-pointer">
-            <input type="checkbox" className="mt-0.5" checked={rules.create_debt}
-              onChange={(e) => set('create_debt', e.target.checked)} />
-            <span>Гарах уншилтгүй машинд өр үүсгэх
-              <span className="block text-xs text-slate-500">
-                Машин хэзээ гарсныг МЭДЭХГҮЙ тул хугацаа нь таамаг — 2026-08-12-нд
-                ийм дүрэм 1,786 хуурамч өр (3.3 сая₮) үүсгэсэн. Унтраалттай орхино уу.
-              </span>
-            </span>
-          </label>
+          {/* «Гарах уншилтгүй машинд өр үүсгэх» (camsync create_debt) чагтыг 2026-10-24-нд
+              хассан: camera_sync үүнийг огт уншдаггүй (асаасан ч юу ч өөрчлөгддөггүй байв).
+              Гарах уншилтгүй сешнийн өрийг Төлбөрийн дүрэм → Авто цэвэрлэгээ удирдана. */}
           <label className="flex items-start gap-2 text-sm cursor-pointer">
             <input type="checkbox" className="mt-0.5" checked={rules.skip_invalid_plate}
               onChange={(e) => set('skip_invalid_plate', e.target.checked)} />
