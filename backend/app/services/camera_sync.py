@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 from ..database import SessionLocal
 from ..models import AuditLog, Compensation, ParkingSession, ParkingSite
-from ..session_logic import close_session_forced, is_valid_plate, normalize_plate
+from ..session_logic import close_session_forced, is_valid_plate, normalize_plate, plates_paid_near
 from .app_settings import CAMSYNC_STATE, get_camsync_rules, get_state, set_state
 from .camera_records import site_camera_events
 
@@ -244,12 +244,14 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
                 ParkingSession.status.in_(ACTIVE)).first():
             skipped += 1
             continue
-        # Тухайн цагийн ±1 цагт бүртгэл байвал давхардуулахгүй
-        if db.query(ParkingSession.id).filter(
+        # Тухайн цагийн ±1 цагт ЯГ эсвэл OCR-ОЙРОЛЦОО дугаартай бүртгэл байвал
+        # давхардуулахгүй: live нь «0539УАП» гэж бүртгэсэн машиныг камерын лог
+        # «0539УАТ» гэж уншаад 2 дахь сешн үүсгэдэг байв (ялалт 2026-10-24).
+        _win = db.query(ParkingSession.plate_number).filter(
                 ParkingSession.site_id == site.id,
-                ParkingSession.plate_number == plate,
                 ParkingSession.entry_time >= ev["time"] - timedelta(hours=1),
-                ParkingSession.entry_time <= ev["time"] + timedelta(hours=1)).first():
+                ParkingSession.entry_time <= ev["time"] + timedelta(hours=1)).all()
+        if any(p == plate or plates_paid_near(plate, p) for (p,) in _win):
             skipped += 1
             continue
         # Event нь БАРИМТЖСАН зогсолтын хугацаанд багтаж байвал давхардуулахгүй:
@@ -258,10 +260,12 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
         # ЗӨВХӨН exit_confirmed=true бүртгэлийг тооцно: албадан хаалт нь гарах цагт
         # «одоо» гэж бичдэг тул 12 цагийн ХУУРАМЧ цонх үүсгэдэг ба түүгээр шүүвэл
         # тэр цонхонд багтсан ЖИНХЭНЭ дараагийн зогсолтууд алдагдана.
+        # Төлбөрөөр хаагдсан сешн (F5 / POS эгнээ / PAID_EXIT_INFERRED нь
+        # exit_confirmed=False) ч бодит зогсолт — цонхонд нь тооцно (2026-10-24).
         if db.query(ParkingSession.id).filter(
                 ParkingSession.site_id == site.id,
                 ParkingSession.plate_number == plate,
-                ParkingSession.exit_confirmed.is_(True),
+                ParkingSession.exit_confirmed.is_(True) | ParkingSession.paid_at.isnot(None),
                 ParkingSession.entry_time <= ev["time"],
                 ParkingSession.exit_time >= ev["time"]).first():
             skipped += 1

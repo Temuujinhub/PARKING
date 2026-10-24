@@ -478,8 +478,11 @@ def audit_sessions(site_id: str | None = None, camera: bool = False,
         ex = last_exit.get(s.plate_number)
         exit_read = bool(ex and s.entry_time and ex > s.entry_time)
         invalid = not is_valid_plate(s.plate_number)
+        # Авто цэвэрлэгээтэй ИЖИЛ эх үүсвэр: сайтын багана → DB-ийн stale_hours
+        # (зогсоолын давхаргатай). Өмнө нь .env-ийн утгыг уншдаг байв (2026-10-24).
+        from ..services.app_settings import get_autoclose_rules
         limit_h = (s.site.auto_close_hours if s.site and s.site.auto_close_hours is not None
-                   else settings.auto_close_hours)
+                   else get_autoclose_rules(db, s.site_id)["stale_hours"])
         stale = bool(limit_h and hours >= limit_h)
 
         # Камерын лог: орсны ДАРАА гарах камераар өнгөрсөн үү (сервер event
@@ -1154,7 +1157,8 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоол
     if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
         raise HTTPException(400, "Зөвхөн нээлттэй session-ий дугаарыг засна")
-    new_plate = normalize_plate(body.get("plate_number", ""))
+    from ..session_logic import admin_plate
+    new_plate = admin_plate(body.get("plate_number", ""), strict_format=False)
     if getattr(s, "hospital_grant_id", None) and new_plate != s.plate_number:
         raise HTTPException(409, "Эмнэлгийн баталгаажуулалттай дугаарыг өөр машин руу шилжүүлэх боломжгүй")
     if not is_valid_plate(new_plate) and not body.get("force"):
@@ -1172,6 +1176,28 @@ async def edit_plate(session_id: str, body: dict, db: Session = Depends(get_db),
         "session_id": s.id, "old_plate": old_plate, "plate": new_plate, "by": user.username,
     })
     return _session_out(db, s, with_fee=True)
+
+
+def _operator_exit_gate(db: Session, s: ParkingSession, device_id: str | None):
+    """Операторын гаргалтын (manual/special) гарах эгнээ → (камер, хаалт).
+
+    Сонгосон эгнээ (камер эсвэл хаалт), эсвэл зогсоолын ГАНЦ гарах эгнээ. Олон
+    гарах эгнээтэй зогсоолд сонголтгүй бол ТААХГҮЙ — 409, оператор сонгоно
+    (2026-10-24 шийдвэр: «ихэнх зогсоол нэг орох нэг гарахтай, олон бол
+    оператороор сонгуулна»). Өмнө нь эхний гарах хаалтыг (буруу эгнээ байж
+    болно) нээдэг байв. Гарах камергүй зогсоолд ганц гарах хаалт байвал түүнийг."""
+    from ..services.exit_presence import outer_exit_cameras, pos_lane
+    lane = pos_lane(db, s, {"device_id": device_id} if device_id else {})
+    if lane is not None:
+        return lane["camera"], db.get(Device, lane["gate_id"])
+    if device_id:
+        raise HTTPException(409, "Сонгосон төхөөрөмж энэ зогсоолын гарах эгнээ биш — дахин сонгоно уу")
+    if len(outer_exit_cameras(db, s.site_id)) > 1:
+        raise HTTPException(409, "Олон гарах эгнээтэй зогсоол — гарах эгнээг (хаалт/камер) сонгоно уу")
+    gates = (db.query(Device).filter(Device.site_id == s.site_id, Device.device_type == "barrier",
+                                     Device.status == "active", Device.lane_dir.in_(("exit", "both")),
+                                     Device.nested_inner.is_(False)).all())
+    return None, (gates[0] if len(gates) == 1 else None)
 
 
 @router.post("/{session_id}/manual-exit")
@@ -1209,8 +1235,17 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
         raise HTTPException(400, "«Бусад» шалтгаанд тайлбар заавал (3+ тэмдэгт)")
     reason_text = f"{reasons[code]}{f' — {note}' if note else ''}" if code else note
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын машиныг гаргана
+    # Аль хэдийн хаагдсан бүртгэлийг ДАХИН гаргахгүй (хуучирсан мөр/давхар дарах:
+    # FREE → MANUAL_CLOSED болж, хаалт дахин нээгдэж, «одоо»-гийн дүнгээр өр үүсдэг байв)
+    if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
+        raise HTTPException(409, "Энэ бүртгэл аль хэдийн хаагдсан байна")
+    gate_cam = device = None
+    if body.get("open_barrier"):
+        gate_cam, device = _operator_exit_gate(db, s, body.get("device_id"))
     now = datetime.utcnow()
     fee = session_fee_info(db, s, at=now)
+    if gate_cam is not None:
+        s.exit_device_id = gate_cam.id   # давтан уншилт/сэргээлт энэ эгнээг таних
     s.exit_time = now
     s.exit_confirmed = True   # оператор гаргаж байна — бодит
     s.duration_minutes = fee["duration_minutes"]
@@ -1227,13 +1262,6 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
 
     barrier_opened = False
     if body.get("open_barrier"):
-        device = db.get(Device, body.get("device_id")) if body.get("device_id") else None
-        if not device:
-            device = (db.query(Device).filter(Device.site_id == s.site_id,
-                                              Device.device_type == "barrier",
-                                              Device.lane_dir == "exit").first()
-                      or db.query(Device).filter(Device.site_id == s.site_id,
-                                                 Device.device_type == "barrier").first())
         if device:
             cmd = await open_barrier(db, device, s.id, "manual", issued_by=user.username,
                                      plate=s.plate_number)
@@ -1427,9 +1455,10 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
         if not s.exit_time or (now - s.exit_time) > timedelta(minutes=30):
             raise HTTPException(400, "Энэ бүртгэл 30 минутаас өмнө хаагдсан — "
                                      "хаалтыг Хаалтны удирдлагаас нээнэ үү")
-        barrier = device if device and device.device_type == "barrier" else None
-        if not barrier and cam:
-            barrier = _find_barrier(db, s.site_id, cam)
+        if body.get("device_id") or not s.exit_device_id:
+            _gc, barrier = _operator_exit_gate(db, s, body.get("device_id"))
+        else:
+            barrier = _find_barrier(db, s.site_id, db.get(Device, s.exit_device_id))
         if not barrier:
             raise HTTPException(400, "Гарах хаалт олдсонгүй")
         cmd = await open_barrier(db, barrier, s.id, "manual", issued_by=user.username,
@@ -1447,6 +1476,13 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
     # ── ХБИ / онцгой / бүртгэлгүй: нөхөн төлбөргүй гаргана ──
     if s.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
         raise HTTPException(400, "Энэ бүртгэл аль хэдийн хаагдсан байна")
+    # Эгнээ: гарах камер энэ машиныг уншсан бол тэр эгнээ, эс бөгөөс сонгосон/ганц
+    # эгнээ; олон эгнээ + сонголтгүй → 409 (эхний хаалтыг тааж нээхгүй)
+    if body.get("device_id") or not s.exit_device_id:
+        gate_cam, barrier = _operator_exit_gate(db, s, body.get("device_id"))
+        cam = gate_cam or cam
+    else:
+        barrier = _find_barrier(db, s.site_id, db.get(Device, s.exit_device_id))
     from ..services.app_settings import get_open_reasons
     labels = {r["code"]: r["label"] for r in get_open_reasons(db)}
     reason_code = spec["reason_code"]
@@ -1464,13 +1500,6 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
         s.exit_device_id = cam.id
     s.note = f"{s.note + ' | ' if s.note else ''}Онцгой гаргалт: {reason_text}"[:1000]
 
-    barrier = device if device and device.device_type == "barrier" else None
-    if not barrier and cam:
-        barrier = _find_barrier(db, s.site_id, cam)
-    if not barrier:
-        barrier = (db.query(Device).filter(Device.site_id == s.site_id,
-                                           Device.device_type == "barrier",
-                                           Device.lane_dir == "exit").first())
     db.add(AuditLog(username=user.username, action="SPECIAL_EXIT", entity="session",
                     entity_id=session_id,
                     detail={"kind": kind, "label": spec["label"], "reason_code": reason_code,

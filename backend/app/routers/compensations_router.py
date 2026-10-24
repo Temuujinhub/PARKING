@@ -73,11 +73,21 @@ def _auto_blacklist(db: Session, plate: str, username: str):
                               created_by=f"систем ({username})"))
 
 
-def create_compensation(db: Session, session: ParkingSession, reason: str, username: str) -> Compensation:
-    fee = session_fee_info(db, session)
+def create_compensation(db: Session, session: ParkingSession, reason: str,
+                        username: str, amount: float | None = None) -> Compensation | None:
+    """Нөхөн төлбөр = ҮЛДЭГДЭЛ (amount_due) — хэсэгчлэн төлсөн (данс г.м) дүнг
+    хасна; өмнө нь нийт дүнгээр бичиж давхар нэхдэг байв (2026-10-24 аудит).
+    `amount` өгвөл (дуудагч өөрөө тооцоолсон үлдэгдэл) түүнийг. Үлдэгдэлгүй → None."""
+    from ..session_logic import amount_due
+    if amount is None:
+        fee = session_fee_info(db, session)
+        amount = amount_due(db, session, fee)
+    due = float(amount or 0)
+    if due <= 0:
+        return None
     comp = Compensation(
         session_id=session.id, site_id=session.site_id, plate_number=session.plate_number,
-        amount=fee["total_fee"] or session.total_fee or 0, reason=reason, created_by=username,
+        amount=due, reason=reason, created_by=username,
     )
     db.add(comp)
     db.flush()

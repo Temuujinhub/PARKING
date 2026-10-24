@@ -67,6 +67,24 @@ def is_valid_plate(plate: str) -> bool:
     return bool(PLATE_RE.match(normalize_plate(plate)))
 
 
+def admin_plate(raw: str, *, strict_format: bool = True) -> str:
+    """Админ/операторын ГАРААР оруулсан дугаар (гэрээт, хар жагсаалт, сешний засвар).
+
+    Зай, зураас, цэгийг арилгана. ЛАТИН үсэгтэй бол ТАТГАЛЗАНА — «B»-г В эсвэл Б
+    гэж таахгүй (2026-10-24 шийдвэр); өмнө нь зөвхөн зайг арилгаж «1234-УБA»
+    хэлбэрээр хадгалдаг тул камерын уншилт хэзээ ч таардаггүй байв.
+    strict_format=True бол стандарт хэлбэрт (PLATE_RE) орохгүй дугаарыг татгалзана."""
+    from fastapi import HTTPException
+    p = re.sub(r"[\s\-–—_.,/\\]", "", (raw or "").upper())
+    if not p:
+        raise HTTPException(400, "Дугаараа оруулна уу")
+    if re.search(r"[A-Z]", p):
+        raise HTTPException(400, "Дугаарт латин үсэг байна — кирилл үсгээр бичнэ үү (жишээ нь 1234УБА)")
+    if strict_format and not PLATE_RE.match(p):
+        raise HTTPException(400, f"«{p}» — дугаарын хэлбэр буруу (жишээ нь 1234УБА)")
+    return p
+
+
 # Dahua-ийн өнгө/төрлийг монголоор (оператор танихад ойлгомжтой)
 _COLOR_MN = {"white": "цагаан", "black": "хар", "gray": "саарал", "grey": "саарал",
              "silver": "мөнгөлөг", "red": "улаан", "blue": "цэнхэр", "green": "ногоон",
@@ -408,13 +426,20 @@ def is_duplicate_read(plate: str, recent: str) -> bool:
     зөв уншилтын цифрүүдэд багтаж байвал давхар уншилт гэж үзнэ. Цифр шалгах нь
     санамсаргүй тохиолдлыг хаана — ард нь дараалсан өөр машины дугаар цифрээрээ
     давхцах магадлал бага."""
+    if is_valid_plate(plate) and is_valid_plate(recent):
+        # Хоёул зөв формат: жигдэлсэн ижил эсвэл ХЭМЖИГДСЭН андуурал л нэг машин.
+        # Дурын 1 тэмдэгт (2942УКН / 2943УКН) — өөр машин (2026-10-24 аудит: 2 дахь
+        # машин 30с dedup-д унаж сешнгүй үлддэг байв). 2↔3 нь 36% өөр машин (10-12 хэмжилт).
+        return (plate == recent or _ocr_canon(plate) == _ocr_canon(recent)
+                or plates_ocr_confusable(plate, recent))
     if plates_ocr_similar(plate, recent):
         return True
     if is_valid_plate(plate):
         return False        # зөв форматтай дугаар — жинхэнэ өөр машин байж болно
     d_new = "".join(c for c in plate if c.isdigit())
     d_old = "".join(c for c in recent if c.isdigit())
-    return len(d_new) >= 3 and (d_new in d_old or d_old in d_new)
+    # d_old хоосон/богино үед `d_old in d_new` ҮРГЭЛЖ үнэн байсан (5551ХК ← «ХК»)
+    return len(d_new) >= 3 and (d_new in d_old or (len(d_old) >= 3 and d_old in d_new))
 
 
 def match_open_session(db: Session, plate: str, site_id: str) -> tuple[ParkingSession | None, bool]:
@@ -524,6 +549,16 @@ def _exit_rules(db: Session, site_id: str | None) -> dict:
     return get_exit_rules(db, site_id)
 
 
+def inner_cross_read_minutes(db: Session, site_id: str | None) -> int:
+    """Доторх зогсоолын «батлагдсан гарц»-ын босго (мин) — доторх гарах камер
+    дөнгөж ОРЖ буй машиныг уншдаг (cross-read 15–104с). Өмнө нь «хуурамч гарц»-ын
+    `fake_exit_minutes`-ийг хуваалцдаг тул хууран мэхлэлтийн босгыг өсгөхөд доторх
+    гарц review руу орж хаалт нээгддэггүй байв (2026-10-24 аудит). 0 = хуучнаар
+    `fake_exit_minutes`-ийг дагана."""
+    r = _exit_rules(db, site_id)
+    return int(r.get("inner_cross_read_minutes") or 0) or int(r["fake_exit_minutes"])
+
+
 def _barrier_rules(db: Session, site_id: str | None) -> dict:
     """Хаалт/уншилтын цагийн цонхнууд (dedup/burst/cooldown) — зогсоолоор.
     Өмнө нь эдгээр нь зөвхөн .env-д байсан тул нэг зогсоолд тааруулсан утга
@@ -605,8 +640,19 @@ def recent_exit_reread(db: Session, plate: str, site_id: str, now: datetime,
                                ParkingSession.updated_at >= since)))
               .all())
     recent.sort(key=lambda x: x.exit_time or x.updated_at or now, reverse=True)
+
+    def _no_reentry(s):
+        # 5 минутаас хуучин бол тэр хооронд ОРОХ камерт уншигдаагүй байх ёстой —
+        # дахин орж ирсэн машиныг «давтан уншилт» гэж үнэгүй гаргахгүй (2026-10-24, 15 мин).
+        left = s.exit_time or s.updated_at or now
+        if (now - left).total_seconds() <= 300:
+            return True
+        return db.query(LprEvent.id).filter(
+            LprEvent.site_id == site_id, LprEvent.lane_dir == "entry",
+            LprEvent.accepted.is_(True), LprEvent.created_at > left,
+            LprEvent.plate_number.in_({plate, s.plate_number})).first() is None
     for s in recent:
-        if plates_ocr_similar(plate, s.plate_number):
+        if plates_ocr_similar(plate, s.plate_number) and _no_reentry(s):
             return s
     for s in recent:
         if (s.exit_time or s.updated_at or now) >= near and plates_reread_similar(plate, s.plate_number):
@@ -1021,7 +1067,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
                                and s.exit_time is not None))
             and s.entry_time is not None
             and (at - s.entry_time).total_seconds()
-            > 60 * int(_exit_rules(db, s.site_id)["fake_exit_minutes"])
+            > 60 * inner_cross_read_minutes(db, s.site_id)
             # Машин тэр гарцаас ХОЙШ доторх зогсоолд дахин орсон (live хүлээн авсан
             # орох уншилт) — нээлттэй хүүхэд сешнийг дахин ашигласан тул camera_sync-ийн
             # хожуу ГАРАХ лог (өнгөрсөн цаг) гадна тоолуурыг ЭХЛҮҮЛЭХГҮЙ: машин одоо
@@ -1061,8 +1107,7 @@ def close_session_forced(db: Session, s: ParkingSession, reason: str, username: 
                 else "FREE" if fee["is_free"] else "MANUAL_CLOSED")
     if create_comp and due > 0 and not fee["is_free"]:
         from .routers.compensations_router import create_compensation
-        comp = create_compensation(db, s, reason, username)
-        comp.amount = due
+        create_compensation(db, s, reason, username, amount=due)
         return due
     return 0.0
 
@@ -1141,6 +1186,16 @@ async def ensure_entry_barrier(db: Session, device: Device, plate: str,
     return cmd.status == "SUCCESS"
 
 
+def blocking_debts(db: Session, plate: str, site_id: str | None) -> list:
+    """«Өртэй машины гарах хаалтыг нээхгүй» (block_exit_debt_count) дүрэмд тоологдох
+    PENDING өр — QR төлбөрийн цуглуулалттай (`_pending_debts`) ИЖИЛ хүрээ: тухайн
+    ТҮРЭЭСЛЭГЧИЙН зогсоолуудынх. Өмнө нь хориг бүх түрээслэгчийн өрийг тоолдог
+    ч QR зөвхөн өөрийнхийг авдаг тул өөр компанид өртэй машин бүх төлбөрөө төлсөн
+    ч гарцад гацдаг байв (2026-10-24 шийдвэр)."""
+    from .routers.payments_router import _pending_debts
+    return _pending_debts(db, plate, db.get(ParkingSite, site_id) if site_id else None)
+
+
 async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str) -> bool:
     """Давхар уншилт дээр ГАРАХ хаалтыг дахин нээх — зөвхөн эрхтэй машинд.
 
@@ -1192,9 +1247,7 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
     from .models import Compensation
     from .services.app_settings import get_blacklist_rules
     threshold = get_blacklist_rules(db, device.site_id)['block_exit_debt_count']
-    if threshold and not registered and db.query(Compensation).filter(
-            Compensation.plate_number == plate,
-            Compensation.status == "PENDING").count() >= threshold:
+    if threshold and not registered and len(blocking_debts(db, plate, device.site_id)) >= threshold:
         return False  # өртэй (гэрээт биш) - оператор шийднэ
 
     session = get_open_session(db, plate, device.site_id)
@@ -1217,13 +1270,18 @@ async def ensure_exit_barrier_if_cleared(db: Session, device: Device, plate: str
             fee = session_fee_info(db, session, at=now)
             entitled = fee["is_free"] or amount_due(db, session, fee) <= 0
     else:
-        # Саяхан гарахаар хаагдсан (хаалт нь амжилтгүй байж болзошгүй) машин
+        # Саяхан гарахаар хаагдсан (хаалт нь амжилтгүй байж болзошгүй) машин.
+        # Цонх = «Гарсан машины давтан уншилт» (exit_reread_seconds), 5 минутаас
+        # богиносгохгүй — өмнө нь 5 мин хатуу байсан тул давтан уншилтын цонхыг
+        # 900 болгосон зогсоолд 2000₮ үүсэхгүй ч хаалт нээгдэхгүй үлддэг байв
+        # (5979УНТ 2026-10-24: төлснөөс 302с-ийн дараа дахин уншигдсан).
+        _win = max(300, int(_exit_rules(db, device.site_id).get("exit_reread_seconds") or 0))
         entitled = bool(
             db.query(ParkingSession)
             .filter(ParkingSession.site_id == device.site_id,
                     ParkingSession.plate_number == plate,
                     ParkingSession.status.in_(["CLOSED", "FREE"]),
-                    ParkingSession.exit_time >= now - timedelta(minutes=5))
+                    ParkingSession.exit_time >= now - timedelta(seconds=_win))
             .first())
     if not entitled:
         return False
@@ -1508,7 +1566,12 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         existing = lock_session(db, existing.id)
         if existing.status not in ("OPEN", "AWAITING_PAYMENT", "PAID"):
             existing = None
-    if existing and paid_exit_expired(db, existing, now, site_id):
+    if existing and (paid_exit_expired(db, existing, now, site_id)
+                     or (existing.status == "PAID" and existing.exit_deadline is not None
+                         and now > existing.exit_deadline)):
+        # 2026-10-24: grace (exit_deadline) хэтэрсэн ТӨЛСӨН сешн ОРОХ камерт уншигдав
+        # → гарсан (уншилтгүй) бөгөөд дахин орж байна. Өмнө нь paid_exit_hours (2ц)
+        # хүртэл хуучин сешнийг дахин ашиглаж гадуур байсан хугацааг нэхдэг байв.
         # ТӨЛСӨН машин deadline-аас хойш олон цаг «дотор» гэж тоологдож байгаад
         # ОРОХ камерт дахин уншигдав — энэ нь өөрөө гарсны нотолгоо (машин
         # гаднаас орж ирж байна). Хуучин сешнийг deadline дээр төлсөн дүнгээр
@@ -1540,8 +1603,7 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
         # (өмнө нь кодод хатуу бичигдсэн байв — 2026-08-21).
         from .services.app_settings import get_autoclose_rules
         if due > 0 and get_autoclose_rules(db, site_id)["create_debt_reentry"]:
-            comp = create_compensation(db, existing, "unpaid_exit", "system")
-            comp.amount = due
+            create_compensation(db, existing, "unpaid_exit", "system", amount=due)
         # Энэ зам ямар ч AuditLog үлдээдэггүй байсан тул Түүх дээр «хэн хаасан»
         # нь хоосон харагддаг байв — хамгийн будлиантай тохиолдол (машин гарах
         # хаалтанд уншигдаад төлөлгүй үлдчихээд дахин орж ирсэн).
@@ -1918,15 +1980,13 @@ def _inner_exit_candidate(db: Session, device: Device, plate: str,
     parent = match_paused_parent(db, site, plate, now)
     if parent is None:
         return None
-    if (now - parent.paused_since).total_seconds() <= 60 * int(
-            _exit_rules(db, site.id)["fake_exit_minutes"]):
+    if (now - parent.paused_since).total_seconds() <= 60 * inner_cross_read_minutes(db, site.id):
         return None
     from .services.app_settings import get_blacklist_rules
     _block_at = get_blacklist_rules(db, site.id)["block_exit_debt_count"]
     if _block_at and find_registered(db, parent.plate_number, site.id) is None:
         from .models import Compensation
-        if (db.query(Compensation).filter(Compensation.plate_number == parent.plate_number,
-                                          Compensation.status == "PENDING").count() >= _block_at):
+        if len(blocking_debts(db, parent.plate_number, site.id)) >= _block_at:
             return None
     return parent
 
@@ -2036,7 +2096,18 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # candidate needs the operator's current-lane image review — EXCEPT a
     # measured OCR confusion with exactly one nearby active stay (2026-10-12:
     # the blanket review stopped ~80% of former EXIT_OCR_MATCH openings).
-    ocr_session = (None if get_open_session(db, plate, site_id)
+    # ДӨНГӨЖ ГАРСАН машины давтан уншилт (ЯГ/жигдэлсэн ижил эсвэл тайрсан) бол
+    # өөр машины сешнийг тааж тохоохгүй, эхний review шатуудыг алгасаж доорх
+    # dedup / recent_exit_reread урсгалаар явна (2026-10-24 аудит: 1234УКА гарсны
+    # 4с дараах давтан уншилт ойролцоо 1234УНА-ийн OPEN сешнийг AWAITING болгодог байв).
+    _rr_early = None
+    if get_open_session(db, plate, site_id) is None and find_registered(db, plate, site_id) is None:
+        _rr_early = recent_exit_reread(db, plate, site_id, now,
+                                       int(_exit_rules(db, site_id).get("exit_reread_seconds") or 0))
+        if _rr_early is not None and not (_ocr_canon(_rr_early.plate_number) == _ocr_canon(plate)
+                                          or plates_truncated_read(plate, _rr_early.plate_number)):
+            _rr_early = None
+    ocr_session = (None if (get_open_session(db, plate, site_id) or _rr_early is not None)
                    else ocr_confusion_match(db, plate, site_id))
     truncated = (ocr_session is not None
                  and plates_truncated_read(plate, ocr_session.plate_number))
@@ -2047,9 +2118,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # алгасаж, ердийн сэргээлтийн (auto_reopen) дараа `_inner_exit_fallback`-аар
     # гаргана. Үл мэдэгдэх машинд None — review хэвээр.
     _fb_parent = (_inner_exit_candidate(db, device, plate, now)
-                  if ocr_session is None and get_open_session(db, plate, site_id) is None
+                  if ocr_session is None and _rr_early is None
+                  and get_open_session(db, plate, site_id) is None
                   else None)
-    if ocr_session is None and _fb_parent is None:
+    if ocr_session is None and _fb_parent is None and _rr_early is None:
         if not is_valid_plate(plate):
             return reject_exit_for_review(db, device, plate, confidence, raw, 'invalid_plate_review')
         _candidate, fuzzy_candidate = match_open_session(db, plate, site_id)
@@ -2228,8 +2300,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
 
     # #6 Өртэй машин — гарах камерт уншигдмагц касст шууд сануулах
     from .models import Compensation
-    debts = db.query(Compensation).filter(Compensation.plate_number == plate,
-                                          Compensation.status == "PENDING").all()
+    debts = blocking_debts(db, plate, site_id)   # хориг/сануулга = QR-ийн хүрээ (түрээслэгч)
     debt_amount = float(sum(c.amount for c in debts))
     if debts:
         notify(site_id, "DEBT_ALERT", {
@@ -2367,6 +2438,10 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     from .services.app_settings import get_blacklist_rules
     _exit_block_at = get_blacklist_rules(db, site_id)["block_exit_debt_count"]
     if _exit_block_at and len(debts) >= _exit_block_at and not session.is_registered:
+        if session.status == "PAID":
+            # begin_wait дээр PAID алгасагддаг — эс бөгөөс payment_wait_started_at
+            # NULL хэвээр AWAITING болж авто цэвэрлэгээнд хэзээ ч орохгүй байв
+            begin_wait(db, session, fee, now, restart=True)
         session.status = "AWAITING_PAYMENT"
         session.duration_minutes = fee["duration_minutes"]
         session.base_fee, session.vat_amount, session.total_fee = (
@@ -2417,7 +2492,9 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Үлдэгдэл ХҮРЭЛЦВЭЛ: хасаад шууд нээнэ — жолооч юу ч хийхгүй.
     # ХҮРЭЛЦЭХГҮЙ бол: байгааг нь хасаад үлдсэн дүнд ердийн QR урсгал.
     # Данс нь EV-ээс хамааралгүй бие даасан боломж — бүх жолоочид ажиллана.
-    if due > 0 and _xr.get("wallet_auto_deduct", True) and not truncated:
+    # Тааж тохоосон (OCR/тайралт) сешнд данснаас ХАСАХГҮЙ — гарцад байгаа машин
+    # тэр дансны эзэн биш байж болно (2026-10-24 аудит).
+    if due > 0 and _xr.get("wallet_auto_deduct", True) and not fuzzy:
         try:
             deducted, covered = await _wallet_auto_deduct(db, session, due)
         except Exception:  # the debit and PAID marker must roll back together
@@ -2690,7 +2767,8 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
     db.flush()
     exit_device, event, waiting_reason = fresh_presence(db, session, now)
     review_read = False
-    if exit_device is None and waiting_reason == 'waiting_for_exit_read':
+    # Кассчин эгнээгээ сонгосон (POS) бол тэр нотолгоо түрүүлнэ — F5 алгасна
+    if exit_device is None and waiting_reason == 'waiting_for_exit_read' and pos_lane is None:
         # F5 (2026-10-24): гарах уншилт review болсон (орох буруу, гарах зөв г.м.)
         # ч ойролцоо дугаартай ГАНЦ камерт сүүлийн 5 минутад уншигдсан бол тэр эгнээ
         from .services.exit_presence import review_read_presence
@@ -2704,9 +2782,17 @@ async def mark_paid_and_open(db: Session, session: ParkingSession, grace_minutes
             if review_read:
                 from .models import AuditLog
                 session.exit_device_id = exit_device.id
+                entry_plate = session.plate_number
+                # Орох камер формат буруу/тайрч уншсан, гарах камер ЗӨВ (3163УУ ← 3163УЕУ):
+                # дугаарыг засна — эс бөгөөс хаалтаар гарах үеийн давтан уншилт
+                # танигдахгүй, 2000₮-ийн «орох уншилтгүй» хий сешн үүсдэг байв.
+                corrected = (not is_valid_plate(entry_plate) and is_valid_plate(event.plate_number))
+                if corrected:
+                    session.plate_number = event.plate_number
                 db.add(AuditLog(username='system', action='PAYMENT_REVIEW_READ_OPEN',
                     entity='session', entity_id=session.id,
-                    detail={'session_plate': session.plate_number, 'read_plate': event.plate_number,
+                    detail={'session_plate': entry_plate, 'read_plate': event.plate_number,
+                            'corrected': corrected,
                             'review_reason': event.reject_reason, 'event_id': event.id,
                             'read_at': event.created_at.isoformat(), 'camera_id': exit_device.id,
                             'lane_no': exit_device.lane_no}))
@@ -2761,11 +2847,9 @@ def exit_policy_block(db, session, now, exclude_debt_ids=None):
         return 'minimum_stay'
     threshold = get_blacklist_rules(db, session.site_id)['block_exit_debt_count']
     if threshold and not registered:
-        q = db.query(Compensation.id).filter(Compensation.plate_number == session.plate_number,
-                                            Compensation.status == 'PENDING')
-        if exclude_debt_ids:
-            q = q.filter(~Compensation.id.in_(list(exclude_debt_ids)))
-        count = q.count()
+        excluded = set(exclude_debt_ids or ())
+        count = sum(1 for c in blocking_debts(db, session.plate_number, session.site_id)
+                    if c.id not in excluded)
         if count >= threshold:
             return 'debt_rule'
     return None

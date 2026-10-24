@@ -3,6 +3,7 @@ import re
 import secrets
 from datetime import datetime, timedelta
 
+from ..session_logic import admin_plate
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
@@ -2175,7 +2176,7 @@ def create_driver(payload: schemas.DriverCreate, db: Session = Depends(get_db), 
             raise HTTPException(403, "«Бүх зогсоол» бүртгэлийг түрээслэгчийн хэрэглэгч л хийнэ — зогсоолоо сонгоно уу.")
     _driver_validate(body)
     _driver_company(body)
-    plate = body["plate_number"].upper().replace(" ", "")
+    plate = admin_plate(body["plate_number"])
     tenant_id = _site_tenant(db, site_id) if site_id else user.tenant_id
     dup = _driver_duplicate(db, plate, site_id, tenant_id)
     if dup:
@@ -2268,7 +2269,7 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
     _driver_validate(body, d)
     _driver_company(body, d)
     # Дугаар/хамрах хүрээ өөрчлөгдөж эсвэл идэвхжиж байвал давхардал шалгана
-    new_plate = (body.get("plate_number") or d.plate_number).upper().replace(" ", "")
+    new_plate = admin_plate(body["plate_number"]) if body.get("plate_number") else d.plate_number
     new_site = body["site_id"] if "site_id" in body else d.site_id
     new_tenant = (_site_tenant(db, new_site) if new_site else (user.tenant_id or d.tenant_id)) \
         if "site_id" in body else d.tenant_id
@@ -2294,7 +2295,7 @@ def update_driver(driver_id: str, payload: schemas.DriverUpdate, db: Session = D
         # засварлагчийн түрээслэгч (эсвэл хуучин утга) хэвээр
         d.tenant_id = _site_tenant(db, body["site_id"]) if body["site_id"] else (user.tenant_id or d.tenant_id)
     if body.get("plate_number"):
-        d.plate_number = body["plate_number"].upper().replace(" ", "")
+        d.plate_number = new_plate
     if body.get("valid_from"):
         d.valid_from = _parse_dt(body["valid_from"], "valid_from")
     if body.get("valid_to"):
@@ -2851,7 +2852,7 @@ def clear_blacklist(body: dict, db: Session = Depends(get_db),
 
 @router.post("/blacklist")
 def add_blacklist(body: dict, db: Session = Depends(get_db), user: User = Depends(require("blacklist"))):
-    b = BlacklistEntry(plate_number=body["plate_number"].upper().replace(" ", ""),
+    b = BlacklistEntry(plate_number=admin_plate(body["plate_number"]),
                        reason=body.get("reason", ""), created_by=user.username)
     db.add(b)
     db.flush()

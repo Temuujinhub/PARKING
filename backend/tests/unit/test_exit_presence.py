@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 from app import models as M, session_logic as SL
 from app.database import Base
 from app.routers import payments_router as PR, sessions_router as SR
+# public_router-ийг fixture session_fee_info-г patch хийхээс ӨМНӨ import хийнэ — эс бөгөөс
+# түүний `from ..session_logic import session_fee_info` нэр хуурамч функцийг барьж үлддэг.
+from app.routers import public_router as PUB
 from app.services import app_settings as A
 from app.services.payment_validation import gate_result
 
@@ -301,7 +304,6 @@ def test_own_truncated_reread_does_not_block_payment_opening(ctx):
 
 def _public_lookup(c, monkeypatch, typed):
     from starlette.requests import Request
-    from app.routers import public_router as PUB
     monkeypatch.setattr(PUB,'session_fee_info',lambda *a,**kw:dict(FEE))
     monkeypatch.setattr(PUB,'amount_due',lambda *a,**kw:1000)
     req=Request({'type':'http','headers':[],'client':('198.51.100.7',1)})
@@ -405,3 +407,270 @@ def test_near_review_read_is_not_enough(ctx, fault):
 ])
 def test_paid_near_rule(read, stay_plate, ok):
     assert SL.plates_paid_near(read, stay_plate) is ok
+
+
+# ── 2026-10-24 аудит, 1-р шат: F5 хамгаалалт, хаалт дахин нээх цонх, данс ──
+
+def flat_fee(c, **extra):
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'wallet_auto_deduct':False,'no_session_fee':2000,**extra},'test');c.db.commit()
+
+
+def test_f5_corrects_malformed_entry_plate_so_passing_reread_is_no_phantom(ctx):
+    # 1a: «3163УУ» F5-аар нээгдэв → хаалтаар гарахдаа «3163УЕУ» дахин уншигдав → 2000₮ хий сешн ҮҮСЭХГҮЙ
+    c=ctx;flat_fee(c);s=stay(c,plate='3163УУ')
+    assert review(c,'3163УЕУ')['reason']=='plate_mismatch_review'   # суурь хураамж биш
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and s.plate_number=='3163УЕУ'
+    assert c.db.query(M.AuditLog).filter_by(action='PAYMENT_REVIEW_READ_OPEN').one().detail['corrected'] is True
+    r=review(c,'3163УЕУ')
+    assert r['action']=='reread' and c.db.query(M.ParkingSession).count()==1
+
+
+def _review_event(c, plate, age=30, cam=None):
+    e=M.LprEvent(site_id=c.site.id,device_id=(cam or c.cams[1]).id,plate_number=plate,lane_dir='exit',
+                 confidence=90,accepted=False,reject_reason='plate_mismatch_review',raw={},
+                 created_at=datetime.utcnow()-timedelta(seconds=age))
+    c.db.add(e);c.db.commit();return e
+
+
+def test_f5_skips_reread_of_a_car_that_just_left(ctx):
+    # 1b: зангуу «0539УАТ» нь 60с өмнө гарсан 0539УАК-ийн давтан уншилт байж болно
+    c=ctx;no_flat_fee(c);s=stay(c,plate='0539УАП')
+    gone=stay(c,plate='0539УАК',status='CLOSED',camera=c.cams[1])
+    gone.exit_time=datetime.utcnow()-timedelta(seconds=60);c.db.commit()
+    _review_event(c,'0539УАТ',age=30)
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='PAID' and not c.commands
+
+
+def test_f5_skips_lane_opened_by_hand_after_the_read(ctx):
+    # 1c: оператор зангуунаас хойш тэр эгнээг гараар нээсэн → машин аль хэдийн гарсан байж болно
+    c=ctx;no_flat_fee(c);s=stay(c,plate='0539УАП')
+    _review_event(c,'0539УАТ',age=60)
+    c.db.add(M.BarrierCommand(device_id=c.bars[1].id,command='open',command_source='manual',status='SUCCESS',
+                              created_at=datetime.utcnow()-timedelta(seconds=20)));c.db.commit()
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='PAID' and not c.commands
+
+
+def test_reread_window_also_reopens_the_barrier(ctx):
+    # 1d: exit_reread_seconds=900 — төлсөн машин 7 мин дараа ижил эгнээнд дахин уншигдвал хаалт нээнэ
+    c=ctx;flat_fee(c,exit_reread_seconds=900);s=stay(c,plate='5979УНТ');read(c,s,c.cams[1])
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and len(c.commands)==1
+    s.exit_time=datetime.utcnow()-timedelta(minutes=7);c.db.commit()
+    for e in c.db.query(M.LprEvent).all()+c.db.query(M.BarrierCommand).all(): e.created_at-=timedelta(minutes=7)
+    c.db.commit()
+    r=review(c,'5979УНТ')
+    assert r['action']=='reread' and r['barrier_opened'] and len(c.commands)==2
+    assert c.db.query(M.ParkingSession).count()==1   # 2000₮ сешн үүсээгүй
+
+
+def test_wallet_is_never_debited_for_a_guessed_plate(ctx):
+    # 1e: OCR андуурлаар (К↔Н) тохоосон сешний эзний данснаас хасахгүй
+    c=ctx;no_flat_fee(c)
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'wallet_auto_deduct':True},'test');c.db.commit()
+    s=stay(c,plate='1041УКС')
+    w=M.Wallet(tenant_id=None,plate_number='1041УКС',phone='',name='',balance=50000,status='ACTIVE')
+    c.db.add(w);c.db.commit()
+    r=review(c,'1041УНС')
+    assert r['action']=='awaiting_payment' and float(w.balance)==50000 and not c.commands
+
+
+# ── 2-р шат: дөнгөж гарсан машины давтан уншилт өөр сешнийг булаахгүй; орох dedup ──
+
+def _leave(c, plate, cam):
+    s=stay(c,plate=plate);read(c,s,cam)
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED';return s
+
+
+def test_departed_car_reread_does_not_grab_neighbour_stay(ctx):
+    c=ctx;no_flat_fee(c);gone=_leave(c,'1234УКА',c.cams[1])
+    other=stay(c,plate='1234УНА')            # К↔Н хэмжигдсэн хос — өмнө нь энэ сешн «булаагддаг» байв
+    r=review(c,'1234УКА')
+    assert r['action'] in ('dedup','reread') and other.status=='OPEN' and other.exit_device_id is None
+
+
+def test_departed_car_truncated_reread_does_not_grab_neighbour_stay(ctx):
+    c=ctx;no_flat_fee(c);_leave(c,'1234УКА',c.cams[1])
+    other=stay(c,plate='1234УКБ')            # «1234УК» нь хоёуланд тайралт
+    review(c,'1234УК')
+    assert other.status=='OPEN' and other.exit_device_id is None
+
+
+@pytest.mark.parametrize('new,old,dup', [
+    ('2943УКН','2942УКН',False),   # өөр машин (2↔3)
+    ('2942УНН','2942УКН',True),    # К↔Н хэмжигдсэн
+    ('2942УКН','2942УКН',True),
+    ('2942УК','2942УКН',True),     # тайрсан хог
+    ('5551ХК','ХК',False),         # цифргүй хуучин хог — өмнө нь ҮРГЭЛЖ давхар гэдэг байв
+    ('4627КД','4627УКА',True),     # 08-14 хэмжилтийн жишээ
+])
+def test_entry_duplicate_read_rule(new, old, dup):
+    assert SL.is_duplicate_read(new, old) is dup
+
+
+# ── 3-р шат: хий өр — гараар/онцгой гаргалт, нөхөн төлбөр, AWAITING, давтан уншилт ──
+
+def _manual(c, s, **body):
+    SR.open_barrier = SL.open_barrier     # fixture-ийн хуурамч нээгч (sessions_router өөрийн нэрээр дууддаг)
+    return asyncio.run(SR.manual_exit(s.id, {'reason_code': '', 'reason': 'тест гаргалт', **body}, c.db, c.user))
+
+
+@pytest.fixture(autouse=False)
+def sr_open(monkeypatch):
+    from app.services import barrier as B
+    monkeypatch.setattr(SR, 'open_barrier', B.open_barrier)   # тест бүрийн дараа сэргээнэ
+    yield
+
+
+def test_manual_exit_on_multi_lane_site_requires_a_lane(ctx, sr_open):
+    from fastapi import HTTPException
+    c=ctx;s=stay(c)
+    with pytest.raises(HTTPException) as err:
+        _manual(c,s,open_barrier=True)
+    assert err.value.status_code==409 and s.status=='OPEN' and not c.commands
+    _manual(c,s,open_barrier=True,device_id=c.bars[1].id)
+    assert s.status=='MANUAL_CLOSED' and s.exit_device_id==c.cams[1].id
+    assert c.commands==[(c.bars[1].id,s.id,'manual')]
+
+
+def test_manual_exit_on_single_lane_site_needs_no_lane(ctx, sr_open):
+    c=ctx;c.cams[1].status='inactive';c.bars[1].status='inactive';c.db.commit();s=stay(c)
+    _manual(c,s,open_barrier=True)
+    assert c.commands==[(c.bars[0].id,s.id,'manual')]
+
+
+def test_manual_exit_refuses_already_closed_stay(ctx, sr_open):
+    from fastapi import HTTPException
+    c=ctx;s=stay(c,status='FREE')
+    with pytest.raises(HTTPException) as err:
+        _manual(c,s,open_barrier=True,device_id=c.bars[0].id,create_compensation=True)
+    assert err.value.status_code==409 and s.status=='FREE' and not c.commands
+    assert c.db.query(M.Compensation).count()==0
+
+
+def test_special_exit_without_read_on_multi_lane_requires_lane(ctx, sr_open):
+    from fastapi import HTTPException
+    c=ctx;s=stay(c)
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(SR.special_exit(s.id,{'kind':'emergency'},c.db,c.user))
+    assert err.value.status_code==409 and s.status=='OPEN' and not c.commands
+
+
+def test_compensation_is_the_unpaid_remainder(ctx):
+    from app.routers.compensations_router import create_compensation
+    c=ctx;s=stay(c)
+    c.db.add(M.Payment(session_id=s.id,provider='WALLET',payment_method='WALLET',sender_invoice_no='part-1',
+                       status='PAID',amount=400,paid_at=datetime.utcnow()));c.db.commit()
+    comp=create_compensation(c.db,s,'manual','тест')
+    assert float(comp.amount)==600              # 1000 − 400 (өмнө нь 1000 бичдэг байв)
+    c.db.add(M.Payment(session_id=s.id,provider='CASH',payment_method='CASH',sender_invoice_no='part-2',
+                       status='PAID',amount=600,paid_at=datetime.utcnow()));c.db.commit()
+    assert create_compensation(c.db,s,'manual','тест') is None
+
+
+def _run_autoclose(c, monkeypatch):
+    from app.services import auto_close as AC
+    monkeypatch.setattr(AC,'SessionLocal',lambda:c.db)
+    monkeypatch.setattr(c.db,'close',lambda:None)
+    return AC.run_once()
+
+
+def test_awaiting_timeout_counts_from_latest_exit_read(ctx, monkeypatch):
+    c=ctx;s=stay(c,status='AWAITING_PAYMENT',age=300)
+    s.payment_wait_started_at=datetime.utcnow()-timedelta(hours=3)
+    s.last_exit_seen_at=datetime.utcnow()-timedelta(minutes=5)     # гарцад саяхан дахин уншигдсан
+    s.updated_at=datetime.utcnow()-timedelta(hours=2);c.db.commit()
+    _run_autoclose(c,monkeypatch)
+    assert s.status=='AWAITING_PAYMENT' and c.db.query(M.Compensation).count()==0
+    s.last_exit_seen_at=datetime.utcnow()-timedelta(hours=3);c.db.commit()
+    _run_autoclose(c,monkeypatch)
+    assert s.status!='AWAITING_PAYMENT'
+
+
+def test_reread_after_10_minutes_only_without_reentry(ctx):
+    # D4: 15 мин цонх; 5 минутаас хойш бол тэр хооронд орох уншилт байх ёсгүй
+    c=ctx;flat_fee(c);s=stay(c,plate='5979УНТ');read(c,s,c.cams[1])
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    s.exit_time=datetime.utcnow()-timedelta(minutes=10);c.db.commit()
+    for e in c.db.query(M.LprEvent).all()+c.db.query(M.BarrierCommand).all(): e.created_at-=timedelta(minutes=10)
+    c.db.commit()
+    assert review(c,'5979УНТ')['action']=='reread'
+    # орох камерт уншигдсан (дахин орсон) бол давтан уншилт БИШ
+    assert SL.recent_exit_reread(c.db,'5979УНТ',c.site.id,datetime.utcnow(),900) is not None
+    c.db.add(M.LprEvent(site_id=c.site.id,device_id=c.cams[0].id,plate_number='5979УНТ',lane_dir='entry',
+                        confidence=90,accepted=True,raw={},created_at=datetime.utcnow()-timedelta(minutes=3)))
+    c.db.commit()
+    assert SL.recent_exit_reread(c.db,'5979УНТ',c.site.id,datetime.utcnow(),900) is None
+
+
+def test_reentry_after_paid_grace_starts_a_new_stay(ctx):
+    # 2i: 11:00 төлсөн (deadline 11:15), уншилтгүй гарсан, 11:40 дахин орсон
+    from sqlalchemy import text
+    c=ctx
+    # SQLite-д uq_active_session нөхцөлгүй (postgresql_where л) — продын адил partial болгоно
+    c.db.execute(text("DROP INDEX IF EXISTS uq_active_session"))
+    c.db.execute(text("CREATE UNIQUE INDEX uq_active_session ON parking_sessions(site_id, plate_number) "
+                      "WHERE status IN ('OPEN','AWAITING_PAYMENT','PAID')"));c.db.commit()
+    s=stay(c,plate='7777УБА',age=120)
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    s.paid_at-=timedelta(minutes=40);s.exit_deadline=s.paid_at+timedelta(minutes=15);c.db.commit()
+    entry_cam=M.Device(site_id=c.site.id,name='Entry',device_type='camera',lane_dir='entry',lane_no=1,
+                       status='active',nested_inner=False,ip_address='192.0.2.9')
+    c.db.add(entry_cam);c.db.commit()
+    asyncio.run(SL.handle_entry(c.db,entry_cam,'7777УБА',95,{}))
+    stays=c.db.query(M.ParkingSession).filter_by(plate_number='7777УБА').all()
+    assert len(stays)==2 and s.status=='CLOSED' and any(x.status=='OPEN' for x in stays)
+
+
+# ── 4-р шат: өрийн хориг = тухайн түрээслэгч; camsync давхар сешн ──
+
+def test_other_tenant_debts_do_not_block_payment_opening(ctx):
+    c=ctx;s=stay(c);read(c,s,c.cams[1])
+    tenant=M.Tenant(name='Other',code='OTH');c.db.add(tenant);c.db.flush()
+    other=M.ParkingSite(name='Other site',site_code='OTH',tenant_id=tenant.id);c.db.add(other);c.db.flush()
+    A.set_site_rules(c.db,A.BLACKLIST_KEY,c.site.id,{'block_exit_debt_count':1},'test')
+    c.db.add(M.Compensation(site_id=other.id,plate_number=s.plate_number,amount=5000,status='PENDING',reason='t'))
+    c.db.commit()
+    asyncio.run(SL.mark_paid_and_open(c.db,s,fee_snapshot=dict(FEE)))
+    assert s.status=='CLOSED' and c.commands==[(c.bars[1].id,s.id,'payment')]
+
+
+# ── 5-р шат: гараар оруулах дугаар, тохиргооны шахалт/хуучин давхарга, доторх босго ──
+
+@pytest.mark.parametrize('raw,out', [('1234 уба','1234УБА'),('1234-УБА','1234УБА'),('12.34УБА','1234УБА')])
+def test_admin_plate_cleans_separators(raw, out):
+    assert SL.admin_plate(raw)==out
+
+
+@pytest.mark.parametrize('raw,strict', [('1234УБA',True),('1234YBA',False),('12УБА',True),('',False)])
+def test_admin_plate_rejects_latin_and_bad_format(raw, strict):
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        SL.admin_plate(raw, strict_format=strict)
+
+
+def test_old_rule_endpoints_are_clamped_and_legacy_overlay_resets(ctx):
+    c=ctx
+    A.set_rules(c.db,A.EXITRULES_KEY,{'exit_read_valid_minutes':1440,'reopen_max_hours':0},'t');c.db.commit()
+    r=A.get_exit_rules(c.db,None)
+    assert r['exit_read_valid_minutes']==60 and r['reopen_max_hours']==1
+    A.set_rules(c.db,A.BARRIER_KEY,{'dedup_seconds':0},'t');c.db.commit()
+    assert A.get_barrier_rules(c.db,None)['dedup_seconds']==3
+    # хуучин site_overrides: «глобал руу буцаах» нь түүнийг ч устгана
+    row=c.db.query(M.AppSetting).filter_by(key=A.EXITRULES_KEY).one()
+    row.value={**row.value,'site_overrides':{c.site.id:'0'},'no_session_fee':2000};c.db.commit();A.invalidate_cache()
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'no_session_fee':3000},'t');c.db.commit();A.invalidate_cache()
+    assert A.no_session_exit_fee(c.db,c.site.id)==3000
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'no_session_fee':None},'t');c.db.commit();A.invalidate_cache()
+    assert A.no_session_exit_fee(c.db,c.site.id)==2000          # өмнө нь хуучин 0 нууцаар буцдаг байв
+
+
+def test_inner_cross_read_threshold_is_separate_from_fake_exit(ctx):
+    c=ctx
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'fake_exit_minutes':30},'t');c.db.commit()
+    assert SL.inner_cross_read_minutes(c.db,c.site.id)==30     # 0 = хуучнаар fake_exit-ийг дагана
+    A.set_site_rules(c.db,A.EXITRULES_KEY,c.site.id,{'inner_cross_read_minutes':2},'t');c.db.commit()
+    assert SL.inner_cross_read_minutes(c.db,c.site.id)==2

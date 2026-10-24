@@ -160,12 +160,19 @@ def run_once() -> int:
                 stale = q.order_by(ParkingSession.entry_time).limit(100).all()
             aw_hours = rules["awaiting_hours"]
             if aw_hours and aw_hours > 0:
+                # Хугацааг СҮҮЛИЙН гарах уншилтаас тоолно: гарцад саяхан дахин
+                # уншигдсан машин (ухарч орсон, хаалтан дээр хүлээж буй) 2ц-ийн
+                # хил дээр өр болж хаагддаг байв (2026-10-24 аудит). payment_wait
+                # NULL байвал updated_at — эс бөгөөс хэзээ ч хаагдахгүй үлддэг.
+                from sqlalchemy import func as _f
+                _last = _f.coalesce(ParkingSession.last_exit_seen_at,
+                                    ParkingSession.payment_wait_started_at,
+                                    ParkingSession.updated_at)
                 awaiting = (db.query(ParkingSession)
                             .filter(ParkingSession.site_id == site.id,
                                     ParkingSession.status == "AWAITING_PAYMENT",
-                                    ParkingSession.payment_wait_started_at <=
-                                    now - timedelta(hours=aw_hours))
-                            .order_by(ParkingSession.payment_wait_started_at)
+                                    _last <= now - timedelta(hours=aw_hours))
+                            .order_by(_last)
                             .limit(200).all())
                 stale += awaiting
             for s in stale:

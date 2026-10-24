@@ -135,6 +135,24 @@ def review_read_presence(db, stay, now=None):
         ParkingSession.status.in_(['OPEN', 'AWAITING_PAYMENT', 'PAID'])).all()
     if any(p == anchor.plate_number or plates_paid_near(anchor.plate_number, p) for (p,) in others):
         return None, None   # уншилт өөр сешнтэй ч ойролцоо — хоёрдмол
+    # Дөнгөж ГАРСАН машины давтан уншилт байж болно (replay: 233-аас 6) — зангуунаас
+    # 5 мин өмнөөс хойш гарцаар хаагдсан ижил/ойролцоо дугаартай сешн байвал алгасна.
+    departed = db.query(ParkingSession.plate_number).filter(
+        ParkingSession.site_id == stay.site_id, ParkingSession.id != stay.id,
+        ParkingSession.status.in_(['CLOSED', 'FREE', 'MANUAL_CLOSED']),
+        ParkingSession.exit_time >= anchor.created_at - timedelta(seconds=REVIEW_READ_SECONDS)).all()
+    if any(p == anchor.plate_number or plates_paid_near(anchor.plate_number, p) for (p,) in departed):
+        return None, None
+    # Зангуунаас хойш тэр эгнээний хаалтыг оператор ГАРААР нээсэн бол тэр машин
+    # аль хэдийн гарсан байж болно — хаалтыг хоосон эгнээнд дахин нээхгүй.
+    from ..models import BarrierCommand
+    from ..session_logic import _find_barrier
+    gate = _find_barrier(db, stay.site_id, cam)
+    if gate is not None and db.query(BarrierCommand.id).filter(
+            BarrierCommand.device_id == gate.id, BarrierCommand.command_source == 'manual',
+            BarrierCommand.created_at > anchor.created_at,
+            BarrierCommand.created_at <= now).first():
+        return None, None
     newer = (db.query(LprEvent.plate_number).filter(
         LprEvent.site_id == stay.site_id, LprEvent.device_id == cam.id, LprEvent.lane_dir == 'exit',
         LprEvent.created_at > anchor.created_at, LprEvent.created_at <= now).all())

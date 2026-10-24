@@ -183,8 +183,10 @@ export default function Cashier() {
   const doFreeExit = async (body) => {
     setBusy(true)
     try {
+      // Олон гарах эгнээтэй зогсоолд сервер эгнээ шаардана (2026-10-24) — дээд талын
+      // «эгнээ» сонголтыг илгээнэ; сонгоогүй бол сервер «эгнээгээ сонгоно уу» гэнэ
       await api(`/api/sessions/${selected.id}/manual-exit`,
-        { method: 'POST', body: { open_barrier: true, ...body } })
+        { method: 'POST', body: { open_barrier: true, device_id: laneRef.current || undefined, ...body } })
       toast(body.create_compensation ? 'Гаргаж, нөхөн төлбөрийн нэхэмжлэл үүслээ' : 'Гаргалаа')
       setFreeExit(false); setSelected(null); loadExits(siteId)
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
@@ -196,7 +198,8 @@ export default function Cashier() {
   const doSpecialExit = async (body) => {
     setBusy(true)
     try {
-      const r = await api(`/api/sessions/${selected.id}/special-exit`, { method: 'POST', body })
+      const r = await api(`/api/sessions/${selected.id}/special-exit`,
+        { method: 'POST', body: { device_id: laneRef.current || undefined, ...body } })
       toast(r.barrier_opened ? 'Хаалт нээгдлээ' : 'Бүртгэл хаагдлаа (хаалтны команд амжилтгүй — Хаалтны удирдлагыг шалгана уу)',
         r.barrier_opened ? 'success' : 'error')
       setSpecialKind(null); setSelected(null); loadExits(siteId)

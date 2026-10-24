@@ -69,7 +69,11 @@ DEFAULTS: dict[str, dict] = {
         # төлсөн (бодит), 2ц+ хоцорсон 10-аас 9 нь хий дүн → босго 2ц. 0 = унтраах.
         "paid_exit_hours": 2,
         "entry_only_free_hours": 72,  # зөвхөн орох уншилттай (гарц уншаагүй) → үнэгүй
-        "invalid_plate_hours": 2,   # формат буруу (junk) дугаар → үнэгүй хаана
+        # формат буруу (junk) дугаар → үнэгүй хаана. 2→6 (2026-10-24 шийдвэр): 2ц бол
+        # 2+ цаг зогссон бодит машин гарахдаа орох сешнээ алдаж 2000₮ суурь хураамж
+        # төлдөг байв (3-р шатны тайралт тохиролт сешнээ олох ёстой). .env-ийн
+        # invalid_plate_close_hours уншигддаггүй — ганц эх үүсвэр нь энэ.
+        "invalid_plate_hours": 6,
         # ── ӨР ҮҮСГЭХ БУСАД ЗАМУУД (2026-08-21) ────────────────────────────
         # Өмнө нь эдгээр нь кодод ХАТУУ бичигдсэн байсан тул «өр дахин
         # хуримтлагдаж байна» гэдэгт зөвхөн deploy-оор л нөлөөлж болдог байв.
@@ -143,6 +147,9 @@ DEFAULTS: dict[str, dict] = {
         # машин ДАХИН гарцад ирэхэд хаагдсан бүртгэл нь сэргээгдэнэ
         # (.env: suspicious_exit_minutes байсан).
         "fake_exit_minutes": 2,
+        # ДОТООД зогсоолын «батлагдсан гарц»-ын босго (мин) — fake_exit_minutes-ээс
+        # тусдаа (2026-10-24). 0 = fake_exit_minutes-ийг дагана (хуучин зан).
+        "inner_cross_read_minutes": 0,
         # Гарах уншилтаар авто сэргээх дээд хугацаа (кодод REOPEN_MAX_HOURS).
         # 48 → 12 (2026-09-13): 48ц цонх 2 хоногийн өмнөх хаагдсан зогсолтыг
         # сэргээж 50,000₮ нэхдэг байв (Маршил 53 сешн, 2.6 сая₮ хий дүн).
@@ -166,7 +173,7 @@ DEFAULTS: dict[str, dict] = {
         # хий 2000₮ (ихэнх нь төлсний дараах давтан уншилт) + Хангарьд 2942УКН
         # 5,000₮. 300с = ensure_exit_barrier_if_cleared-ийн «5 мин дотор
         # хаагдсан» эрхтэй ижил. 0 = унтраах.
-        "exit_reread_seconds": 300,
+        "exit_reread_seconds": 900,   # 2026-10-24: 300→900 (5979УНТ 302с); 5+ мин бол орох уншилтгүй байх нөхцөлтэй
         # ГАРАХ УНШИЛТЫН ХҮЧИНТЭЙ ХУГАЦАА (2026-10-12): гарах камерт уншигдсанаас
         # хойш N минутын дотор төлбөр төлөгдвөл тэр эгнээний хаалтыг нээнэ —
         # тэр камерт энэ машинаас хойш ӨӨР дугаар (хүлээн авсан/татгалзсан/«?»)
@@ -327,8 +334,9 @@ PER_SITE: dict[str, set[str]] = {
                     "create_debt_night_close"},
     ENTRYPLATE_KEY: {"policy", "hold_seconds"},
     EXITRULES_KEY: {"payment_hold_minutes", "no_session_fee", "min_stay_seconds", "fake_exit_minutes",
+                    "inner_cross_read_minutes",
                     "reopen_max_hours", "reopen_skip_exit_read",
-                    "paid_wait_fallback_minutes", "exit_reread_seconds",
+                    "exit_reread_seconds",   # paid_wait_fallback_minutes — үхмэл, хассан (10-24)
                     "exit_read_valid_minutes",
                     "invoice_quote_minutes", "wallet_auto_deduct",
                     "inner_unverified_cap_hours"},
@@ -481,12 +489,20 @@ def get_site_overrides(db, key: str) -> dict:
     return _load(db, key)[1]
 
 
+# Хуучин `site_overrides` давхарга нь аль түлхүүрийг төлөөлдөг вэ — «глобал руу
+# буцаах» үед хуучин мөрийг ч устгана, эс бөгөөс нууцаар дахин үйлчилдэг байв.
+_LEGACY_SITE_KEY = {EXITRULES_KEY: "no_session_fee", ENTRYPLATE_KEY: "policy"}
+
+
 def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> dict:
     """Нэг зогсоолын давхаргыг шинэчилнэ. Утга нь None/"" бол ТУХАЙН түлхүүрийг
-    устгаж глобал руу буцаана; бүх түлхүүр уствал зогсоолын мөр өөрөө арилна."""
+    устгаж глобал руу буцаана; бүх түлхүүр уствал зогсоолын мөр өөрөө арилна.
+    Тоон утга MIN/MAX-д шахагдана (бүх бичих зам нэг дүрэмтэй)."""
     from ..models import AppSetting
+    from .payment_rules import clamp_values
     if key not in DEFAULTS:
         raise ValueError(f"мэдэгдэхгүй бүлэг: {key}")
+    values = clamp_values(key, values or {})
     allowed_keys = PER_SITE.get(key, set())
     row = _write_row(db, key)
     if row is None:
@@ -501,6 +517,10 @@ def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> d
             continue                      # энэ түлхүүр зогсоол бүрээр тохируулагддаггүй
         if v is None or (isinstance(v, str) and not v.strip()):
             site.pop(k, None)             # глобал руу буцаана
+            if _LEGACY_SITE_KEY.get(key) == k:
+                legacy = dict(stored.get("site_overrides") or {})
+                if legacy.pop(site_id, None) is not None:
+                    stored["site_overrides"] = legacy
             continue
         cv = _coerce(DEFAULTS[key][k], v, STR_LIMIT.get((key, k), 30))
         if cv is None:
@@ -521,8 +541,12 @@ def set_site_rules(db, key: str, site_id: str, values: dict, username: str) -> d
 
 
 def set_rules(db, key: str, values: dict, username: str) -> dict:
-    """Дүрмийг хадгална (зөвхөн мэдэгдэж буй түлхүүр, төрлөө шалгана)."""
+    """Дүрмийг хадгална (зөвхөн мэдэгдэж буй түлхүүр, төрлөө шалгана). Тоон утга
+    MIN/MAX-д шахагдана — хуучин PUT endpoint-ууд (/exit/rules, /barrier/rules,
+    /autoclose/rules …) шахалтгүй бичдэг байв (2026-10-24 аудит)."""
     from ..models import AppSetting
+    from .payment_rules import clamp_values
+    values = clamp_values(key, values or {})
     clean: dict = {}
     site_only = SITE_ONLY.get(key, set())
     for k, default in DEFAULTS[key].items():

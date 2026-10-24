@@ -47,7 +47,10 @@ def test_bill_shows_debts_and_exit_block(ctx):
     assert d["payableOnline"] is True
 
 
-def test_bill_debt_of_other_tenant_still_blocks(ctx):
+def test_bill_debt_of_other_tenant_does_not_block(ctx):
+    # 2026-10-24 шийдвэр (Тэмүүжин): өрийн хориг QR цуглуулалттай ИЖИЛ хүрээтэй —
+    # зөвхөн тухайн түрээслэгчийн өр. Өмнө нь өөр компанийн өр бүх төлбөрөө төлсөн
+    # машиныг гарцад гацаадаг байв.
     tenant = M.Tenant(name="Other tenant", code="OT")
     ctx.db.add(tenant); ctx.db.flush()
     ctx.other.tenant_id = tenant.id
@@ -58,9 +61,8 @@ def test_bill_debt_of_other_tenant_still_blocks(ctx):
     for _ in range(3):
         debt(ctx, site=ctx.other)            # өөр түрээслэгчийн өр — энд төлөгдөхгүй
     d = bill(ctx)
-    assert d["debtCount"] == 1 and d["debtAmount"] == 2000.0 and d["exitBlockReason"] == "debt_rule"
-    # Энэ түрээслэгчийн өрийг төлсөн ч өөр түрээслэгчийн 3 өр гарцыг барьсаар
-    assert d["exitBlockReasonWithDebts"] == "debt_rule"
+    assert d["debtCount"] == 1 and d["debtAmount"] == 2000.0 and d["exitBlockReason"] is None
+    assert d["exitBlockReasonWithDebts"] is None
     app_settings.invalidate_cache()
 
 
