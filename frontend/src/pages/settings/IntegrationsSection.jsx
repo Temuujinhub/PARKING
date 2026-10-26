@@ -764,11 +764,19 @@ curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" 
 ]
 
 // Түлхүүр үүсгэх модал — үүссэн түлхүүр НЭГ УДАА л ил гарна
-function KeyCreateModal({ open, sites, onClose, onDone }) {
+// canGlobal=false — түрээслэгч/зогсоолоор хязгаарлагдсан админ: «Бүх зогсоол» болон машин
+// бүртгэлийн түлхүүрийг сервер 403-аар хаадаг тул сонгох боломж өгөхгүй (2026-10-26 гомдол)
+function KeyCreateModal({ open, sites, canGlobal, onClose, onDone }) {
   const toast = useToast()
-  const [f, setF] = useState({ name: '', can_pay: true, can_vehicles: false, site_id: '' })
+  const blank = () => ({ name: '', can_pay: true, can_vehicles: false,
+                         site_id: canGlobal ? '' : (sites[0]?.id || '') })
+  const [f, setF] = useState(blank)
   const [created, setCreated] = useState(null)
-  useEffect(() => { if (open) { setF({ name: '', can_pay: true, can_vehicles: false, site_id: '' }); setCreated(null) } }, [open])
+  useEffect(() => { if (open) { setF(blank()); setCreated(null) } }, [open])
+  // Зөвхөн хоосон зогсоолыг дүүргэнэ — үүсгэсний дараах load() ил гарсан түлхүүрийг арилгахгүй
+  useEffect(() => {
+    if (open && !canGlobal && sites[0]) setF((x) => (x.site_id ? x : { ...x, site_id: sites[0].id }))
+  }, [open, canGlobal, sites])
   if (!open) return null
   const copy = (text) => navigator.clipboard.writeText(text)
     .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
@@ -795,18 +803,26 @@ function KeyCreateModal({ open, sites, onClose, onDone }) {
               onChange={(e) => setF({ ...f, can_pay: e.target.checked })} />
             Төлбөр батлах эрхтэй (унтраавал зөвхөн лавлана)
           </label>
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <input type="checkbox" checked={f.can_vehicles}
-              onChange={(e) => setF({ ...f, can_vehicles: e.target.checked })} />
-            Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay, MonPay …)
-          </label>
+          {canGlobal && (
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={f.can_vehicles}
+                onChange={(e) => setF({ ...f, can_vehicles: e.target.checked })} />
+              Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay, MonPay …)
+            </label>
+          )}
           <Field label="Зогсоолын хязгаар">
-            <select className="input" value={f.site_id}
+            <select className="input" value={f.site_id} required={!canGlobal}
               onChange={(e) => setF({ ...f, site_id: e.target.value })}>
-              <option value="">Бүх зогсоол</option>
+              {canGlobal && <option value="">Бүх зогсоол</option>}
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
             </select>
           </Field>
+          {!canGlobal && (
+            <p className="text-[11px] text-slate-500">
+              Таны эрх өөрийн зогсоолуудаар хязгаарлагдсан тул нэг зогсоолын түлхүүр үүсгэнэ.
+              «Бүх зогсоол» болон машин бүртгэлийн түлхүүрийг бүх зогсоолын эрхтэй админ үүсгэнэ.
+            </p>
+          )}
           <button className="btn-primary w-full justify-center">Үүсгэх</button>
         </form>
       ) : (
@@ -961,12 +977,15 @@ function PartnerApiPanel() {
   const [data, setData] = useState(null)      // админ/супер: {keys, env_partners}
   const [partners, setPartners] = useState(null)  // энгийн админ: зөвхөн нэрс
   const [sites, setSites] = useState([])
+  const [canGlobal, setCanGlobal] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [eventsKey, setEventsKey] = useState(null)   // SocialPay мэдэгдлийн түүх
   const load = () => {
     if (isSuper) {
       api('/api/admin/partner-keys').then(setData).catch((e) => toast(e.message, 'error'))
       api('/api/admin/sites').then(setSites)
+      api('/api/admin/settings-capabilities')
+        .then((c) => setCanGlobal(c.can_edit_global === true)).catch(() => setCanGlobal(false))
     } else {
       api('/api/admin/payment-accounts')
         .then((d) => setPartners(d.partners)).catch(() => setPartners([]))
@@ -1140,7 +1159,7 @@ function PartnerApiPanel() {
         </div>
       )}
 
-      <KeyCreateModal open={createOpen} sites={sites}
+      <KeyCreateModal open={createOpen} sites={sites} canGlobal={canGlobal}
         onClose={() => setCreateOpen(false)} onDone={load} />
       <VehicleEventsModal k={eventsKey} onClose={() => { setEventsKey(null); load() }} />
 
