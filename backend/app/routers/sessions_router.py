@@ -1000,7 +1000,9 @@ async def bulk_remove(body: dict, db: Session = Depends(get_db),
 async def test_awaiting(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("cashier"))):
     """ТЕСТ: камергүйгээр 'Гарах машинууд (төлбөр хүлээж буй)' листэд машин нэмнэ.
-    Зөвхөн тест горим (PARKING_ALLOW_SIMULATE=true) дээр ажиллана."""
+    Зөвхөн тест горим (PARKING_ALLOW_SIMULATE=true) дээр ажиллана.
+    `debts` (1–3): тэр дугаарт өмнөх өдрүүдийн төлөгдөөгүй зогсолт + PENDING өр
+    үүсгэнэ — касс/QR-ийн өр нийлүүлж төлөх урсгалыг камергүй турших (2026-10-26)."""
     import random
     from ..config import settings
     if not settings.allow_simulate:
@@ -1016,6 +1018,22 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
                             f"{random.randint(1000, 9999)}{''.join(random.choice(letters) for _ in range(3))}")
     minutes = int(body.get("minutes") or random.randint(35, 130))
     now = datetime.utcnow()
+    from .compensations_router import create_compensation
+    debts = []
+    for day in range(1, max(0, min(3, int(body.get("debts") or 0))) + 1):
+        amount = int(body.get("debt_amount") or random.choice((2000, 3000, 5000)))
+        vat = round(amount * settings.vat_rate / (1 + settings.vat_rate))
+        entry = now - timedelta(days=day, minutes=random.randint(60, 300))
+        stay = random.randint(60, 240)
+        prev = ParkingSession(site_id=site_id, plate_number=plate, entry_time=entry,
+                              exit_time=entry + timedelta(minutes=stay), exit_confirmed=True,
+                              duration_minutes=stay, status="MANUAL_CLOSED",
+                              base_fee=amount - vat, vat_amount=vat, total_fee=amount,
+                              note="ТЕСТ: төлбөргүй гарсан өмнөх зогсолт")
+        db.add(prev)
+        db.flush()
+        comp = create_compensation(db, prev, "unpaid_exit", user.username, amount=amount)
+        debts.append({"id": comp.id, "amount": amount, "session_id": prev.id})
     s = ParkingSession(site_id=site_id, plate_number=plate, entry_time=now - timedelta(minutes=minutes),
                        status="AWAITING_PAYMENT")
     db.add(s)
@@ -1026,13 +1044,14 @@ async def test_awaiting(body: dict, db: Session = Depends(get_db),
     s.duration_minutes = fee["duration_minutes"]
     s.base_fee, s.vat_amount, s.total_fee = fee["base_fee"], fee["vat_amount"], fee["total_fee"]
     db.add(AuditLog(username=user.username, action="TEST_AWAITING", entity="session",
-                    entity_id=s.id, detail={"plate": plate}))
+                    entity_id=s.id, detail={"plate": plate, "debts": debts}))
     db.commit()
     await manager.broadcast(site_id, "EXIT_LPR_EVENT", {
         "session_id": s.id, "plate": plate, "entry_time": s.entry_time.isoformat(),
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"], "test": True,
     })
-    return _session_out(db, s, with_fee=True)
+    return {**_session_out(db, s, with_fee=True), "test_debts": debts,
+            "debt_total": sum(d["amount"] for d in debts)}
 
 
 @router.get("/{session_id}/snapshot/{kind}")

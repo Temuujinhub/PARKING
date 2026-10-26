@@ -206,11 +206,12 @@ export default function Cashier() {
     } catch (e) { toast(e.message, 'error') } finally { setBusy(false) }
   }
 
-  const addTestCar = async () => {
+  const addTestCar = async (debts = 0) => {
     if (!siteId) return
     try {
-      const s = await api('/api/sessions/test-awaiting', { method: 'POST', body: { site_id: siteId } })
-      toast(`Тест машин нэмэгдлээ: ${s.plate_number} (${fmt(s.fee?.total_fee ?? s.total_fee)}₮)`)
+      const s = await api('/api/sessions/test-awaiting', { method: 'POST', body: { site_id: siteId, debts } })
+      const debtText = s.debt_total ? ` + өр ${fmt(s.debt_total)}₮ (${s.test_debts.length} ш)` : ''
+      toast(`Тест машин нэмэгдлээ: ${s.plate_number} (${fmt(s.fee?.total_fee ?? s.total_fee)}₮${debtText})`)
       loadExits(siteId)
     } catch (e) { toast(e.message, 'error') }
   }
@@ -317,9 +318,15 @@ export default function Cashier() {
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {testMode && (
-            <button onClick={addTestCar} className="btn-secondary border-amber-500/40 text-amber-400"
+            <button onClick={() => addTestCar(0)} className="btn-secondary border-amber-500/40 text-amber-400"
               title="Тест: камергүйгээр гарах машин нэмнэ">
               <FlaskConical size={16} /> Тест машин
+            </button>
+          )}
+          {testMode && (
+            <button onClick={() => addTestCar(2)} className="btn-secondary border-red-500/40 text-red-400"
+              title="Тест: өмнөх 2 төлөгдөөгүй зогсолтын өртэй гарах машин нэмнэ">
+              <FlaskConical size={16} /> Өртэй тест машин
             </button>
           )}
           {canAct && (
