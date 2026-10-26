@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     qpay_recheck_batch_size: int = 20
     qpay_recheck_spacing_sec: float = 0.5
     qpay_callback_max_attempts: int = 8
+    # Төлбөрийн хуудас/POS-ийн polling-оос банкны шалгалт (/qpay/check): нэхэмжлэл
+    # `after` секундээс удаан PENDING бол `window` хүртэл `every` секунд тутам
+    # payment/check дуудна. 10-24/25-нд QPay callback 70–150с хоцорсон. every=0 → унтраалттай.
+    qpay_poll_check_after_sec: int = 30
+    qpay_poll_check_every_sec: int = 15
+    qpay_poll_check_window_sec: int = 300
 
     # QPay-ээр дамжуулсан e-Barimt 3.0 (ebarimt_v3/create). True үед локал PosAPI-ийн
     # оронд QPay-ийн ebarimt_v3 endpoint ашиглаж баримт үүсгэнэ (QR-аар төлсөн үед).

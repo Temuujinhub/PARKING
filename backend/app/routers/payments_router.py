@@ -1021,20 +1021,74 @@ async def qpay_webhook_post(request: Request, payment_id: str = "", token: str =
     return PlainTextResponse("SUCCESS")
 
 
+def _poll_check_due(db: Session, payment: Payment, now: datetime) -> bool:
+    """Энэ poll банкнаас шалгах ээлжтэй эсэх — тийм бол ээлжийг атомикаар авна.
+
+    2026-10-24 22:00 – 10-25 11:30 УБ: QPay callback-аа 70–150с хоцроож (440
+    төлбөр, хамгийн бага 73с; хэвийн үед ~9с) жолооч нар хаалтан дээр 2 минут
+    хүлээсэн. Систем зөвхөн callback-аар таньдаг байсан (09-19 de4ce4e) тул
+    жолоочийн хуудас нээлттэй, нэхэмжлэл `after`-аас удаан PENDING байхад л
+    `window` хүртэл `every` секунд тутам payment/check дуудна. Хаагдсан
+    хуудас, хуучин нэхэмжлэлийг хэзээ ч шалгахгүй. `qpay_last_check_at`-ийн
+    нөхцөлт UPDATE нь олон tab/POS нэг зэрэг poll хийхэд нэг л шалгалт явуулна."""
+    every = int(settings.qpay_poll_check_every_sec or 0)
+    if (every <= 0 or settings.qpay_mock or payment.provider != "QPAY"
+            or payment.kind != "PARKING" or payment.status != "PENDING"
+            or not payment.provider_invoice_id or not payment.created_at):
+        return False
+    age = (now - payment.created_at).total_seconds()
+    if not settings.qpay_poll_check_after_sec <= age <= settings.qpay_poll_check_window_sec:
+        return False
+    from sqlalchemy import or_
+    claimed = (db.query(Payment).filter(
+        Payment.id == payment.id, Payment.status == "PENDING",
+        or_(Payment.qpay_last_check_at.is_(None),
+            Payment.qpay_last_check_at <= now - timedelta(seconds=every)))
+        .update({Payment.qpay_last_check_at: now}, synchronize_session=False))
+    db.commit()
+    return claimed == 1
+
+
+async def _poll_bank_check(db: Session, payment: Payment) -> Payment:
+    """Банкнаас нэг удаа шалгана. Алдаа гарвал хадгалсан төлвөө буцаана (poll унахгүй)."""
+    pid, created = payment.id, payment.created_at
+    try:
+        paid = await _confirm_qpay(db, payment)
+    except HTTPException:
+        db.rollback()  # callback зэрэг finalize хийж байна (NOWAIT түгжээ) — дараагийн poll харна
+        paid = False
+    except Exception as e:  # noqa: BLE001 — QPay тасалдал жолоочийн хуудсыг унагахгүй
+        db.rollback()
+        log.warning("QPay poll шалгалт амжилтгүй (payment %s): %r", pid, e)
+        paid = False
+    db.expire_all()
+    payment = db.get(Payment, pid)
+    # qpay_next_check_at-ийг callback (request_verification) тавьдаг — хоосон бол
+    # callback-аас ӨМНӨ илэрсэн: дараагийн QPay хоцролтод үр дүнг хэмжинэ.
+    if paid and payment.status == "PAID" and payment.qpay_next_check_at is None:
+        age = round((payment.paid_at - created).total_seconds()) if payment.paid_at else None
+        log.info("QPay poll шалгалт callback-аас өмнө PAID: payment=%s нэхэмжлэлээс %sс", pid, age)
+        db.add(AuditLog(username="system", action="QPAY_POLL_PAID", entity="payment",
+                        entity_id=pid, detail={"invoice_age_sec": age}))
+        db.commit()
+    return payment
+
+
 @router.post("/qpay/check/{payment_id}")
 @router.get("/qpay/check/{payment_id}")
 async def qpay_check(payment_id: str, request: Request, db: Session = Depends(get_db)):
     """Webhook ирээгүй үед polling шалгалт (pay page/POS 5 сек тутам дуудна).
     PAID болмогц e-Barimt-ийн хэвлэх мэдээллийг (POS терминалд) хамт буцаана.
     GET (2026-10-15): PAX аппын шинэ хувилбар GET-ээр дууддаг — өмнө нь 405 буцдаг байв.
-    Хоёулаа зөвхөн хадгалсан үр дүнг уншина (банк руу хүсэлт илгээхгүй)."""
+    Ихэвчлэн хадгалсан үр дүнг уншина; нэхэмжлэл удаан PENDING бол банкнаас
+    хязгаартай шалгана (`_poll_check_due`)."""
     # 5 сек тутам poll = 12/мин/утас; CGNAT-аар нэг IP-д олон жолооч → 300
     _throttle_qpay(request, "check", limit=300)
     payment = db.get(Payment, payment_id)
     if not payment:
         raise HTTPException(404, "Payment олдсонгүй")
-    # Browser polling reads our durable result. Bank verification is triggered
-    # by callback, as required by QPay, not by every foreground polling request.
+    if _poll_check_due(db, payment, datetime.utcnow()):
+        payment = await _poll_bank_check(db, payment)
     if payment.status == "PAID":
         await _ready_for_print(db, payment)   # QR алга бол msgbill-ээс нэг удаа (QPay биш)
         payment = db.get(Payment, payment_id)
