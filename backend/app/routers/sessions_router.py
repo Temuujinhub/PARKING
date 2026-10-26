@@ -1239,7 +1239,8 @@ async def manual_exit(session_id: str, body: dict, db: Session = Depends(get_db)
     # Шалтгааныг жагсаалттай тулгана — танигдахгүй код ирвэл татгалзана
     # (эс бол чөлөөт текст рүү чимээгүй буцаж, тайлан дахин задарна).
     from ..services.app_settings import get_open_reasons
-    reasons = {r["code"]: r["label"] for r in get_open_reasons(db, active_only=True)}
+    # Зогсоолын ТҮРЭЭСЛЭГЧИЙН жагсаалт (2026-10-26: түрээслэгч бүр өөрийн шалтгаантай)
+    reasons = {r["code"]: r["label"] for r in get_open_reasons(db, active_only=True, site_id=s.site_id)}
     code = str(body.get("reason_code") or "").strip()
     if code and code not in reasons:
         raise HTTPException(400, f"«{code}» шалтгаан жагсаалтад алга — "
@@ -1502,8 +1503,8 @@ async def special_exit(session_id: str, body: dict, db: Session = Depends(get_db
         cam = gate_cam or cam
     else:
         barrier = _find_barrier(db, s.site_id, db.get(Device, s.exit_device_id))
-    from ..services.app_settings import get_open_reasons
-    labels = {r["code"]: r["label"] for r in get_open_reasons(db)}
+    from ..services.app_settings import open_reason_labels
+    labels = open_reason_labels(db)
     reason_code = spec["reason_code"]
     reason_text = f"{labels.get(reason_code, spec['label'])}{f' — {note}' if note else ''}"
     fee = session_fee_info(db, s, at=now)

@@ -497,7 +497,9 @@ def catalog() -> list[dict]:
                     "group_name": _GROUP_NAMES.get(g, g),
                     "default": A._base(g)[k],
                     "min": MIN.get((g, k), 0), "max": MAX.get((g, k)),
-                    "per_site": k in A.PER_SITE.get(g, set())})
+                    "per_site": k in A.PER_SITE.get(g, set()),
+                    # түрээслэгчийн админы «Ерөнхий»-д засагдах эсэх (2026-10-26)
+                    "per_tenant": k in A.tenant_keys(g)})
     return out
 
 
@@ -515,9 +517,10 @@ def tariff_dict(site) -> dict | None:
                       for t in sorted(tmpl.tiers, key=lambda t: t.upto_minutes)]}
 
 
-def _globals(db) -> dict:
-    """Бүлэг бүрийн ГЛОБАЛ (зогсоолын давхаргагүй) утгууд."""
-    return {g: A.get_rules(db, g) for g in _GROUP_NAMES}
+def _globals(db, tenant_id: str | None = None) -> dict:
+    """Бүлэг бүрийн «Ерөнхий» (зогсоолын давхаргагүй) утгууд — tenant_id өгвөл
+    системийн утга дээр тухайн түрээслэгчийн давхарга."""
+    return {g: A.get_rules(db, g, tenant_id=tenant_id) for g in _GROUP_NAMES}
 
 
 def effective(db, site_id: str | None) -> dict:
@@ -525,14 +528,26 @@ def effective(db, site_id: str | None) -> dict:
     return {g: A.get_rules(db, g, site_id) for g in _GROUP_NAMES}
 
 
-def global_report(db) -> dict:
-    """«Ерөнхий» горим — бүх зогсоолын АНХДАГЧ утгууд (зогсоолын давхаргагүй).
-    Зөрчлийн шалгалт энд ХИЙГДЭХГҮЙ: тариф/төхөөрөмж зогсоол тус бүрийнх."""
-    glob = _globals(db)
+def _tenant_layers(db, tenant_id: str | None) -> dict:
+    if not tenant_id:
+        return {g: {} for g in _GROUP_NAMES}
+    return {g: (A.get_tenant_overrides(db, g).get(str(tenant_id)) or {}) for g in _GROUP_NAMES}
+
+
+def global_report(db, tenant_id: str | None = None, tenant_name: str | None = None) -> dict:
+    """«Ерөнхий» горим — tenant_id=None бол СИСТЕМИЙН анхдагч (бүх түрээслэгч),
+    эс бол тухайн түрээслэгчийн бүх зогсоолын анхдагч (систем + түрээслэгчийн давхарга).
+    `system_value` = түрээслэгчийн давхаргагүй утга. Зөрчлийн шалгалт энд ХИЙГДЭХГҮЙ:
+    тариф/төхөөрөмж зогсоол тус бүрийнх."""
+    system, glob, layers = _globals(db), _globals(db, tenant_id), _tenant_layers(db, tenant_id)
     rules = [{**row, "value": glob[row["group"]][row["key"]],
-              "global_value": glob[row["group"]][row["key"]], "source": "global"}
+              "global_value": glob[row["group"]][row["key"]],
+              "system_value": system[row["group"]][row["key"]],
+              "source": "tenant" if row["key"] in layers[row["group"]] else "global"}
              for row in catalog()]
-    return {"site_id": None, "site_name": "Ерөнхий — бүх зогсоолын анхдагч",
+    name = (f"Ерөнхий — {tenant_name or 'түрээслэгч'}-ийн бүх зогсоол" if tenant_id
+            else "Ерөнхий — бүх зогсоолын анхдагч (систем)")
+    return {"site_id": None, "site_name": name, "tenant_id": tenant_id,
             "site_flags": {}, "rules": rules, "tariff": None, "conflicts": []}
 
 
@@ -545,14 +560,18 @@ def site_report(db, site) -> dict:
     харагдаад код өөр утгаар ажиллана.
     """
     site_id = site.id
-    glob, eff = _globals(db), effective(db, site_id)
+    tenant_id = A.site_tenant(db, site_id)
+    # global_value = зогсоолын давхаргаа арилгавал буцах утга (систем + түрээслэгч)
+    glob, eff = _globals(db, tenant_id), effective(db, site_id)
     overrides = {g: (A.get_site_overrides(db, g).get(site_id) or {}) for g in _GROUP_NAMES}
+    layers = _tenant_layers(db, tenant_id)
 
     rules = []
     for row in catalog():
         g, k = row["group"], row["key"]
         item = {**row, "value": eff[g][k], "global_value": glob[g][k],
-                "source": "site" if k in overrides[g] else "global"}
+                "source": ("site" if k in overrides[g]
+                           else "tenant" if k in layers[g] and k in A.tenant_keys(g) else "global")}
         col = row.get("site_column")
         if col and getattr(site, col, None) is not None:
             item.update(value=getattr(site, col), source="site_column",

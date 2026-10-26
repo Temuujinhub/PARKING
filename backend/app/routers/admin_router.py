@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from ..auth import (ALL_MODULES, can_manage_global_settings, enforce_global_settings,
                     enforce_site, get_current_user, grant_site, has_permission,
-                    hash_password, operator_sites, require, require_role)
+                    hash_password, operator_sites, reader_tenant, require, require_role,
+                    settings_tenant, tenant_admin_of)
 from ..database import get_db
 from ..models import (
     AuditLog, BarrierCommand, BlacklistEntry, CashierShift, Compensation, DailySettlement,
@@ -25,8 +26,31 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 @router.get("/settings-capabilities")
-def settings_capabilities(user: User = Depends(require("settings"))):
-    return {"can_edit_global": can_manage_global_settings(user)}
+def settings_capabilities(db: Session = Depends(get_db), user: User = Depends(require("settings"))):
+    """«Ерөнхий» тохиргооны хүрээ: систем (бүх түрээслэгч) эсвэл түрээслэгчийн
+    админы өөрийн түрээслэгч (2026-10-26). can_edit_global = «Ерөнхий»-г засаж болох."""
+    system = can_manage_global_settings(user)
+    tid = None if system else tenant_admin_of(user)
+    tenant = db.get(Tenant, tid) if tid else None
+    return {"can_edit_global": system or bool(tid), "can_edit_system": system,
+            "tenant_id": tid, "tenant_name": tenant.name if tenant else None}
+
+
+def _scope_label(db, tid: str | None) -> dict:
+    """Аудит/хариуд — аль хүрээнд хадгалсан."""
+    if not tid:
+        return {"scope": "system"}
+    t = db.get(Tenant, tid)
+    return {"scope": "tenant", "tenant_id": tid, "tenant_name": t.name if t else None}
+
+
+def _scope_site_ids(db, user) -> list[str] | None:
+    """«Одоо ажиллуулах» товчны хүрээ: системийн админ → None (бүгд), түрээслэгчийн
+    админ → түрээслэгчийн зогсоолууд."""
+    tid = settings_tenant(user)
+    if tid is None:
+        return None
+    return [r[0] for r in db.query(ParkingSite.id).filter(ParkingSite.tenant_id == tid).all()]
 
 
 def _qpay_err(e: Exception) -> str:
@@ -232,16 +256,32 @@ def list_sites(db: Session = Depends(get_db), user: User = Depends(get_current_u
 
 
 # ─────────────── Түрээслэгч (Tenant) — SUPER_ADMIN л удирдана ───────────────
+def _tenant_self(user) -> str | None:
+    """Түрээслэгчийн мэдээлэл засах хүрээ: системийн админ → None (бүгд),
+    түрээслэгчийн админ → өөрийн түрээслэгч (2026-10-26), бусад → 403."""
+    if user.role == "SUPER_ADMIN" or can_manage_global_settings(user):
+        return None
+    tid = tenant_admin_of(user)
+    if not tid:
+        raise HTTPException(403, "Түрээслэгчийн мэдээллийг түрээслэгчийн эсвэл системийн админ засна")
+    return tid
+
+
 @router.get("/tenants")
-def list_tenants(db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN"))):
-    """Түрээслэгчдийн жагсаалт — зогсоол/хэрэглэгчийн тоотой."""
+def list_tenants(db: Session = Depends(get_db), user: User = Depends(require_role("SUPER_ADMIN", "ADMIN"))):
+    """Түрээслэгчдийн жагсаалт — зогсоол/хэрэглэгчийн тоотой. Түрээслэгчийн админ
+    зөвхөн өөрийн түрээслэгчийг харна."""
     from sqlalchemy import func
+    own = _tenant_self(user)
     site_cnt = dict(db.query(ParkingSite.tenant_id, func.count()).filter(
         ParkingSite.tenant_id.isnot(None)).group_by(ParkingSite.tenant_id).all())
     user_cnt = dict(db.query(User.tenant_id, func.count()).filter(
         User.tenant_id.isnot(None)).group_by(User.tenant_id).all())
     out = []
-    for t in db.query(Tenant).order_by(Tenant.created_at).all():
+    tq = db.query(Tenant)
+    if own:
+        tq = tq.filter(Tenant.id == own)
+    for t in tq.order_by(Tenant.created_at).all():
         sites = [{"id": s.id, "name": s.name, "site_code": s.site_code}
                  for s in db.query(ParkingSite).filter(ParkingSite.tenant_id == t.id).all()]
         out.append(to_dict(t, extra={"site_count": int(site_cnt.get(t.id, 0)),
@@ -310,11 +350,28 @@ def create_tenant(payload: schemas.TenantCreate, db: Session = Depends(get_db),
 
 @router.put("/tenants/{tenant_id}")
 def update_tenant(tenant_id: str, payload: schemas.TenantUpdate, db: Session = Depends(get_db),
-                  user: User = Depends(require_role("SUPER_ADMIN"))):
+                  user: User = Depends(require_role("SUPER_ADMIN", "ADMIN"))):
+    """Түрээслэгчийн мэдээлэл. 2026-10-26: түрээслэгчийн админ ӨӨРИЙН түрээслэгчийн
+    холбоо барих, регистр, QPay/e-Barimt/msgbill данс, түлхүүрийг засна; код, идэвх,
+    зогсоолын хуваарилалт нь системийн админд үлдэнэ."""
     body = payload.dump()
+    own = _tenant_self(user)
+    if own is not None and tenant_id != own:
+        raise HTTPException(403, "Зөвхөн өөрийн түрээслэгчийн мэдээллийг засна")
     t = db.get(Tenant, tenant_id)
     if not t:
         raise HTTPException(404, "Түрээслэгч олдсонгүй")
+    if own is not None:
+        # Маягт бүх талбараа илгээдэг — ӨӨРЧЛӨӨГҮЙ бол алгасна, өөрчлөх гэвэл 403
+        current_sites = {r[0] for r in db.query(ParkingSite.id).filter(ParkingSite.tenant_id == t.id).all()}
+        changed = [k for k, same in (
+            ("code", (body.get("code") or "").strip().upper() == (t.code or "")),
+            ("is_active", body.get("is_active") == t.is_active),
+            ("site_ids", set(body.get("site_ids") or []) == current_sites)) if k in body and not same]
+        if changed:
+            raise HTTPException(403, "Түрээслэгчийн код, идэвх, зогсоолын хуваарилалтыг системийн админ өөрчилнө")
+        for k in ("code", "is_active", "site_ids"):
+            body.pop(k, None)
     if "code" in body:
         code = (body["code"] or "").strip().upper()
         if code != t.code and db.query(Tenant).filter(Tenant.code == code).first():
@@ -985,6 +1042,32 @@ def msgbill_global_put(body: dict, db: Session = Depends(get_db),
 # ─────────── Холболт: гадаад API-ийн партнер түлхүүрүүд ───────────
 # Партнерын түлхүүрийн удирдлага — 2026-09-15-аас ADMIN эрхэд ч нээлттэй
 # (Тэмүүжин: «супер админтай адил болго, тест үүсгэж ажил явагдаж байх хэрэгтэй»).
+def _key_scope(user) -> tuple[str, object]:
+    """Түлхүүрийн удирдлагын хүрээ: ("system", None) | ("tenant", tenant_id) |
+    ("sites", [site_id…]) — сүүлийнх нь тодорхой зогсоолоор хязгаарлагдсан админ."""
+    try:
+        tid = settings_tenant(user)
+    except HTTPException:
+        return "sites", [str(x) for x in (operator_sites(user) or [])]
+    return ("tenant", tid) if tid else ("system", None)
+
+
+def _own_key(db, user, key_id: str):
+    """Түлхүүрийг авч, хэрэглэгч түүнийг удирдах эрхтэйг шалгана (2026-10-26):
+    системийн админ — бүх түлхүүр; түрээслэгчийн админ — ЗӨВХӨН өөрийн түрээслэгчийнх;
+    зогсоолын админ — өөрийн зогсоолын түлхүүр. Өмнө нь webhook/хаах/сэргээх нь
+    түрээслэгч шалгадаггүй байв."""
+    from ..models import PartnerKey
+    kind, val = _key_scope(user)
+    k = db.get(PartnerKey, key_id)
+    if not k:
+        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    if ((kind == "tenant" and str(k.tenant_id or "") != val)
+            or (kind == "sites" and str(k.site_id or "") not in val)):
+        raise HTTPException(403, "Энэ түлхүүр өөр түрээслэгч/зогсоолынх")
+    return k
+
+
 @router.get("/partner-keys")
 def list_partner_keys(db: Session = Depends(get_db),
                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
@@ -993,7 +1076,10 @@ def list_partner_keys(db: Session = Depends(get_db),
     from sqlalchemy import func as _f
     from ..models import PartnerKey, PartnerVehicle, PartnerVehicleEvent
     from ..services.partner_vehicles import has_scope
+    kind, val = _key_scope(user)   # түрээслэгчийн/зогсоолын админ → зөвхөн өөрийн түлхүүрүүд
+    tid = val if kind == "tenant" else None
     site_names = {s.id: s for s in db.query(ParkingSite).all()}
+    tenant_names = {t.id: t.name for t in db.query(Tenant).all()}
     # SocialPay: идэвхтэй бүртгэлтэй машин + мэдэгдлийн төлөв (түлхүүр тутам)
     vehicles = dict(db.query(PartnerVehicle.partner_key_id, _f.count(PartnerVehicle.id))
                     .filter(PartnerVehicle.deleted_at.is_(None))
@@ -1005,7 +1091,12 @@ def list_partner_keys(db: Session = Depends(get_db),
                            .group_by(PartnerVehicleEvent.partner_key_id, PartnerVehicleEvent.status)):
         ev_counts.setdefault(kid, {})[status] = n
     keys = []
-    for k in db.query(PartnerKey).order_by(PartnerKey.created_at).all():
+    kq = db.query(PartnerKey)
+    if kind == "tenant":
+        kq = kq.filter(PartnerKey.tenant_id == val)
+    elif kind == "sites":
+        kq = kq.filter(PartnerKey.site_id.in_(val or ["-"]))
+    for k in kq.order_by(PartnerKey.created_at).all():
         site = site_names.get(k.site_id)
         evc = ev_counts.get(k.id, {})
         keys.append({
@@ -1013,6 +1104,7 @@ def list_partner_keys(db: Session = Depends(get_db),
             "scopes": k.scopes, "site_id": k.site_id,
             "site_code": site.site_code if site else None,
             "site_name": site.name if site else None,
+            "tenant_id": k.tenant_id, "tenant_name": tenant_names.get(k.tenant_id),
             "is_active": k.is_active,
             "webhook_url": k.webhook_url,
             # e-Barimt гаргагч (2026-10-22): None = ерөнхий msgbill аргууд, SYSTEM = манай систем заавал
@@ -1028,7 +1120,13 @@ def list_partner_keys(db: Session = Depends(get_db),
             "created_by": k.created_by,
             "created_at": k.created_at.isoformat() if k.created_at else None,
         })
-    return {"keys": keys, "env_partners": sorted(settings.partner_map().values()),
+    return {"keys": keys, "env_partners": sorted(settings.partner_map().values()) if kind == "system" else [],
+            # Түлхүүр үүсгэх хүрээ: системийн админ түрээслэгч сонгоно; түрээслэгчийн админ —
+            # өөрийнх («Бүх зогсоол» = түрээслэгчийн бүх зогсоол); зогсоолын админ — зогсоол л
+            "scope": kind,
+            "scope_tenant": ({"id": tid, "name": tenant_names.get(tid)} if tid else None),
+            "tenants": ([{"id": i, "name": n} for i, n in sorted(tenant_names.items(), key=lambda x: x[1])]
+                        if kind == "system" else []),
             # PARKING_PARTNER_VEHICLE_NOTIFY=false үед машин мэдэгдэл огт илгээгдэхгүй
             "vehicle_notify_enabled": bool(settings.partner_vehicle_notify)}
 
@@ -1036,8 +1134,10 @@ def list_partner_keys(db: Session = Depends(get_db),
 @router.post("/partner-keys")
 def create_partner_key(body: dict, db: Session = Depends(get_db),
                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
-    """Шинэ түлхүүр үүсгэнэ. body: {name, scopes?, site_id?}.
-    Түлхүүр ЗӨВХӨН энэ хариултад ил гарна — DB-д sha256 hash нь л үлдэнэ."""
+    """Шинэ түлхүүр үүсгэнэ. body: {name, can_pay?, can_vehicles?, tenant_id?, site_id?}.
+    Түлхүүр ЗӨВХӨН энэ хариултад ил гарна — DB-д sha256 hash нь л үлдэнэ.
+    2026-10-26: түлхүүр бүр ТҮРЭЭСЛЭГЧТЭЙ — «Бүх зогсоол» = тухайн түрээслэгчийн бүх
+    зогсоол. Түрээслэгчийн админ → өөрийн түрээслэгч; системийн админ tenant_id сонгоно."""
     import hashlib
     from ..models import PartnerKey
     name = (body.get("name") or "").strip().lower()
@@ -1047,37 +1147,47 @@ def create_partner_key(body: dict, db: Session = Depends(get_db),
     if body.get("can_vehicles"):
         scopes += ",vehicles"   # SocialPay: машин бүртгэх/устгах/bill + орох/гарах мэдэгдэл
     site_id = (body.get("site_id") or "").strip() or None
-    # Хяналт m3: зогсоолоор хязгаарлагдсан ADMIN БҮХ зогсоолын (эсвэл машин бүртгэлийн —
-    # бусдын машины байршил харах) түлхүүр үүсгэж болохгүй; өөр зогсоолынхыг ч.
-    if body.get("can_vehicles") or not site_id:
-        enforce_global_settings(user)
-    else:
-        enforce_site(user, site_id)
-    if site_id and not db.get(ParkingSite, site_id):
+    # Хяналт m3: зогсоолоор хязгаарлагдсан ADMIN түрээслэгчийн бүх зогсоолын түлхүүр
+    # үүсгэхгүй; түрээслэгчийн админ зөвхөн өөрийн түрээслэгчид.
+    kind, val = _key_scope(user)
+    if kind == "sites" and (not site_id or body.get("can_vehicles")):
+        # Машин бүртгэлийн түнш нь хэрэглэгчийн машиныг БҮХ зогсоолд нь хянадаг — зогсоолын админ биш
+        raise HTTPException(403, "Таны эрх зогсоолоор хязгаарлагдсан — зөвхөн өөрийн зогсоолын "
+                                 "(машин бүртгэлгүй) түлхүүр үүсгэнэ")
+    tenant_id = (val if kind == "tenant"
+                 else (str(body.get("tenant_id") or "").strip() or None) if kind == "system" else None)
+    site = db.get(ParkingSite, site_id) if site_id else None
+    if site_id and not site:
         raise HTTPException(404, "Зогсоол олдсонгүй")
+    if site is not None:
+        enforce_site(user, site_id)
+        if tenant_id and str(site.tenant_id or "") != tenant_id:
+            raise HTTPException(400, "Зогсоол сонгосон түрээслэгчид хамаарахгүй")
+        tenant_id = tenant_id or (str(site.tenant_id) if site.tenant_id else None)
+    if not tenant_id and site is None:
+        raise HTTPException(400, "Түрээслэгч сонгоно уу — түлхүүр бүр түрээслэгчийн хүрээтэй")
+    if tenant_id and not db.get(Tenant, tenant_id):
+        raise HTTPException(404, "Түрээслэгч олдсонгүй")
     # Нэр давхардвал тайлан дээр хоёр өөр түлхүүрийн төлбөр нийлж харагдана — хориглоно
     if db.query(PartnerKey).filter(PartnerKey.name == name, PartnerKey.is_active.is_(True)).first():
         raise HTTPException(400, f"«{name}» нэртэй идэвхтэй түлхүүр аль хэдийн байна")
     raw = "pk_" + secrets.token_urlsafe(24)
     k = PartnerKey(name=name, key_hash=hashlib.sha256(raw.encode()).hexdigest(),
-                   key_prefix=raw[:10], scopes=scopes, site_id=site_id,
+                   key_prefix=raw[:10], scopes=scopes, site_id=site_id, tenant_id=tenant_id,
                    created_by=user.username)
     db.add(k)
     _audit(db, user, "CREATE", "partner_key", k.id,
-           {"name": name, "scopes": scopes, "site_id": site_id})
+           {"name": name, "scopes": scopes, "site_id": site_id, "tenant_id": tenant_id})
     db.commit()
     return {"id": k.id, "name": name, "key": raw, "key_prefix": k.key_prefix,
-            "scopes": scopes, "site_id": site_id}
+            "scopes": scopes, "site_id": site_id, "tenant_id": tenant_id}
 
 
 @router.post("/partner-keys/{key_id}/webhook")
 def set_partner_webhook(key_id: str, body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Түншийн webhook URL (төлбөр + e-Barimt мэдэгдэл POST хийх). body: {url} — хоосон = унтраах."""
-    from ..models import PartnerKey
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    k = _own_key(db, user, key_id)
     url = (body.get("url") or "").strip()
     if url and not url.lower().startswith(("https://", "http://")):
         raise HTTPException(400, "URL http(s)://-ээр эхлэх ёстой")
@@ -1095,11 +1205,8 @@ def set_partner_receipt_issuer(key_id: str, body: dict, db: Session = Depends(ge
     SYSTEM — EasyParking msgbill-ээр заавал гаргана (MonPay, SocialPay: түнш баримт ГАРГАХГҮЙ
     гэж тохирсон). null — хуучин зан төлөв (msgbill-ийн ерөнхий «аргууд»-д WALLET байвал).
     Баримтаа ӨӨРӨӨ гаргадаг түншид SYSTEM бүү тавь — ТЕГ-т нэг борлуулалт 2 баримт болно."""
-    from ..models import PartnerKey
-    enforce_global_settings(user)   # татварын баримтын суваг — бүх түрээслэгчид нөлөөлнө
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    # татварын баримтын суваг — түлхүүр түрээслэгчийн хүрээтэй тул түрээслэгчийн админ өөрийнхийг
+    k = _own_key(db, user, key_id)
     issuer = (body.get("issuer") or "").strip().upper() or None
     if issuer not in (None, "SYSTEM"):
         raise HTTPException(422, "issuer нь SYSTEM эсвэл хоосон")
@@ -1116,11 +1223,9 @@ async def test_partner_webhook(key_id: str, body: dict | None = None, db: Sessio
                                user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Webhook-ийг ТУРШИНА: сүүлийн бодит төлбөрийн (эсвэл жишээ) payload-ыг илгээж
     түншийн сервер хүлээж авч байгаа эсэхийг (HTTP код, хариу) буцаана."""
-    from ..models import PartnerKey, Payment
+    from ..models import Payment
     from .integration_router import _payment_event, push_partner_webhook
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    k = _own_key(db, user, key_id)
     url = ((body or {}).get("url") or k.webhook_url or "").strip()
     if not url:
         raise HTTPException(400, "Webhook URL тохируулаагүй")
@@ -1151,12 +1256,11 @@ def set_partner_vehicles(key_id: str, body: dict, db: Session = Depends(get_db),
     """«vehicles» эрх + мэдэгдлийн URL/формат. body: {enabled, url, format}.
     url = түншийн {SP_URL}/parking/notification (хоосон = мэдэгдэл илгээхгүй, бүртгэл ажиллана).
     format: 'socialpay' (spec-ийн яг JSON, анхдагч) | 'extended' (нэмэлт талбартай)."""
-    from ..models import PartnerKey
     from ..services.partner_vehicles import FORMATS, SCOPE
-    enforce_global_settings(user)   # бүх зогсоолын түнш — site-ийн админ биш
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    # түнш түрээслэгчийн зогсоолуудын хөдөлгөөнийг л авна (partner_scope)
+    k = _own_key(db, user, key_id)
+    if body.get("enabled") and _key_scope(user)[0] == "sites":
+        raise HTTPException(403, "Машин бүртгэлийн эрхийг түрээслэгчийн эсвэл системийн админ олгоно")
     scopes = [x.strip() for x in (k.scopes or "").split(",") if x.strip()]
     if "enabled" in body:
         scopes = [x for x in scopes if x != SCOPE] + ([SCOPE] if body.get("enabled") else [])
@@ -1188,12 +1292,8 @@ async def test_partner_vehicles_webhook(key_id: str, body: dict | None = None,
     """Мэдэгдлийн URL-ийг ТУРШИНА: жишээ ENTRY ({"data":{"plateNo":"0000ТЕС",…}})
     илгээж HTTP код, Success/Message-ийг буцаана (IP whitelist шалгахад)."""
     import uuid as _uuid
-    from ..models import PartnerKey
     from ..services.partner_vehicles import iso_z, post_event
-    enforce_global_settings(user)
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    k = _own_key(db, user, key_id)
     url = ((body or {}).get("url") or k.vehicle_webhook_url or "").strip()
     if not url.lower().startswith(("https://", "http://")):
         raise HTTPException(400, "Мэдэгдлийн URL тохируулаагүй")
@@ -1214,7 +1314,7 @@ def list_partner_vehicle_events(key_id: str, status: str = "", plate: str = "", 
     """Мэдэгдлийн outbox (шинээс хуучин руу) — DEAD/RETRY-г харж, дахин илгээх."""
     from ..models import PartnerVehicleEvent as E
     from ..session_logic import normalize_plate
-    enforce_global_settings(user)   # бусад түрээслэгчийн машины дугаар/хөдөлгөөн
+    _own_key(db, user, key_id)   # бусад түрээслэгчийн машины дугаар/хөдөлгөөн харагдахгүй
     q = db.query(E).filter(E.partner_key_id == key_id)
     if status:
         q = q.filter(E.status == status.strip().upper())
@@ -1238,10 +1338,10 @@ def retry_partner_vehicle_event(event_id: str, db: Session = Depends(get_db),
     """DEAD/SKIPPED/RETRY мэдэгдлийг ОДОО дахин илгээх дараалалд оруулна (нэг оролдлого;
     24ц-ийн цонх өнгөрсөн бол дахин бүтэлгүйтвэл шууд DEAD)."""
     from ..models import PartnerVehicleEvent as E
-    enforce_global_settings(user)
     ev = db.query(E).filter(E.id == event_id).with_for_update().first()
     if not ev:
         raise HTTPException(404, "Мэдэгдэл олдсонгүй")
+    _own_key(db, user, ev.partner_key_id)
     if ev.status in ("DONE", "SENDING"):
         raise HTTPException(409, f"Төлөв {ev.status} — дахин илгээх шаардлагагүй")
     prev = ev.status
@@ -1260,7 +1360,7 @@ def list_partner_vehicles(key_id: str, plate: str = "", user_id: str = "", limit
     """Түншээр бүртгүүлсэн машинууд (устгасныг ч) — дэмжлэгийн асуултад."""
     from ..models import PartnerVehicle as V
     from ..session_logic import normalize_plate
-    enforce_global_settings(user)   # хэрэглэгчийн ID + дугаар — хувийн мэдээлэл
+    _own_key(db, user, key_id)   # хэрэглэгчийн ID + дугаар — хувийн мэдээлэл
     q = db.query(V).filter(V.partner_key_id == key_id)
     if plate:
         q = q.filter(V.plate_number == normalize_plate(plate))
@@ -1278,10 +1378,7 @@ def revoke_partner_key(key_id: str, db: Session = Depends(get_db),
                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
     """Түлхүүрийг хаана — тэр дороо хүчингүй (restart шаардлагагүй). Буцаахгүй:
     санамсаргүй хаасан бол шинэ түлхүүр үүсгэж партнерт өгнө."""
-    from ..models import PartnerKey
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    k = _own_key(db, user, key_id)
     if not k.is_active:
         return {"ok": True, "already": True}
     k.is_active = False
@@ -1297,10 +1394,7 @@ def restore_partner_key(key_id: str, db: Session = Depends(get_db),
     """Санамсаргүй хаасан түлхүүрийг СЭРГЭЭНЭ — түлхүүрийн хэш DB-д хэвээр тул
     партнер ижил түлхүүрээрээ үргэлжлүүлнэ (2026-09-15: админ ardwallet-ийг
     андуурч хаасан, өөр хүмүүс тэр түлхүүрээр тест хийж байсан)."""
-    from ..models import PartnerKey
-    k = db.get(PartnerKey, key_id)
-    if not k:
-        raise HTTPException(404, "Түлхүүр олдсонгүй")
+    k = _own_key(db, user, key_id)
     if k.is_active:
         return {"ok": True, "already": True}
     k.is_active = True
@@ -2440,20 +2534,21 @@ def list_open_reasons(active_only: bool = False, db: Session = Depends(get_db),
     Оператор чөлөөт текст бичихийн оронд эндээс сонгоно — ингэснээр «хэн, ямар
     шалтгаанаар хэдэн удаа үнэгүй гаргасан» гэдэг тайлан гарна."""
     from ..services.app_settings import get_open_reasons
-    return get_open_reasons(db, active_only=active_only)
+    return get_open_reasons(db, active_only=active_only, tenant_id=reader_tenant(user))
 
 
 @router.put("/open-reasons")
 def put_open_reasons(body: dict, db: Session = Depends(get_db),
                      user: User = Depends(require("settings"))):
-    """Жагсаалтыг бүхэлд нь солино. body: {items: [{code, label, is_active}]}."""
-    enforce_global_settings(user)
+    """Жагсаалтыг бүхэлд нь солино. body: {items: [{code, label, is_active}]}.
+    Түрээслэгчийн админ → зөвхөн өөрийн түрээслэгчийн жагсаалт."""
+    tid = settings_tenant(user)
     from ..services.app_settings import set_open_reasons
     try:
-        items = set_open_reasons(db, body.get("items"), user.username)
+        items = set_open_reasons(db, body.get("items"), user.username, tenant_id=tid)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
-    _audit(db, user, "UPDATE", "open_reasons", "-", {"count": len(items)})
+    _audit(db, user, "UPDATE", "open_reasons", tid or "-", {"count": len(items), **_scope_label(db, tid)})
     db.commit()
     return items
 
@@ -2462,17 +2557,17 @@ def put_open_reasons(body: dict, db: Session = Depends(get_db),
 def get_autoclose_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("settings"))):
     """Зогсоолын авто цэвэрлэгээний дүрэм (гацсан бүртгэлийг хэзээ хаах)."""
-    from ..services.app_settings import get_autoclose_rules
-    return get_autoclose_rules(db)
+    from ..services.app_settings import AUTOCLOSE_KEY, get_rules
+    return get_rules(db, AUTOCLOSE_KEY, tenant_id=reader_tenant(user))
 
 
 @router.put("/autoclose/rules")
 def put_autoclose_rules(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("settings"))):
-    enforce_global_settings(user)
-    from ..services.app_settings import set_autoclose_rules
-    rules = set_autoclose_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "autoclose_rules", "-", rules)
+    tid = settings_tenant(user)   # түрээслэгчийн админ → өөрийн түрээслэгчийн давхарга
+    from ..services.app_settings import AUTOCLOSE_KEY, set_scoped_rules
+    rules = set_scoped_rules(db, AUTOCLOSE_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "autoclose_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
     return rules
 
@@ -2481,17 +2576,17 @@ def put_autoclose_rules(body: dict, db: Session = Depends(get_db),
 def get_entry_plate_rules_api(db: Session = Depends(get_db),
                               user: User = Depends(require("settings"))):
     """Орох дугаарын шалгалт — формат буруу уншилтад хаалтыг яах дүрэм."""
-    from ..services.app_settings import get_entry_plate_rules
-    return get_entry_plate_rules(db)
+    from ..services.app_settings import ENTRYPLATE_KEY, get_rules
+    return get_rules(db, ENTRYPLATE_KEY, tenant_id=reader_tenant(user))
 
 
 @router.put("/entry-plate/rules")
 def put_entry_plate_rules(body: dict, db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
-    enforce_global_settings(user)
-    from ..services.app_settings import set_entry_plate_rules
-    rules = set_entry_plate_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "entry_plate_rules", "-", rules)
+    tid = settings_tenant(user)   # түрээслэгчийн админ → өөрийн түрээслэгчийн давхарга
+    from ..services.app_settings import ENTRYPLATE_KEY, set_scoped_rules
+    rules = set_scoped_rules(db, ENTRYPLATE_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "entry_plate_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
     return rules
 
@@ -2500,17 +2595,17 @@ def put_entry_plate_rules(body: dict, db: Session = Depends(get_db),
 def get_exit_rules_api(db: Session = Depends(get_db),
                        user: User = Depends(require("settings"))):
     """Гарах хаалтны дүрэм — орох уншилтгүй машины суурь хураамж г.м."""
-    from ..services.app_settings import get_exit_rules
-    return get_exit_rules(db)
+    from ..services.app_settings import EXITRULES_KEY, get_rules
+    return get_rules(db, EXITRULES_KEY, tenant_id=reader_tenant(user))
 
 
 @router.put("/exit/rules")
 def put_exit_rules(body: dict, db: Session = Depends(get_db),
                    user: User = Depends(require("settings"))):
-    enforce_global_settings(user)
-    from ..services.app_settings import set_exit_rules
-    rules = set_exit_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "exit_rules", "-", rules)
+    tid = settings_tenant(user)   # түрээслэгчийн админ → өөрийн түрээслэгчийн давхарга
+    from ..services.app_settings import EXITRULES_KEY, set_scoped_rules
+    rules = set_scoped_rules(db, EXITRULES_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "exit_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
     return rules
 
@@ -2519,17 +2614,17 @@ def put_exit_rules(body: dict, db: Session = Depends(get_db),
 def get_barrier_rules_api(db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
     """Хаалт/уншилтын цагийн цонхнууд (dedup/burst/cooldown) — ГЛОБАЛ утга."""
-    from ..services.app_settings import get_barrier_rules
-    return get_barrier_rules(db)
+    from ..services.app_settings import BARRIER_KEY, get_rules
+    return get_rules(db, BARRIER_KEY, tenant_id=reader_tenant(user))
 
 
 @router.put("/barrier/rules")
 def put_barrier_rules(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
-    enforce_global_settings(user)
-    from ..services.app_settings import set_barrier_rules
-    rules = set_barrier_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "barrier_rules", "-", rules)
+    tid = settings_tenant(user)   # түрээслэгчийн админ → өөрийн түрээслэгчийн давхарга
+    from ..services.app_settings import BARRIER_KEY, set_scoped_rules
+    rules = set_scoped_rules(db, BARRIER_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "barrier_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
     return rules
 
@@ -2550,11 +2645,18 @@ def payment_rules_index(db: Session = Depends(get_db),
         q = q.filter(ParkingSite.id.in_(allowed))
     sites = q.order_by(ParkingSite.name).all()
     overrides = {g: A.get_site_overrides(db, g) for g in PR.group_names()}
+    system = can_manage_global_settings(user)
+    tid = None if system else tenant_admin_of(user)
+    rtid = reader_tenant(user)
+    tenant = db.get(Tenant, tid or rtid) if (tid or rtid) else None
     return {
         "groups": PR.group_names(),
-        "can_edit_global": can_manage_global_settings(user),
+        # 2026-10-26: түрээслэгчийн админ «Ерөнхий»-г өөрийн түрээслэгчид засна
+        "can_edit_global": system or bool(tid),
+        "can_edit_system": system,
+        "global_tenant": ({"id": tenant.id, "name": tenant.name} if tenant else None),
         "catalog": PR.catalog(),
-        "globals": {g: A.get_rules(db, g) for g in PR.group_names()},
+        "globals": {g: A.get_rules(db, g, tenant_id=rtid) for g in PR.group_names()},
         "site_column_rules": PR.SITE_COLUMN_RULES,
         "tariff_rules": PR.TARIFF_RULES,
         "sites": [{"id": s.id, "name": s.name, "site_code": s.site_code,
@@ -2573,7 +2675,9 @@ def payment_rules_site(site_id: str, db: Session = Depends(get_db),
     site_id="global" → бүх зогсоолын АНХДАГЧ (ерөнхий) утгууд."""
     from ..services import payment_rules as PR
     if site_id == "global":
-        return PR.global_report(db)
+        rtid = reader_tenant(user)
+        t = db.get(Tenant, rtid) if rtid else None
+        return PR.global_report(db, rtid, t.name if t else None)
     enforce_site(user, site_id)
     site = db.get(ParkingSite, site_id)
     if not site:
@@ -2592,8 +2696,9 @@ def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_
     from ..services import app_settings as A
     from ..services import payment_rules as PR
     is_global = site_id == "global"
+    tid = None
     if is_global:
-        enforce_global_settings(user)
+        tid = settings_tenant(user)   # None = систем, эс бол түрээслэгчийн давхарга
         site = None
     else:
         enforce_site(user, site_id)
@@ -2606,13 +2711,17 @@ def payment_rules_site_save(site_id: str, body: dict, db: Session = Depends(get_
             continue
         values = PR.clamp_values(group, values)
         if is_global:
-            saved[group] = A.set_rules(db, group, values, user.username)
+            saved[group] = A.set_scoped_rules(db, group, values, user.username, tid)
         else:
             saved[group] = A.set_site_rules(db, group, site_id, values, user.username)
-    _audit(db, user, "UPDATE", "payment_rules", site_id, saved)
+    _audit(db, user, "UPDATE", "payment_rules", (tid or site_id),
+           {**saved, **(_scope_label(db, tid) if is_global else {})})
     db.commit()
     A.invalidate_cache()
-    return PR.global_report(db) if is_global else PR.site_report(db, site)
+    if is_global:
+        t = db.get(Tenant, tid) if tid else None
+        return PR.global_report(db, tid, t.name if t else None)
+    return PR.site_report(db, site)
 
 
 # ── ХОЛБОГДСОН POS (2026-10-15) — PAX аппын хувилбар/төлөв + POS-той холбоотой тохиргоо ──
@@ -2666,9 +2775,10 @@ def get_driver_type_rules_api(db: Session = Depends(get_db),
                               user: User = Depends(require("drivers"))):
     """«Шөнө үнэгүй» (NIGHT) төрлийн глобал цагийн цонх — Бүртгэлтэй машин
     хуудас харуулахад ашиглана."""
-    from ..services.app_settings import get_driver_type_rules, night_window
-    rules = get_driver_type_rules(db)
-    f, u = night_window(db)
+    from ..services.app_settings import DRIVERTYPE_KEY, get_rules, night_window
+    tid = reader_tenant(user)
+    rules = get_rules(db, DRIVERTYPE_KEY, tenant_id=tid)
+    f, u = night_window(db, tenant_id=tid)
     # effective — буруу тохиргоонд БОДИТООР үйлчлэх утга (default руу унасан ч)
     return {**rules, "effective_from": f, "effective_until": u}
 
@@ -2676,8 +2786,9 @@ def get_driver_type_rules_api(db: Session = Depends(get_db),
 @router.put("/driver-type/rules")
 def put_driver_type_rules(body: dict, db: Session = Depends(get_db),
                           user: User = Depends(require("settings"))):
-    """Шөнийн цонхыг өөрчлөх — биллингд шууд нөлөөлөх тул зөвхөн тохиргооны эрхтэн."""
-    enforce_global_settings(user)
+    """Шөнийн цонхыг өөрчлөх — биллингд шууд нөлөөлөх тул зөвхөн тохиргооны эрхтэн.
+    Түрээслэгчийн админ → өөрийн түрээслэгчийн зогсоолуудад."""
+    tid = settings_tenant(user)
     import re as _re
     for k in ("night_from", "night_until"):
         v = str((body or {}).get(k, "")).strip()
@@ -2685,11 +2796,11 @@ def put_driver_type_rules(body: dict, db: Session = Depends(get_db),
             raise HTTPException(400, f"{k}: цаг «HH:MM» хэлбэртэй байх ёстой (ж: 21:00)")
     if (body.get("night_from") or "") == (body.get("night_until") or "") and body.get("night_from"):
         raise HTTPException(400, "Эхлэх, дуусах цаг ижил байж болохгүй")
-    from ..services.app_settings import night_window, set_driver_type_rules
-    rules = set_driver_type_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "driver_type_rules", "-", rules)
+    from ..services.app_settings import DRIVERTYPE_KEY, night_window, set_scoped_rules
+    rules = set_scoped_rules(db, DRIVERTYPE_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "driver_type_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
-    f, u = night_window(db)
+    f, u = night_window(db, tenant_id=tid)
     return {**rules, "effective_from": f, "effective_until": u}
 
 
@@ -2698,9 +2809,9 @@ def run_autoclose_now(db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
     """Авто цэвэрлэгээг ЯГ ОДОО ажиллуулна (30 мин хүлээхгүй) — тохиргоо
     өөрчилсний дараа үр дүнг шууд харах."""
-    enforce_global_settings(user)
+    site_ids = _scope_site_ids(db, user)   # түрээслэгчийн админ → өөрийн зогсоолууд
     from ..services.auto_close import run_once
-    closed = run_once()
+    closed = run_once(site_ids)
     _audit(db, user, "AUTO_CLOSE_MANUAL", "session", "-", {"closed": closed})
     db.commit()
     return {"closed": closed}
@@ -2736,11 +2847,12 @@ def put_camsync_rules(body: dict, db: Session = Depends(get_db),
 @router.post("/camsync/run")
 def run_camsync_now(body: dict | None = None, db: Session = Depends(get_db),
                     user: User = Depends(require("settings"))):
-    """Камерын лог нөхөлтийг ЯГ ОДОО ажиллуулна. body: {dry_run: bool}"""
-    enforce_global_settings(user)
+    """Камерын лог нөхөлтийг ЯГ ОДОО ажиллуулна. body: {dry_run: bool}
+    Түрээслэгчийн админ → зөвхөн өөрийн зогсоолууд."""
+    site_ids = _scope_site_ids(db, user)
     from ..services.camera_sync import run_once
     dry = bool((body or {}).get("dry_run"))
-    rows = run_once(dry_run=dry)
+    rows = run_once(dry_run=dry, site_ids=site_ids)
     if not dry:
         _audit(db, user, "CAMERA_SYNC_MANUAL", "session", "-",
                {"created": sum(r.get("created", 0) for r in rows)})
@@ -2781,11 +2893,14 @@ def put_camhealth_rules(body: dict, db: Session = Depends(get_db),
 def run_camhealth_now(body: dict | None = None, db: Session = Depends(get_db),
                       user: User = Depends(require("settings"))):
     """Камерын эрүүл мэндийг ЯГ ОДОО шалгана. body: {dry_run: bool}
-    dry_run=true бол зөвхөн ангилна (reboot ХИЙХГҮЙ)."""
-    enforce_global_settings(user)
+    dry_run=true бол зөвхөн ангилна (reboot ХИЙХГҮЙ).
+    Түрээслэгчийн админ → зөвхөн өөрийн камерууд, ЗӨВХӨН шалгах горим (reboot-ын
+    cooldown нь бүх камерын нийтлэг төлөвт хадгалагддаг; камерыг тус бүрээр нь
+    Төхөөрөмж хэсгээс reboot хийнэ)."""
+    site_ids = _scope_site_ids(db, user)
     from ..services.camera_health import run_once
-    dry = bool((body or {}).get("dry_run"))
-    out = run_once(dry_run=dry)
+    dry = bool((body or {}).get("dry_run")) or site_ids is not None
+    out = run_once(dry_run=dry, site_ids=site_ids)
     if not dry and out.get("rebooted"):
         _audit(db, user, "CAMERA_HEALTH_MANUAL", "device", "-",
                {"rebooted": [r["ip"] for r in out["rebooted"]]})
@@ -2797,17 +2912,17 @@ def run_camhealth_now(body: dict | None = None, db: Session = Depends(get_db),
 def get_blacklist_rules_api(db: Session = Depends(get_db),
                             user: User = Depends(require("blacklist", "cashier"))):
     """Хар жагсаалтын дүрэм — авто-хоригийн босго, орох/гарах хаалтны зан төлөв."""
-    from ..services.app_settings import get_blacklist_rules
-    return get_blacklist_rules(db)
+    from ..services.app_settings import BLACKLIST_KEY, get_rules
+    return get_rules(db, BLACKLIST_KEY, tenant_id=reader_tenant(user))
 
 
 @router.put("/blacklist/rules")
 def put_blacklist_rules(body: dict, db: Session = Depends(get_db),
                         user: User = Depends(require("blacklist"))):
-    enforce_global_settings(user)
-    from ..services.app_settings import set_blacklist_rules
-    rules = set_blacklist_rules(db, body or {}, user.username)
-    _audit(db, user, "UPDATE", "blacklist_rules", "-", rules)
+    tid = settings_tenant(user)
+    from ..services.app_settings import BLACKLIST_KEY, set_scoped_rules
+    rules = set_scoped_rules(db, BLACKLIST_KEY, body or {}, user.username, tid)
+    _audit(db, user, "UPDATE", "blacklist_rules", tid or "-", {**rules, **_scope_label(db, tid)})
     db.commit()
     return rules
 

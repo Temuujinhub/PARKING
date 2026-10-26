@@ -404,7 +404,7 @@ def sync_site(db, site: ParkingSite, rules: dict, dry_run: bool = False) -> dict
             "to": horizon.isoformat()}
 
 
-def run_once(dry_run: bool = False) -> list:
+def run_once(dry_run: bool = False, site_ids=None) -> list:
     """Бүх идэвхтэй зогсоолыг нэг удаа sync хийнэ.
 
     ЧУХАЛ: энэ функц дотроо `asyncio.run` ашигладаг (камер руу зэрэг хандахад)
@@ -420,19 +420,22 @@ def run_once(dry_run: bool = False) -> list:
         return [{"site": "-", "created": 0, "skipped": 0,
                  "note": "аль хэдийн ажиллаж байна"}]
     try:
-        return _run_once_locked(dry_run)
+        return _run_once_locked(dry_run, site_ids)
     finally:
         _LOCK.release()
 
 
-def _run_once_locked(dry_run: bool = False) -> list:
+def _run_once_locked(dry_run: bool = False, site_ids=None) -> list:
     db = SessionLocal()
     out = []
     try:
         rules = get_camsync_rules(db)
         if not rules["enabled"] and not dry_run:
             return []
-        for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
+        sites = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
+        if site_ids is not None:   # түрээслэгчийн админ — зөвхөн өөрийн зогсоолууд
+            sites = sites.filter(ParkingSite.id.in_(list(site_ids)))
+        for site in sites.all():
             try:
                 out.append(sync_site(db, site, rules, dry_run=dry_run))
             except Exception as e:  # noqa: BLE001

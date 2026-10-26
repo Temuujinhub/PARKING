@@ -351,6 +351,27 @@ PER_SITE: dict[str, set[str]] = {
     # хуудасны 🌙 тохиргоонд харьяалагдана (2026-09-03).
 }
 
+# ── ТҮРЭЭСЛЭГЧИЙН ДАВХАРГА (2026-10-26) ────────────────────────────────────
+# Дараалал: DEFAULTS → систем (SUPER_ADMIN/компанийн админ) → ТҮРЭЭСЛЭГЧ → зогсоол.
+#     {"_tenants": {"<tenant_id>": {"stale_hours": 24, ...}}}
+# Түрээслэгчийн админ «Ерөнхий»-г хадгалахад ЗӨВХӨН өөрийн түрээслэгчийн мөр
+# өөрчлөгдөнө — өмнө нь ерөнхий утга бүх түрээслэгчид нийтлэг тул түрээслэгчийн
+# админ огт өөрчилж чаддаггүй байв (Тэмүүжин: «түрээслэгч бүрийн админ миний
+# оролцоогүй бүх тохиргоогоо хийнэ»). Зөвшөөрөгдөх түлхүүр = зогсоолоор дардаг
+# түлхүүрүүд (уншигч нь зогсоолоо мэддэг тул түрээслэгчийг тодорхойлно) + доорх.
+# Серверийн нийтлэг ажлын хуваарь (camsync/camhealth давтамж, POS аппын хувилбар)
+# системийн түвшинд үлдэнэ.
+TENANT_OVERLAY = "_tenants"
+TENANT_EXTRA: dict[str, set[str]] = {
+    DRIVERTYPE_KEY: {"night_from", "night_until"},   # биллинг night_window(db, site_id)-ээр уншина
+}
+
+
+def tenant_keys(key: str) -> set[str]:
+    """Түрээслэгчийн давхаргад хадгалж болох түлхүүрүүд."""
+    return PER_SITE.get(key, set()) | TENANT_EXTRA.get(key, set())
+
+
 # ЗӨВХӨН зогсоолоор тохируулагддаг түлхүүрүүд — ЕРӨНХИЙ (глобал) утга нь
 # хадгалагдахгүй, уншихад ч тоологдохгүй. 2026-10-14: «POS терминал баримтаа өөрөө
 # гаргадаг» ердийн ерөнхий+зогсоолын тохиргоо болсон (10-15-аас анхдагч унтраалттай)
@@ -375,11 +396,14 @@ CHOICES: dict[tuple[str, str], set] = {
 }
 
 _cache: dict[str, tuple[float, dict, dict]] = {}
+_tenant_cache: dict[str, tuple[float, dict]] = {}
+_site_tenant_cache: dict[str, tuple[float, dict]] = {}
 _CACHE_SEC = 30.0
 
 
 def _mark_changed(db, key):
     _cache.pop(key, None)
+    _tenant_cache.pop(key, None)
     if isinstance(db, Session):
         db.info.setdefault("app_settings_changed", set()).add(key)
 
@@ -406,6 +430,7 @@ def _invalidate_after_transaction(db):
     # A concurrent reader may rewarm the old value before the writer commits.
     for key in db.info.pop("app_settings_changed", ()):
         _cache.pop(key, None)
+        _tenant_cache.pop(key, None)
 
 
 def _load(db, key: str) -> tuple[dict, dict]:
@@ -417,8 +442,18 @@ def _load(db, key: str) -> tuple[dict, dict]:
     hit = None if pending else _cache.get(key)
     if hit and time.monotonic() - hit[0] < _CACHE_SEC:
         return hit[1], hit[2]
+    stored, overlay, tenants, ok = _read_row(db, key)
+    if ok and not pending:
+        now = time.monotonic()
+        _cache[key] = (now, stored, overlay)
+        _tenant_cache[key] = (now, tenants)
+    return stored, overlay
+
+
+def _read_row(db, key: str) -> tuple[dict, dict, dict, bool]:
+    """(глобал, зогсоолын давхарга, түрээслэгчийн давхарга, амжилттай уншсан эсэх)."""
     from ..models import AppSetting
-    stored, overlay = {}, {}
+    stored, overlay, tenants = {}, {}, {}
     try:
         row = db.get(AppSetting, key)
         if row and isinstance(row.value, dict):
@@ -426,11 +461,56 @@ def _load(db, key: str) -> tuple[dict, dict]:
             raw = row.value.get(SITE_OVERLAY)
             if isinstance(raw, dict):
                 overlay = {str(sid): dict(v) for sid, v in raw.items() if isinstance(v, dict)}
+            raw = row.value.get(TENANT_OVERLAY)
+            if isinstance(raw, dict):
+                tenants = {str(tid): dict(v) for tid, v in raw.items() if isinstance(v, dict)}
     except Exception:  # noqa: BLE001 — never cache a failed read as saved defaults
-        return stored, overlay
-    if not pending:
-        _cache[key] = (time.monotonic(), stored, overlay)
-    return stored, overlay
+        return stored, overlay, tenants, False
+    return stored, overlay, tenants, True
+
+
+def _load_tenants(db, key: str) -> dict:
+    """Бүлгийн түрээслэгч бүрийн түүхий давхарга ({tenant_id: {түлхүүр: утга}}) — кэштэй."""
+    pending = isinstance(db, Session) and key in db.info.get("app_settings_changed", ())
+    hit = None if pending else _tenant_cache.get(key)
+    if hit and time.monotonic() - hit[0] < _CACHE_SEC:
+        return hit[1]
+    _, _, tenants, ok = _read_row(db, key)
+    if ok and not pending:
+        _tenant_cache[key] = (time.monotonic(), tenants)
+    return tenants
+
+
+def site_tenant(db, site_id: str | None) -> str | None:
+    """Зогсоолын түрээслэгч (30с кэш). Уншиж чадахгүй бол None = систем утга."""
+    if not site_id:
+        return None
+    hit = _site_tenant_cache.get("map")
+    if not hit or time.monotonic() - hit[0] >= _CACHE_SEC or str(site_id) not in hit[1]:
+        try:
+            from ..models import ParkingSite
+            rows = db.query(ParkingSite.id, ParkingSite.tenant_id).all()
+        except Exception:  # noqa: BLE001 — тестийн FakeDB г.м
+            return None
+        hit = (time.monotonic(), {str(i): (str(t) if t else None) for i, t in rows})
+        _site_tenant_cache["map"] = hit
+    return hit[1].get(str(site_id))
+
+
+def _apply_layer(key: str, rules: dict, layer: dict, allowed_keys: set[str]) -> dict:
+    """Давхаргын утгуудыг (зөвшөөрөгдсөн, төрөл/сонголт таарсан) дүрэм дээр давхарлана."""
+    out = dict(rules)
+    for k, v in (layer or {}).items():
+        if k not in allowed_keys or k not in DEFAULTS[key]:
+            continue
+        cv = _coerce(DEFAULTS[key][k], v, STR_LIMIT.get((key, k), 30))
+        if cv is None:
+            continue
+        allowed = CHOICES.get((key, k))
+        if allowed and cv not in allowed:
+            continue
+        out[k] = cv
+    return out
 
 
 def _coerce(default, v, limit: int = 30):
@@ -456,23 +536,56 @@ def _coerce(default, v, limit: int = 30):
         return None
 
 
-def get_rules(db, key: str, site_id: str | None = None) -> dict:
-    """Дүрмийн бүлэг: DEFAULTS → глобал (DB) → ЗОГСООЛЫН давхарга.
+def get_rules(db, key: str, site_id: str | None = None, tenant_id: str | None = None) -> dict:
+    """Дүрмийн бүлэг: DEFAULTS → систем (DB) → ТҮРЭЭСЛЭГЧ → ЗОГСООЛЫН давхарга.
 
-    site_id өгвөл тухайн зогсоолын дарсан утгууд нэмэгдэнэ. `PER_SITE`-д
+    site_id өгвөл тухайн зогсоолын түрээслэгч ба зогсоолын дарсан утгууд нэмэгдэнэ;
+    tenant_id өгвөл (зогсоолгүй) тухайн түрээслэгчийн «Ерөнхий» утга. Давхаргад
     зөвшөөрөгдөөгүй эсвэл төрөл нь таарахгүй түлхүүр АВТОМАТААР алгасагдана —
     буруу тохиргоо биллингийг унагаахгүй."""
     stored, overlay = _load(db, key)
     # ЗӨВХӨН зогсоолын түлхүүрийн ерөнхий утгыг (гараар DB-д бичигдсэн ч) үл тооно
     site_only = SITE_ONLY.get(key, set())
     rules = {**_base(key), **{k: v for k, v in stored.items() if k not in site_only}}
+    tid = tenant_id or (site_tenant(db, site_id) if site_id else None)
+    if tid:
+        layer = _load_tenants(db, key).get(str(tid))
+        if layer:
+            rules = _apply_layer(key, rules, layer, tenant_keys(key))
     site = overlay.get(site_id or "") if site_id else None
     if not site:
         return rules
-    allowed_keys = PER_SITE.get(key, set())
-    out = dict(rules)
-    for k, v in site.items():
-        if k not in allowed_keys or k not in DEFAULTS[key]:
+    return _apply_layer(key, rules, site, PER_SITE.get(key, set()))
+
+
+def get_tenant_overrides(db, key: str) -> dict:
+    """Бүлгийн түрээслэгч бүрийн түүхий давхарга ({tenant_id: {түлхүүр: утга}})."""
+    return _load_tenants(db, key)
+
+
+def set_tenant_rules(db, key: str, tenant_id: str, values: dict, username: str) -> dict:
+    """Нэг түрээслэгчийн «Ерөнхий» давхаргыг шинэчилнэ. Утга None/"" бол тухайн
+    түлхүүрийг устгаж системийн утга руу буцаана. Тоон утга MIN/MAX-д шахагдана.
+    Буцаах: тухайн түрээслэгчид ҮЙЛЧЛЭХ бүтэн дүрэм."""
+    from ..models import AppSetting
+    from .payment_rules import clamp_values
+    if key not in DEFAULTS:
+        raise ValueError(f"мэдэгдэхгүй бүлэг: {key}")
+    values = clamp_values(key, values or {})
+    allowed_keys = tenant_keys(key)
+    row = _write_row(db, key)
+    if row is None:
+        row = AppSetting(key=key, value={})
+        db.add(row)
+    stored = dict(row.value or {})
+    tenants = {str(k): dict(v) for k, v in (stored.get(TENANT_OVERLAY) or {}).items()
+               if isinstance(v, dict)}
+    layer = dict(tenants.get(str(tenant_id)) or {})
+    for k, v in values.items():
+        if k not in allowed_keys:
+            continue
+        if v is None or (isinstance(v, str) and not v.strip()):
+            layer.pop(k, None)
             continue
         cv = _coerce(DEFAULTS[key][k], v, STR_LIMIT.get((key, k), 30))
         if cv is None:
@@ -480,8 +593,26 @@ def get_rules(db, key: str, site_id: str | None = None) -> dict:
         allowed = CHOICES.get((key, k))
         if allowed and cv not in allowed:
             continue
-        out[k] = cv
-    return out
+        layer[k] = cv
+    if layer:
+        tenants[str(tenant_id)] = layer
+    else:
+        tenants.pop(str(tenant_id), None)
+    stored[TENANT_OVERLAY] = tenants
+    row.value = stored
+    row.updated_by = username
+    _mark_changed(db, key)
+    if isinstance(db, Session):
+        db.flush()   # шинэ мөрийг доорх уншилт харна (autoflush=False сешнд ч)
+    return get_rules(db, key, tenant_id=tenant_id)
+
+
+def set_scoped_rules(db, key: str, values: dict, username: str, tenant_id: str | None) -> dict:
+    """«Ерөнхий» хадгалалт: tenant_id=None → систем (бүх түрээслэгчийн анхдагч),
+    эс бол тухайн түрээслэгчийн давхарга."""
+    if tenant_id:
+        return set_tenant_rules(db, key, tenant_id, values, username)
+    return set_rules(db, key, values, username)
 
 
 def get_site_overrides(db, key: str) -> dict:
@@ -689,8 +820,9 @@ def pos_app_users(db, site_id: str | None = None) -> set[str]:
     except Exception:  # noqa: BLE001 — тохиргоо уншигдахгүй бол хуучин зан
         return set()
     out = set()
+    tenants = _load_tenants(db, EBARIMT_KEY)
     for raw in [stored.get("pos_terminal_users")] + [v.get("pos_terminal_users")
-                                                     for v in overlay.values()]:
+                                                     for v in [*overlay.values(), *tenants.values()]]:
         out |= {u.strip().lower() for u in re.split(r"[,;\s]+", str(raw or "")) if u.strip()}
     return out
 
@@ -706,10 +838,10 @@ def set_driver_type_rules(db, values: dict, username: str) -> dict:
     return set_rules(db, DRIVERTYPE_KEY, values, username)
 
 
-def night_window(db, site_id: str | None = None) -> tuple[str, str]:
+def night_window(db, site_id: str | None = None, tenant_id: str | None = None) -> tuple[str, str]:
     """NIGHT төрлийн хүчинтэй цонх — буруу/дутуу тохиргоонд default (21:00–08:00)
     руу унана: биллинг хэзээ ч «цонхгүй = бүх цагт үнэгүй» болж алдахгүй."""
-    r = get_rules(db, DRIVERTYPE_KEY, site_id)
+    r = get_rules(db, DRIVERTYPE_KEY, site_id, tenant_id=tenant_id)
     f = str(r.get("night_from") or "").strip()
     u = str(r.get("night_until") or "").strip()
     if _HHMM.match(f) and _HHMM.match(u) and f != u:
@@ -743,18 +875,36 @@ OPEN_REASON_DEFAULTS = [
 ]
 
 
-def get_open_reasons(db, active_only: bool = False) -> list[dict]:
-    """Нээх шалтгааны жагсаалт (тохируулаагүй бол анхдагч)."""
-    rows = get_state(db, OPEN_REASONS_KEY).get("items")
+def get_open_reasons(db, active_only: bool = False, tenant_id: str | None = None,
+                     site_id: str | None = None) -> list[dict]:
+    """Нээх шалтгааны жагсаалт: түрээслэгчийн өөрийн жагсаалт (тохируулсан бол) →
+    системийн жагсаалт → анхдагч. site_id өгвөл түүний түрээслэгчээр."""
+    state = get_state(db, OPEN_REASONS_KEY)
+    tid = tenant_id or (site_tenant(db, site_id) if site_id else None)
+    rows = (state.get(TENANT_OVERLAY) or {}).get(str(tid)) if tid else None
+    if not isinstance(rows, list) or not rows:
+        rows = state.get("items")
     if not isinstance(rows, list) or not rows:
         rows = OPEN_REASON_DEFAULTS
     out = [r for r in rows if isinstance(r, dict) and r.get("code") and r.get("label")]
     return [r for r in out if r.get("is_active", True)] if active_only else out
 
 
-def set_open_reasons(db, items: list, username: str) -> list[dict]:
+def open_reason_labels(db) -> dict:
+    """Код → нэр, БҮХ түрээслэгчийн жагсаалтын нэгдэл (тайлан хуучин мөрийг кодоор бүлэглэнэ)."""
+    state = get_state(db, OPEN_REASONS_KEY)
+    out = {r["code"]: r["label"] for r in OPEN_REASON_DEFAULTS}
+    for rows in [state.get("items")] + list((state.get(TENANT_OVERLAY) or {}).values()):
+        for r in rows if isinstance(rows, list) else []:
+            if isinstance(r, dict) and r.get("code") and r.get("label"):
+                out[r["code"]] = r["label"]
+    return out
+
+
+def set_open_reasons(db, items: list, username: str, tenant_id: str | None = None) -> list[dict]:
     """Жагсаалтыг бүхэлд нь дарж бичнэ. `code` нь давхардахгүй, тогтмол байх ёстой
-    (тайлан хуучин мөрүүдийг кодоор нь бүлэглэдэг)."""
+    (тайлан хуучин мөрүүдийг кодоор нь бүлэглэдэг). tenant_id өгвөл зөвхөн тухайн
+    түрээслэгчийн жагсаалт солигдоно."""
     clean, seen = [], set()
     for r in items or []:
         if not isinstance(r, dict):
@@ -767,7 +917,12 @@ def set_open_reasons(db, items: list, username: str) -> list[dict]:
         clean.append({"code": code, "label": label, "is_active": bool(r.get("is_active", True))})
     if not clean:
         raise ValueError("Дор хаяж нэг шалтгаан үлдээх ёстой")
-    set_state(db, OPEN_REASONS_KEY, {"items": clean}, username)
+    state = get_state(db, OPEN_REASONS_KEY)
+    if tenant_id:
+        state[TENANT_OVERLAY] = {**(state.get(TENANT_OVERLAY) or {}), str(tenant_id): clean}
+    else:
+        state["items"] = clean
+    set_state(db, OPEN_REASONS_KEY, state, username)
     return clean
 
 
@@ -795,6 +950,8 @@ def set_state(db, key: str, value: dict, username: str = "system"):
 
 def invalidate_cache():
     _cache.clear()
+    _tenant_cache.clear()
+    _site_tenant_cache.clear()
 
 
 # Хуучин кодтой нийцтэй байх (тестүүд BLACKLIST_DEFAULTS-ыг ашигладаг)

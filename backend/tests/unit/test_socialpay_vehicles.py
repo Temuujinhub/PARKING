@@ -659,8 +659,14 @@ def test_admin_vehicle_data_requires_global_admin(ctx):
 
 
 def test_create_key_with_vehicles_scope(ctx):
+    # 2026-10-26: түлхүүр бүр түрээслэгчтэй — системийн админ түрээслэгч сонгоно; ИйзиПаркингийн
+    # түлхүүр түрээслэгчгүй зогсоолуудыг (энэ тестийн бүх зогсоол) хамарна
+    assert ctx.client.post("/api/admin/partner-keys", json={"name": "no-tenant"}).status_code == 400
+    ep = M.Tenant(name="ИйзиПаркинг", code="EASYPARKING"); ctx.db.add(ep); ctx.db.commit()
     r = ctx.client.post("/api/admin/partner-keys", json={"name": "socialpay-uat", "can_pay": True,
-                                                         "can_vehicles": True})
+                                                         "can_vehicles": True, "tenant_id": ep.id})
     assert r.status_code == 200 and r.json()["scopes"] == "read,pay,vehicles"
+    from app.services.partner_scope import key_site_ids
+    assert ctx.site.id in key_site_ids(ctx.db, ctx.db.get(M.PartnerKey, r.json()["id"]))
     raw = r.json()["key"]
     assert post(ctx, "register", {"plateNo": "7886УКР", "userId": "1"}, key=raw).json()["Message"] == "OK"

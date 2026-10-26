@@ -726,7 +726,9 @@ class PartnerKey(Base):
     түлхүүрүүд fallback болж хэвээр ажиллана — одоогийн партнерууд тасрахгүй.
 
     scopes: "read" (лавлах) эсвэл "read,pay" (төлбөр батлах хүртэл).
-    site_id: NULL = бүх зогсоол; заасан бол зөвхөн тэр зогсоолын мэдээлэл/төлбөр.
+    site_id: заасан бол зөвхөн тэр зогсоолын мэдээлэл/төлбөр.
+    tenant_id: түрээслэгчийн БҮХ зогсоол (2026-10-26 — «Бүх зогсоол» = түрээслэгчийн
+    бүх зогсоол; хүрээ services/partner_scope.py).
     Нэр нь Payment.provider болж тайланд ялгарна (.env-тэй ижил зарчим)."""
     __tablename__ = "partner_keys"
     id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
@@ -735,6 +737,7 @@ class PartnerKey(Base):
     key_prefix = Column(String(12), nullable=False)                # эхний тэмдэгтүүд (танихад)
     scopes = Column(String(60), nullable=False, default="read,pay")
     site_id = Column(UUID(as_uuid=False), ForeignKey("parking_sites.id"), nullable=True)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True, index=True)
     # Түншийн сервер рүү төлбөр/баримтын мэдэгдэл (POST) илгээх URL — Easy Wallet
     # апп жолоочид ДДТД/сугалаа харуулахад (2026-09-13). Хоосон = илгээхгүй.
     webhook_url = Column(String(300), nullable=True)

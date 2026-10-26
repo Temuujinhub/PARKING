@@ -337,6 +337,9 @@ def scan_once(db, now: datetime | None = None) -> dict:
         db.rollback()
         return {"entry": 0, "exit": 0}
     key_ids = list(keys)
+    # Түлхүүр бүрийн зогсоолын хүрээ (зогсоол / түрээслэгчийн бүх зогсоол) — 2026-10-26
+    from .partner_scope import allows, key_site_ids
+    scope = {kid: key_site_ids(db, key) for kid, key in keys.items()}
     S, E = ParkingSession, PartnerVehicleEvent
     settle = now - timedelta(seconds=max(0, settings.partner_vehicle_settle_sec))
     entry_since = now - timedelta(minutes=settings.partner_vehicle_entry_max_age_min)
@@ -353,7 +356,7 @@ def scan_once(db, now: datetime | None = None) -> dict:
     want = {}
     for (kid, sid), (r, sub_created) in entries.items():
         key = keys[kid]
-        if key.site_id and key.site_id != r.site_id:
+        if not allows(scope[kid], r.site_id):
             continue
         if sub_created > r.created_at:
             continue     # бүртгэлээс ӨМНӨ орсон айлчлал
@@ -392,7 +395,7 @@ def scan_once(db, now: datetime | None = None) -> dict:
     n_exit = 0
     for (kid, sid), (r, sub_created) in cands.items():
         key = keys[kid]
-        if key.site_id and key.site_id != r.site_id:
+        if not allows(scope[kid], r.site_id):
             continue
         jk = _job_key(kid, sid, "EXIT")
         paired = entry_plate.get(_job_key(kid, sid, "ENTRY")) == r.plate_number

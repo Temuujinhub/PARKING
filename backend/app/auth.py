@@ -147,8 +147,40 @@ def can_manage_global_settings(user: User) -> bool:
 
 
 def enforce_global_settings(user: User):
+    """Серверийн НИЙТЛЭГ тохиргоо (бүх түрээслэгчид нэг утга) — системийн админ л."""
     if not can_manage_global_settings(user):
-        raise HTTPException(403, "Ерөнхий тохиргоог зөвхөн бүх зогсоолын эрхтэй админ өөрчилнө. Өөрийн зогсоолыг сонгоно уу.")
+        raise HTTPException(403, "Энэ тохиргоо бүх түрээслэгчид нийтлэг (серверийн ажил) тул зөвхөн системийн админ өөрчилнө.")
+
+
+def tenant_admin_of(user: User) -> str | None:
+    """Түрээслэгчийнхээ БҮХ зогсоолыг удирддаг админ бол tenant_id (2026-10-26).
+    Тодорхой зогсоолоор (site_id/site_ids) хязгаарлагдсан админ — зөвхөн зогсоолын түвшин."""
+    if user.role != "ADMIN" or not getattr(user, "tenant_id", None) or not has_permission(user, "settings"):
+        return None
+    if user.site_id or [s for s in (user.site_ids or []) if s]:
+        return None
+    return str(user.tenant_id)
+
+
+def settings_tenant(user: User) -> str | None:
+    """«Ерөнхий» тохиргоог ХААНА хадгалах вэ: None = систем (бүх түрээслэгчийн анхдагч),
+    tenant_id = тухайн түрээслэгчийн давхарга. Аль нь ч биш бол 403.
+    Тэмүүжин 10-26: «түрээслэгч бүрийн админ миний оролцоогүй бүх тохиргоо, үйлдлээ
+    тухайн түрээслэгчийн хүрээнд бүх зогсоолдоо саадгүй хийнэ»."""
+    if can_manage_global_settings(user):
+        return None
+    tid = tenant_admin_of(user)
+    if tid:
+        return tid
+    raise HTTPException(403, "Ерөнхий тохиргоог түрээслэгчийн эсвэл системийн админ өөрчилнө. Өөрийн зогсоолыг сонгоно уу.")
+
+
+def reader_tenant(user: User) -> str | None:
+    """Тохиргоо УНШИХ хүрээ: түрээслэгчийн хэрэглэгч өөрийн түрээслэгчид үйлчлэх утгыг харна."""
+    if user.role == "SUPER_ADMIN" or can_manage_global_settings(user):
+        return None
+    tid = getattr(user, "tenant_id", None)
+    return str(tid) if tid else None
 
 
 def require(*modules: str):

@@ -306,8 +306,8 @@ def _bill(body, partner, db: Session) -> JSONResponse:
                  ParkingSite.parent_site_id.is_(None),
                  # идэвхгүй болгосон зогсоолын үлдсэн OPEN сешн «одоо энд байна» биш (m12)
                  ParkingSite.is_active.is_(True)))
-    if partner.site_id:
-        q = q.filter(ParkingSession.site_id == partner.site_id)
+    if partner.scope_ids() is not None:   # түлхүүрийн хүрээ (зогсоол / түрээслэгч)
+        q = q.filter(ParkingSession.site_id.in_(partner.scope_ids()))
     s = q.order_by(ParkingSession.entry_time.desc()).first()
     if s is None:
         return _resp(True, "NO_ACTIVE_SESSION", data=None)

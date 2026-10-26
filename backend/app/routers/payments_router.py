@@ -1490,7 +1490,8 @@ def pos_bootstrap(terminal_id: str | None = None, db: Session = Depends(get_db),
         # POS «Төлбөргүй гаргах» дээр эндээс сонгуулж manual-exit-д reason_code
         # илгээнэ; «other» бол reason (тайлбар) заавал. Тусдаа дуудлага:
         # GET /api/admin/open-reasons?active_only=true (cashier эрхээр ажиллана).
-        "open_reasons": get_open_reasons(db, active_only=True),
+        "open_reasons": get_open_reasons(db, active_only=True,
+                                         tenant_id=str(getattr(user, "tenant_id", None) or "") or None),
         # Онцгой гаргалт (2026-09-14, free_exit эрхгүй POS/операторт): эхлээд
         # POST /api/sessions/{id}/special-exit/snapshot (гарах камерын зураг),
         # дараа нь POST /api/sessions/{id}/special-exit {kind} — kind жагсаалт:

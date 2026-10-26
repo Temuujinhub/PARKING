@@ -1153,7 +1153,9 @@ def settings_report(db, user) -> dict:
         "terminals": terminals,
         "pos_users": pos_users,
         "pos_app_min_card": POS_APP_MIN_CARD,
-        "open_reasons": A.get_open_reasons(db),
+        "open_reasons": A.get_open_reasons(db, tenant_id=(
+            str(user.tenant_id) if getattr(user, "role", "") != "SUPER_ADMIN"
+            and getattr(user, "tenant_id", None) else None)),
         "special_exit_kinds": [{"kind": k, "label": v["label"], "needs_snapshot": v["needs_snapshot"]}
                                for k, v in SPECIAL_EXIT_KINDS.items()],
         "capture": {"enabled": is_enabled(), "throttle_sec": int(THROTTLE_SEC),

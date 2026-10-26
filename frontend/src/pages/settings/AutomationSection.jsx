@@ -27,7 +27,7 @@ const BOUNDS = {
 const clampRules = (r) => Object.fromEntries(Object.entries(r).map(
   ([k, v]) => [k, BOUNDS[k] ? clampNum(v, { ...BOUNDS[k], fallback: BOUNDS[k].min }) : v]))
 
-function CamSyncCard({ toast }) {
+function CamSyncCard({ toast, systemOnly }) {
   const [rules, setRules] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -71,7 +71,14 @@ function CamSyncCard({ toast }) {
           бүртгэгдэхгүй</b>.
         </p>
       </div>
+      {systemOnly && (
+        <p className="text-xs text-slate-400">
+          Хуваарь болон дүрэм нь бүх түрээслэгчид нийтлэг серверийн ажил тул системийн админ
+          өөрчилнө. Доорх товч зөвхөн <b className="text-slate-300">таны зогсоолууд</b> дээр ажиллана.
+        </p>
+      )}
 
+      <fieldset disabled={systemOnly} className="space-y-4 disabled:opacity-70">
       <label className="flex items-start gap-2 text-sm cursor-pointer">
         <input type="checkbox" className="mt-0.5" checked={rules.enabled}
           onChange={(e) => set('enabled', e.target.checked)} />
@@ -141,11 +148,14 @@ function CamSyncCard({ toast }) {
           </div>
         </details>
       )}
+      </fieldset>
 
       <div className="flex flex-wrap gap-2">
-        <button className="btn-primary" onClick={save} disabled={busy}>
-          <Save size={15} /> Хадгалах
-        </button>
+        {!systemOnly && (
+          <button className="btn-primary" onClick={save} disabled={busy}>
+            <Save size={15} /> Хадгалах
+          </button>
+        )}
         <button className="btn-secondary" onClick={() => run(true)} disabled={busy}>
           Урьдчилан харах
         </button>
@@ -168,7 +178,7 @@ const VERDICT = {
   error: ['✗ Алдаа', 'text-slate-400'],
 }
 
-function CamHealthCard({ toast }) {
+function CamHealthCard({ toast, systemOnly }) {
   const [rules, setRules] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -220,7 +230,14 @@ function CamHealthCard({ toast }) {
           автоматаар унтрааж асаана.
         </p>
       </div>
+      {systemOnly && (
+        <p className="text-xs text-slate-400">
+          Хуваарь болон дүрэм нь бүх түрээслэгчид нийтлэг серверийн ажил тул системийн админ
+          өөрчилнө. Доорх товч зөвхөн <b className="text-slate-300">таны зогсоолууд</b> дээр ажиллана.
+        </p>
+      )}
 
+      <fieldset disabled={systemOnly} className="space-y-4 disabled:opacity-70">
       <label className="flex items-start gap-2 text-sm cursor-pointer">
         <input type="checkbox" className="mt-0.5" checked={rules.enabled}
           onChange={(e) => set('enabled', e.target.checked)} />
@@ -297,17 +314,22 @@ function CamHealthCard({ toast }) {
           )}
         </div>
       )}
+      </fieldset>
 
       <div className="flex flex-wrap gap-2">
-        <button className="btn-primary" onClick={save} disabled={busy}>
-          <Save size={15} /> Хадгалах
-        </button>
+        {!systemOnly && (
+          <button className="btn-primary" onClick={save} disabled={busy}>
+            <Save size={15} /> Хадгалах
+          </button>
+        )}
         <button className="btn-secondary" onClick={() => run(true)} disabled={busy}>
           <PlayCircle size={15} /> Одоо шалгах (reboot хийхгүй)
         </button>
-        <button className="btn-secondary" onClick={() => run(false)} disabled={busy}>
-          <RotateCw size={15} /> Шалгаад засах
-        </button>
+        {!systemOnly && (
+          <button className="btn-secondary" onClick={() => run(false)} disabled={busy}>
+            <RotateCw size={15} /> Шалгаад засах
+          </button>
+        )}
       </div>
     </div>
   )
@@ -373,16 +395,17 @@ export default function AutomationSection({ onGotoRules }) {
   }, [])
   if (error) return <p role="alert" className="text-sm text-slate-100">{error}</p>
   if (!capabilities) return <p role="status" className="text-sm text-slate-300">Эрх шалгаж байна…</p>
-  // Бүх админд ижил харагдана (2026-09-28). Автомат ажил бүх түрээслэгчийн
-  // зогсоолд үйлчилдэг тул түрээслэгчийн админд зөвхөн харах горим — backend
-  // тэдэнд зөвхөн өөрийн зогсоол/камерын төлөвийг буцаана.
+  // 2026-10-26: түрээслэгчийн админ «Яг одоо» товчийг өөрийн зогсоолууд дээр ажиллуулна;
+  // камерын нөхөлт/эрүүл мэндийн хуваарь, дүрэм нь серверийн нийтлэг ажил тул системийн админд.
+  // Зогсоолоор хязгаарлагдсан админ — зөвхөн харах.
   const readOnly = !capabilities.can_edit_global
+  const systemOnly = !capabilities.can_edit_system
   return (
     <div className="space-y-4">
       {readOnly && (
         <div className="card flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-slate-300">
-            Эдгээр автомат ажил бүх түрээслэгчийн зогсоолд үйлчилдэг тул <b>зөвхөн харах</b> горимд
+            Таны эрх тодорхой зогсоолоор хязгаарлагдсан тул энд <b>зөвхөн харах</b> горимд
             байна. Өөрийн зогсоолын дүрмийг Төлбөрийн дүрэм хэсэгт тохируулна.
           </p>
           <button type="button" className="btn-secondary" onClick={onGotoRules}>Өөрийн зогсоолын дүрэм →</button>
@@ -390,8 +413,8 @@ export default function AutomationSection({ onGotoRules }) {
       )}
       <fieldset disabled={readOnly} className="space-y-4 disabled:opacity-80">
         <AutoCloseRunCard toast={toast} onGotoRules={readOnly ? null : onGotoRules} />
-        <CamHealthCard toast={toast} />
-        <CamSyncCard toast={toast} />
+        <CamHealthCard toast={toast} systemOnly={systemOnly} />
+        <CamSyncCard toast={toast} systemOnly={systemOnly} />
       </fieldset>
     </div>
   )

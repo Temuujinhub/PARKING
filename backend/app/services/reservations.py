@@ -132,7 +132,8 @@ def site_for(db, site_code, partner) -> ParkingSite:
     site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code.strip()).first()
     if site is None or not site.is_active:
         raise ReservationError("SITE_NOT_FOUND", "Зогсоол олдсонгүй", 404)
-    if partner.site_id and partner.site_id != site.id:
+    from .partner_scope import allows, partner_ids
+    if not allows(partner_ids(partner), site.id):
         raise ReservationError("FORBIDDEN", "Энэ түлхүүр өөр зогсоолд хандах эрхгүй", 403)
     if site.parent_site_id:
         raise ReservationError("NOT_SUPPORTED", "Доторх (nested) зогсоолд захиалга авахгүй — "

@@ -44,21 +44,29 @@ const GROUP_NOTE = {
 
 const SOURCE_BADGE = {
   site: ['Энэ зогсоолд', 'bg-accent/15 text-accent border-accent/30'],
+  tenant: ['Түрээслэгч', 'bg-violet-500/15 text-violet-300 border-violet-500/30'],
   global: ['Ерөнхий', 'bg-slate-500/10 text-slate-400 border-slate-600/40'],
   site_column: ['«Зогсоол» таб', 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'],
 }
 
 /** Нэг дүрмийн мөр — үйлчилж буй утга, эх сурвалж, засварын талбар. */
-function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
+function RuleRow({ row, draft, onChange, onReset, isGlobal, tenantScope }) {
   const edited = draft !== undefined
   const shown = edited ? draft : row.value
   // site_only: ЗӨВХӨН зогсоолоор тохируулагдах дүрэм (сервер ерөнхий утгыг хадгалахгүй)
   // — энд зөвхөн харуулна. 2026-10-14-өөс POS терминалын e-Barimt дүрэм ердийн
   // ерөнхий+зогсоолын тохиргоо болсон (механизм хэвээр, одоогоор ийм дүрэм алга)
   const siteOnly = isGlobal && row.site_only
-  const locked = row.source === 'site_column' || siteOnly
-  const [badgeText, badgeCls] = SOURCE_BADGE[edited && !isGlobal ? 'site' : row.source] || SOURCE_BADGE.global
-  const overridden = !isGlobal && (row.source === 'site' || edited)
+  // Түрээслэгчийн админы «Ерөнхий»: түрээслэгчээр дарж болохгүй (серверийн нийтлэг) дүрэм — харуулна
+  const systemLocked = isGlobal && tenantScope && !row.per_tenant
+  const locked = row.source === 'site_column' || siteOnly || systemLocked
+  const editedSource = !isGlobal ? 'site' : (tenantScope ? 'tenant' : row.source)
+  const [badgeText, badgeCls] = SOURCE_BADGE[edited ? editedSource : row.source] || SOURCE_BADGE.global
+  // Дарсан утга: зогсоолд — зогсоолын давхарга; түрээслэгчийн «Ерөнхий»-д — түрээслэгчийн давхарга
+  const overridden = !isGlobal ? (row.source === 'site' || edited)
+    : !!tenantScope && (row.source === 'tenant' || edited)
+  const fallbackLabel = isGlobal ? 'систем' : 'ерөнхий'
+  const fallbackValue = isGlobal ? row.system_value : row.global_value
 
   const control = () => {
     if (siteOnly) {
@@ -118,6 +126,11 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
               зөвхөн ерөнхий
             </span>
           )}
+          {systemLocked && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600/40 text-slate-500">
+              систем — бүх түрээслэгчид нийтлэг
+            </span>
+          )}
           {row.site_only && (
             <span className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-500/30 text-cyan-300">
               зөвхөн зогсоолоор
@@ -145,12 +158,12 @@ function RuleRow({ row, draft, onChange, onReset, isGlobal }) {
           {control()}
           {overridden && !locked && (
             <div className="text-[10px] text-slate-500 mt-1">
-              ерөнхий: <span className="font-mono">{String(row.global_value)}</span>
+              {fallbackLabel}: <span className="font-mono">{String(fallbackValue)}</span>
             </div>
           )}
         </div>
         {overridden && !locked && (
-          <button type="button" title="Ерөнхий утга руу буцаах"
+          <button type="button" title={isGlobal ? 'Системийн утга руу буцаах' : 'Ерөнхий утга руу буцаах'}
             className="text-slate-500 hover:text-slate-200 cursor-pointer mt-1.5"
             onClick={onReset}><RotateCcw size={14} /></button>
         )}
@@ -204,8 +217,11 @@ export default function PaymentRulesSection({ onGotoDevices }) {
   const dirty = Object.values(draft).some((g) => Object.keys(g).length > 0)
 
   const isGlobal = siteId === GLOBAL
-  // Ерөнхий утга бүх түрээслэгчид нөлөөлдөг тул түрээслэгчийн админ зөвхөн харна
+  // 2026-10-26: түрээслэгчийн админ «Ерөнхий»-г ӨӨРИЙН түрээслэгчид засна (системийн утга
+  // хөндөгдөхгүй); зогсоолоор хязгаарлагдсан админ — зөвхөн харах
   const readOnly = isGlobal && !canGlobal
+  const tenantScope = isGlobal && canGlobal && !index?.can_edit_system
+  const tenantName = index?.global_tenant?.name
 
   const save = async () => {
     setBusy(true)
@@ -216,7 +232,9 @@ export default function PaymentRulesSection({ onGotoDevices }) {
       setDraft({})
       api('/api/admin/payment-rules').then(setIndex).catch(() => {})
       toast(isGlobal
-        ? 'Ерөнхий дүрэм хадгалагдлаа — тусгай дүрэмгүй бүх зогсоолд үйлчилнэ'
+        ? (tenantScope
+          ? `Ерөнхий дүрэм хадгалагдлаа — ${tenantName || 'таны түрээслэгч'}-ийн тусгай дүрэмгүй бүх зогсоолд үйлчилнэ`
+          : 'Ерөнхий дүрэм хадгалагдлаа — тусгай дүрэмгүй бүх зогсоолд үйлчилнэ')
         : 'Хадгалагдлаа — дараагийн уншилтаас эхлэн үйлчилнэ')
     } catch (e) { setError(e.message); toast(e.message, 'error') } finally { setBusy(false) }
   }
@@ -235,7 +253,7 @@ export default function PaymentRulesSection({ onGotoDevices }) {
       {error && <p role="alert" className="text-sm text-slate-100 border border-brand-red rounded-lg p-3">{error}</p>}
       {readOnly && (
         <p className="text-sm text-slate-300 border border-surface-border rounded-lg p-3">
-          Ерөнхий дүрэм бүх түрээслэгчийн зогсоолд үйлчилдэг тул <b>зөвхөн харах</b> горимд
+          Таны эрх тодорхой зогсоолоор хязгаарлагдсан тул ерөнхий дүрэм <b>зөвхөн харах</b> горимд
           байна. Өөрийн зогсоолд өөрөөр тохируулах бол доорх жагсаалтаас зогсоолоо сонгоно уу.
         </p>
       )}
@@ -255,7 +273,10 @@ export default function PaymentRulesSection({ onGotoDevices }) {
         <div className="flex flex-wrap items-center gap-2">
           <select className="input w-auto min-w-[16rem]" value={siteId} disabled={busy}
             onChange={(e) => setSiteId(e.target.value)} aria-label="Зогсоол">
-            <option value={GLOBAL}>Ерөнхий — бүх зогсоолын анхдагч{canGlobal ? '' : ' (зөвхөн харах)'}</option>
+            <option value={GLOBAL}>
+              {tenantName ? `Ерөнхий — ${tenantName}-ийн бүх зогсоол` : 'Ерөнхий — бүх зогсоолын анхдагч'}
+              {canGlobal ? '' : ' (зөвхөн харах)'}
+            </option>
             {index.sites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}{s.override_count ? ` — ${s.override_count} тусгай дүрэм` : ''}
@@ -264,7 +285,10 @@ export default function PaymentRulesSection({ onGotoDevices }) {
           </select>
           {report && isGlobal && (
             <span className="text-xs text-slate-500">
-              Энд хадгалсан утга <b className="text-slate-300">тусгай дүрэмгүй бүх зогсоолд</b> үйлчилнэ.
+              Энд хадгалсан утга <b className="text-slate-300">
+                {tenantScope ? `${tenantName || 'таны түрээслэгч'}-ийн тусгай дүрэмгүй бүх зогсоолд`
+                  : 'тусгай дүрэмгүй бүх зогсоолд'}</b> үйлчилнэ
+              {tenantScope && ' (бусад түрээслэгчид нөлөөлөхгүй)'}.
               Зогсоол сонговол тэр зогсоолын давхаргыг засна.
             </span>
           )}
@@ -321,9 +345,10 @@ export default function PaymentRulesSection({ onGotoDevices }) {
             </p>
           )}
           {rows.map((r) => (
-            <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal}
+            <RuleRow key={`${r.group}.${r.key}`} row={r} isGlobal={isGlobal} tenantScope={tenantScope}
               draft={draft[r.group]?.[r.key] === undefined ? undefined
-                : (draft[r.group][r.key] === null ? r.global_value : draft[r.group][r.key])}
+                : (draft[r.group][r.key] === null ? (isGlobal ? r.system_value : r.global_value)
+                  : draft[r.group][r.key])}
               onChange={(v) => setVal(r.group, r.key, v)}
               onReset={() => resetVal(r.group, r.key)} />
           ))}

@@ -79,8 +79,8 @@ function AccountModal({ state, tenants, sites, isSuper, onClose, onDone }) {
   useEffect(() => {
     if (!state) return
     if (state.mode === 'new') {
-      // ADMIN түрээслэгчийн данс үүсгэхгүй (backend ч 403 өгнө) — зогсоолын л данс
-      setF({ scope: isSuper ? 'tenant' : 'site', target_id: '', qpay_username: '',
+      // Түрээслэгчийн данс: супер — дурын, түрээслэгчийн админ — өөрийнх (2026-10-26)
+      setF({ scope: tenants.length ? 'tenant' : 'site', target_id: '', qpay_username: '',
              qpay_password: '', qpay_invoice_code: '', qpay_district_code: '' })
     } else {
       setF({ scope: state.scope, target_id: state.id,
@@ -142,7 +142,7 @@ function AccountModal({ state, tenants, sites, isSuper, onClose, onDone }) {
         {isNew && (
           <>
             <div className="flex gap-2">
-              {(isSuper
+              {(tenants.length
                 ? [['tenant', 'Түрээслэгчид (бүх зогсоолд нь)'], ['site', 'Нэг зогсоолд (ховор)']]
                 : [['site', 'Нэг зогсоолд']]).map(([v, l]) => (
                 <label key={v} className={`flex-1 px-3 py-2 rounded-lg border text-sm cursor-pointer text-center transition-colors
@@ -277,7 +277,8 @@ function PaymentAccountsPanel() {
   const load = () => api('/api/admin/payment-accounts').then(setData).catch((e) => toast(e.message, 'error'))
   useEffect(() => {
     load()
-    if (isSuper) api('/api/admin/tenants').then(setTenants)  // түрээслэгчийн жагсаалт супер л авна
+    // Супер — бүх түрээслэгч; түрээслэгчийн админ — өөрийнхөө (backend шүүнэ); бусад 403
+    if (isSuper || user?.role === 'ADMIN') api('/api/admin/tenants').then(setTenants).catch(() => setTenants([]))
     api('/api/admin/sites').then(setSites)
   }, [])
   if (!data) return <div className="card text-sm text-slate-500 py-6 text-center">Ачаалж байна…</div>
@@ -341,8 +342,8 @@ function PaymentAccountsPanel() {
             <td className="td"><SiteList sites={a.sites} /></td>
             <td className="td text-right whitespace-nowrap">
               <button className="btn-secondary py-1 text-xs mr-1" onClick={() => test(a)}>Турших</button>
-              {/* Түрээслэгчийн данс засах нь мөнгөний тохиргоо — зөвхөн Супер админ */}
-              {(isSuper || a.scope === 'site') && (
+              {/* Түрээслэгчийн данс — супер эсвэл тухайн түрээслэгчийн админ */}
+              {(isSuper || a.scope === 'site' || (a.scope === 'tenant' && tenants.some((t) => t.id === a.id))) && (
                 <button className="btn-secondary py-1 text-xs" onClick={() => setAccModal({ mode: 'edit', ...a })}>Засах</button>
               )}
             </td>
@@ -409,7 +410,7 @@ function PaymentAccountsPanel() {
       {/* msgbill.mn eBarimt API — дансаар (online operator) төлбөрт PosAPI-гүйгээр
           жинхэнэ баримт. Түлхүүр: түрээслэгч бүрийнх (энд) → глобал .env */}
       {data.msgbill && (
-        <MsgbillPanel mb={data.msgbill} isSuper={isSuper} onChanged={load} />
+        <MsgbillPanel mb={data.msgbill} isSuper={isSuper} ownTenants={tenants.map((t) => t.id)} onChanged={load} />
       )}
 
       {/* Bank modal-д зогсоол сонгуулах хувилбар (шинээр нэмэхэд) */}
@@ -626,7 +627,7 @@ function MsgbillGlobalModal({ open, mb, onClose, onDone }) {
   )
 }
 
-function MsgbillPanel({ mb, isSuper, onChanged }) {
+function MsgbillPanel({ mb, isSuper, ownTenants = [], onChanged }) {
   const toast = useToast()
   const [modal, setModal] = useState(null)
   const [gmodal, setGmodal] = useState(false)
@@ -718,7 +719,7 @@ function MsgbillPanel({ mb, isSuper, onChanged }) {
             </span>
             {t.sites?.length > 0 && <SiteList sites={t.sites} />}
           </div>
-          {isSuper && (
+          {(isSuper || ownTenants.includes(t.id)) && (
             <button className="btn-secondary py-0.5 text-xs shrink-0" onClick={() => setModal(t)}>
               {t.key_set ? 'Засах' : 'Түлхүүр'}
             </button>
@@ -764,19 +765,23 @@ curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" 
 ]
 
 // Түлхүүр үүсгэх модал — үүссэн түлхүүр НЭГ УДАА л ил гарна
-// canGlobal=false — түрээслэгч/зогсоолоор хязгаарлагдсан админ: «Бүх зогсоол» болон машин
-// бүртгэлийн түлхүүрийг сервер 403-аар хаадаг тул сонгох боломж өгөхгүй (2026-10-26 гомдол)
-function KeyCreateModal({ open, sites, canGlobal, onClose, onDone }) {
+// 2026-10-26: түлхүүр бүр ТҮРЭЭСЛЭГЧИЙН хүрээтэй — «Бүх зогсоол» = тухайн түрээслэгчийн бүх
+// зогсоол. scope (сервер): system — түрээслэгч сонгоно; tenant — өөрийн түрээслэгч;
+// sites — зогсоолоор хязгаарлагдсан админ, зөвхөн өөрийн зогсоол.
+function KeyCreateModal({ open, sites, scope, tenants, scopeTenant, onClose, onDone }) {
   const toast = useToast()
-  const blank = () => ({ name: '', can_pay: true, can_vehicles: false,
-                         site_id: canGlobal ? '' : (sites[0]?.id || '') })
+  const blank = () => ({ name: '', can_pay: true, can_vehicles: false, tenant_id: '',
+                         site_id: scope === 'sites' ? (sites[0]?.id || '') : '' })
   const [f, setF] = useState(blank)
   const [created, setCreated] = useState(null)
   useEffect(() => { if (open) { setF(blank()); setCreated(null) } }, [open])
   // Зөвхөн хоосон зогсоолыг дүүргэнэ — үүсгэсний дараах load() ил гарсан түлхүүрийг арилгахгүй
   useEffect(() => {
-    if (open && !canGlobal && sites[0]) setF((x) => (x.site_id ? x : { ...x, site_id: sites[0].id }))
-  }, [open, canGlobal, sites])
+    if (open && scope === 'sites' && sites[0]) setF((x) => (x.site_id ? x : { ...x, site_id: sites[0].id }))
+  }, [open, scope, sites])
+  const tenantId = scope === 'tenant' ? scopeTenant?.id : f.tenant_id
+  const tenantName = scope === 'tenant' ? scopeTenant?.name : tenants.find((t) => t.id === f.tenant_id)?.name
+  const scopedSites = scope === 'system' ? sites.filter((x) => tenantId && x.tenant_id === tenantId) : sites
   if (!open) return null
   const copy = (text) => navigator.clipboard.writeText(text)
     .then(() => toast('Хуулагдлаа')).catch(() => toast('Хуулж чадсангүй', 'error'))
@@ -784,6 +789,7 @@ function KeyCreateModal({ open, sites, canGlobal, onClose, onDone }) {
   const save = async (e) => {
     e.preventDefault()
     try {
+      if (scope === 'system' && !f.tenant_id) return toast('Түрээслэгч сонгоно уу', 'error')
       const r = await api('/api/admin/partner-keys', { method: 'POST', body: f })
       setCreated(r); onDone()
     } catch (err) { toast(err.message, 'error') }
@@ -803,26 +809,37 @@ function KeyCreateModal({ open, sites, canGlobal, onClose, onDone }) {
               onChange={(e) => setF({ ...f, can_pay: e.target.checked })} />
             Төлбөр батлах эрхтэй (унтраавал зөвхөн лавлана)
           </label>
-          {canGlobal && (
+          {scope !== 'sites' && (
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input type="checkbox" checked={f.can_vehicles}
                 onChange={(e) => setF({ ...f, can_vehicles: e.target.checked })} />
               Машин бүртгэх + орох/гарах мэдэгдэл (SocialPay, MonPay …)
             </label>
           )}
+          {scope === 'system' && (
+            <Field label="Түрээслэгч" required>
+              <select className="input" value={f.tenant_id} required
+                onChange={(e) => setF({ ...f, tenant_id: e.target.value, site_id: '' })}>
+                <option value="">— Сонгох —</option>
+                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="Зогсоолын хязгаар">
-            <select className="input" value={f.site_id} required={!canGlobal}
+            <select className="input" value={f.site_id} required={scope === 'sites'}
+              disabled={scope === 'system' && !tenantId}
               onChange={(e) => setF({ ...f, site_id: e.target.value })}>
-              {canGlobal && <option value="">Бүх зогсоол</option>}
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
+              {scope !== 'sites' && (
+                <option value="">{tenantName ? `${tenantName}-ийн бүх зогсоол` : 'Түрээслэгчийн бүх зогсоол'}</option>
+              )}
+              {scopedSites.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.site_code})</option>)}
             </select>
           </Field>
-          {!canGlobal && (
-            <p className="text-[11px] text-slate-500">
-              Таны эрх өөрийн зогсоолуудаар хязгаарлагдсан тул нэг зогсоолын түлхүүр үүсгэнэ.
-              «Бүх зогсоол» болон машин бүртгэлийн түлхүүрийг бүх зогсоолын эрхтэй админ үүсгэнэ.
-            </p>
-          )}
+          <p className="text-[11px] text-slate-500">
+            {scope === 'sites'
+              ? 'Таны эрх зогсоолоор хязгаарлагдсан тул өөрийн зогсоолын түлхүүр үүсгэнэ.'
+              : 'Түнш зөвхөн энэ түрээслэгчийн зогсоолуудын мэдээлэл, төлбөр, машины хөдөлгөөнд хандана.'}
+          </p>
           <button className="btn-primary w-full justify-center">Үүсгэх</button>
         </form>
       ) : (
@@ -977,15 +994,12 @@ function PartnerApiPanel() {
   const [data, setData] = useState(null)      // админ/супер: {keys, env_partners}
   const [partners, setPartners] = useState(null)  // энгийн админ: зөвхөн нэрс
   const [sites, setSites] = useState([])
-  const [canGlobal, setCanGlobal] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [eventsKey, setEventsKey] = useState(null)   // SocialPay мэдэгдлийн түүх
   const load = () => {
     if (isSuper) {
       api('/api/admin/partner-keys').then(setData).catch((e) => toast(e.message, 'error'))
       api('/api/admin/sites').then(setSites)
-      api('/api/admin/settings-capabilities')
-        .then((c) => setCanGlobal(c.can_edit_global === true)).catch(() => setCanGlobal(false))
     } else {
       api('/api/admin/payment-accounts')
         .then((d) => setPartners(d.partners)).catch(() => setPartners([]))
@@ -1069,7 +1083,10 @@ function PartnerApiPanel() {
                   {k.vehicles_enabled && <span className="block text-accent">+ Машин бүртгэл</span>}</td>
                 <td className="td text-xs">{k.site_code
                   ? <span>{k.site_name} <span className="font-mono text-slate-500">({k.site_code})</span></span>
-                  : 'Бүх зогсоол'}</td>
+                  : k.tenant_name
+                    ? <span>{k.tenant_name}-ийн бүх зогсоол</span>
+                    : <span className="text-amber-400" title="Түрээслэгч оноогоогүй хуучин түлхүүр — бүх зогсоолд хандана">
+                        Бүх зогсоол ⚠</span>}</td>
                 <td className="td text-xs">
                   {k.is_active ? (
                     <div className="space-y-1 min-w-[260px]">
@@ -1124,7 +1141,7 @@ function PartnerApiPanel() {
                 <td className="td font-mono text-sm">{p}</td>
                 <td className="td font-mono text-xs text-slate-500">—</td>
                 <td className="td text-xs">Лавлах + Төлбөр</td>
-                <td className="td text-xs">Бүх зогсоол</td>
+                <td className="td text-xs" title=".env-ийн хуучин түлхүүр — бүх зогсоолд хандана">Бүх зогсоол (.env)</td>
                 <td className="td text-xs text-slate-500">—</td>
                 <td className="td text-xs text-slate-500">—</td>
                 <td className="td text-xs text-slate-500">—</td>
@@ -1159,7 +1176,8 @@ function PartnerApiPanel() {
         </div>
       )}
 
-      <KeyCreateModal open={createOpen} sites={sites} canGlobal={canGlobal}
+      <KeyCreateModal open={createOpen} sites={sites} scope={data?.scope || 'sites'}
+        tenants={data?.tenants || []} scopeTenant={data?.scope_tenant}
         onClose={() => setCreateOpen(false)} onDone={load} />
       <VehicleEventsModal k={eventsKey} onClose={() => { setEventsKey(null); load() }} />
 

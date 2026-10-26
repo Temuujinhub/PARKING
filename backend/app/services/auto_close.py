@@ -26,8 +26,9 @@ from ..session_logic import (
 log = logging.getLogger("parking.auto_close")
 
 
-def run_once() -> int:
-    """Нэг удаагийн цэвэрлэгээ — хаасан session-ийн тоог буцаана."""
+def run_once(site_ids=None) -> int:
+    """Нэг удаагийн цэвэрлэгээ — хаасан session-ийн тоог буцаана.
+    site_ids: зөвхөн эдгээр зогсоол (түрээслэгчийн админы «Одоо ажиллуулах»)."""
     db = SessionLocal()
     closed = 0
     try:
@@ -36,7 +37,10 @@ def run_once() -> int:
         from .app_settings import get_autoclose_rules
         now = datetime.utcnow()
         recent_guard = now - timedelta(hours=1)
-        for site in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True)).all():
+        sites = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
+        if site_ids is not None:
+            sites = sites.filter(ParkingSite.id.in_(list(site_ids)))
+        for site in sites.all():
             # Дүрмийг ЗОГСООЛ БҮРЭЭР уншина (Тохиргоо → Төлбөрийн дүрэм): нэг
             # зогсоолын урсгалд тохирсон босго нөгөөд нь буруу байдаг —
             # өмнө нь бүх зогсоол ганц глобал утгаар цэвэрлэгддэг байв.

@@ -149,17 +149,19 @@ async def _classify(ip: str, name: str, creds: tuple[str, str], samples: int,
     return {"ip": ip, "name": name, "verdict": verdict, **snap}
 
 
-async def _run_all(dry_run: bool, rules: dict) -> dict:
+async def _run_all(dry_run: bool, rules: dict, site_ids=None) -> dict:
     """Бүх идэвхтэй камерыг шалгаж, ГАЦСАНЫГ (боломжтой бол) reboot хийнэ."""
     from .barrier import barrier_is_waiting
 
     db = SessionLocal()
     try:
-        cams = (db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id)
-                .filter(Device.device_type == "camera", Device.status == "active",
-                        ParkingSite.is_active.is_(True),
-                        Device.ip_address.isnot(None), Device.ip_address != "")
-                .all())
+        q = (db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id)
+             .filter(Device.device_type == "camera", Device.status == "active",
+                     ParkingSite.is_active.is_(True),
+                     Device.ip_address.isnot(None), Device.ip_address != ""))
+        if site_ids is not None:   # түрээслэгчийн админ — зөвхөн өөрийн камерууд
+            q = q.filter(Device.site_id.in_(list(site_ids)))
+        cams = q.all()
         seen, targets = set(), []
         for c in cams:
             if c.ip_address in seen:
@@ -261,7 +263,7 @@ async def _run_all(dry_run: bool, rules: dict) -> dict:
                 "total": len(results)}}
 
 
-def run_once(dry_run: bool = False) -> dict:
+def run_once(dry_run: bool = False, site_ids=None) -> dict:
     """Бүх камерын snapshot эрүүл мэндийг нэг удаа шалгана.
 
     ЧУХАЛ: дотроо `asyncio.run` ашигладаг тул event loop-ийн ДОТРООС дуудаж
@@ -274,7 +276,11 @@ def run_once(dry_run: bool = False) -> dict:
         db.close()
     if not rules["enabled"] and not dry_run:
         return {"note": "унтраалттай", "results": [], "counts": {}}
-    out = asyncio.run(_run_all(dry_run, rules))
+    out = asyncio.run(_run_all(dry_run, rules, site_ids))
+    if site_ids is not None:
+        # Түрээслэгчийн хэсэгчилсэн шалгалт — бүх камерын сүүлийн дүн, reboot-ын
+        # cooldown-ыг дарж бичихгүй (зөвхөн dry_run-аар дуудагдана)
+        return out
     # Сүүлийн дүнг UI-д харуулахаар хадгална (dry_run ч болно — оператор харна)
     db = SessionLocal()
     try:

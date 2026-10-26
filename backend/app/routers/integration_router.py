@@ -210,7 +210,18 @@ class PartnerAuth(str):
     scopes/site_id хязгаарлалтыг авч явна (.env түлхүүрт хязгаарлалтгүй)."""
     scopes: str = "read,pay"
     site_id: str | None = None
+    site_ids: list[str] | None = None   # хандах зогсоолууд (None = хязгааргүй) — partner_scope
     key_id: str | None = None
+
+    def scope_ids(self) -> list[str] | None:
+        """Хандах зогсоолууд: site_ids (зогсоол/түрээслэгч) → site_id → None (хязгааргүй)."""
+        if self.site_ids is not None:
+            return self.site_ids
+        return [str(self.site_id)] if self.site_id else None
+
+    def allows(self, site_id) -> bool:
+        from ..services.partner_scope import allows
+        return allows(self.scope_ids(), site_id)
 
     def can_pay(self) -> bool:
         return self.has_scope("pay")
@@ -245,6 +256,8 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
             auth = PartnerAuth(row.name)
             auth.scopes = row.scopes or "read"
             auth.site_id = row.site_id
+            from ..services.partner_scope import key_site_ids
+            auth.site_ids = key_site_ids(db, row)
             auth.key_id = row.id
             return auth
     partners = settings.partner_map()
@@ -264,7 +277,7 @@ def _require_pay(partner: PartnerAuth):
 
 
 def _check_site_scope(partner: PartnerAuth, site_id: str | None):
-    if partner.site_id and partner.site_id != site_id:
+    if not partner.allows(site_id):
         raise HTTPException(403, "Энэ түлхүүр өөр зогсоолын мэдээлэлд хандах эрхгүй")
 
 
@@ -317,8 +330,8 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
     """/sites ба /socialpay/parkings-ийн нэг эх: (ORM site-ууд, мөрүүд, sampled_at)."""
     from ..services.site_location import occupancy_counts, occupied_count
     q = db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))
-    if partner.site_id:
-        q = q.filter(ParkingSite.id == partner.site_id)
+    if partner.scope_ids() is not None:   # түлхүүрийн хүрээ (зогсоол / түрээслэгч)
+        q = q.filter(ParkingSite.id.in_(partner.scope_ids()))
     sites = q.order_by(ParkingSite.site_code).all()
     from ..services.reservations import reservation_summary
     from ..services.ev_map import ev_site_summary
@@ -375,8 +388,8 @@ def find_sessions(plate: str, site_code: str = "",
     q = (db.query(ParkingSession)
          .filter(ParkingSession.plate_number == plate,
                  ParkingSession.status.in_(OPEN_STATUSES)))
-    if partner.site_id:   # түлхүүрийн зогсоолын хязгаар — бусад зогсоолын зогсолт харагдахгүй
-        q = q.filter(ParkingSession.site_id == partner.site_id)
+    if partner.scope_ids() is not None:   # түлхүүрийн хүрээ — бусад зогсоолын зогсолт харагдахгүй
+        q = q.filter(ParkingSession.site_id.in_(partner.scope_ids()))
     if site_code:
         site = db.query(ParkingSite).filter(ParkingSite.site_code == site_code).first()
         if not site:
@@ -415,8 +428,8 @@ def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
             raise HTTPException(404, "Зогсоол олдсонгүй")
         _check_site_scope(partner, site.id)
         site_ids = [site.id]
-    elif partner.site_id:
-        site_ids = [partner.site_id]
+    elif partner.scope_ids() is not None:
+        site_ids = list(partner.scope_ids())
 
     def _rows(statuses):
         q = (db.query(ParkingSession)

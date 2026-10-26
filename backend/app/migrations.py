@@ -471,6 +471,19 @@ MIGRATIONS = [
     # байгаа мөрийг нөхөхгүй (продын цэнэглэгчдэд EV хуудсаас гараар оруулна).
     "ALTER TABLE ev_chargers ADD COLUMN IF NOT EXISTS power_kw NUMERIC(6,1)",
 
+    # 2026-10-26 Түрээслэгчийн хүрээ (Тэмүүжингийн шийдвэр): API түлхүүр бүр түрээслэгчтэй.
+    # (1) түлхүүрийн түрээслэгч; (2) зогсоолтой түлхүүр → тэр зогсоолын түрээслэгч;
+    # (3) бусад хуучин «Бүх зогсоол» түлхүүр → ИйзиПаркинг (EASYPARKING). EASYPARKING
+    # түлхүүр түрээслэгчгүй зогсоолуудыг ч хамарна (services/partner_scope) — тасралтгүй.
+    # Түрээслэгчгүй зогсоолыг ИйзиПаркингт ШИЛЖҮҮЛЭХГҮЙ: локал PosAPI баримт түрээслэгчийн
+    # ТТД-ээр гардаг (ebarimt.merchant_for) тул продод ТТД-ийг шалгасны дараа гараар.
+    "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_keys_tenant_id ON partner_keys (tenant_id)",
+    "UPDATE partner_keys k SET tenant_id = s.tenant_id FROM parking_sites s "
+    "WHERE k.site_id = s.id AND k.tenant_id IS NULL AND s.tenant_id IS NOT NULL",
+    "UPDATE partner_keys SET tenant_id = (SELECT id FROM tenants WHERE code = 'EASYPARKING' LIMIT 1) "
+    "WHERE tenant_id IS NULL AND site_id IS NULL AND EXISTS (SELECT 1 FROM tenants WHERE code = 'EASYPARKING')",
+
 ]
 
 
