@@ -221,6 +221,12 @@ DEFAULTS: dict[str, dict] = {
         # Давхар уншилт дээр ГАРАХ хаалтыг дахин нээх эсэх (эрхтэй машинд).
         # Унтраавал: хаалт нээгдээгүй гацсан машин dedup цонх дуустал хүлээнэ.
         "exit_dedup_reopen": True,
+        # Камер зургаа event-тэйгээ ӨӨРӨӨ илгээгээгүй үед машин бүрд snapshot.cgi-ээр
+        # одоогийн кадр татах эсэх. Энэ нь камер дээр «Manual Snapshot» бичлэг үүсгэж,
+        # хаалт/LED-ийн командтай НЭГ камерын түгжээг 5с хүртэл барьдаг. 2026-10-30
+        # Рашбулаг: «manual snapshot удаан авч, орох/гарах хаалт удаан нээгдэж байна»
+        # → анхдагч УНТРААЛТТАЙ; зураг хэрэгтэй зогсоолд асаана.
+        "manual_snapshot": False,
     },
     DRIVERTYPE_KEY: {
         # «Шөнө үнэгүй» (NIGHT) гэрээний төрлийн ГЛОБАЛ цагийн цонх (УБ цагаар,
@@ -341,7 +347,7 @@ PER_SITE: dict[str, set[str]] = {
                     "invoice_quote_minutes", "wallet_auto_deduct",
                     "inner_unverified_cap_hours"},
     BARRIER_KEY: {"dedup_seconds", "entry_burst_seconds", "entry_burst_max_diff",
-                  "reopen_cooldown_sec", "exit_dedup_reopen"},
+                  "reopen_cooldown_sec", "exit_dedup_reopen", "manual_snapshot"},
     EBARIMT_KEY: {"pos_terminal_issues", "pos_terminal_methods", "pos_terminal_users"},
     RESERVATION_KEY: {"enabled", "spots", "min_minutes", "max_minutes", "max_days_ahead",
                       "min_lead_minutes", "hold_minutes", "arrive_early_minutes",

@@ -490,6 +490,8 @@ class Settings(BaseSettings):
     # snapshot.cgi руу унах эсэх. Энэ нь камер дээр «Manual Snapshot» бичлэг
     # үүсгэдэг бөгөөд АМЬД кадр авдаг тул машин өнгөрсний дараа зураг гардаг.
     # Стримийн зураг тогтвортой ажилласны дараа false болгож бүрмөсөн унтраана.
+    # Зогсоол бүрээр: Тохиргоо → Төлбөрийн дүрэм → «Камераас гар зураг (Manual
+    # Snapshot) авах» (2026-10-30-аас анхдагч унтраалттай). Энэ нь серверийн хориг.
     snapshot_cgi_fallback: bool = True
     # Total CGI budget includes waiting for the camera lock and HTTP authentication.
     snapshot_cgi_budget_sec: float = Field(default=5.0, gt=0, le=30)

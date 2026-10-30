@@ -299,6 +299,22 @@ async def _snapshot_written(session_id: str, lane_dir: str) -> bool:
         db.close()
 
 
+async def _manual_snapshot_allowed(session_id: str) -> bool:
+    """Тохиргоо → Төлбөрийн дүрэм → «Камераас гар зураг (Manual Snapshot) авах» —
+    session-ийн зогсоолоор. 2026-10-30-аас анхдагч унтраалттай: snapshot.cgi нь
+    хаалт/LED-тэй нэг камерын түгжээг барьж хаалтыг удаашруулдаг байв."""
+    from ..models import ParkingSession
+    from .app_settings import get_barrier_rules
+    db = SessionLocal()
+    try:
+        s = db.get(ParkingSession, session_id)
+        return bool(get_barrier_rules(db, s.site_id if s else None).get("manual_snapshot"))
+    except Exception:  # noqa: BLE001 — уншиж чадахгүй бол камерыг ачаалахгүй
+        return False
+    finally:
+        db.close()
+
+
 def image_channel_alive(ip: str) -> bool:
     """Энэ камераас event зураг ӨӨРӨӨ ирэх боломжтой юу — ямар нэг зургийн
     суваг (CGI стрим / comet / WS) АМЬД байна уу.
@@ -372,6 +388,10 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         if not settings.snapshot_cgi_fallback:
             log.info(f"{plate} {lane_dir}: event зураг ирсэнгүй, snapshot.cgi унтраалттай "
                      f"— зураггүй үлдлээ (камер {camera_ip})")
+            return
+        if not await _manual_snapshot_allowed(session_id):
+            log.info(f"{plate} {lane_dir}: event зураг ирсэнгүй, Manual Snapshot тохиргоогоор "
+                     f"унтраалттай — зураггүй үлдлээ (камер {camera_ip})")
             return
         # Хүлээх хугацаанд өөр суваг холбочихсон байж болно — сүүлчийн шалгалт
         # snapshot.cgi-г дуудахаас ӨМНӨ (өмнө нь ДАРАА нь шалгаад хаядаг байв)

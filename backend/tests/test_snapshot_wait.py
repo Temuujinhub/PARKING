@@ -9,7 +9,8 @@
   (3) хүлээх үед зураг ирвэл snapshot.cgi ОГТ дуудагдахгүй,
   (4) ирэхгүй бол fallback ажиллана,
   (5) session-д зураг АЛЬ ХЭДИЙН байвал (дахин уншилт) юу ч хийхгүй,
-  (6) логоос нөхсөн (log_tail) event-д амьд кадр авахгүй.
+  (6) логоос нөхсөн (log_tail) event-д амьд кадр авахгүй,
+  (7) «Камераас гар зураг (Manual Snapshot) авах» унтраалттай зогсоолд snapshot.cgi үгүй.
 """
 import asyncio
 import os
@@ -81,9 +82,18 @@ async def fake_written(session_id, lane_dir):
     return written_after["n"] is not None and calls["written"] >= written_after["n"]
 
 
+manual = {"on": True}         # зогсоолын «Manual Snapshot» дүрэм
+
+
+async def fake_manual(session_id):
+    return manual["on"]
+
+
 _orig_fetch, _orig_written = snapshot._fetch_from_camera, snapshot._snapshot_written
+_orig_manual = snapshot._manual_snapshot_allowed
 snapshot._fetch_from_camera = fake_fetch
 snapshot._snapshot_written = fake_written
+snapshot._manual_snapshot_allowed = fake_manual
 _orig_wait, _orig_stream = settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec
 settings.snapshot_wait_event_sec = 1.5
 settings.snapshot_stream_wait_sec = 0.5
@@ -115,16 +125,14 @@ dt = run({}, "10.0.113.10")
 check("comet attach-тай ч зураг ирсэнгүй: цонхны дараа fallback snapshot.cgi",
       calls["fetch"] == 1 and dt >= 1.4)
 
-# 4) Стримийн санамжид зураг байвал хүлээлгүй шууд түүнийг авна (fetch үгүй)
+# 4) Стримээр ирсэн ТАНИГДААГҮЙ кадр session-д наагдахгүй — зөвхөн сувгийн
+#    эрүүл мэнд: хүлээгээд, зураг ирэхгүй бол fallback
 _orig_save = snapshot._save
-snapshot._save = lambda *a: None
-try:
-    snapshot.offer_stream_image("10.0.113.10", b"\xff\xd8" + b"x" * 2000, src="comet")
-    dt = run({}, "10.0.113.10")
-finally:
-    snapshot._save = _orig_save
-check("стримийн зураг бэлэн: шууд авна, snapshot.cgi үгүй", calls["fetch"] == 0 and dt < 0.5)
-snapshot._stream_images.clear()
+snap_puller._comet_state.clear()
+snapshot.offer_stream_image("10.0.113.10", b"\xff\xd8" + b"x" * 2000, src="comet")
+dt = run({}, "10.0.113.10")
+check("стримийн кадр: наахгүй, сувгийг амьд гэж хүлээгээд fallback",
+      snapshot.stream_delivers("10.0.113.10") and calls["fetch"] == 1 and dt >= 1.4)
 
 # 5) session-д зураг АЛЬ ХЭДИЙН бий (гарах хаалтан дээр дахин уншигдав) → юу ч хийхгүй
 dt = run({}, "10.0.113.10", written_n=1)
@@ -137,7 +145,13 @@ check("log_tail event: snapshot.cgi үгүй (машин аль хэдийн ө�
 
 # 7) payload-д base64 зурагтай (ITSAPI push) → хүлээлт ч, fetch ч хэрэггүй
 import base64
-big = base64.b64encode(b"\xff\xd8" + b"x" * 2000).decode()
+import io
+import random
+from PIL import Image
+_img = Image.frombytes("L", (160, 120), bytes(random.getrandbits(8) for _ in range(160 * 120)))
+_buf = io.BytesIO()
+_img.convert("RGB").save(_buf, "JPEG")   # valid_jpeg бүрэн decode хийдэг — хуурамч байт хүлээн авахгүй
+big = base64.b64encode(_buf.getvalue()).decode()
 snapshot._save = lambda *a: None
 try:
     run({"Picture": {"NormalPic": {"Content": big}}}, "10.0.113.10")
@@ -153,8 +167,17 @@ run({}, "10.0.113.10")
 settings.snapshot_cgi_fallback = _orig_fb
 check("cgi_fallback=false: snapshot.cgi дуудагдахгүй", calls["fetch"] == 0)
 
+# 9) Зогсоолын «Manual Snapshot» дүрэм унтраалттай → зураггүй үлдэнэ (fetch үгүй)
+snapshot._stream_seen.clear()
+manual["on"] = False
+dt = run({}, "10.0.113.10")
+manual["on"] = True
+check("manual_snapshot=false: snapshot.cgi дуудагдахгүй, хүлээхгүй",
+      calls["fetch"] == 0 and dt < 0.5)
+
 snapshot._fetch_from_camera = _orig_fetch
 snapshot._snapshot_written = _orig_written
+snapshot._manual_snapshot_allowed = _orig_manual
 settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec = _orig_wait, _orig_stream
 settings.snap_pull, settings.snap_comet = orig_snap_pull, orig_comet
 snap_puller._comet_state.clear()
