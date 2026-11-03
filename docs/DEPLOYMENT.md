@@ -32,6 +32,24 @@ sudo bash /root/PARKING/deploy/update.sh
 Энэ нь автоматаар: **DB backup** → git pull → deps → frontend build → restart → health.
 Схемийн шинэ багана автоматаар нэмэгдэнэ (`migrations.py` — `ADD COLUMN IF NOT EXISTS`).
 
+### 2а. Өөрийн компьютерээс SSH-ээр (TEST → PROD), 2026-11-03
+
+VPN/дотоод сүлжээнд холбогдсон компьютерээс (Windows — Git Bash эсвэл WSL):
+
+```bash
+bash deploy/remote_deploy.sh status        # хоёр серверийн commit, health
+bash deploy/remote_deploy.sh test          # TEST-д origin/main
+bash deploy/remote_deploy.sh prod          # PROD-д — TEST дээр deploy хийгдсэн ИЖИЛ commit л ("yes" гэж батална)
+bash deploy/remote_deploy.sh all           # TEST → PROD дараалан
+```
+
+Хост: `TEST_HOST` (анхдагч `easyparking@172.16.100.34`), `PROD_HOST` (`easyparking@172.16.100.21`),
+`SSH_OPTS="-p 22 -i ~/.ssh/key"`. Скрипт: `/etc/parking/deploy.env`-ийн үүргийг шалгана (TEST=staging,
+PROD=production — андуурвал зогсоно), deploy түгжээг авч autodeploy-той уралдахгүй, PROD-д
+`approved-release`-ийг бичээд (`.prev`-д өмнөх) `update.sh`-ийг ажиллуулна, сервер GitHub-д хүрэхгүй
+бол энэ компьютер дээр bundle үүсгэж дамжуулна, дараа нь health/commit/шинэ хүснэгт/pillow/autoPay-ийн
+`.env`-ийг шалгана. TEST-ийн батлагдсан commit `/etc/parking/deployed-sha`-д бичигдэнэ.
+
 ### 3. Буцаах (rollback) — алдаа гарвал
 update.sh backup үүсгэдэг (`/root/parking-backup-*.sql`). Асуудал гарвал:
 ```bash
