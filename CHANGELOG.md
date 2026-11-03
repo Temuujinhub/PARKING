@@ -26,6 +26,16 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-11-03 — Wallet-ийн автомат төлбөр гарах хаалтан дээр (autoPay)
+
+Wallet-ийн хүсэлт: бүртгэлтэй машин орох мэдэгдэл (хуучнаараа) + гарах камерт уншигдмагц тухайн
+wallet руу төлөх дүн, дугаарыг илгээж (хэрэглэгч wallet-аар төлөхөө урьдчилж сонгосон), wallet
+төлсөн хариу ирмэгц хаалт ШУУД нээгдэх урсгал. Бүрэн гэрээ: `docs/INTEGRATION_API.md` §9.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| feat | **autoPay**: `POST /api/v1/vehicles/register` `{"autoPay": true}` / `POST /api/v1/vehicles/autopay` (+ `/socialpay/…`). Гарах камер ЯГ дугаар уншиж AWAITING_PAYMENT болмогц түншийн нэрээр intent (өр багтсан) → төлбөрийн webhook URL руу `payment.requested` (ард нь, хаалт/LPR-ийг хүлээлгэхгүй). Wallet `confirm` → хаалт нээгдэнэ; `cancel` (`reason`) → QR/касс. 60с хариугүй → intent CANCELLED, `payment.request_expired`. OCR-тааж тохоосон сешн, татгалзсан айлчлал, өөр идэвхтэй төлбөрт явахгүй; олон wallet-аас хамгийн сүүлд сонгосон нэг рүү. Migration: `partner_vehicles.auto_pay` (DEFAULT false), `partner_autopay_requests`. `.env`: `PARKING_PARTNER_AUTOPAY_ENABLED`, `PARKING_PARTNER_AUTOPAY_TIMEOUT_SEC`; `PARKING_PARTNER_VEHICLE_NOTIFY=false` үед илгээхгүй | 27f6f87 | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+
 ## 2026-10-30 — Камерын «Manual Snapshot»-ыг тохиргооноос асаах/унтраах
 
 Рашбулаг (10-30): «manual snapshot удаан авч, орох/гарах хаалт удаан нээгдэж байна».
