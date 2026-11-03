@@ -484,6 +484,27 @@ MIGRATIONS = [
     "UPDATE partner_keys SET tenant_id = (SELECT id FROM tenants WHERE code = 'EASYPARKING' LIMIT 1) "
     "WHERE tenant_id IS NULL AND site_id IS NULL AND EXISTS (SELECT 1 FROM tenants WHERE code = 'EASYPARKING')",
 
+    # 2026-11-03 Wallet-ийн автомат төлбөр (гарах хаалт): бүртгэлд autoPay сонголт (nullable биш,
+    # DEFAULT false — PG11+ дээр мөр дахин бичихгүй, хуучин бүртгэл бүгд унтраалттай) + хүсэлтийн
+    # хүснэгт (ШИНЭ, create_all дээр үүснэ, хоосон). Мөнгөн өгөгдөл хөндөхгүй.
+    "ALTER TABLE partner_vehicles ADD COLUMN IF NOT EXISTS auto_pay BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE partner_vehicles ADD COLUMN IF NOT EXISTS auto_pay_updated_at TIMESTAMP",
+    "CREATE TABLE IF NOT EXISTS partner_autopay_requests (id UUID PRIMARY KEY, "
+    "payment_id UUID NOT NULL UNIQUE REFERENCES payments(id), "
+    "partner_key_id UUID NOT NULL REFERENCES partner_keys(id), session_id UUID NOT NULL, "
+    "plate_number VARCHAR(20) NOT NULL, external_user_id VARCHAR(64), status VARCHAR(20) NOT NULL, "
+    "attempts INTEGER NOT NULL, next_attempt_at TIMESTAMP, lease_until TIMESTAMP, lease_token VARCHAR(36), "
+    "expires_at TIMESTAMP NOT NULL, payload JSON NOT NULL, last_error TEXT, last_http_status INTEGER, "
+    "delivered_at TIMESTAMP, resolved_at TIMESTAMP, decline_reason VARCHAR(60), notice_status VARCHAR(20), "
+    "notice_attempts INTEGER NOT NULL, notice_next_at TIMESTAMP, created_at TIMESTAMP NOT NULL, "
+    "updated_at TIMESTAMP NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_autopay_requests_session_id ON partner_autopay_requests (session_id)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_autopay_due ON partner_autopay_requests (status, next_attempt_at)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_autopay_expires ON partner_autopay_requests (status, expires_at)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_autopay_notice ON partner_autopay_requests (notice_status, notice_next_at)",
+    "CREATE INDEX IF NOT EXISTS ix_partner_autopay_key_created ON partner_autopay_requests "
+    "(partner_key_id, created_at)",
+
 ]
 
 
@@ -560,6 +581,9 @@ def check_ready():
         conn.execute(text("SELECT reservation_no, status, start_time, end_time, payment_id, session_id "
                           "FROM reservations LIMIT 0"))
         conn.execute(text("SELECT power_kw FROM ev_chargers LIMIT 0"))
+        conn.execute(text("SELECT auto_pay, auto_pay_updated_at FROM partner_vehicles LIMIT 0"))
+        conn.execute(text("SELECT payment_id, status, expires_at, notice_status "
+                          "FROM partner_autopay_requests LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'

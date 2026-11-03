@@ -754,6 +754,11 @@ curl -H "X-API-Key: ТҮЛХҮҮР" \\\n  "${base}/api/v1/sessions?plate=1234У�
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/register
 # → {"Success": true, "Message": "OK"}  (давтан бол "ALREADY_REGISTERED")
 curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/delete`],
+  ['Автомат төлбөр гарах хаалтан дээр (autoPay; «pay» эрх + төлбөрийн Webhook URL шаардлагатай)',
+    `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264", "autoPay": true}' ${base}/api/v1/vehicles/autopay
+# Гарах камерт уншигдмагц Webhook URL руу: {"event": "payment.requested", "payment_id": "…", "amount": 2000, "plate": "7886УКР", "user_id": "100264", "expires_at": "…"}
+# → мөнгө татаад: POST ${base}/api/v1/payments/PAYMENT_ID/confirm {"transaction_id": "…", "amount": 2000} — хаалт шууд нээгдэнэ
+# → татаж чадаагүй: POST ${base}/api/v1/payments/PAYMENT_ID/cancel {"outcome": "NOT_CHARGED", "reason": "INSUFFICIENT_FUNDS"}`],
   ['Бүртгэлтэй машины одоогийн зогсолт, үнэгүй хугацаа, төлөх дүн (bill)',
     `curl -X POST -H "X-API-Key: ТҮЛХҮҮР" -H "Content-Type: application/json" \\\n  -d '{"plateNo": "7886УКР", "userId": "100264"}' ${base}/api/v1/vehicles/bill
 # → {"Success": true, "Message": "OK", "data": {"sessionId": "…", "enteredDate": "…Z", "freeMinutes": 15, "freeUntil": "…Z", "amountDue": 2000, …}}`],
@@ -914,6 +919,11 @@ function VehiclesCell({ k, onChanged, onHistory }) {
         {k.vehicle_events_pending > 0 && <span className="text-amber-400"> · хүлээгдэж буй {k.vehicle_events_pending}</span>}
         {k.vehicle_events_dead > 0 && <span className="text-red-400"> · илгээгдээгүй (DEAD) {k.vehicle_events_dead}</span>}
         {!k.vehicle_webhook_url && <span className="text-amber-400"> · URL хоосон — мэдэгдэл явахгүй</span>}
+        {/* Автомат төлбөр (2026-11-03): autoPay асаасан машин гарах камерт уншигдмагц payment.requested */}
+        {k.autopay_vehicle_count > 0 && <span> · авто төлбөр {k.autopay_vehicle_count}</span>}
+        {k.autopay_open > 0 && <span className="text-amber-400"> · хариу хүлээж буй {k.autopay_open}</span>}
+        {k.autopay_vehicle_count > 0 && k.autopay_problem &&
+          <span className="text-red-400" title={k.autopay_problem}> · авто төлбөр ажиллахгүй: {k.autopay_problem}</span>}
         {res && <span className={res.ok ? 'text-accent' : 'text-red-400'}>
           {' · '}{res.ok ? `✓ HTTP ${res.status_code}` : `✗ ${res.error}`}</span>}
       </div>

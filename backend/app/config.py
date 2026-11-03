@@ -699,6 +699,17 @@ class Settings(BaseSettings):
     partner_vehicle_http_timeout: float = 5.0  # түншийн webhook-ийн хугацаа (сек)
     partner_vehicle_retry_hours: int = 24      # амжилтгүй мэдэгдлийг давтах нийт хугацаа → DEAD
 
+    # ── Wallet-ийн автомат төлбөр гарах хаалтан дээр (2026-11-03) ──
+    # services/partner_autopay.py. «autoPay» асаасан бүртгэлтэй машин гарах камерт уншигдмагц
+    # түншийн төлбөрийн webhook руу `payment.requested` (дүн, дугаар, payment_id) илгээнэ;
+    # түнш /payments/{id}/confirm дуудахад хаалт ШУУД нээгдэнэ. Илгээлт нь
+    # partner_vehicle_notify=false үед ч ХААЛТТАЙ (прод dump-тай TEST жинхэнэ wallet-аас
+    # мөнгө татуулахгүй).
+    partner_autopay_enabled: bool = True
+    partner_autopay_timeout_sec: int = 60      # түнш confirm/cancel хийх хугацаа → дараа нь intent CANCELLED, QR/касс нээгдэнэ
+    partner_autopay_scan_sec: int = 2          # дахин илгээлт/хугацаа дуусгалтын давтамж
+    partner_autopay_http_timeout: float = 5.0  # нэг илгээлтийн хугацаа (сек)
+
 
     # ── EV Hub (тусдаа WSS сервер, EVrepo) ─────────────────────────────────
     # Hub нь OCPP терминаци хийдэг; core (энэ систем) данс/тооцоог хийнэ.
