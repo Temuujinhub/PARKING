@@ -1084,6 +1084,15 @@ def list_partner_keys(db: Session = Depends(get_db),
     vehicles = dict(db.query(PartnerVehicle.partner_key_id, _f.count(PartnerVehicle.id))
                     .filter(PartnerVehicle.deleted_at.is_(None))
                     .group_by(PartnerVehicle.partner_key_id).all())
+    # Автомат төлбөр (2026-11-03): autoPay асаасан машин + хариу хүлээж буй хүсэлт
+    from ..models import PartnerAutopayRequest
+    from ..services.partner_autopay import key_problem
+    autopay_vehicles = dict(db.query(PartnerVehicle.partner_key_id, _f.count(PartnerVehicle.id))
+                            .filter(PartnerVehicle.deleted_at.is_(None), PartnerVehicle.auto_pay.is_(True))
+                            .group_by(PartnerVehicle.partner_key_id).all())
+    autopay_open = dict(db.query(PartnerAutopayRequest.partner_key_id, _f.count(PartnerAutopayRequest.id))
+                        .filter(PartnerAutopayRequest.status.in_(("PENDING", "SENDING", "SENT")))
+                        .group_by(PartnerAutopayRequest.partner_key_id).all())
     ev_counts: dict = {}
     for kid, status, n in (db.query(PartnerVehicleEvent.partner_key_id, PartnerVehicleEvent.status,
                                     _f.count(PartnerVehicleEvent.id))
@@ -1115,6 +1124,10 @@ def list_partner_keys(db: Session = Depends(get_db),
             "vehicle_count": int(vehicles.get(k.id, 0)),
             "vehicle_events_pending": int(sum(evc.get(x, 0) for x in ("PENDING", "RETRY", "SENDING"))),
             "vehicle_events_dead": int(evc.get("DEAD", 0)),
+            "autopay_vehicle_count": int(autopay_vehicles.get(k.id, 0)),
+            "autopay_open": int(autopay_open.get(k.id, 0)),
+            # None = autoPay асаасан машинд гарах хаалтан дээр хүсэлт явна; эс бөгөөс шалтгаан
+            "autopay_problem": key_problem(k),
             "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
             "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
             "created_by": k.created_by,
@@ -1369,8 +1382,38 @@ def list_partner_vehicles(key_id: str, plate: str = "", user_id: str = "", limit
     rows = q.order_by(V.created_at.desc()).limit(max(1, min(int(limit or 100), 500))).all()
     return {"vehicles": [{
         "id": v.id, "plate": v.plate_number, "user_id": v.external_user_id, "via": v.created_via,
+        "auto_pay": bool(v.auto_pay),
+        "auto_pay_updated_at": v.auto_pay_updated_at.isoformat() if v.auto_pay_updated_at else None,
         "created_at": v.created_at.isoformat() if v.created_at else None,
         "deleted_at": v.deleted_at.isoformat() if v.deleted_at else None} for v in rows]}
+
+
+@router.get("/partner-keys/{key_id}/autopay-requests")
+def list_partner_autopay_requests(key_id: str, status: str = "", plate: str = "", limit: int = 50,
+                                  db: Session = Depends(get_db),
+                                  user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Гарах хаалтан дээрх wallet-ийн автомат төлбөрийн хүсэлтүүд (шинээс хуучин руу) —
+    «яагаад хаалт нээгдсэнгүй / яагаад QR хүлээлгэв» гэх дэмжлэгийн асуултад (2026-11-03)."""
+    from ..models import PartnerAutopayRequest as AR
+    from ..session_logic import normalize_plate
+    _own_key(db, user, key_id)
+    q = db.query(AR).filter(AR.partner_key_id == key_id)
+    if status:
+        q = q.filter(AR.status == status.strip().upper())
+    if plate:
+        q = q.filter(AR.plate_number == normalize_plate(plate))
+    rows = q.order_by(AR.created_at.desc()).limit(max(1, min(int(limit or 50), 200))).all()
+
+    def t(v):
+        return v.isoformat() if v else None
+    return {"requests": [{
+        "id": r.id, "payment_id": r.payment_id, "session_id": r.session_id, "plate": r.plate_number,
+        "user_id": r.external_user_id, "status": r.status, "attempts": r.attempts,
+        "amount": (r.payload or {}).get("amount"), "debt_amount": (r.payload or {}).get("debt_amount"),
+        "last_error": r.last_error, "last_http_status": r.last_http_status,
+        "decline_reason": r.decline_reason, "notice_status": r.notice_status,
+        "created_at": t(r.created_at), "delivered_at": t(r.delivered_at),
+        "expires_at": t(r.expires_at), "resolved_at": t(r.resolved_at)} for r in rows]}
 
 
 @router.post("/partner-keys/{key_id}/revoke")

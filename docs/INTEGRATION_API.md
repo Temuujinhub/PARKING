@@ -1,7 +1,9 @@
 # Түншийн интеграцийн API (/api/v1)
 
 tokI, Easy Wallet, MonPay, SocialPay зэрэг гадаад төлбөрийн систем зогсоолын төлбөрийг өөрийн апп
-дотроо төлүүлэхэд зориулсан B2B API. Төлбөр баталгаажмагц систем хаалтыг нээнэ.
+дотроо төлүүлэхэд зориулсан B2B API. Төлбөр баталгаажмагц систем хаалтыг нээнэ. **2026-11-03:**
+хэрэглэгч автомат төлбөр (autoPay) сонгосон бүртгэлтэй машин гарах камерт уншигдмагц систем төлөх
+дүнг wallet руу өөрөө илгээж, wallet батлахад хаалт шууд нээгдэнэ — §9.
 
 > **e-Barimt-ыг ЗӨВХӨН EasyParking-ийн систем гаргана** (`receipt.ready` webhook ба
 > `GET /payments/{id}`-ээр ДДТД/сугалаа; QR-ыг зөвхөн GET, баримт үүссэнээс 1 цагийн дотор). Түнш
@@ -268,7 +270,8 @@ e-Barimt `FAILED`** (`MerchantMissing`: TEST түрээслэгч «ИйзиПа
 
 | Түншээс үл хамаарах (MonPay г.м) | SocialPay (spec) | |
 |---|---|---|
-| `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId"}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` |
+| `POST /api/v1/vehicles/register` | `POST /api/v1/socialpay/register` | `{"plateNo","userId","autoPay"?}` → `{"Success": true, "Message": "OK"\|"ALREADY_REGISTERED"}` (`autoPay` илгээсэн бол + `data` — §9) |
+| `POST /api/v1/vehicles/autopay` | `POST /api/v1/socialpay/autopay` | `{"plateNo","userId","autoPay": true\|false}` — гарах хаалтан дээрх автомат төлбөрийг асаах/унтраах (§9) |
 | `POST /api/v1/vehicles/delete` | `POST /api/v1/socialpay/delete` | → `OK` \| `NOT_FOUND` (Success=true) |
 | `POST /api/v1/vehicles/bill` | `POST /api/v1/socialpay/bill` | бүртгүүлсэн хэрэглэгчийн машины одоогийн зогсолт/үнэгүй хугацаа/төлөх дүн + өр бүр огноотой (`debts[]`: `debtId`, `amount`, `createdAt`, `reason`, `reasonText`, `siteCode`, `siteName`, `enteredDate`, `exitedDate`, `minutesParked`; цаг `…Z`) |
 | `GET\|POST /api/v1/parkings` | `GET\|POST /api/v1/socialpay/parkings` | гадна зогсоолууд, координат, `freeMinutes`, дүүргэлт (`capacity/occupied/free`), захиалга: `reservable`, `reservationSpots`, `reservationFreeNow`; EV цэнэглэгч: `hasEvCharger`, `evChargers[]`, `evConnectorsTotal`, `evConnectorsFree` (§7.1) (2026-10-22; `vehicles` эрх шаардахгүй) |
@@ -442,6 +445,158 @@ POST /api/v1/reservations
 координат, тариф, тохиргоо) TEST-д хуулж, дутуу координат/багтаамжийг зохиомлоор нөхөж, захиалга асааж,
 зохиомол машинаар (note `TEST-DEMO`) дүүргэлт үүсгэнэ. Зөвхөн `PARKING_DEPLOY_ROLE=staging` дээр.
 
+### 9. Автомат төлбөр гарах хаалтан дээр (autoPay) — 2026-11-03
+
+Хэрэглэгч wallet дотроо «энэ машины зогсоолын төлбөрийг автоматаар төл» гэж сонгосон бол машин
+гарах камерт уншигдмагц систем **төлөх дүн, дугаар, `payment_id`-тай хүсэлтийг wallet руу ӨӨРӨӨ
+илгээнэ** — жолооч апп нээх, QR уншуулах шаардлагагүй. Wallet хэрэглэгчээс мөнгө татаад ердийн
+**`POST /api/v1/payments/{payment_id}/confirm`** (§4) дуудахад хаалт **шууд** нээгдэнэ, e-Barimt-ыг
+систем гаргана. Төлбөрийн урсгал (intent → confirm, өр, баримт, webhook) нь §3–§6-тай ЯГ ИЖИЛ;
+ялгаа нь intent-ийг wallet биш **систем үүсгэж** wallet руу түлхдэг.
+
+```
+Машин орох  ─► vehicle.entry мэдэгдэл (§7, хуучнаараа)
+Гарах камер ─► систем: intent (PENDING) үүсгэнэ ─► POST {webhook_url}  event=payment.requested
+                                                   │
+         wallet: хэрэглэгчээс amount татна ◄──────┘
+           ├─ амжилттай → POST /api/v1/payments/{id}/confirm  → PAID, ХААЛТ НЭЭГДЭНЭ, receipt.ready
+           └─ татаж чадаагүй → POST /api/v1/payments/{id}/cancel {"outcome":"NOT_CHARGED","reason":"INSUFFICIENT_FUNDS"}
+                               → жолооч QR/кассаар төлнө
+   60с-д хариу ирэхгүй → intent CANCELLED, QR/касс нээгдэнэ ─► POST {webhook_url} event=payment.request_expired
+```
+
+#### 9.1 Бэлтгэл (түлхүүр)
+
+| Шаардлага | Хаана |
+|---|---|
+| `pay` **ба** `vehicles` эрх | Тохиргоо → Холболт → Гадаад API |
+| Төлбөрийн **webhook URL** (`payment.paid`, `receipt.ready`-тэй ИЖИЛ URL) | мөн тэнд — «Webhook» |
+| Зогсоол түлхүүрийн хүрээнд (зогсоол / түрээслэгч) | түлхүүр үүсгэхэд |
+
+Эдгээрийн аль нэг дутуу байхад `autoPay: true` илгээвэл **409 `AUTOPAY_NOT_CONFIGURED`** (`Detail`-д
+шалтгаан) — чимээгүй бүртгээд гарцад хэзээ ч хүсэлт явуулахгүй байх нөхцөл үүсэхгүй.
+
+#### 9.2 autoPay асаах / унтраах
+
+Бүртгэхдээ:
+
+```json
+POST /api/v1/vehicles/register
+{"plateNo": "7886УКР", "userId": "100264", "autoPay": true}
+→ 200 {"Success": true, "Message": "OK", "data": {"plateNo": "7886УКР", "userId": "100264", "autoPay": true}}
+```
+
+Бүртгэлтэй машинд дараа нь (эсвэл register-ийг `autoPay`-тай давтан дуудаж — `ALREADY_REGISTERED` +
+`data`):
+
+```json
+POST /api/v1/vehicles/autopay
+{"plateNo": "7886УКР", "userId": "100264", "autoPay": false}
+→ 200 {"Success": true, "Message": "OK", "data": {"plateNo": "7886УКР", "userId": "100264", "autoPay": false}}
+```
+
+- `autoPay` нь JSON boolean (`true`/`false`) — `"true"`, `1` → 400 `INVALID_AUTO_PAY`.
+- `autoPay` талбаргүй register — хариу **хуучин хэлбэрээрээ** (`data`-гүй), сонголт хөндөгдөхгүй.
+- Бүртгэлгүй машинд `/vehicles/autopay` → 404 `NOT_REGISTERED`. Машиныг устгахад (`/vehicles/delete`)
+  autoPay мөн дуусна. Анхдагч — **унтраалттай** (хуучин бүх бүртгэл).
+- `/vehicles/bill`-ийн `data`-д: `autoPay` (энэ хэрэглэгчийн сонголт), `autoPayStatus`
+  (одоогийн intent автомат хүсэлт бол `PENDING|SENDING|SENT`, үгүй бол `null`), `autoPayExpiresAt` (`…Z`).
+
+#### 9.3 `payment.requested` — систем → wallet
+
+`POST {webhook_url}`; толгой: `Content-Type: application/json`, `X-Parking-Partner: <түншийн нэр>`,
+`X-Parking-Event: payment.requested`, `X-Parking-Event-Id` = `Idempotency-Key` = `request_id`
+(давталтад ИЖИЛ — wallet давхар татахгүйн тулд энэ түлхүүрээр ялгана).
+
+```json
+{"event": "payment.requested",
+ "event_id": "3d9d…", "request_id": "3d9d…",
+ "payment_id": "261e…",                 // ← confirm/cancel-д ЭНЭ id
+ "session_id": "…",
+ "plate": "7886УКР", "user_id": "100264",   // autoPay асаасан хэрэглэгч
+ "site_code": "NOMADS", "site_name": "Номадс",
+ "entry_time": "2026-11-03T02:10:00", "exit_read_at": "2026-11-03T03:50:12",   // UTC, бүсгүй (§2-тай ижил)
+ "duration_minutes": 100,
+ "amount": 4000.0,                      // ← хэрэглэгчээс ЭНЭ дүнг татна (өр багтсан)
+ "vat_amount": 364.0, "currency": "MNT",
+ "parking_amount": 1000.0, "debt_amount": 3000.0, "debt_count": 3,
+ "debts": [{"debt_id": "…", "amount": 1000.0, "created_at": "…", "reason": "unpaid_exit",
+            "reason_text": "Төлбөр төлөлгүй гарсан", "site_code": "…", "site_name": "…",
+            "session_id": "…", "entry_time": "…", "exit_time": "…", "duration_minutes": 210}],
+ "expires_at": "2026-11-03T03:51:12", "expires_in_seconds": 60,
+ "confirm_url": "https://site.easy-parking.mn/api/v1/payments/261e…/confirm",
+ "cancel_url": "https://site.easy-parking.mn/api/v1/payments/261e…/cancel"}
+```
+
+- **Хариу**: HTTP 2xx = хүлээж авсан (body-д `{"Success": false}` / `{"success": false}` ирвэл
+  амжилтгүйд тооцно). Мөнгө татах, confirm хийхийг **асинхрон**оор хийнэ — webhook-ийн хариуг
+  хүлээлгэхгүй (5с timeout).
+- Хүргэгдээгүй бол 2с, 4с, 8с, 15с, 20с давтана — гэхдээ зөвхөн `expires_at` хүртэл.
+- **Өр**: QR-тэй ижил — тухайн байгууллагын зогсоолуудын төлөгдөөгүй өр `amount`-д багтана
+  (`include_debts=true`). Төлөгдвөл өрийн «3+ өр» дүрэм арилж хаалт нээгдэнэ. Хэрэглэгчид
+  `parking_amount` ба `debts`-ийг тусад нь харуулахыг зөвлөнө.
+
+#### 9.4 Wallet-ийн хариу үйлдэл
+
+| Үр дүн | Дуудах | Систем |
+|---|---|---|
+| Мөнгө татсан | `POST /api/v1/payments/{payment_id}/confirm` `{"transaction_id": "…", "amount": 4000}` | PAID; машин гарцан дээр (тэр эгнээнд өөр машин уншигдаагүй) бол **хаалт шууд нээгдэнэ** (хариуны `barrier_opened`); e-Barimt → `receipt.ready` |
+| Татаж чадаагүй (үлдэгдэл хүрэлцээгүй, хэрэглэгч автомат төлбөрөө унтраасан г.м) | `POST /api/v1/payments/{payment_id}/cancel` `{"outcome": "NOT_CHARGED", "reason": "INSUFFICIENT_FUNDS"}` | intent CANCELLED → жолооч QR/кассаар. Тэр айлчлалд wallet-ийг **дахин нэхэхгүй** |
+
+`reason` заавал биш — 1–60 тэмдэгт код (`INSUFFICIENT_FUNDS`, `USER_DECLINED`, `AUTOPAY_DISABLED`,
+`LIMIT_EXCEEDED` г.м; том үсэг болгож хадгална), аудит болон админы түүхэд харагдана. Буруу хэлбэр → 422.
+
+`GET /api/v1/payments/{payment_id}`-ийн хариунд `autopay`: `{"request_id", "status", "expires_at",
+"delivered_at", "decline_reason"}` (автомат хүсэлт биш бол `null`). `status`: `PENDING` (илгээх) →
+`SENDING` → `SENT` (хүргэгдсэн) → `PAID` | `DECLINED` | `EXPIRED` (хүргэгдсэн ч хариугүй) |
+`FAILED` (хугацаандаа хүргэж чадаагүй).
+
+#### 9.5 Хугацаа (60с) ба `payment.request_expired`
+
+Хүсэлт идэвхтэй байх хооронд тухайн зогсолтод QR нэхэмжлэл/касс **түр хаагдана** (давхар татахаас
+сэргийлнэ; QR хуудас «…-аар автомат төлбөр хийгдэж байна» гэж харуулна). `expires_at` хүртэл
+confirm/cancel ирэхгүй бол систем intent-ийг **CANCELLED** болгож QR/кассыг нээнэ, wallet руу:
+
+```json
+{"event": "payment.request_expired", "event_id": "3d9d…:expired", "request_id": "3d9d…",
+ "payment_id": "261e…", "session_id": "…", "plate": "7886УКР", "user_id": "100264",
+ "status": "CANCELLED", "reason": "TIMEOUT", "expired_at": "2026-11-03T03:51:12"}
+```
+
+- Энэ мэдэгдэл ирсний дараа хэрэглэгчээс **бүү тат**.
+- Хэрэв аль хэдийн татчихсан бол **confirm-ыг ЗААВАЛ дуудна** — систем хүлээн авч бүртгэнэ (машин
+  гарцан дээр хэвээр бол хаалт нээгдэнэ). Энэ хооронд жолооч өөрөөр төлсөн бол илүү төлөлт
+  `overpaid_amount`-оор тэмдэглэгдэж санхүү буцаалт хийнэ — мөнгө хэзээ ч чимээгүй алга болохгүй.
+- Мэдэгдлийг 15с, 1м, 5м, 15м давтана (2xx хүртэл).
+
+#### 9.6 Дүрэм (хэзээ хүсэлт ЯВАХГҮЙ)
+
+| Тохиолдол | Шийдвэр |
+|---|---|
+| autoPay унтраалттай / машин бүртгэлгүй | Явахгүй (жолооч QR/касс эсвэл wallet-ийн гар урсгал §3) |
+| Камер дугаарыг ойролцоогоор уншсан (OCR тааж тохоосон сешн) | Явахгүй — гарцад байгаа машин тэр хэрэглэгчийнх биш байж болно |
+| Үнэгүй хугацаанд / гэрээт / аль хэдийн төлсөн (grace дотор) | Явахгүй — хаалт шууд нээгдэнэ |
+| Тэр зогсолтод өөр идэвхтэй төлбөр (QR нэхэмжлэл, POS) явж байна | Явахгүй |
+| Давтан гарах уншилт (машин хаалтан дээр хэд хэд уншигдсан) | Нэг л хүсэлт |
+| Wallet татгалзсан / хугацаа дууссан | Тэр айлчлалд дахин явахгүй |
+| Төлсөн ч grace хэтэрч дахин гарцад ирсэн | Зөрүүд **шинэ** хүсэлт явна |
+| Нэг машиныг хэд хэдэн wallet / хэрэглэгч autoPay-тай бүртгүүлсэн | **Хамгийн сүүлд autoPay сонгосон** нэг рүү л — хоёр wallet-аас зэрэг татахгүй |
+| Түлхүүр хаагдсан, `pay`/`vehicles` эрхгүй, webhook URL хоосон, зогсоол хүрээнээс гадуур | Тэр түнш рүү явахгүй |
+| Орох уншилтгүй машин (суурь хураамж) | Явна — суурь хураамжийн дүнгээр |
+
+#### 9.7 Сервер талын тохиргоо
+
+`.env`: `PARKING_PARTNER_AUTOPAY_ENABLED=true` (анхдагч), `PARKING_PARTNER_AUTOPAY_TIMEOUT_SEC=60`
+(15–600). `PARKING_PARTNER_VEHICLE_NOTIFY=false` (прод dump-аас сэргээсэн TEST) үед автомат хүсэлт мөн
+**илгээгдэхгүй** — жинхэнэ wallet-аас мөнгө татуулахгүй. Хугацаа дуусгалт ямагт ажиллана (intent
+гацахгүй). `PARKING_PUBLIC_BASE_URL` нь `confirm_url`/`cancel_url`-д орно.
+
+Админ: Тохиргоо → Холболт → Гадаад API — түлхүүр бүрд autoPay-тай машины тоо, хариу хүлээж буй
+хүсэлт, бэлэн биш бол шалтгаан; API `GET /api/admin/partner-keys/{id}/autopay-requests`
+(`?status=&plate=`), `GET /api/admin/partner-keys/{id}/vehicles`-д `auto_pay`. Аудит:
+`PARTNER_VEHICLE_AUTOPAY`, `WALLET_AUTOPAY_REQUEST`, `WALLET_AUTOPAY_EXPIRED`, `WALLET_PAID`,
+`WALLET_INTENT_CANCELLED`.
+
 ## Жишээ урсгал (curl)
 
 ```bash
@@ -453,6 +608,12 @@ curl -H "$K" -X POST "$B/api/v1/payments" -H "Content-Type: application/json" \
      -d '{"session_id":"SID"}'
 curl -H "$K" -X POST "$B/api/v1/payments/PID/confirm" -H "Content-Type: application/json" \
      -d '{"transaction_id":"TX1","amount":2000}'
+
+# Автомат төлбөр (§9): бүртгэхдээ асаана — гарах камерт уншигдмагц payment.requested ирнэ
+curl -H "$K" -X POST "$B/api/v1/vehicles/register" -H "Content-Type: application/json" \
+     -d '{"plateNo":"7886УКР","userId":"100264","autoPay":true}'
+curl -H "$K" -X POST "$B/api/v1/payments/PID/cancel" -H "Content-Type: application/json" \
+     -d '{"outcome":"NOT_CHARGED","reason":"INSUFFICIENT_FUNDS"}'
 ```
 
 ## POS терминалын зогсоол-харьяалал

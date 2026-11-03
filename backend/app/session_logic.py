@@ -2369,6 +2369,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             db.commit()
             schedule_capture(session.id, device.ip_address, plate, "exit", raw,
                              camera_credentials(device))
+            _autopay = _request_partner_autopay(db, session, plate, fuzzy=False)
             notify(site_id, "EXIT_LPR_EVENT", {
                 "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
                 "last_exit_seen_at": now.isoformat(),
@@ -2376,14 +2377,14 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                 "entry_time": now.isoformat(), "duration_minutes": 0,
                 "total_fee": float(_flat), "amount_due": float(_flat),
                 "has_debt": bool(debts), "debt_amount": debt_amount,
-                "no_entry": True})
+                "no_entry": True, "autopay_partner": _autopay["partner"] if _autopay else None})
             _txt = _fee_screen_text(plate, 0, _flat, debt_shown, db=db, site_id=site_id)
             schedule_display(device.ip_address, _txt,
                              _txt if settings.screen_voice else None,
                              camera_credentials(device))
             log.info("[exit] орох уншилтгүй машинд суурь хураамж: %s %s₮", plate, _flat)
             return {"action": "no_session_fee", "session_id": session.id,
-                    "plate": plate, "amount_due": float(_flat)}
+                    "plate": plate, "amount_due": float(_flat), "autopay": _autopay}
 
         # Session олдсонгүй — оператор шийднэ (гараар нээх боломжтой)
         db.commit()
@@ -2448,6 +2449,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             fee["base_fee"], fee["vat_amount"], fee["total_fee"])
         db.commit()
         due_now = amount_due(db, session, fee)
+        # Wallet-ийн автомат төлбөр өрийг ХАМТ нэхэмжилнэ — төлөгдвөл өрийн дүрэм арилж хаалт нээгдэнэ
+        _autopay = _request_partner_autopay(db, session, plate, fuzzy=fuzzy)
         notify(site_id, "EXIT_LPR_EVENT", {
             "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
             "last_exit_seen_at": now.isoformat(),
@@ -2455,14 +2458,16 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             "entry_time": session.entry_time.isoformat(),
             "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
             "amount_due": due_now,
-            "has_debt": True, "debt_amount": debt_amount, "blocked": True})
+            "has_debt": True, "debt_amount": debt_amount, "blocked": True,
+            "autopay_partner": _autopay["partner"] if _autopay else None})
         # Дэлгэцэнд өнөөдрийн төлбөр ба өмнөх өрийг ТУСДАА мөрөөр харуулна
         _txt = _fee_screen_text(plate, fee["duration_minutes"], due_now, debt_shown,
                                 db=db, site_id=site_id)
         schedule_display(device.ip_address, _txt,
                          _txt if settings.screen_voice else None,
                          camera_credentials(device))
-        return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount}
+        return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount,
+                "autopay": _autopay}
 
     # Төлчихсөн — grace хугацаа дотор гарч байна
     if session.status == "PAID":
@@ -2518,6 +2523,11 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     session.total_fee = fee["total_fee"]
     db.commit()
 
+    # ── Wallet-ийн автомат төлбөр (2026-11-03, services/partner_autopay.py) ──
+    # autoPay асаасан бүртгэлтэй машин: түншийн нэрээр intent үүсгэж `payment.requested`-ийг
+    # АРД НЬ илгээнэ; түнш confirm хийхэд хаалт нээгдэнэ. Тааж тохоосон сешнд ЯВУУЛАХГҮЙ.
+    _autopay = _request_partner_autopay(db, session, plate, fuzzy=fuzzy)
+
     notify(site_id, "EXIT_LPR_EVENT", {
         "device_id": device.id, "lane_no": device.lane_no, "lane_dir": 'exit',
         "last_exit_seen_at": now.isoformat(),
@@ -2526,6 +2536,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
         "duration_minutes": fee["duration_minutes"], "total_fee": fee["total_fee"],
         "amount_due": due,
         "has_debt": bool(debts), "debt_amount": debt_amount,
+        "autopay_partner": _autopay["partner"] if _autopay else None,
     })
     # Гарах хаалтны LED дэлгэцэнд төлөх дүнг харуулна (ард нь, урсгалыг хүлээлгэхгүй).
     # Өртэй машинд ӨМНӨХ ӨР тусдаа мөрөөр (өнөөдрийн зогсолтын дүнтэй нийлүүлэхгүй).
@@ -2536,7 +2547,7 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                          camera_credentials(device))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
-            "debt_amount": debt_amount}
+            "debt_amount": debt_amount, "autopay": _autopay}
 
 
 def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0,
@@ -2853,6 +2864,28 @@ def exit_policy_block(db, session, now, exclude_debt_ids=None):
         if count >= threshold:
             return 'debt_rule'
     return None
+
+
+def _request_partner_autopay(db: Session, session: ParkingSession, plate: str,
+                             fuzzy: bool) -> dict | None:
+    """Гарах хаалтан дээрх wallet-ийн автомат төлбөрийн хүсэлт (services/partner_autopay.py).
+    Хаалт/LPR-ийн урсгалыг ХЭЗЭЭ Ч унагаахгүй: алдаа гарвал rollback хийж None (жолооч
+    QR/кассаар ердийнхөөрөө төлнө). HTTP илгээлт ард нь (schedule_delivery)."""
+    from fastapi import HTTPException
+    from .services import partner_autopay
+    try:
+        out = partner_autopay.request_on_exit(db, session, plate, fuzzy=fuzzy)
+    except HTTPException as e:   # зэрэгцээ төлбөр (409) / төлөх дүнгүй (400) — хэвийн
+        db.rollback()
+        log.info("[autopay] алгасав: session=%s (%s)", session.id, e.detail)
+        return None
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log.exception("[autopay] хүсэлт үүсгэх алдаа: session=%s", session.id)
+        return None
+    if out:
+        partner_autopay.schedule_delivery(out["request_id"])
+    return out
 
 
 async def _wallet_auto_deduct(db: Session, session: ParkingSession,

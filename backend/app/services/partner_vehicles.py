@@ -138,13 +138,39 @@ def _active(db, key_id: str, plate: str, user_id: str):
                     PartnerVehicle.deleted_at.is_(None)).first())
 
 
+def parse_auto_pay(value) -> bool:
+    """`autoPay` (2026-11-03): зөвхөн JSON boolean — "true"/1 г.м-ийг таамаглахгүй."""
+    if not isinstance(value, bool):
+        raise VehicleInputError("INVALID_AUTO_PAY", "autoPay нь true эсвэл false байна")
+    return value
+
+
+def _apply_auto_pay(db, row: PartnerVehicle, value: bool, partner_name: str, ip: str | None) -> bool:
+    """Сонголтыг өөрчилнө (өөрчлөгдсөн бол True) — commit-гүй."""
+    if bool(row.auto_pay) == value:
+        return False
+    row.auto_pay, row.auto_pay_updated_at = value, datetime.utcnow()
+    db.add(AuditLog(username=f"partner:{partner_name}"[:60], action="PARTNER_VEHICLE_AUTOPAY",
+                    entity="partner_vehicle", entity_id=row.id, ip_address=ip,
+                    detail={"plate": row.plate_number, "user_id": row.external_user_id,
+                            "auto_pay": value}))
+    return True
+
+
 def register_vehicle(db, key_id: str, partner_name: str, plate: str, user_id: str,
-                     via: str = "api", ip: str | None = None) -> str:
+                     via: str = "api", ip: str | None = None, auto_pay: bool | None = None) -> str:
     """Идемпотент: аль хэдийн идэвхтэй бол «ALREADY_REGISTERED» (Success=true).
-    Буцаах: "OK" | "ALREADY_REGISTERED". Хязгаар хэтэрвэл VehicleInputError(409)."""
+    Буцаах: "OK" | "ALREADY_REGISTERED". Хязгаар хэтэрвэл VehicleInputError(409).
+
+    auto_pay (2026-11-03): None = сонголтыг хөндөхгүй (хуучин зан төлөв); True/False =
+    шинэ бүртгэлд тавина, БАЙГАА бүртгэлд шинэчилнэ (Message нь ALREADY_REGISTERED хэвээр)."""
     _user_lock(db, key_id, user_id)
-    if _active(db, key_id, plate, user_id):
-        db.rollback()
+    existing = _active(db, key_id, plate, user_id)
+    if existing:
+        if auto_pay is not None and _apply_auto_pay(db, existing, auto_pay, partner_name, ip):
+            db.commit()
+        else:
+            db.rollback()
         return "ALREADY_REGISTERED"
     count = (db.query(func.count(PartnerVehicle.id))
              .filter(PartnerVehicle.partner_key_id == key_id,
@@ -155,20 +181,48 @@ def register_vehicle(db, key_id: str, partner_name: str, plate: str, user_id: st
         db.rollback()
         raise VehicleInputError("LIMIT_EXCEEDED",
                                 f"Нэг хэрэглэгч {limit}-аас олон машин бүртгүүлэх боломжгүй", 409)
+    now = datetime.utcnow()
     row = PartnerVehicle(partner_key_id=key_id, plate_number=plate,
-                         external_user_id=user_id, created_via=via)
+                         external_user_id=user_id, created_via=via,
+                         auto_pay=bool(auto_pay), auto_pay_updated_at=now if auto_pay else None)
     db.add(row)
     db.flush()
     db.add(AuditLog(username=f"partner:{partner_name}"[:60], action="PARTNER_VEHICLE_REGISTER",
                     entity="partner_vehicle", entity_id=row.id, ip_address=ip,
-                    detail={"plate": plate, "user_id": user_id, "via": via}))
+                    detail={"plate": plate, "user_id": user_id, "via": via,
+                            **({"auto_pay": bool(auto_pay)} if auto_pay is not None else {})}))
     try:
         db.commit()
     except IntegrityError:
         # Зэрэгцээ ижил хүсэлт (partial unique индекс) — нөгөө нь бүртгэчихсэн
         db.rollback()
+        if auto_pay is not None:
+            return register_vehicle(db, key_id, partner_name, plate, user_id, via, ip, auto_pay)
         return "ALREADY_REGISTERED"
     return "OK"
+
+
+def set_auto_pay(db, key_id: str, partner_name: str, plate: str, user_id: str, value: bool,
+                 ip: str | None = None) -> str:
+    """Бүртгэлтэй машины autoPay-г асаах/унтраах. Буцаах: "OK" | "NOT_REGISTERED"."""
+    _user_lock(db, key_id, user_id)
+    row = (db.query(PartnerVehicle)
+           .filter(PartnerVehicle.partner_key_id == key_id, PartnerVehicle.plate_number == plate,
+                   PartnerVehicle.external_user_id == user_id, PartnerVehicle.deleted_at.is_(None))
+           .with_for_update().first())
+    if row is None:
+        db.rollback()
+        return "NOT_REGISTERED"
+    if _apply_auto_pay(db, row, value, partner_name, ip):
+        db.commit()
+    else:
+        db.rollback()
+    return "OK"
+
+
+def auto_pay_of(db, key_id: str, plate: str, user_id: str) -> bool:
+    row = _active(db, key_id, plate, user_id)
+    return bool(row and row.auto_pay)
 
 
 def delete_vehicle(db, key_id: str, partner_name: str, plate: str, user_id: str,

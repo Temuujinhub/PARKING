@@ -18,6 +18,10 @@ Endpoint-ууд sync (def) — FastAPI threadpool-д ажиллуулна: DB х
 SocialPay-ээс бусад түнш (MonPay г.м) «socialpay» нэртэй зам дуудахгүй. Хариуны хэлбэр,
 эрх, хязгаар ЯГ ИЖИЛ; ялгаа нь зөвхөн бүртгэлийн `created_via` («api»). SocialPay-ийн
 замууд өөрчлөгдөөгүй. Баримт бичиг: docs/INTEGRATION_API.md §7.
+
+АВТОМАТ ТӨЛБӨР (2026-11-03): register-ийн заавал биш `autoPay` болон `…/autopay` endpoint —
+гарах камерт уншигдмагц түнш рүү `payment.requested` (services/partner_autopay.py,
+docs/INTEGRATION_API.md §9). `autoPay` талбаргүй хүсэлтийн хариу хуучнаараа.
 """
 import logging
 from datetime import datetime, timedelta
@@ -161,17 +165,61 @@ def _ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def _auto_pay_arg(body) -> bool | None:
+    """`autoPay` талбар (том/жижиг үсэг үл харгалзана) — байхгүй бол None (хөндөхгүй)."""
+    lower = {str(k).lower(): v for k, v in (body or {}).items()}
+    return PV.parse_auto_pay(lower["autopay"]) if "autopay" in lower else None
+
+
+def _autopay_not_ready(db: Session, partner) -> JSONResponse | None:
+    """autoPay асаахын өмнө түлхүүр бэлэн эсэх (pay эрх, төлбөрийн webhook URL) — эс бөгөөс
+    хүсэлт гарцад хэзээ ч явахгүй тул түншид ШУУД хэлнэ (чимээгүй бүртгэхгүй)."""
+    from ..models import PartnerKey
+    from ..services.partner_autopay import key_problem
+    problem = key_problem(db.get(PartnerKey, partner.key_id))
+    return _fail("AUTOPAY_NOT_CONFIGURED", problem, 409) if problem else None
+
+
 def _register(request: Request, body, partner, db: Session, via: str) -> JSONResponse:
     err = _guard(partner)
     if err:
         return err
     try:
         plate, user = _plate_user(body)
+        auto_pay = _auto_pay_arg(body)
+        if auto_pay:
+            err = _autopay_not_ready(db, partner)
+            if err:
+                return err
         msg = PV.register_vehicle(db, partner.key_id, str(partner), plate, user,
-                                  via=via, ip=_ip(request))
+                                  via=via, ip=_ip(request), auto_pay=auto_pay)
     except PV.VehicleInputError as exc:
         return _fail(exc.code, exc.detail, exc.status)
-    return _resp(True, msg)
+    if auto_pay is None:
+        return _resp(True, msg)       # хуучин хариу ЯГ хэвээр (SocialPay spec)
+    return _resp(True, msg, data={"plateNo": plate, "userId": user, "autoPay": auto_pay})
+
+
+def _autopay(request: Request, body, partner, db: Session) -> JSONResponse:
+    """Бүртгэлтэй машины автомат төлбөрийг асаах/унтраах: {"plateNo","userId","autoPay"}."""
+    err = _guard(partner)
+    if err:
+        return err
+    try:
+        plate, user = _plate_user(body)
+        auto_pay = _auto_pay_arg(body)
+        if auto_pay is None:
+            raise PV.VehicleInputError("INVALID_AUTO_PAY", "autoPay заавал (true/false)")
+        if auto_pay:
+            err = _autopay_not_ready(db, partner)
+            if err:
+                return err
+        msg = PV.set_auto_pay(db, partner.key_id, str(partner), plate, user, auto_pay, ip=_ip(request))
+    except PV.VehicleInputError as exc:
+        return _fail(exc.code, exc.detail, exc.status)
+    if msg == "NOT_REGISTERED":
+        return _fail("NOT_REGISTERED", "Энэ хэрэглэгч энэ машиныг бүртгүүлээгүй байна", 404)
+    return _resp(True, msg, data={"plateNo": plate, "userId": user, "autoPay": auto_pay})
 
 
 def _delete(request: Request, body, partner, db: Session) -> JSONResponse:
@@ -198,6 +246,13 @@ def delete(request: Request, body=Depends(_json_body), partner=Depends(_partner)
            db: Session = Depends(get_db)):
     """4.2 Машин устгах. Бүртгэлгүй бол Success=true, Message=NOT_FOUND (давталт аюулгүй)."""
     return _delete(request, body, partner, db)
+
+
+@router.post("/autopay")
+def autopay(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+            db: Session = Depends(get_db)):
+    """Гарах хаалтан дээрх автомат төлбөрийг асаах/унтраах (2026-11-03; = /api/v1/vehicles/autopay)."""
+    return _autopay(request, body, partner, db)
 
 
 def _bill_data(db: Session, partner: PartnerAuth, s: ParkingSession) -> dict:
@@ -312,6 +367,12 @@ def _bill(body, partner, db: Session) -> JSONResponse:
     if s is None:
         return _resp(True, "NO_ACTIVE_SESSION", data=None)
     data = _bill_data(db, partner, s)
+    # Автомат төлбөр (2026-11-03): энэ хэрэглэгчийн сонголт + одоогийн intent автомат хүсэлт эсэх
+    from ..services.partner_autopay import status_for
+    data["autoPay"] = PV.auto_pay_of(db, partner.key_id, plate, user)
+    ap = status_for(db, data["paymentId"]) if data.get("paymentId") else None
+    data["autoPayStatus"] = ap["status"] if ap else None
+    data["autoPayExpiresAt"] = PV.iso_z(datetime.fromisoformat(ap["expires_at"])) if ap else None
     # session_fee_info is_registered-ийг тэмдэглэж болзошгүй — уншилтын хүсэлтэд хадгалахгүй
     db.rollback()
     return _resp(True, "OK", data=data)
@@ -378,6 +439,13 @@ def vehicles_delete(request: Request, body=Depends(_json_body), partner=Depends(
                     db: Session = Depends(get_db)):
     """= /socialpay/delete."""
     return _delete(request, body, partner, db)
+
+
+@neutral_router.post("/vehicles/autopay")
+def vehicles_autopay(request: Request, body=Depends(_json_body), partner=Depends(_partner),
+                     db: Session = Depends(get_db)):
+    """= /socialpay/autopay — гарах хаалтан дээрх автомат төлбөрийг асаах/унтраах."""
+    return _autopay(request, body, partner, db)
 
 
 @neutral_router.post("/vehicles/bill")

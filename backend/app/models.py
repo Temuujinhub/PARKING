@@ -826,6 +826,12 @@ class PartnerVehicle(Base):
     created_via = Column(String(30), nullable=False, default="api")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
+    # 2026-11-03: хэрэглэгч энэ машины зогсоолын төлбөрийг ЭНЭ wallet-аар автоматаар
+    # төлөхийг сонгосон (register/autopay endpoint-ийн `autoPay`). Гарах камерт уншигдмагц
+    # түнш рүү төлбөрийн хүсэлт явна (services/partner_autopay.py). auto_pay_updated_at —
+    # олон түнш/хэрэглэгч асаасан үед хамгийн СҮҮЛД сонгосныг нь сонгоход.
+    auto_pay = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    auto_pay_updated_at = Column(DateTime, nullable=True)
     __table_args__ = (
         Index("uq_partner_vehicle_active", "partner_key_id", "plate_number", "external_user_id",
               unique=True, postgresql_where=text("deleted_at IS NULL"),
@@ -875,6 +881,52 @@ class PartnerVehicleEvent(Base):
         # retention/хугацаа дуусгалт (created_at) + админы түүх (түлхүүр × огноо)
         Index("ix_partner_vehicle_events_created", "created_at"),
         Index("ix_partner_vehicle_events_key_created", "partner_key_id", "created_at"),
+    )
+
+
+class PartnerAutopayRequest(Base):
+    """Гарах хаалтан дээрх wallet-ийн автомат төлбөрийн хүсэлт (2026-11-03).
+
+    autoPay асаасан бүртгэлтэй машин гарах камерт уншигдаж төлбөр хүлээх (AWAITING_PAYMENT)
+    болмогц: түншийн нэрээр PENDING Payment (intent) үүсч, түншийн төлбөрийн webhook руу
+    `payment.requested` явна. Түнш ердийн POST /api/v1/payments/{id}/confirm-оор батлахад
+    хаалт нээгдэнэ; татгалзвал /cancel. Хугацаандаа (partner_autopay_timeout_sec) хариу
+    ирэхгүй бол intent CANCELLED болж жолооч QR/кассаар төлнө, түнш рүү
+    `payment.request_expired`. services/partner_autopay.py.
+
+    status: PENDING (илгээх) → SENDING → SENT (хүргэгдсэн, түнш хариу өгөх) →
+            PAID | DECLINED (түнш цуцалсан) | EXPIRED (хугацаа дууссан) |
+            FAILED (хугацаандаа хүргэж чадаагүй).
+    notice_*: хугацаа дууссаны мэдэгдлийн тусдаа хүргэлт (best-effort, хэдэн оролдлого)."""
+    __tablename__ = "partner_autopay_requests"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=uid)
+    payment_id = Column(UUID(as_uuid=False), ForeignKey("payments.id"), nullable=False, unique=True)
+    partner_key_id = Column(UUID(as_uuid=False), ForeignKey("partner_keys.id"), nullable=False)
+    session_id = Column(UUID(as_uuid=False), nullable=False, index=True)
+    plate_number = Column(String(20), nullable=False)
+    external_user_id = Column(String(64), nullable=True)
+    status = Column(String(20), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=True)
+    lease_until = Column(DateTime, nullable=True)
+    lease_token = Column(String(36), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    last_error = Column(Text, nullable=True)
+    last_http_status = Column(Integer, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    decline_reason = Column(String(60), nullable=True)
+    notice_status = Column(String(20), nullable=True)     # NULL | PENDING | DONE | DEAD
+    notice_attempts = Column(Integer, nullable=False, default=0)
+    notice_next_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        Index("ix_partner_autopay_due", "status", "next_attempt_at"),
+        Index("ix_partner_autopay_expires", "status", "expires_at"),
+        Index("ix_partner_autopay_notice", "notice_status", "notice_next_at"),
+        Index("ix_partner_autopay_key_created", "partner_key_id", "created_at"),
     )
 
 

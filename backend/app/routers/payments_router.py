@@ -804,9 +804,16 @@ async def qpay_invoice(body: dict, request: Request, db: Session = Depends(get_d
         raise HTTPException(404, "Session олдсонгүй")
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
         raise HTTPException(400, f"Session төлөв буруу: {session.status}")
-    if db.query(Payment.id).filter(Payment.session_id == session.id,
-                                  Payment.payment_method == "WALLET",
-                                  Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first():
+    _wallet_busy = (db.query(Payment.id, Payment.provider, Payment.status)
+                    .filter(Payment.session_id == session.id, Payment.payment_method == "WALLET",
+                            Payment.status.in_(["PENDING", "UNKNOWN", "REVIEW"])).first())
+    if _wallet_busy:
+        from ..services.partner_autopay import status_for as _autopay_status
+        _ap = _autopay_status(db, _wallet_busy.id) if _wallet_busy.status == "PENDING" else None
+        if _ap and _ap["status"] in ("PENDING", "SENDING", "SENT"):
+            # Гарах хаалтан дээрх wallet-ийн автомат төлбөр явж байна (≤ partner_autopay_timeout_sec)
+            raise HTTPException(409, f"{_wallet_busy.provider}-аар автомат төлбөр хийгдэж байна. "
+                                     "Түр хүлээнэ үү — амжилтгүй бол QR дахин нээгдэнэ.")
         raise HTTPException(409, "Дансны гүйлгээг шалгаж байна. Давхар нэхэмжлэл үүсгэхгүй.")
 
     # Худалдан авагч — нэхэмжлэл үүсгэхээс ӨМНӨ шалгана. ТТД/танигдахгүй дугаар → нэргүй иргэн +

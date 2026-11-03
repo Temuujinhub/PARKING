@@ -7,6 +7,9 @@ tokI, Easy Wallet зэрэг гадаад төлбөрийн систем энэ
   4. POST /api/v1/payments/{id}/confirm     — өөрийн талд амжилттай болмогц баталгаажуулах
                                               → систем PAID болгож ХААЛТ НЭЭНЭ
   5. GET  /api/v1/payments/{id}             — төлөв шалгах
+  6. Автомат төлбөр (2026-11-03): autoPay асаасан бүртгэлтэй машин гарах камерт уншигдмагц
+     систем 3-р алхмыг ӨӨРӨӨ хийж түнш рүү `payment.requested` түлхэнэ; түнш 4-р алхмаар
+     батлах эсвэл /cancel (services/partner_autopay.py, docs/INTEGRATION_API.md §9)
 
 Нэвтрэлт: X-API-Key толгой. Түлхүүр ХОЁР эх үүсвэртэй:
   1. partner_keys хүснэгт (Тохиргоо → Холболт → Гадаад API-гаас удирдана,
@@ -530,15 +533,22 @@ def cancel_payment_intent(payment_id: str, body: dict, db: Session = Depends(get
     _check_payment_scope(db, partner, payment)
     if body.get("outcome") != "NOT_CHARGED":
         raise HTTPException(422, "Wallet талаас мөнгө татаагүйг NOT_CHARGED гэж батална уу")
+    # reason (заавал биш, 2026-11-03): автомат төлбөрөөс татгалзсан шалтгаан —
+    # INSUFFICIENT_FUNDS, USER_DECLINED, AUTOPAY_DISABLED г.м (аудит/админы түүхэд)
+    from ..services import partner_autopay as PA
+    reason = PA.parse_reason(body.get("reason"))
     payment = _lock_payment(db, payment.id)
     if payment is None:
         raise HTTPException(409, "Төлбөр боловсруулагдаж байна")
     if payment.status == "PAID":
         raise HTTPException(409, "Төлөгдсөн төлбөрийг intent цуцлалтаар өөрчлөхгүй")
     payment.status = "CANCELLED"
+    if reason:
+        payment.raw_payload = {**(payment.raw_payload or {}), "cancel_reason": reason}
+    PA.mark_declined(db, payment.id, reason)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_INTENT_CANCELLED",
                     entity="payment", entity_id=payment.id,
-                    detail={"outcome": "NOT_CHARGED"}))
+                    detail={"outcome": "NOT_CHARGED", **({"reason": reason} if reason else {})}))
     db.commit()
     return {"payment_id": payment.id, "status": payment.status}
 
@@ -586,6 +596,8 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
                     entity_id=payment.id, detail={"transaction_id": payment.provider_payment_id,
                                                   "amount": float(payment.amount),
                                                   **({"amount_defaulted": True} if amount_defaulted else {})}))
+    from ..services.partner_autopay import mark_paid
+    mark_paid(db, payment.id)     # гарах хаалтан дээрх автомат хүсэлт байсан бол PAID
     db.commit()
     # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
@@ -599,6 +611,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
 async def payment_status(payment_id: str, db: Session = Depends(get_db),
                          partner: PartnerAuth = Depends(require_partner)):
     from .payments_router import payment_outcome
+    from ..services.partner_autopay import status_for as autopay_status
     payment = db.get(Payment, payment_id)
     if not payment or payment.provider != partner:
         raise HTTPException(404, "Payment олдсонгүй")
@@ -615,4 +628,6 @@ async def payment_status(payment_id: str, db: Session = Depends(get_db),
             # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан.
             # `ebarimt` = хамгийн сүүлийн баримт (хуучин), `ebarimts` = БҮХ баримт (зогсолт + өр)
             "ebarimt": latest, "ebarimts": rows,
+            # Гарах хаалтан дээрх автомат төлбөрийн хүсэлт (2026-11-03) — үгүй бол null
+            "autopay": autopay_status(db, payment.id),
             **payment_outcome(db, payment)}

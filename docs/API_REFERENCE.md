@@ -494,10 +494,13 @@ MonPay-д өгөх Word баримт: `MonPay_EasyParking_API_v1.0.docx` (2026-1
 | `GET /api/v1/recent-exits?minutes=5` | read | Гарах камерт уншигдаад төлбөр хүлээж буй машинууд |
 | `POST /api/v1/payments` `{session_id, include_debts?}` | pay | Intent (PENDING) — дүнг систем тооцно |
 | `POST /api/v1/payments/{id}/confirm` `{transaction_id, amount?}` | pay | PAID → хаалт нээгдэнэ, e-Barimt-ыг СИСТЕМ гаргана |
-| `POST /api/v1/payments/{id}/cancel` `{outcome: "NOT_CHARGED"}` | pay | Мөнгө татаагүй intent-ийг цуцлах |
+| `POST /api/v1/payments/{id}/cancel` `{outcome: "NOT_CHARGED", reason?}` | pay | Мөнгө татаагүй intent-ийг цуцлах (`reason`: INSUFFICIENT_FUNDS г.м) |
 | `GET /api/v1/payments/{id}` | read | Төлөв + `ebarimt` (ДДТД, сугалаа, QR) |
-| `POST /api/v1/vehicles/register\|delete\|bill` (= `/api/v1/socialpay/…`) | vehicles | Машин бүртгэл, bill (2026-10-15 түншээс үл хамаарах зам) |
+| `POST /api/v1/vehicles/register\|delete\|bill` (= `/api/v1/socialpay/…`) | vehicles | Машин бүртгэл, bill (2026-10-15 түншээс үл хамаарах зам); register-т `autoPay?` |
+| `POST /api/v1/vehicles/autopay` `{plateNo, userId, autoPay}` (= `/api/v1/socialpay/autopay`) | vehicles (+pay, webhook URL) | Гарах хаалтан дээрх автомат төлбөр: камер уншмагц `payment.requested` webhook → wallet confirm → хаалт (2026-11-03, INTEGRATION_API.md §9) |
 
 Webhook (EasyParking → түнш): `payment.paid`, `receipt.ready` (2xx = амжилт, 24 оролдлого ~18ц);
-машины `vehicle.entry` / `vehicle.exit` (2xx + `{"success": true}`, 24ц). Гарын үсэггүй — түнш
+машины `vehicle.entry` / `vehicle.exit` (2xx + `{"success": true}`, 24ц); автомат төлбөр (autoPay) —
+`payment.requested` (гарах камер уншмагц, төлбөрийн webhook URL руу, хүчинтэй 60с) ба
+`payment.request_expired` (хариугүй хугацаа дууссан — бүү тат). Гарын үсэггүй — түнш
 `GET /api/v1/payments/{id}`-ээр баталгаажуулна. **Түнш энэ төлбөрт өөрийн e-Barimt гаргахгүй.**

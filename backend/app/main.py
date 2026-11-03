@@ -299,6 +299,11 @@ async def start_vat_auto_send():
     from .services.partner_vehicles import supervisor as partner_vehicles_supervisor
     _bg_task(partner_vehicles_supervisor(), "partner-vehicles")
 
+    # Wallet-ийн автомат төлбөр (гарах хаалт): хүсэлтийн дахин илгээлт + 60с-ийн хугацаа
+    # дуусгалт (PENDING intent-ийг суллаж QR/кассыг нээнэ). Хүсэлтгүй үед индекстэй хөнгөн query.
+    from .services.partner_autopay import supervisor as partner_autopay_supervisor
+    _bg_task(partner_autopay_supervisor(), "partner-autopay")
+
     # Урьдчилсан захиалга: төлбөр хүлээх хугацаа дууссан → EXPIRED, ирээгүй → NO_SHOW,
     # сешн хаагдсан → COMPLETED (минут тутам; захиалгагүй үед хоосон 3 query)
     from .services.reservations import supervisor as reservations_supervisor

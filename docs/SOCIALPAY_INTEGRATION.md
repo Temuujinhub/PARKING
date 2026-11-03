@@ -314,6 +314,19 @@ SocialPay spec-ээс өөр талбарыг хүлээн авахыг бата
 
 Төлбөрийн дэлгэрэнгүй, e-Barimt, төлбөрийн webhook: `docs/INTEGRATION_API.md`.
 
+### 7.1 Автомат төлбөр гарах хаалтан дээр (autoPay) — 2026-11-03
+
+Хэрэглэгч SocialPay дотроо автомат төлбөр сонгосон бол бүртгэхдээ `autoPay: true`
+(`POST {EasyParkingUrl}/socialpay/register` `{"plateNo","userId","autoPay": true}`) эсвэл дараа нь
+`POST {EasyParkingUrl}/socialpay/autopay` `{"plateNo","userId","autoPay": true|false}`. Машин гарах
+камерт уншигдмагц EasyParking intent-ийг өөрөө үүсгэж түлхүүрийн **төлбөрийн webhook URL** руу
+`payment.requested` (`payment_id`, `plate`, `user_id`, `amount`, өрийн задаргаа, `expires_at`)
+илгээнэ; SocialPay мөнгө татаад дээрх 4-р алхмын confirm-ыг дуудахад хаалт шууд нээгдэнэ, татаж
+чадаагүй бол 5-р алхмын cancel (`"reason": "INSUFFICIENT_FUNDS"` г.м). 60с-д хариугүй бол intent
+цуцлагдаж `payment.request_expired` ирнэ. Түлхүүрт `pay` эрх ба төлбөрийн webhook URL шаардлагатай
+(үгүй бол 409 `AUTOPAY_NOT_CONFIGURED`). Бүрэн гэрээ, payload, дүрэм: `docs/INTEGRATION_API.md` §9.
+`autoPay` талбаргүй register/delete-ийн хариу spec-ээр ЯГ хэвээр.
+
 ## 8. Edge case / FAQ
 
 - **Машин гарч яваад буцаж орвол?** Шинэ зогсолт → шинэ ОРСОН. Нэг уншилтын давталт шинэ зогсолт үүсгэхгүй.
