@@ -350,6 +350,7 @@ def dashboard_stats(rev_days: int = 7,
     cameras_total = sum(1 for d in device_status if d["device_type"] == "camera")
     barriers_total = sum(1 for d in device_status if d["device_type"] == "barrier")
     return {"open_sessions": open_count, "awaiting_payment": awaiting,
+            "wallets": wallet_stats(db, scope, today),
             "today_entries": today_entries, "today_exits": today_exits,
             "today_revenue": today_revenue, "total_capacity": int(total_capacity or 0),
             "sites": sites, "week_revenue": week, "hourly_load": hourly_load,
@@ -357,6 +358,71 @@ def dashboard_stats(rev_days: int = 7,
             "cameras_total": cameras_total, "barriers_total": barriers_total,
             "devices_online": online_n, "devices_total": len(devices),
             "device_status": device_status}
+
+
+def wallet_stats(db: Session, scope, today: datetime) -> list[dict]:
+    """Хяналтын самбарын «Wallet-аар бүртгүүлсэн машин» (2026-11-03): wallet (түншийн нэр —
+    нэг wallet хэд хэдэн түлхүүртэй байж болно) тус бүрээр манай системд бүртгүүлсэн машин.
+
+      vehicles   — идэвхтэй бүртгэлтэй ДАВТАГДАШГҮЙ дугаар (wallet бүхэлдээ — зогсоолоор хуваагддаггүй)
+      users      — бүртгүүлсэн хэрэглэгч (wallet-ийн userId)
+      auto_pay   — гарах хаалтан дээр автомат төлбөр асаасан дугаар
+      new_today  — өнөөдөр (УБ цагаар) шинээр бүртгэгдсэн
+      parked_now — ОДОО зогсоолд байгаа (хэрэглэгчийн хариуцах зогсоолуудаар шүүнэ)
+      autopay_paid_today — өнөөдөр автомат төлбөрөөр төлөгдсөн гарц
+
+    Хязгаарлагдсан (түрээслэгч/зогсоолын) хэрэглэгчид зөвхөн өөрийн зогсоолыг хамардаг
+    түлхүүрүүдийн wallet харагдана. Түлхүүр цөөн тул Python-д шүүнэ; тоолол 4 бүлэглэсэн query."""
+    from sqlalchemy import case, distinct
+    from ..models import PartnerAutopayRequest, PartnerKey, PartnerVehicle
+    from ..services.partner_scope import key_site_ids
+    keys = db.query(PartnerKey).filter(PartnerKey.is_active.is_(True)).all()
+    if scope is not None:
+        allowed = {scope} if isinstance(scope, str) else set(scope)
+
+        def visible(key):
+            ids = key_site_ids(db, key)
+            return ids is None or bool(allowed & set(ids))
+        keys = [k for k in keys if visible(k)]
+    names = {k.id: k.name for k in keys}
+    if not names:
+        return []
+    PV = PartnerVehicle
+    out: dict = {}
+
+    def row(name):
+        return out.setdefault(name, {"name": name, "vehicles": 0, "users": 0, "auto_pay": 0,
+                                     "new_today": 0, "parked_now": 0, "autopay_paid_today": 0})
+    for k in keys:   # машин бүртгэлийн эрхтэй ч бүртгэлгүй wallet «0»-ээр харагдана
+        if "vehicles" in {x.strip() for x in (k.scopes or "").split(",")}:
+            row(k.name)
+    for name, plates, users, auto, new in (
+            db.query(PartnerKey.name, func.count(distinct(PV.plate_number)),
+                     func.count(distinct(PV.external_user_id)),
+                     func.count(distinct(case((PV.auto_pay.is_(True), PV.plate_number)))),
+                     func.count(distinct(case((PV.created_at >= today, PV.plate_number)))))
+            .join(PartnerKey, PartnerKey.id == PV.partner_key_id)
+            .filter(PV.deleted_at.is_(None), PV.partner_key_id.in_(list(names)))
+            .group_by(PartnerKey.name).all()):
+        r = row(name)
+        r.update(vehicles=int(plates), users=int(users), auto_pay=int(auto), new_today=int(new))
+    parked_q = (db.query(PartnerKey.name, func.count(distinct(ParkingSession.id)))
+                .select_from(PV)
+                .join(PartnerKey, PartnerKey.id == PV.partner_key_id)
+                .join(ParkingSession, ParkingSession.plate_number == PV.plate_number)
+                .filter(PV.deleted_at.is_(None), PV.partner_key_id.in_(list(names)),
+                        ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])))
+    for name, n in _flt(parked_q, ParkingSession.site_id, scope).group_by(PartnerKey.name).all():
+        row(name)["parked_now"] = int(n)
+    ap_q = (db.query(PartnerKey.name, func.count(PartnerAutopayRequest.id))
+            .join(PartnerKey, PartnerKey.id == PartnerAutopayRequest.partner_key_id)
+            .join(ParkingSession, ParkingSession.id == PartnerAutopayRequest.session_id)
+            .filter(PartnerAutopayRequest.partner_key_id.in_(list(names)),
+                    PartnerAutopayRequest.status == "PAID",
+                    PartnerAutopayRequest.resolved_at >= today))
+    for name, n in _flt(ap_q, ParkingSession.site_id, scope).group_by(PartnerKey.name).all():
+        row(name)["autopay_paid_today"] = int(n)
+    return sorted(out.values(), key=lambda r: (-r["vehicles"], r["name"]))
 
 
 @router.get("/revenue")
