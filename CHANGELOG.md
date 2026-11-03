@@ -28,15 +28,21 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ## 2026-11-03 — Wallet-ийн автомат төлбөр гарах хаалтан дээр (autoPay)
 
+**Deploy (11-03):** TEST 11:45, PROD 11:46 UTC — `51cb182`, схем `a636306f5ccf`, `partner_autopay_requests`
+хүснэгт үүссэн, pillow 13.0.0, health ok; гадна талаас `POST /api/v1/vehicles/autopay` → 401 (route бүртгэгдсэн).
+PROD-ийн deploy-ийн өмнө `/api/health` 3с-д хариугүй байсан (түр ачаалал) — restart-ийн дараа хэвийн.
+autoPay-тай машин хоёр серверт 0 — түншүүд v1.3 баримтын дагуу асаасны дараа ажиллана.
+
 Wallet-ийн хүсэлт: бүртгэлтэй машин орох мэдэгдэл (хуучнаараа) + гарах камерт уншигдмагц тухайн
 wallet руу төлөх дүн, дугаарыг илгээж (хэрэглэгч wallet-аар төлөхөө урьдчилж сонгосон), wallet
 төлсөн хариу ирмэгц хаалт ШУУД нээгдэх урсгал. Бүрэн гэрээ: `docs/INTEGRATION_API.md` §9.
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| feat | **autoPay**: `POST /api/v1/vehicles/register` `{"autoPay": true}` / `POST /api/v1/vehicles/autopay` (+ `/socialpay/…`). Гарах камер ЯГ дугаар уншиж AWAITING_PAYMENT болмогц түншийн нэрээр intent (өр багтсан) → төлбөрийн webhook URL руу `payment.requested` (ард нь, хаалт/LPR-ийг хүлээлгэхгүй). Wallet `confirm` → хаалт нээгдэнэ; `cancel` (`reason`) → QR/касс. 60с хариугүй → intent CANCELLED, `payment.request_expired`. OCR-тааж тохоосон сешн, татгалзсан айлчлал, өөр идэвхтэй төлбөрт явахгүй; олон wallet-аас хамгийн сүүлд сонгосон нэг рүү. Migration: `partner_vehicles.auto_pay` (DEFAULT false), `partner_autopay_requests`. `.env`: `PARKING_PARTNER_AUTOPAY_ENABLED`, `PARKING_PARTNER_AUTOPAY_TIMEOUT_SEC`; `PARKING_PARTNER_VEHICLE_NOTIFY=false` үед илгээхгүй | 27f6f87 | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
-| feat | **Хяналтын самбар → «Wallet-аар бүртгүүлсэн машин»**: wallet тус бүрийн бүртгэлтэй машин, хэрэглэгч, автомат төлбөртэй, одоо зогсоолд байгаа, өнөөдөр шинэ, өнөөдөр автомат төлбөрөөр гарсан (`/api/reports/dashboard` → `wallets`; хязгаарлагдсан хэрэглэгчид өөрийн зогсоолын түлхүүрүүд) | f8f27c6 | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
-| sec | `pillow` 12.3.0 → **13.0.0** — pip-audit 39 эмзэг байдал (CI «Аюулгүй байдлын шалгалт» 10-30-аас улаан байсан). Deploy үед `update.sh` шинэ хувилбарыг суулгана | 138a1ab | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| feat | **autoPay**: `POST /api/v1/vehicles/register` `{"autoPay": true}` / `POST /api/v1/vehicles/autopay` (+ `/socialpay/…`). Гарах камер ЯГ дугаар уншиж AWAITING_PAYMENT болмогц түншийн нэрээр intent (өр багтсан) → төлбөрийн webhook URL руу `payment.requested` (ард нь, хаалт/LPR-ийг хүлээлгэхгүй). Wallet `confirm` → хаалт нээгдэнэ; `cancel` (`reason`) → QR/касс. 60с хариугүй → intent CANCELLED, `payment.request_expired`. OCR-тааж тохоосон сешн, татгалзсан айлчлал, өөр идэвхтэй төлбөрт явахгүй; олон wallet-аас хамгийн сүүлд сонгосон нэг рүү. Migration: `partner_vehicles.auto_pay` (DEFAULT false), `partner_autopay_requests`. `.env`: `PARKING_PARTNER_AUTOPAY_ENABLED`, `PARKING_PARTNER_AUTOPAY_TIMEOUT_SEC`; `PARKING_PARTNER_VEHICLE_NOTIFY=false` үед илгээхгүй | 27f6f87 | ✅ 11-03 11:45 UTC (51cb182) | ✅ 11-03 11:46 UTC (51cb182) |
+| ops | `deploy/remote_deploy.sh` — өөрийн компьютерээс SSH-ээр TEST → PROD (үүргийн шалгалт, deploy түгжээ, TEST-д батлагдсан commit л PROD-д, GitHub хаалттай үед bundle). TEST: `eptest@172.16.100.34`. Энэ deploy-г TEST серверээс `remote_deploy.sh all`-аар хийв | c9bf32f, ac4ce0e | ✅ 11-03 11:45 UTC (51cb182) | ✅ 11-03 11:46 UTC (51cb182) |
+| feat | **Хяналтын самбар → «Wallet-аар бүртгүүлсэн машин»**: wallet тус бүрийн бүртгэлтэй машин, хэрэглэгч, автомат төлбөртэй, одоо зогсоолд байгаа, өнөөдөр шинэ, өнөөдөр автомат төлбөрөөр гарсан (`/api/reports/dashboard` → `wallets`; хязгаарлагдсан хэрэглэгчид өөрийн зогсоолын түлхүүрүүд) | f8f27c6 | ✅ 11-03 11:45 UTC (51cb182) | ✅ 11-03 11:46 UTC (51cb182) |
+| sec | `pillow` 12.3.0 → **13.0.0** — pip-audit 39 эмзэг байдал (CI «Аюулгүй байдлын шалгалт» 10-30-аас улаан байсан). Deploy үед `update.sh` шинэ хувилбарыг суулгана | 138a1ab | ✅ 11-03 11:45 UTC (51cb182) | ✅ 11-03 11:46 UTC (51cb182) |
 
 ## 2026-10-30 — Камерын «Manual Snapshot»-ыг тохиргооноос асаах/унтраах
 
