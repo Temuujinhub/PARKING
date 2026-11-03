@@ -8,7 +8,7 @@
 #   bash deploy/remote_deploy.sh test <sha>      # тодорхой commit (origin/main-ийн өвөг байх ёстой)
 #
 # Хост (шаардлагатай бол орлуулна):
-#   TEST_HOST=easyparking@172.16.100.34  PROD_HOST=easyparking@172.16.100.21
+#   TEST_HOST=eptest@172.16.100.34  PROD_HOST=easyparking@172.16.100.21
 #   SSH_OPTS="-p 22 -i ~/.ssh/id_ed25519"
 #
 # Сервер бүр дээр хийгдэх зүйл: энэ файлыг /tmp руу хуулж `sudo bash … --remote` ажиллуулна →
@@ -122,7 +122,7 @@ if [ "${1:-}" = "--remote" ]; then
 fi
 
 # ════════════════════════════ ӨӨРИЙН КОМПЬЮТЕР ТАЛ ════════════════════════════
-TEST_HOST="${TEST_HOST:-easyparking@172.16.100.34}"
+TEST_HOST="${TEST_HOST:-eptest@172.16.100.34}"
 PROD_HOST="${PROD_HOST:-easyparking@172.16.100.21}"
 # shellcheck disable=SC2206
 SSH_ARGS=(-o ConnectTimeout=10 -o ServerAliveInterval=30 ${SSH_OPTS:-})
