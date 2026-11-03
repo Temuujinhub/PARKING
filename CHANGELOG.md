@@ -35,6 +35,8 @@ wallet руу төлөх дүн, дугаарыг илгээж (хэрэглэг
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
 | feat | **autoPay**: `POST /api/v1/vehicles/register` `{"autoPay": true}` / `POST /api/v1/vehicles/autopay` (+ `/socialpay/…`). Гарах камер ЯГ дугаар уншиж AWAITING_PAYMENT болмогц түншийн нэрээр intent (өр багтсан) → төлбөрийн webhook URL руу `payment.requested` (ард нь, хаалт/LPR-ийг хүлээлгэхгүй). Wallet `confirm` → хаалт нээгдэнэ; `cancel` (`reason`) → QR/касс. 60с хариугүй → intent CANCELLED, `payment.request_expired`. OCR-тааж тохоосон сешн, татгалзсан айлчлал, өөр идэвхтэй төлбөрт явахгүй; олон wallet-аас хамгийн сүүлд сонгосон нэг рүү. Migration: `partner_vehicles.auto_pay` (DEFAULT false), `partner_autopay_requests`. `.env`: `PARKING_PARTNER_AUTOPAY_ENABLED`, `PARKING_PARTNER_AUTOPAY_TIMEOUT_SEC`; `PARKING_PARTNER_VEHICLE_NOTIFY=false` үед илгээхгүй | 27f6f87 | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| feat | **Хяналтын самбар → «Wallet-аар бүртгүүлсэн машин»**: wallet тус бүрийн бүртгэлтэй машин, хэрэглэгч, автомат төлбөртэй, одоо зогсоолд байгаа, өнөөдөр шинэ, өнөөдөр автомат төлбөрөөр гарсан (`/api/reports/dashboard` → `wallets`; хязгаарлагдсан хэрэглэгчид өөрийн зогсоолын түлхүүрүүд) | f8f27c6 | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| sec | `pillow` 12.3.0 → **13.0.0** — pip-audit 39 эмзэг байдал (CI «Аюулгүй байдлын шалгалт» 10-30-аас улаан байсан). Deploy үед `update.sh` шинэ хувилбарыг суулгана | 138a1ab | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
 
 ## 2026-10-30 — Камерын «Manual Snapshot»-ыг тохиргооноос асаах/унтраах
 
