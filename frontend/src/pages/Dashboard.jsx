@@ -1,4 +1,4 @@
-import { Activity, Banknote, Building2, CalendarClock, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wifi } from 'lucide-react'
+import { Activity, Banknote, Building2, CalendarClock, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wallet, Wifi } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, wsConnect } from '../api'
 import { StatCard } from '../components/ui'
@@ -236,6 +236,46 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Wallet-аар бүртгүүлсэн машин (2026-11-03) — wallet тус бүрийн хэрэглэгч манай системд
+          хэдэн машин бүртгүүлсэн (бүртгэл нь wallet бүхэлдээ, зогсоолоор хуваагддаггүй), автомат
+          төлбөртэй нь, одоо зогсоолд байгаа нь (хариуцах зогсоолуудаар). */}
+      {(stats.wallets || []).length > 0 && (() => {
+        const maxVeh = Math.max(...stats.wallets.map((w) => w.vehicles), 1)
+        const total = stats.wallets.reduce((a, w) => a + w.vehicles, 0)
+        return (
+          <div className="card card-hover">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold flex items-center gap-2">
+                <Wallet size={16} className="text-accent" /> Wallet-аар бүртгүүлсэн машин
+              </h2>
+              <span className="text-xs text-slate-400">нийт <span className="font-mono text-slate-200">{fmt(total)}</span> бүртгэл</span>
+            </div>
+            <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
+              {stats.wallets.map((w) => (
+                <div key={w.name} className="rounded-lg bg-surface-muted/40 border border-surface-border/50 p-3 space-y-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-semibold text-sm truncate" title={w.name}>{w.name}</span>
+                    <span className="font-mono font-bold text-xl tabular-nums">{fmt(w.vehicles)}
+                      <span className="font-sans text-[11px] font-normal text-slate-400 ml-1">машин</span></span>
+                  </div>
+                  <div className="h-1.5 bg-surface-muted rounded-full overflow-hidden">
+                    <div className="h-full rounded-full bg-accent transition-all"
+                      style={{ width: `${(w.vehicles / maxVeh) * 100}%` }} />
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                    <span title="Машин бүртгүүлсэн wallet-ийн хэрэглэгч">хэрэглэгч <b className="font-mono text-slate-300">{fmt(w.users)}</b></span>
+                    <span title="Гарах хаалтан дээр wallet-аас автоматаар төлдөг">авто төлбөр <b className="font-mono text-slate-300">{fmt(w.auto_pay)}</b></span>
+                    <span title="Одоо зогсоолд байгаа бүртгэлтэй машин">одоо зогсоолд <b className="font-mono text-accent">{fmt(w.parked_now)}</b></span>
+                    {w.new_today > 0 && <span className="text-blue-300" title="Өнөөдөр шинээр бүртгэгдсэн">өнөөдөр +{fmt(w.new_today)}</span>}
+                    {w.autopay_paid_today > 0 && <span title="Өнөөдөр автомат төлбөрөөр гарсан">авто төлсөн {fmt(w.autopay_paid_today)}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Шууд үйл явдал */}
       <div className="card">

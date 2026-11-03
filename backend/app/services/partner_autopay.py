@@ -56,7 +56,7 @@ OPEN = ("PENDING", "SENDING", "SENT")          # түнш хариу өгөх б
 TERMINAL = ("PAID", "DECLINED", "EXPIRED", "FAILED", "REVIEW")
 INTERNAL_NAMES = {"QPAY", "POS", "CASH", "TRANSFER", "WALLET"}
 RETRY_DELAYS = (2, 4, 8, 15, 20)               # хүргэлтийн давталт (сек) — хугацаан дотор
-NOTICE_DELAYS = (15, 60, 300, 900)             # хугацаа дууссаны мэдэгдлийн давталт (сек)
+NOTICE_DELAYS = (15, 60, 300)                  # хугацаа дууссаны мэдэгдлийн давталт (сек); нийт 1+3 оролдлого
 LEASE = timedelta(seconds=20)
 _REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,60}$", re.ASCII)
 _TASKS: set = set()                            # ард ажиллаж буй илгээлт (GC-ээс хамгаална)
@@ -470,7 +470,7 @@ def record_notice(db, request_id: str, token: str, res: dict, now: datetime | No
     r.lease_token = None
     if res.get("ok"):
         r.notice_status = "DONE"
-    elif (r.notice_attempts or 0) >= len(NOTICE_DELAYS):
+    elif (r.notice_attempts or 0) > len(NOTICE_DELAYS):
         r.notice_status = "DEAD"
         r.last_error = f"Мэдэгдэл: {(res.get('error') or 'алдаа')[:200]}"
     else:

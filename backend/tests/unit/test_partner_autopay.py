@@ -429,3 +429,28 @@ def test_bill_and_admin_show_autopay(c):
     assert len(rows) == 1 and rows[0]["plate"] == PLATE and rows[0]["amount"] == 2000.0
     veh = c.client.get(f"/api/admin/partner-keys/{c.key.id}/vehicles").json()["vehicles"]
     assert veh[0]["auto_pay"] is True
+
+
+# ─────────────────────────── 6. Хяналтын самбар: wallet тус бүрийн машин ───────────────────────────
+
+def test_dashboard_wallet_stats_counts_and_scope(c):
+    from app.routers.reports_router import wallet_stats
+    today = datetime.utcnow() - timedelta(hours=1)
+    register(c)                                            # monpay: 7886УКР (autoPay)
+    register(c, user="200", auto=False)                    # ижил машин, өөр хэрэглэгч
+    register(c, plate="1234УБА", user="200", auto=False)
+    register(c, user="sp-1", key=KEY2)                     # socialpay: 7886УКР
+    api(c, "vehicles/delete", {"plateNo": "1234УБА", "userId": "200"})   # устгасан тоологдохгүй
+    arrive(c)                                              # 7886УКР одоо зогсоолд (NOMADS)
+    rows = {r["name"]: r for r in wallet_stats(c.db, None, today)}
+    assert rows["monpay"] == {"name": "monpay", "vehicles": 1, "users": 2, "auto_pay": 1,
+                              "new_today": 1, "parked_now": 1, "autopay_paid_today": 0}
+    assert rows["socialpay"]["vehicles"] == 1 and rows["socialpay"]["parked_now"] == 1
+    assert rows["nohook"]["vehicles"] == 0                 # vehicles эрхтэй ч бүртгэлгүй → 0
+    # Өөр зогсоолын хэрэглэгч: түлхүүр хязгааргүй тул wallet харагдана, гэхдээ «одоо зогсоолд» 0
+    other = {r["name"]: r for r in wallet_stats(c.db, [c.other.id], today)}
+    assert other["monpay"]["vehicles"] == 1 and other["monpay"]["parked_now"] == 0
+    # Зогсоолоор хязгаарласан түлхүүр өөр зогсоолын хэрэглэгчид харагдахгүй
+    c.key2.site_id = c.site.id; c.db.commit()
+    assert "socialpay" not in {r["name"] for r in wallet_stats(c.db, [c.other.id], today)}
+    assert [r["name"] for r in wallet_stats(c.db, None, today)][:2] == ["monpay", "socialpay"]
