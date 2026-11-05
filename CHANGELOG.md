@@ -38,9 +38,9 @@ idle таймер (15 мин) хэзээ ч ажиллаагүй; (2) log_tail-�
 
 | Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
 |---|---|---|---|---|
-| fix | **log_tail гэрч**: логоос стримээр ИРЭЭГҮЙ шинэхэн уншилт олдвол `cgi_poller.force_reconnect` (камер тутам 120с cooldown). 30 минутад 3 удаа дахин холбосон ч алдсаар бол `КАМЕРЫН СТРИМ СЭРГЭХГҮЙ` ERROR лог + кассын `CAMERA_STREAM_LOSS` мэдэгдэл (reboot хэрэгтэй). `.env`: `PARKING_LOG_TAIL_WITNESS_RECONNECT/_COOLDOWN_SEC/_WINDOW_MIN/_ESCALATE_AFTER` | ⏳ | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
-| fix | log_tail-ийн лог татах алдаа 5 мин+ тасралтгүй бол WARNING (15 мин тутам), сэргэхэд INFO. `PARKING_LOG_TAIL_FAIL_WARN_AFTER_SEC/_EVERY_SEC` | ⏳ | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
-| fix | «КАМЕР ЧИМЭЭГҮЙ» шалгалт логоос нөхсөн мөрийг (`raw.log_tail`) стримийн амьд байдалд тооцохгүй — худал «камер сэргэлээ» гарахгүй | ⏳ | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| fix | **log_tail гэрч**: логоос стримээр ИРЭЭГҮЙ шинэхэн уншилт олдвол `cgi_poller.force_reconnect` (камер тутам 120с cooldown). 30 минутад 3 удаа дахин холбосон ч алдсаар бол `КАМЕРЫН СТРИМ СЭРГЭХГҮЙ` ERROR лог + кассын `CAMERA_STREAM_LOSS` мэдэгдэл (reboot хэрэгтэй). `.env`: `PARKING_LOG_TAIL_WITNESS_RECONNECT/_COOLDOWN_SEC/_WINDOW_MIN/_ESCALATE_AFTER` | 2e78d3b | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| fix | log_tail-ийн лог татах алдаа 5 мин+ тасралтгүй бол WARNING (15 мин тутам), сэргэхэд INFO. `PARKING_LOG_TAIL_FAIL_WARN_AFTER_SEC/_EVERY_SEC` | 2e78d3b | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| fix | «КАМЕР ЧИМЭЭГҮЙ» шалгалт логоос нөхсөн мөрийг (`raw.log_tail`) стримийн амьд байдалд тооцохгүй — худал «камер сэргэлээ» гарахгүй | 2e78d3b | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
 
 ## 2026-11-03 — Wallet-ийн автомат төлбөр гарах хаалтан дээр (autoPay)
 
