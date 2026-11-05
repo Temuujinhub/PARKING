@@ -75,6 +75,99 @@ def may_open(gap_sec: float, interval_sec: float | None = None) -> bool:
     return gap_sec <= max(settings.log_tail_open_max_lag_sec, max(1.0, iv) * 3)
 
 
+# device_id → (тасралтгүй амжилтгүй эхэлсэн monotonic, сүүлд анхааруулсан monotonic)
+_pull_fail: dict[str, tuple[float, float]] = {}
+# device_id → гэрчээр дахин холбуулсан monotonic үеүүд (цонхоор хязгаарлагдана)
+_witness_hist: dict[str, list[float]] = {}
+# device_id → сүүлд «reboot хэрэгтэй» гэж мэдэгдсэн monotonic
+_witness_alarm: dict[str, float] = {}
+
+
+def fail_warn_due(first_fail: float, last_warn: float, now: float,
+                  after_sec: float | None = None,
+                  every_sec: float | None = None) -> bool:
+    """Лог татах тасралтгүй алдааг WARNING-оор мэдэгдэх цаг болсон уу.
+
+    Ганц нэг алдаа (камер завгүй) хэвийн — `after_sec` тасралтгүй үргэлжилсэн
+    үед л анхааруулна, дараа нь `every_sec` тутам давтана (лог дүүргэхгүй)."""
+    after = settings.log_tail_fail_warn_after_sec if after_sec is None else after_sec
+    every = settings.log_tail_fail_warn_every_sec if every_sec is None else every_sec
+    if now - first_fail < after:
+        return False
+    return not last_warn or now - last_warn >= every
+
+
+def witness_decision(hist: list[float], last_alarm: float, now: float,
+                     cooldown_sec: float | None = None,
+                     window_sec: float | None = None,
+                     escalate_after: int | None = None) -> tuple[bool, bool, list[float]]:
+    """Стримд ирээгүй уншилт логоос олдсон үед юу хийх вэ.
+
+    Буцаана: (дахин_холбуулах, reboot_мэдэгдэх, шинэ_түүх).
+      • дахин холболт: сүүлийнхээс `cooldown_sec` өнгөрсөн бол л (камерыг
+        мөчлөг бүр (20с) тасалж ядраахгүй)
+      • reboot мэдэгдэл: `window_sec` дотор `escalate_after` удаа дахин
+        холбосон ч алдагдал үргэлжилж байвал (холболт тусалсангүй) — цонхонд
+        нэг л удаа
+    """
+    cool = settings.log_tail_witness_cooldown_sec if cooldown_sec is None else cooldown_sec
+    win = (settings.log_tail_witness_window_min * 60.0
+           if window_sec is None else window_sec)
+    n = (settings.log_tail_witness_escalate_after
+         if escalate_after is None else escalate_after)
+    hist = [t for t in hist if now - t <= win]
+    force = not hist or now - hist[-1] >= cool
+    if force:
+        hist.append(now)
+    alarm = bool(n) and len(hist) >= n and (not last_alarm or now - last_alarm >= win)
+    return force, alarm, hist
+
+
+def _note_pull_fail(device_id: str, name: str, ip: str, err: Exception) -> None:
+    now = time.monotonic()
+    first, last_warn = _pull_fail.get(device_id, (now, 0.0))
+    if fail_warn_due(first, last_warn, now):
+        log.warning("[лог-нөөц] %s (%s): камерын лог %d минут татагдахгүй байна "
+                    "(%s: %s) — стрим чимээгүй бол машин бүртгэгдэхгүй. Шалгах: "
+                    "tools/camera_push_check.py %s", name, ip, int((now - first) / 60),
+                    type(err).__name__, str(err)[:120], ip)
+        last_warn = now
+    _pull_fail[device_id] = (first, last_warn)
+
+
+def _note_pull_ok(device_id: str, name: str, ip: str) -> None:
+    prev = _pull_fail.pop(device_id, None)
+    if prev and prev[1]:
+        log.info("[лог-нөөц] %s (%s): камерын лог дахин татагдлаа", name, ip)
+
+
+def _witness(device_id: str, site_id: str | None, name: str, ip: str, missed: int) -> None:
+    """Стрим `missed` шинэхэн уншилтыг алдсан нь нотлогдсон — дахин холбуулна."""
+    if not settings.log_tail_witness_reconnect:
+        return
+    now = time.monotonic()
+    force, alarm, hist = witness_decision(_witness_hist.get(device_id, []),
+                                          _witness_alarm.get(device_id, 0.0), now)
+    _witness_hist[device_id] = hist
+    if force:
+        from .cgi_poller import force_reconnect
+        log.warning("[лог-нөөц] %s (%s): стримээр ирээгүй %d уншилт логоос олдлоо — "
+                    "стримийг дахин холбуулна", name, ip, missed)
+        force_reconnect(device_id)
+    if alarm:
+        _witness_alarm[device_id] = now
+        log.error("КАМЕРЫН СТРИМ СЭРГЭХГҮЙ: %s (%s) — %d минутад %d удаа дахин холбосон ч "
+                  "event алдсаар байна (камерын ANPR гацсан байж магадгүй). Машингүй үед "
+                  "дахин асаана уу: tools/camera_reboot.py %s --yes",
+                  name, ip, settings.log_tail_witness_window_min, len(hist), ip)
+        if site_id:
+            from ..ws import notify
+            notify(site_id, "CAMERA_STREAM_LOSS", {
+                "device": name, "ip": ip, "reconnects": len(hist),
+                "message": f"{name}: камер дугаар уншсан ч систем рүү дамжуулахгүй "
+                           f"байна — камерыг дахин асаах шаардлагатай"})
+
+
 def _remember(device_id: str, key: str) -> None:
     s = _seen.setdefault(device_id, set())
     if len(s) >= _SEEN_MAX:
@@ -120,7 +213,15 @@ async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
     return [c for c in cams if (last.get(c.id) or datetime.min) < cutoff]
 
 
-async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
+async def _pull_one(device_id: str, ip: str, creds, name: str,
+                    site_id: str | None = None) -> int:
+    done = await _pull_one_inner(device_id, ip, creds, name)
+    if done:
+        _witness(device_id, site_id, name, ip, done)
+    return done
+
+
+async def _pull_one_inner(device_id: str, ip: str, creds, name: str) -> int:
     """Нэг камерын сүүлийн бичлэгийг татаж, ШИНЭ уншилтыг боловсруулна."""
     now = datetime.now(timezone.utc)
     tol = timedelta(minutes=settings.log_tail_skew_tolerance_min)
@@ -151,7 +252,9 @@ async def _pull_one(device_id: str, ip: str, creds, name: str) -> int:
                 note_rpc_done(ip)
     except Exception as e:  # noqa: BLE001 — камер завгүй байж болно, дараагийн мөчлөгт
         log.debug("%s (%s): лог татагдсангүй — %s", name, ip, type(e).__name__)
+        _note_pull_fail(device_id, name, ip, e)
         return 0
+    _note_pull_ok(device_id, name, ip)
 
     # ── ХААЛТ НЭЭХ ЭРХ: зөвхөн уншилт ШИНЭХЭН бол ───────────────────────────
     # Энэ зам нь хаалт нээдэг (жолооч гарцад хүлээж байгаа бол нээгдэх ЁСТОЙ).
@@ -296,8 +399,8 @@ async def run_once(site_id: str | None = None) -> dict:
     db = SessionLocal()
     try:
         cams = await _silent_devices(db, site_id)
-        targets = [(c.id, c.ip_address, camera_credentials(c), c.name or c.ip_address)
-                   for c in cams]
+        targets = [(c.id, c.ip_address, camera_credentials(c), c.name or c.ip_address,
+                    c.site_id) for c in cams]
     finally:
         db.close()
     if not targets:
