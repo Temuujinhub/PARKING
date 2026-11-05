@@ -221,11 +221,17 @@ async def start_vat_auto_send():
                         Device.ip_address != "").all()
                     # Камер бүрийн сүүлийн ЖИНХЭНЭ уншилт (heartbeat илгээдэггүй
                     # firmware-т last_seen хоцордог тул хоёуланг нь харна)
-                    from sqlalchemy import func as _f
+                    # Логоос НӨХСӨН мөрийг (raw.log_tail=true) тооцохгүй — тэр нь
+                    # стрим ажиллаж байгааг биш, харин эсрэгээр нь баталдаг.
+                    # 2026-11-05 BTALBAI: log_tail нөхөж эхэлмэгц «камер сэргэлээ»
+                    # гэж бичигдсэн ч стрим 87% алдсаар байв.
+                    from sqlalchemy import func as _f, or_ as _or
                     from .models import LprEvent as _Ev
+                    _inj = _Ev.raw["log_tail"].as_string()
                     last_ev = dict(
                         db.query(_Ev.device_id, _f.max(_Ev.created_at))
-                        .filter(_Ev.device_id.in_([c.id for c in cams]))
+                        .filter(_Ev.device_id.in_([c.id for c in cams]),
+                                _or(_inj.is_(None), _inj != "true"))
                         .group_by(_Ev.device_id).all()) if cams else {}
                     for c in cams:
                         marks = [t for t in (c.last_seen, last_ev.get(c.id)) if t]

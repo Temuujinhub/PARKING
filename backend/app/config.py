@@ -425,6 +425,22 @@ class Settings(BaseSettings):
     log_tail_open_max_lag_sec: float = 90.0
     log_tail_timeout_sec: float = 20.0
     log_tail_concurrency: int = 3           # зэрэг хандах камерын тоо
+    # Лог татагдахгүй байгааг WARNING-оор харуулах: ийм удаан тасралтгүй
+    # амжилтгүй болбол анхааруулж, дараа нь ийм завсартай давтана. Өмнө нь
+    # debug түвшинд байсан тул 2026-11-05 BTALBAI орох камер дээр нөөц зам
+    # 7 цаг ажиллаагүйг хэн ч хараагүй.
+    log_tail_fail_warn_after_sec: float = 300.0
+    log_tail_fail_warn_every_sec: float = 900.0
+    # ГЭРЧ: логоос стримд ИРЭЭГҮЙ шинэхэн уншилт олдвол стрим event алдаж байгаа
+    # нь нотлогдсон — стримийг дахин холбуулна (камер тутам cooldown-оор).
+    # Хааяа нэг event ирж байгаа үед idle таймер (camera_event_idle_reconnect_sec)
+    # хэзээ ч ажилладаггүй: 2026-11-05 BTALBAI орох камер 6 цаг 87% алдсан.
+    log_tail_witness_reconnect: bool = True
+    log_tail_witness_cooldown_sec: float = 120.0
+    # Энэ цонхонд ийм олон удаа дахин холбосон ч алдагдал үргэлжилбэл холболт
+    # засахгүй гэсэн үг (камерын ANPR гацсан) — reboot хэрэгтэйг чангаар мэдэгдэнэ.
+    log_tail_witness_window_min: int = 30
+    log_tail_witness_escalate_after: int = 3
 
     # LPR snapshot — event бүрд камераас зураг татаж хадгална (нотолгоо/маргаан шийдэхэд)
     snapshot_enabled: bool = True
