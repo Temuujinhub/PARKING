@@ -81,6 +81,41 @@ _pull_fail: dict[str, tuple[float, float]] = {}
 _witness_hist: dict[str, list[float]] = {}
 # device_id → сүүлд «reboot хэрэгтэй» гэж мэдэгдсэн monotonic
 _witness_alarm: dict[str, float] = {}
+# device_id → ИДЭВХТЭЙ «стрим сэргэхгүй» анхааруулга. UI (оператор/админ) үүнийг
+# харуулж «Камерыг дахин асаах» товч гаргана. WS мэдэгдэл түр зуурынх (тэр агшинд
+# хуудас нээлттэй байгаагүй бол алга) тул төлөвийг энд хадгална. Backend нэг
+# worker-тэй (deploy/parking-backend.service) тул санах ой хангалттай.
+_alerts: dict[str, dict] = {}
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def active_alerts(site_ids: list[str] | None = None) -> list[dict]:
+    """Идэвхтэй анхааруулгууд. `log_tail_witness_window_min` турш шинэ алдагдал
+    илрээгүй бол стрим сэргэсэн гэж үзээд өөрөө арилна."""
+    cutoff = _utcnow() - timedelta(minutes=settings.log_tail_witness_window_min)
+    for dev, a in list(_alerts.items()):
+        if a["last_missed_at"] < cutoff:
+            _alerts.pop(dev, None)
+    out = [dict(a) for a in _alerts.values()
+           if site_ids is None or a["site_id"] in site_ids]
+    for a in out:
+        a["since"] = a["since"].isoformat()
+        a["last_missed_at"] = a["last_missed_at"].isoformat()
+    return sorted(out, key=lambda a: a["since"])
+
+
+def has_alert(device_id: str) -> bool:
+    return any(a["device_id"] == device_id for a in active_alerts())
+
+
+def clear_alert(device_id: str) -> None:
+    """Камерыг дахин асаасны дараа — анхааруулга, гэрчийн түүхийг тэглэнэ."""
+    _alerts.pop(device_id, None)
+    _witness_hist.pop(device_id, None)
+    _witness_alarm.pop(device_id, None)
 
 
 def fail_warn_due(first_fail: float, last_warn: float, now: float,
@@ -149,6 +184,11 @@ def _witness(device_id: str, site_id: str | None, name: str, ip: str, missed: in
     force, alarm, hist = witness_decision(_witness_hist.get(device_id, []),
                                           _witness_alarm.get(device_id, 0.0), now)
     _witness_hist[device_id] = hist
+    alert = _alerts.get(device_id)
+    if alert:
+        alert["missed"] += missed
+        alert["last_missed_at"] = _utcnow()
+        alert["reconnects"] = max(alert["reconnects"], len(hist))
     if force:
         from .cgi_poller import force_reconnect
         log.warning("[лог-нөөц] %s (%s): стримээр ирээгүй %d уншилт логоос олдлоо — "
@@ -160,10 +200,15 @@ def _witness(device_id: str, site_id: str | None, name: str, ip: str, missed: in
                   "event алдсаар байна (камерын ANPR гацсан байж магадгүй). Машингүй үед "
                   "дахин асаана уу: tools/camera_reboot.py %s --yes",
                   name, ip, settings.log_tail_witness_window_min, len(hist), ip)
+        if not alert:
+            _alerts[device_id] = {
+                "device_id": device_id, "site_id": site_id, "name": name, "ip": ip,
+                "since": _utcnow(), "last_missed_at": _utcnow(),
+                "reconnects": len(hist), "missed": missed}
         if site_id:
             from ..ws import notify
             notify(site_id, "CAMERA_STREAM_LOSS", {
-                "device": name, "ip": ip, "reconnects": len(hist),
+                "device_id": device_id, "device": name, "ip": ip, "reconnects": len(hist),
                 "message": f"{name}: камер дугаар уншсан ч систем рүү дамжуулахгүй "
                            f"байна — камерыг дахин асаах шаардлагатай"})
 
