@@ -8,6 +8,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { api, setToken } from '../api'
 import { useAuth } from '../auth'
 import { isDark, toggleTheme } from '../theme'
+import CameraAlerts from './CameraAlerts'
 import Logo, { LogoMark } from './Logo'
 import { Field, Modal, PasswordInput, useToast } from './ui'
 
@@ -205,6 +206,7 @@ export default function Layout() {
         {/* Задарсан анхны нууц үгээр нэвтэрсэн бол ЗААВАЛ солиулна.
             Нууц үг нь нээлттэй GitHub repo-д ил бичигдсэн байсан тул хэн ч
             нэвтрэх боломжтой байв — солих хүртэл энэ анхааруулга арилахгүй. */}
+        <CameraAlerts />
         {pwWeak && (
           <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3
                           flex items-start gap-3">

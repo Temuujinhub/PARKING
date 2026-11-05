@@ -1777,19 +1777,11 @@ async def reconnect_device_stream(device_id: str, db: Session = Depends(get_db),
                       f"1-2 минутын дараа «Сүүлд дугаар уншсан» цагийг шалгана уу."}
 
 
-@router.post("/devices/{device_id}/reboot")
-async def reboot_device(device_id: str, db: Session = Depends(get_db),
-                        user: User = Depends(require("settings", "barriers"))):
-    """Камерыг ГАРААР reboot хийх (magicBox.reboot). 1-2 минут ажиллахгүй.
-
-    ЗӨВХӨН гараар: автомат reboot зориудаар унтраалттай (`camera_auto_reboot`)
-    — богино, өөрөө сэргэдэг тасалдалд reboot хортой. Дахин холбох оролдлого
-    үр дүнгүй болсны ДАРАА ашиглана. Бүх reboot AuditLog-д үлдэнэ."""
+async def _reboot_camera_device(db: Session, device: Device, user: User,
+                                reason: str = "manual") -> dict:
+    """Камерыг reboot хийх нийтлэг зам (Төхөөрөмж хэсэг ба стримийн анхааруулга)."""
     from ..services.camera_recovery import reboot_camera
     from ..services.device_auth import camera_credentials
-    device = db.get(Device, device_id)
-    if not device or device.device_type != "camera":
-        raise HTTPException(404, "Камер олдсонгүй")
     if not device.ip_address:
         raise HTTPException(400, "IP хаяг бүртгэгдээгүй байна")
     # Хаалт нээхийг ХҮЛЭЭЖ буй үед reboot хийвэл машин гацна (camera_health-ийн
@@ -1803,13 +1795,73 @@ async def reboot_device(device_id: str, db: Session = Depends(get_db),
                                  "хэдэн секундын дараа дахин оролдоно уу")
     err = await reboot_camera(device.ip_address, camera_credentials(device))
     db.add(AuditLog(username=user.username, action="CAMERA_REBOOT", entity="device",
-                    entity_id=device_id,
-                    detail={"ip": device.ip_address, "manual": True, "result": err or "OK"}))
+                    entity_id=device.id,
+                    detail={"ip": device.ip_address, "manual": True, "reason": reason,
+                            "result": err or "OK"}))
     db.commit()
     if err:
         return {"ok": False, "detail": f"Reboot илгээгдсэнгүй — {err}. Камер бүрэн "
                                        f"унтарсан бол цахилгааныг нь салгаж залгана уу."}
     return {"ok": True, "detail": f"«{device.name}» reboot хүлээн авлаа — 1-2 минутад сэргэнэ."}
+
+
+@router.post("/devices/{device_id}/reboot")
+async def reboot_device(device_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(require("settings", "barriers"))):
+    """Камерыг ГАРААР reboot хийх (magicBox.reboot). 1-2 минут ажиллахгүй.
+
+    ЗӨВХӨН гараар: автомат reboot зориудаар унтраалттай (`camera_auto_reboot`)
+    — богино, өөрөө сэргэдэг тасалдалд reboot хортой. Дахин холбох оролдлого
+    үр дүнгүй болсны ДАРАА ашиглана. Бүх reboot AuditLog-д үлдэнэ."""
+    device = db.get(Device, device_id)
+    if not device or device.device_type != "camera":
+        raise HTTPException(404, "Камер олдсонгүй")
+    enforce_site(user, device.site_id)
+    res = await _reboot_camera_device(db, device, user)
+    if res["ok"]:
+        from ..services.log_tail import clear_alert
+        clear_alert(device.id)
+    return res
+
+
+# ── Камерын стрим сэргэхгүй байгаа анхааруулга (services/log_tail) ──────────
+# Камер дугаар уншиж байгаа ч event серверт хүрэхгүй, дахин холболт тусалсангүй
+# (2026-11-05 BTALBAI орох камер: 6 цагт 87% алдагдал, reboot хийхэд засагдсан).
+# Оператор ба админ кассын/хяналтын дэлгэц дээр анхааруулга харж, нэг товчоор
+# камерыг дахин асаана.
+@router.get("/camera-alerts")
+def camera_alerts(user: User = Depends(require("cashier", "settings", "barriers",
+                                               "devices", "health"))):
+    from ..services.log_tail import active_alerts
+    rows = active_alerts(operator_sites(user))
+    can_reboot = any(has_permission(user, m) for m in ("cashier", "settings", "barriers"))
+    for r in rows:
+        r["can_reboot"] = can_reboot
+    return rows
+
+
+@router.post("/camera-alerts/{device_id}/reboot")
+async def camera_alert_reboot(device_id: str, db: Session = Depends(get_db),
+                              user: User = Depends(require("cashier", "settings", "barriers"))):
+    """Анхааруулгатай камерыг дахин асаах. Касс (оператор) зөвхөн ИДЭВХТЭЙ
+    анхааруулгатай, өөрийн зогсоолын камерыг асаана — дур мэдэн reboot хийх
+    эрх биш. Админ (settings/barriers) Төхөөрөмж хэсгийнхтэй ижил."""
+    from ..services.log_tail import clear_alert, has_alert
+    device = db.get(Device, device_id)
+    if not device or device.device_type != "camera":
+        raise HTTPException(404, "Камер олдсонгүй")
+    enforce_site(user, device.site_id)
+    admin = has_permission(user, "settings") or has_permission(user, "barriers")
+    if not admin and not has_alert(device.id):
+        raise HTTPException(409, "Энэ камерт идэвхтэй анхааруулга алга — дахин асаах "
+                                 "шаардлагагүй (камер сэргэсэн байж магадгүй).")
+    res = await _reboot_camera_device(db, device, user, reason="stream_loss_alert")
+    if res["ok"]:
+        clear_alert(device.id)
+        from ..ws import notify
+        notify(device.site_id, "CAMERA_REBOOT", {"device_id": device.id, "device": device.name,
+                                                 "ip": device.ip_address, "by": user.username})
+    return res
 
 
 @router.post("/devices/{device_id}/test-connection")
