@@ -1076,6 +1076,7 @@ def list_partner_keys(db: Session = Depends(get_db),
     from sqlalchemy import func as _f
     from ..models import PartnerKey, PartnerVehicle, PartnerVehicleEvent
     from ..services.partner_vehicles import has_scope
+    from .integration_router import limited_counts
     kind, val = _key_scope(user)   # түрээслэгчийн/зогсоолын админ → зөвхөн өөрийн түлхүүрүүд
     tid = val if kind == "tenant" else None
     site_names = {s.id: s for s in db.query(ParkingSite).all()}
@@ -1128,6 +1129,10 @@ def list_partner_keys(db: Session = Depends(get_db),
             "autopay_open": int(autopay_open.get(k.id, 0)),
             # None = autoPay асаасан машинд гарах хаалтан дээр хүсэлт явна; эс бөгөөс шалтгаан
             "autopay_problem": key_problem(k),
+            # Лавлах замын хурдны хязгаар (2026-11-11): None = анхдагч; rate_limited = restart-аас хойш
+            # зам тутам 429 буцаасан тоо (Easy Wallet хязгаарт хэр цохигдож буйг харуулна)
+            "rate_limit_per_min": k.rate_limit_per_min,
+            "rate_limited": limited_counts(k.id),
             "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
             "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
             "created_by": k.created_by,
@@ -1141,7 +1146,9 @@ def list_partner_keys(db: Session = Depends(get_db),
             "tenants": ([{"id": i, "name": n} for i, n in sorted(tenant_names.items(), key=lambda x: x[1])]
                         if kind == "system" else []),
             # PARKING_PARTNER_VEHICLE_NOTIFY=false үед машин мэдэгдэл огт илгээгдэхгүй
-            "vehicle_notify_enabled": bool(settings.partner_vehicle_notify)}
+            "vehicle_notify_enabled": bool(settings.partner_vehicle_notify),
+            # rate_limit_per_min тавиагүй түлхүүрийн лавлах замын хязгаар (0 = хязгааргүй)
+            "lookup_rate_default": int(settings.partner_lookup_rate_per_min or 0)}
 
 
 @router.post("/partner-keys")
@@ -1229,6 +1236,37 @@ def set_partner_receipt_issuer(key_id: str, body: dict, db: Session = Depends(ge
            {"name": k.name, "old": old, "new": issuer})
     db.commit()
     return {"ok": True, "receipt_issuer": k.receipt_issuer}
+
+
+@router.post("/partner-keys/{key_id}/rate-limit")
+def set_partner_rate_limit(key_id: str, body: dict, db: Session = Depends(get_db),
+                           user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Түлхүүрийн ЛАВЛАХ замын (sessions, recent-exits, sites) хурдны хязгаар — минутад, зам тус бүрд.
+    body: {per_min: 10–100000 | null}. null/0/хоосон = анхдагч (PARKING_PARTNER_LOOKUP_RATE_PER_MIN,
+    0 = хязгааргүй). Төлбөрийн замд хамаарахгүй. Хадгалмагц дараагийн хүсэлтээс үйлчилнэ (restart-гүй).
+    Ганц backend процессыг бүх түнш хуваалцдаг тул серверийн хамгаалалт — зөвхөн системийн админ."""
+    if _key_scope(user)[0] != "system":
+        raise HTTPException(403, "Хурдны хязгаарыг системийн админ тохируулна")
+    k = _own_key(db, user, key_id)
+    raw = body.get("per_min")
+    if raw is None or (isinstance(raw, str) and not raw.strip()) or raw == 0:
+        new = None
+    else:
+        if isinstance(raw, bool):
+            raise HTTPException(422, "per_min нь бүхэл тоо (10–100000) эсвэл хоосон")
+        try:
+            new = int(str(raw).strip())
+        except (TypeError, ValueError):
+            raise HTTPException(422, "per_min нь бүхэл тоо (10–100000) эсвэл хоосон")
+        if new == 0:
+            new = None
+        elif not 10 <= new <= 100000:
+            raise HTTPException(422, "per_min 10–100000 хооронд байна (хоосон = хязгааргүй)")
+    old = k.rate_limit_per_min
+    k.rate_limit_per_min = new
+    _audit(db, user, "PARTNER_RATE_LIMIT_SET", "partner_key", k.id, {"name": k.name, "old": old, "new": new})
+    db.commit()
+    return {"ok": True, "rate_limit_per_min": new}
 
 
 @router.post("/partner-keys/{key_id}/webhook/test")

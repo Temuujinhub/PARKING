@@ -511,6 +511,10 @@ MIGRATIONS = [
     "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS updated_by VARCHAR(60)",
     "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
 
+    # 2026-11-11 Түншийн түлхүүр тутмын ЛАВЛАХ хүсэлтийн хязгаар (минутад, зам тус бүрд). nullable —
+    # NULL = анхдагч (хязгааргүй); хуучин мөр хөндөхгүй. Easy Wallet-ийн утгыг partner_presets тавина.
+    "ALTER TABLE partner_keys ADD COLUMN IF NOT EXISTS rate_limit_per_min INTEGER",
+
 ]
 
 
@@ -591,6 +595,7 @@ def check_ready():
         conn.execute(text("SELECT payment_id, status, expires_at, notice_status "
                           "FROM partner_autopay_requests LIMIT 0"))
         conn.execute(text("SELECT entry_policy, updated_by, updated_at FROM blacklist LIMIT 0"))
+        conn.execute(text("SELECT rate_limit_per_min FROM partner_keys LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'

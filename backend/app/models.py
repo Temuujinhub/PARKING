@@ -758,6 +758,10 @@ class PartnerKey(Base):
     #   'SYSTEM' — EasyParking msgbill-ээр ЗААВАЛ гаргана — WALLET-ийг ерөнхийд асаахгүйгээр (MonPay,
     #              SocialPay). Ерөнхийд асаавал баримтаа өөрөө гаргадаг түншид ТЕГ давхардал үүснэ.
     receipt_issuer = Column(String(10), nullable=True)
+    # 2026-11-11: лавлах (sessions, recent-exits, sites) хүсэлтийн хязгаар — минутад, ЗАМ ТУС БҮРД.
+    # NULL = анхдагч (PARKING_PARTNER_LOOKUP_RATE_PER_MIN, 0 = хязгааргүй). Easy Wallet 24с тутам ~190
+    # дугаар асуудаг байсан (секундэд ~8). Төлбөрийн замд хэзээ ч үйлчлэхгүй.
+    rate_limit_per_min = Column(Integer, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
