@@ -64,8 +64,51 @@ def cgi_state() -> dict:
             for ip, v in _CGI_STATE.items()}
 
 
+# snapshot.cgi-ийн хариуг хүлээх зуур хаалтны команд дараалалд орсон эсэхийг ингэж
+# байнга шалгана — орвол зураг авалтыг ШУУД тасалж түгжээг өгнө.
+_YIELD_POLL_SEC = 0.05
+# Хаалтанд зам тавьж тасалсан тоо (оношилгоо: /api/admin/cameras/snap-state)
+_yielded: dict[str, int] = {}
+
+
+def yielded_counts() -> dict:
+    return dict(_yielded)
+
+
+async def _get_yielding(client, url: str, auth, timeout, ip: str, control_waiting):
+    """snapshot.cgi GET — хаалтны команд ирмэгц тасална (None буцаана).
+
+    2026-11-11: 10-30-нд Рашбулагийн «manual snapshot удаан, хаалт удаан нээгдэж байна»
+    гомдлоор зураг авалтыг бүх зогсоолд анхдагчаар УНТРААСАН — үүнээс хойш зургийн
+    суваггүй камерууд огт зураг хадгалахгүй болсон. Шалтгаан нь snapshot.cgi камерын
+    түгжээг 5с хүртэл барьж, тэр хооронд ирсэн хаалт (≤2с хүлээгээд түгжээгүй явдаг) ба
+    LED хүлээдэг байсан. Одоо зураг авалт хаалтанд ҮРГЭЛЖ бууж өгнө: түгжээг ≤50мс-д
+    чөлөөлнө (LED нь түгжээний дарааллаараа хэвээр — гарах зургийг алдахгүйн тулд).
+    Тасарсан зураг дахин авагдахгүй — машин аль хэдийн өнгөрсөн байж болох тул өөр
+    машины амьд кадрыг нотолгоо болгохоос зураггүй нь дээр."""
+    task = asyncio.ensure_future(client.get(url, auth=auth, timeout=timeout))
+    # Тасалсан task-ийн алдааг уншиж «never retrieved» лог үлдээхгүй
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_YIELD_POLL_SEC)
+            if done:
+                return task.result()
+            if control_waiting(ip):
+                task.cancel()
+                _yielded[ip] = _yielded.get(ip, 0) + 1
+                log.info("%s: хаалтны команд ирлээ — snapshot.cgi-г тасалж түгжээг өглөө", ip)
+                return None
+    except BaseException:
+        task.cancel()
+        raise
+
+
 async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> bytes | None:
-    """One bounded CGI capture per camera; never bypass the control lock."""
+    """One bounded CGI capture per camera; never bypass the control lock.
+
+    Хаалтны команд ирвэл зураг авалтыг тасалж (None) түгжээг шууд өгнө — зураг хэзээ ч
+    хаалт нээхийг хүлээлгэхгүй (2026-11-11)."""
     import time
     from .barrier import _rpc_lock, barrier_is_waiting, camera_client, note_rpc_done
 
@@ -102,7 +145,11 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                 if barrier_is_waiting(ip):
                     return None
                 attempted = True
-                response = await camera_client(ip).get(url, auth=auth, timeout=timeout)
+                response = await _get_yielding(camera_client(ip), url, auth, timeout, ip,
+                                               barrier_is_waiting)
+                if response is None:
+                    # Хаалтанд зам тавьсан — камерын алдаа биш, fails тоолохгүй
+                    return None
                 if response.status_code == 200 and valid_jpeg(response.content):
                     st["url"], st["fails"] = url, 0
                     return response.content
@@ -326,11 +373,15 @@ def image_channel_alive(ip: str) -> bool:
     атлаа snapshot.cgi ШУУД дуудагдаж, дараа нь comet-ийн жинхэнэ зураг давхар
     ирдэг байв. Одоо сувгийн ХОЛБОЛТ (attach) амьд бол зураг өгсөн түүхгүй ч
     хүлээнэ; суваггүй камерт зан төлөв хэвээр (шууд snapshot.cgi — тэнд өөр
-    зам байхгүй, хойшлуулбал машин өнгөрчихнө)."""
+    зам байхгүй, хойшлуулбал машин өнгөрчихнө).
+
+    2026-11-11: CGI event стримийн JPEG (`stream_delivers`) энд ТООЦОГДОХГҮЙ. 09-19-ний
+    хяналтаас хойш тэр кадрыг аль event-ийнх нь тодорхойгүй тул session-д ХЭЗЭЭ Ч
+    наадаггүй — гэтэл энэ функц түүнийг «суваг амьд» гэж үзээд 4с дэмий хүлээлгэж,
+    дараа нь snapshot.cgi машин аль хэдийн өнгөрсөн (эсвэл дараагийн машины) кадрыг
+    авдаг байв. Зөвхөн БОДИТ наадаг суваг (comet / WS) хүлээлт өдөөнө."""
     if not ip:
         return False
-    if stream_delivers(ip):
-        return True
     from .snap_puller import comet_attached, puller_delivers
     return comet_attached(ip) or puller_delivers(ip)
 

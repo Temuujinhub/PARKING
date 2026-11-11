@@ -48,12 +48,15 @@ TABLE_CATEGORY = {
 CATEGORY_ORDER = ["Зогсолт/төлбөр", "Камер/хаалт", "Лог/түүх", "Тохиргоо", "Бусад"]
 
 
-def _snapshot_storage() -> dict | None:
-    """LPR snapshot зургийн хавтасны хэмжээ (файлын тоо + байт)."""
-    from ..config import settings as cfg
-    root = cfg.snapshot_dir
-    if not os.path.isdir(root):
-        return None
+# Зургийн хавтасны хэмжээ — 10 мин кэш (2026-11-11). Health хуудас 5с тутам шинэчлэгддэг
+# бөгөөд хавтсыг ХҮСЭЛТ БҮРД бүтнээр нь алхдаг байв (400GB таг → сая гаруй файл) — дискийг
+# байнга ачаалж бусад хүсэлтийг (POS) удаашруулах эрсдэлтэй. Зэрэг хоёр алхалт хийхгүй.
+_SNAP_STORAGE_TTL = 600.0
+_snap_storage_cache: dict = {"at": 0.0, "value": None}
+_snap_storage_lock = __import__("threading").Lock()
+
+
+def _walk_snapshot_storage(root: str) -> dict | None:
     total, files = 0, 0
     try:
         for dirpath, _dirs, names in os.walk(root):
@@ -66,6 +69,80 @@ def _snapshot_storage() -> dict | None:
     except OSError:
         return None
     return {"bytes": total, "files": files}
+
+
+def _snapshot_storage() -> dict | None:
+    """LPR snapshot зургийн хавтасны хэмжээ (файлын тоо + байт) — 10 мин кэштэй."""
+    from ..config import settings as cfg
+    root = cfg.snapshot_dir
+    if not os.path.isdir(root):
+        return None
+    now = time.monotonic()
+    cached = _snap_storage_cache["value"]
+    if cached is not None and now - _snap_storage_cache["at"] < _SNAP_STORAGE_TTL:
+        return cached
+    if not _snap_storage_lock.acquire(blocking=False):
+        return cached            # өөр хүсэлт тооцоолж байна — хуучин утгаа өгнө
+    try:
+        value = _walk_snapshot_storage(root)
+        if value is not None:
+            value["measured_at"] = int(time.time())
+            _snap_storage_cache.update(at=time.monotonic(), value=value)
+        return value
+    finally:
+        _snap_storage_lock.release()
+
+
+def _image_coverage(db) -> dict:
+    """Камерын зураг хадгалагдаж байгаа эсэх (2026-11-11 гомдол): сүүлийн 24ц-т орох/гарах
+    уншилттай сешнүүдийн хэдэн хувьд зураг байна, зогсоол тус бүрээр (хамгийн мууг эхэнд),
+    «Камераас гар зураг (Manual Snapshot)» унтраалттай зогсоолууд, хадгалалтын таг."""
+    from datetime import datetime as _dt, timedelta as _td
+    from sqlalchemy import func
+    from ..models import ParkingSession as PS, ParkingSite
+    from ..services.app_settings import get_barrier_rules
+    from ..services.auto_close import snapshot_cap_bytes
+    since = _dt.utcnow() - _td(hours=24)
+    out: dict = {"hours": 24}
+    try:
+        ent = dict(((sid, (n, img)) for sid, n, img in db.query(
+            PS.site_id, func.count(PS.id), func.count(PS.entry_snapshot))
+            .filter(PS.entry_time >= since, PS.entry_device_id.isnot(None))
+            .group_by(PS.site_id).all()))
+        ext = dict(((sid, (n, img)) for sid, n, img in db.query(
+            PS.site_id, func.count(PS.id), func.count(PS.exit_snapshot))
+            .filter(PS.exit_time >= since, PS.exit_device_id.isnot(None))
+            .group_by(PS.site_id).all()))
+        sites = {s.id: s.name for s in db.query(ParkingSite).filter(ParkingSite.is_active.is_(True))}
+        rows = []
+        for sid, name in sites.items():
+            en, ei = ent.get(sid, (0, 0))
+            xn, xi = ext.get(sid, (0, 0))
+            try:
+                manual = bool(get_barrier_rules(db, sid).get("manual_snapshot"))
+            except Exception:  # noqa: BLE001
+                manual = None
+            rows.append({"site_id": sid, "site_name": name, "entries": en, "entry_images": ei,
+                         "exits": xn, "exit_images": xi, "manual_snapshot": manual,
+                         "percent": round((ei + xi) * 100 / (en + xn), 1) if (en + xn) else None})
+        rows.sort(key=lambda r: (r["percent"] is None, r["percent"] if r["percent"] is not None else 0))
+        te, tei = sum(r["entries"] for r in rows), sum(r["entry_images"] for r in rows)
+        tx, txi = sum(r["exits"] for r in rows), sum(r["exit_images"] for r in rows)
+        out.update({
+            "entries": te, "entry_images": tei, "exits": tx, "exit_images": txi,
+            "entry_percent": round(tei * 100 / te, 1) if te else None,
+            "exit_percent": round(txi * 100 / tx, 1) if tx else None,
+            "manual_snapshot_off": [r["site_name"] for r in rows if r["manual_snapshot"] is False],
+            "sites": rows,
+        })
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:120]
+    try:
+        out["cap_bytes"] = snapshot_cap_bytes(settings.snapshot_dir)
+    except Exception:  # noqa: BLE001
+        out["cap_bytes"] = None
+    out["retention_days"] = settings.retention_snapshot_days
+    return out
 
 
 def _db_storage(db, snapshots: dict | None = None) -> dict:
@@ -484,6 +561,8 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
             "qpay": await _qpay_reachable(),
             "websocket_clients": ws_clients,
         },
+        # Камерын зураг хадгалагдаж буй хувь (2026-11-11)
+        "images": _image_coverage(db),
         # Үйл ажиллагаа / хамгаалалт — SSL, backup, ТЕГ авто-илгээлт
         "ops": {
             "ssl": probe["ssl"],

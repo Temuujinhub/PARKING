@@ -160,10 +160,24 @@ def main():
             print(f"    {d}  {human(size):>8}  {cnt:,} файл")
 
     # 3. Тохиргоо ба зөвлөмж
-    limit = args.max_gb if args.max_gb is not None else settings.retention_snapshot_max_gb
+    if args.max_gb is not None:
+        limit, how = args.max_gb, "--max-gb"
+    else:
+        # 2026-11-11: min(retention_snapshot_max_gb (анхдагч 400), дискний max_disk_percent %) —
+        # backend-ийн auto_close.snapshot_cap_bytes-тэй ИЖИЛ дүрэм
+        gb = float(settings.retention_snapshot_max_gb or 0)
+        pct = float(settings.retention_snapshot_max_disk_percent or 0)
+        caps = [gb] if gb > 0 else []
+        try:
+            if pct > 0:
+                caps.append(shutil.disk_usage(settings.snapshot_dir).total * pct / 100 / GB)
+        except OSError:
+            pass
+        limit = round(min(caps), 1) if caps else 0
+        how = f"min({gb:g}GB, дискний {pct:g}%)"
     print("\n── Тохиргоо ──")
     print(f"  Хугацааны хязгаар : {settings.retention_snapshot_days} хоног")
-    print(f"  Хэмжээний хязгаар : {limit}GB "
+    print(f"  Хэмжээний хязгаар : {limit}GB ({how}) "
           f"({'ХЭТЭРСЭН' if limit and total > limit * GB else 'хэвийн'})")
     print(f"  Дискний доод сул  : {settings.disk_free_min_percent}%")
 
