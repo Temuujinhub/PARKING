@@ -4,7 +4,7 @@
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
 import { CarFront, Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
+import { api, fmt, fmtDate, fmtDur, wsConnect, coalesce } from '../api'
 import { useAuth } from '../auth'
 import { PaymentWaitSince } from '../components/PaymentWait'
 import { SnapshotButton } from '../components/Snapshot'
@@ -166,7 +166,13 @@ export default function Check() {
     debounceRef.current = setTimeout(load, 350)
     return () => clearTimeout(debounceRef.current)
   }, [plate])
-  useEffect(() => wsConnect('all', load), [siteId, status, plate, audit])
+  // Сонгосон зогсоолын event л (бүх зогсоолынхыг биш), 5с-д нэгээс олонгүй дахин ачаална —
+  // жагсаалт 200 машины төлбөрийг бодох хүнд хүсэлт (2026-11-11 «POS удаан»)
+  useEffect(() => {
+    const reload = coalesce(load, 5000)
+    const close = wsConnect(siteId || 'all', () => reload())
+    return () => { reload.cancel(); close() }
+  }, [siteId, status, plate, audit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Дэлгэцэнд харуулах мөрүүд: аудит горимд "зөвхөн сэжигтэй" + дугаарын шүүлт client талд
   const rows = data.rows.filter((r) => {

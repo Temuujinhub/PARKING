@@ -85,6 +85,11 @@ else:
     log.warning("«Холбогдсон POS» УНТРААЛТТАЙ (PARKING_POS_CLIENTS_ENABLED=false) — POS аппын "
                 "хүсэлтийг бүртгэхгүй, heartbeat хадгалахгүй; төлбөр/хаалт/e-Barimt хэвийн")
 
+# API хүсэлтийн хугацааны статистик (2026-11-11 «POS удаан») — цэвэр ASGI, DB-гүй, санах ойд.
+# Хамгийн гадна давхарга байх ёстой тул СҮҮЛД нэмнэ (Starlette сүүлд нэмснийг гадна ороодог).
+from .services.request_stats import RequestTimingMiddleware  # noqa: E402
+app.add_middleware(RequestTimingMiddleware)
+
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,
           health_router, integration_router, legacy_router, dr_router, billing_router,

@@ -89,6 +89,22 @@ function errMessage(detail, status, raw) {
   return detail.msg || JSON.stringify(detail)
 }
 
+// WS event бүрд хүнд жагсаалтыг дахин ачаалахгүй (2026-11-11 «POS удаан»): 40 зогсоолын event
+// секундэд хэд хэд ирдэг — Хяналтын самбар/Шалгах хуудас тус бүр серверт олон хүнд хүсэлт илгээж
+// нэг процесстой backend-ийг (POS-ын хүсэлтийг ч) удаашруулдаг байв. coalesce: чимээгүй үед ШУУД
+// ажиллана, дараа нь `ms` цонхонд ирсэн бүх дуудлагыг НЭГ (хамгийн сүүлийн) дуудлага болгоно.
+export function coalesce(fn, ms) {
+  let timer = null
+  let last = 0
+  const run = () => { timer = null; last = Date.now(); fn() }
+  const call = () => {
+    if (timer) return
+    timer = setTimeout(run, Math.max(0, last + ms - Date.now()))
+  }
+  call.cancel = () => { clearTimeout(timer); timer = null }
+  return call
+}
+
 export function wsConnect(siteId = 'all', onMessage) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   let ws, timer, closed = false

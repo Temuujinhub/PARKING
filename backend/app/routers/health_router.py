@@ -93,6 +93,14 @@ def _snapshot_storage() -> dict | None:
         _snap_storage_lock.release()
 
 
+def _request_stats() -> dict | None:
+    try:
+        from ..services.request_stats import snapshot
+        return snapshot()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _image_coverage(db) -> dict:
     """Камерын зураг хадгалагдаж байгаа эсэх (2026-11-11 гомдол): сүүлийн 24ц-т орох/гарах
     уншилттай сешнүүдийн хэдэн хувьд зураг байна, зогсоол тус бүрээр (хамгийн мууг эхэнд),
@@ -563,6 +571,8 @@ async def system_health(db=Depends(get_db), user: User = Depends(require_role("A
         },
         # Камерын зураг хадгалагдаж буй хувь (2026-11-11)
         "images": _image_coverage(db),
+        # API хүсэлтийн хугацаа (2026-11-11 «POS удаан») — сүүлийн ≤1ц, p95-аар
+        "requests": _request_stats(),
         # Үйл ажиллагаа / хамгаалалт — SSL, backup, ТЕГ авто-илгээлт
         "ops": {
             "ssl": probe["ssl"],

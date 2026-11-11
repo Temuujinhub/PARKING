@@ -3,7 +3,7 @@
 import { AlertTriangle, CarFront, FlaskConical, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtHM, preferredSite, rememberSite, wsConnect } from '../api'
+import { api, fmt, fmtHM, preferredSite, rememberSite, wsConnect, coalesce } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
 import { paymentOutcome } from '../paymentOutcome'
@@ -82,8 +82,10 @@ export default function Cashier() {
     searchGeneration.current += 1
     if (!siteId) return
     loadExits(siteId)
+    // Event-ийн бөөгнөрлийг (уншилт + зураг + төлбөр…) 1с-д нэг ачаалал болгоно — эхнийх нь шууд
+    const reloadExits = coalesce(() => loadExits(siteId), 1000)
     const close = wsConnect(siteId, (ev) => {
-      loadExits(siteId)
+      reloadExits()
       if (ev?.type === 'DEBT_ALERT') {
         toast(`⚠ ${ev.data?.plate} — ${fmt(ev.data?.debt_amount || 0)}₮ өртэй машин гарах хаалтанд ирлээ!`, 'error')
       }
@@ -104,7 +106,7 @@ export default function Cashier() {
       if (rsvMsg) { toast(...rsvMsg); setRsvTick((t) => t + 1) }
     })
     const poll = setInterval(() => loadExits(siteId), 15000)
-    return () => { close(); clearInterval(poll); loadGeneration.current += 1 }
+    return () => { close(); reloadExits.cancel(); clearInterval(poll); loadGeneration.current += 1 }
   }, [siteId, loadExits])
 
   const search = async (q) => {

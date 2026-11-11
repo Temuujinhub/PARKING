@@ -613,17 +613,12 @@ def recent_exits(site_id: str, minutes: int | None = None,
                 ParkingSession.last_exit_seen_at >= since)
     )
     sessions = q.order_by(ParkingSession.last_exit_seen_at.desc(), ParkingSession.id.desc()).limit(20).all()
-    # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
-    from ..models import Compensation
-    debt_plates = {p for (p,) in db.query(Compensation.plate_number)
-                   .filter(Compensation.status == "PENDING").all()}
     dev_ids = {s.exit_device_id for s in sessions if s.exit_device_id}
     devs = {d.id: d for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()} if dev_ids else {}
     out = []
     for s in sessions:
         d = devs.get(s.exit_device_id)
         out.append(_session_out(db, s, with_fee=True) | {
-            "has_debt": s.plate_number in debt_plates,
             "exit_camera_id": d.id if d else None,
             "last_exit_seen_at": s.last_exit_seen_at,
             "exit_lane_no": d.lane_no if d else None,
@@ -631,7 +626,13 @@ def recent_exits(site_id: str, minutes: int | None = None,
             "exit_device_name": d.name if d else None})
     # `debt` {amount, count} — касс дээр өнөөдрийн зогсолт ба өмнөх өрийг ТУСАД НЬ
     # харуулна (өмнө нь зөвхөн has_debt туг ирдэг байсан тул дүн харагддаггүй байв)
-    return _attach_debt(db, out)
+    out = _attach_debt(db, out)
+    # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек). 2026-11-11 (POS
+    # удаан): өмнө нь POS-ын ХҮСЭЛТ БҮРД бүх зогсоолын БҮХ төлөгдөөгүй өрийн дугаарыг (~11 мянга)
+    # татаж has_debt тооцдог байв — одоо жагсаалтын ≤20 дугаарын нэгтгэлээс (_attach_debt).
+    for row in out:
+        row["has_debt"] = bool(row.get("debt"))
+    return out
 
 
 @router.put("/{session_id}/note")

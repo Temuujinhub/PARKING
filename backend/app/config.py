@@ -690,6 +690,9 @@ class Settings(BaseSettings):
     # 0 = унтраах (хуучин 4×1.5с зан төлөв).
     screen_keep_sec: int = 300
     screen_keep_interval_sec: float = 4.0
+    # Энэ хугацаанаас (мс) удаан API хүсэлтийг WARNING «SLOW …» гэж логлоно — «POS удаан»
+    # гомдлыг хэмжих (services/request_stats.py; Health → «API хүсэлтийн хугацаа»). 0 = унтраах.
+    slow_request_log_ms: int = 2000
     # LED дэлгэцийн мөр таслалын тэмдэг. Зарим firmware «\n»-ийг ойлгодоггүй тул
     # «\r\n» эсвэл хоосон зайгаар туршиж болно (камер солихгүйгээр .env-ээс).
     screen_line_break: str = "\n"

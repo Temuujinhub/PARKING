@@ -234,14 +234,42 @@ def _daily_site_rows(db, start, end, site_id):
     return out
 
 
+# Хяналтын самбарын хариуны богино кэш (2026-11-11, «POS удаан»). Самбар 40 зогсоолын event
+# БҮРД ~15 нэгтгэл query дахин ажиллуулдаг байв (хананд нээлттэй хэд хэдэн самбар → секундэд
+# олон удаа); нэг процесстой backend-д энэ нь POS-ын хүсэлтийг дараалалд хүлээлгэдэг. Ижил
+# хүрээ (scope) + rev_days-ийн хариуг DASHBOARD_CACHE_SEC хуваалцана; зэрэг хүсэлт нэг л удаа тооцно.
+DASHBOARD_CACHE_SEC = 10.0
+_dash_cache: dict = {}
+_dash_lock = __import__("threading").Lock()
+
+
 @router.get("/dashboard")
 def dashboard_stats(rev_days: int = 7,
                     db: Session = Depends(get_db), user: User = Depends(require("dashboard"))):
     """Нүүр хуудасны статистик. Хариуцах зогсоолтой хэрэглэгчид зөвхөн өөрийн
     зогсоолуудын тоо баримт харагдана (tenant салгалт).
-    rev_days — орлогын графикийн хоногийн тоо (7/14/30, UI-ийн сонголт)."""
+    rev_days — орлогын графикийн хоногийн тоо (7/14/30, UI-ийн сонголт).
+    Хариу DASHBOARD_CACHE_SEC (10с) хүртэл хуучирч болно — хүрээ тус бүрээр кэштэй."""
+    import time as _time
     rev_days = max(1, min(31, rev_days))
     scope = _scope(user)
+    # _scope: None (бүх) | str (нэг зогсоол) | list (хэд хэдэн)
+    key = (scope if scope is None or isinstance(scope, str) else tuple(sorted(scope)), rev_days)
+    hit = _dash_cache.get(key)
+    if hit and _time.monotonic() - hit[0] < DASHBOARD_CACHE_SEC:
+        return hit[1]
+    with _dash_lock:   # кэш дууссан агшинд олон самбар зэрэг тооцохгүй
+        hit = _dash_cache.get(key)
+        if hit and _time.monotonic() - hit[0] < DASHBOARD_CACHE_SEC:
+            return hit[1]
+        out = _dashboard_compute(db, scope, rev_days)
+        if len(_dash_cache) > 256:
+            _dash_cache.clear()
+        _dash_cache[key] = (_time.monotonic(), out)
+        return out
+
+
+def _dashboard_compute(db: Session, scope, rev_days: int) -> dict:
     today = _local_midnight_utc(datetime.utcnow())
     open_count = _flt(db.query(ParkingSession).filter(
         ParkingSession.status.in_(["OPEN", "AWAITING_PAYMENT", "PAID"])),
