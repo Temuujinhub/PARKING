@@ -104,16 +104,39 @@ async def _get_yielding(client, url: str, auth, timeout, ip: str, control_waitin
         raise
 
 
+# Зураг авалт амжилтгүй болсон СҮҮЛИЙН шалтгаан (камер тутам) — «зураг ОЛДСОНГҮЙ» логт хавсарна.
+# 2026-11-11: олон алдаа чимээгүй (логгүй) байсан тул камерын эвдрэл, түгжээний өрсөлдөөн хоёрыг
+# ялгах боломжгүй байв.
+_skip_reason: dict[str, str] = {}
+
+
+def skip_reason(ip: str | None) -> str | None:
+    return _skip_reason.get(ip) if ip else None
+
+
 async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> bytes | None:
     """One bounded CGI capture per camera; never bypass the control lock.
 
     Хаалтны команд ирвэл зураг авалтыг тасалж (None) түгжээг шууд өгнө — зураг хэзээ ч
-    хаалт нээхийг хүлээлгэхгүй (2026-11-11)."""
+    хаалт нээхийг хүлээлгэхгүй (2026-11-11).
+
+    2026-11-11 (2): түгжээ хүлээх зуур «зураг хүлээж байна» гэж тэмдэглэнэ — гарах LED-ийн
+    төлөх дүнгийн 4×1.5с давталт түүнд зам тавина (өмнө нь ~5с барьж, зураг 3с-д бууж өгдөг
+    байв: гарах 56%). Камерын хариуны хугацаа (`snapshot_cgi_budget_sec`) ЗӨВХӨН камерт хандах
+    хэсэгт — өмнө нь хүлээлт ч тооцогдож, түгжээ хүлээсэн зураг авалт «TimeoutError» болж
+    камерын алдаанд тоологдон, 5 дараалвал камер 30 мин зураггүй болдог байв."""
     import time
-    from .barrier import _rpc_lock, barrier_is_waiting, camera_client, note_rpc_done
+    from .barrier import (_rpc_lock, barrier_is_waiting, camera_client, note_rpc_done,
+                          note_snapshot_waiting)
 
     st = _CGI_STATE.setdefault(ip, {"url": None, "fails": 0, "quiet_until": 0.0})
-    if time.monotonic() < st["quiet_until"] or ip in _cgi_inflight:
+    now = time.monotonic()
+    if now < st["quiet_until"]:
+        _skip_reason[ip] = (f"{settings.snapshot_cgi_max_fails} удаа дараалан хариугүй тул "
+                            f"{int((st['quiet_until'] - now) // 60) + 1} мин түр зогссон")
+        return None
+    if ip in _cgi_inflight:
+        _skip_reason[ip] = "энэ камерт өөр зураг авалт явж байна"
         return None
     _cgi_inflight.add(ip)
     lock = _rpc_lock(ip)
@@ -121,19 +144,27 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
     attempted = False
     last_error = "capture deadline exceeded"
     try:
+        # 1) Хүлээлт — камерын алдаа биш: эхлээд хаалтны команд дуусахыг, дараа нь түгжээг
+        deadline = time.monotonic() + settings.snapshot_barrier_wait_sec
+        while barrier_is_waiting(ip):
+            if time.monotonic() >= deadline:
+                _skip_reason[ip] = f"хаалтны команд {settings.snapshot_barrier_wait_sec:g}с-ээс удаан"
+                return None
+            await asyncio.sleep(0.1)
+        note_snapshot_waiting(ip, +1)     # дэлгэцийн давталт/keepalive зам тавина
+        try:
+            await asyncio.wait_for(lock.acquire(), settings.snapshot_lock_wait_sec)
+            held = True
+        except TimeoutError:
+            _skip_reason[ip] = f"камерын түгжээ {settings.snapshot_lock_wait_sec:g}с завгүй"
+            return None
+        finally:
+            note_snapshot_waiting(ip, -1)
+        if barrier_is_waiting(ip):
+            _skip_reason[ip] = "хаалтны команд ирлээ"
+            return None
+        # 2) Камерын хариу — хугацааны төсөв зөвхөн энд
         async with asyncio.timeout(settings.snapshot_cgi_budget_sec):
-            deadline = time.monotonic() + settings.snapshot_barrier_wait_sec
-            while barrier_is_waiting(ip):
-                if time.monotonic() >= deadline:
-                    return None
-                await asyncio.sleep(0.1)
-            try:
-                await asyncio.wait_for(lock.acquire(), settings.snapshot_lock_wait_sec)
-                held = True
-            except TimeoutError:
-                return None
-            if barrier_is_waiting(ip):
-                return None
             auth = httpx.DigestAuth(*(creds or camera_credentials(None)))
             timeout = httpx.Timeout(connect=3.0, read=settings.snapshot_cgi_budget_sec,
                                     write=3.0, pool=3.0)
@@ -143,15 +174,18 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
                 f"http://{ip}/cgi-bin/snapshot.cgi?channel=0"]
             for url in urls:
                 if barrier_is_waiting(ip):
+                    _skip_reason[ip] = "хаалтны команд ирлээ"
                     return None
                 attempted = True
                 response = await _get_yielding(camera_client(ip), url, auth, timeout, ip,
                                                barrier_is_waiting)
                 if response is None:
                     # Хаалтанд зам тавьсан — камерын алдаа биш, fails тоолохгүй
+                    _skip_reason[ip] = "хаалтанд зам тавьсан"
                     return None
                 if response.status_code == 200 and valid_jpeg(response.content):
                     st["url"], st["fails"] = url, 0
+                    _skip_reason.pop(ip, None)
                     return response.content
                 last_error = f"HTTP {response.status_code} ({len(response.content)} bytes)"
                 # Only a rejected channel/URL justifies trying another form.
@@ -170,6 +204,9 @@ async def _fetch_from_camera(ip: str, creds: tuple[str, str] | None = None) -> b
         if st["fails"] >= settings.snapshot_cgi_max_fails:
             st["quiet_until"] = time.monotonic() + settings.snapshot_cgi_quiet_minutes * 60
             st["fails"] = 0
+            log.warning("%s: snapshot.cgi %d удаа дараалан амжилтгүй — %d мин түр зогсооно",
+                        ip, settings.snapshot_cgi_max_fails, settings.snapshot_cgi_quiet_minutes)
+        _skip_reason[ip] = f"камер хариу өгсөнгүй ({last_error})"
         log.warning("%s: snapshot.cgi failed: %s", ip, last_error)
     return None
 
@@ -486,7 +523,12 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         data = await _fetch_after_own_barrier(session_id, camera_ip, lane_dir, creds)
         source = "snapshot.cgi"
     if data is None:
-        log.warning(f"{plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")
+        why = skip_reason(camera_ip)
+        if camera_ip and await _snapshot_written(session_id, lane_dir):
+            log.info(f"{plate} {lane_dir}: зураг өөр сувгаар холбогдсон — snapshot.cgi шаардлагагүй")
+            return
+        log.warning(f"{plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'}"
+                    f"{': ' + why if why else ''})")
         return
     # Дискэнд бичихийн ӨМНӨ: snap_puller/comet энэ хооронд жинхэнэ event зургаа
     # холбочихсон байж болно — тэгвэл энд юу ч бичилгүй гарна (өмнө нь давхар

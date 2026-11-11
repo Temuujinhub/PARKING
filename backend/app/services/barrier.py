@@ -838,6 +838,48 @@ def barrier_is_waiting(ip: str) -> bool:
     return _barrier_waiting.get(ip, 0) > 0
 
 
+# ── Зураг авалт түгжээ хүлээж байна (2026-11-11 PROD) ────────────────────────────────────
+# Гарах LED-ийн төлөх дүн 4×1.5с давталтаар түгжээг ~5с барьдаг; snapshot.cgi түгжээг 3с л хүлээдэг
+# тул төлбөр хүлээж буй машины гарах зураг ихэвчлэн «ОЛДСОНГҮЙ» болж байв (21:35-аас хойш гарах 56%,
+# орох 86%). Дэлгэц (заавал биш) хаалтанд зам тавьдаг шигээ хүлээж буй зураг авалтад ч давталтын
+# хооронд зам тавина — эхний текст аль хэдийн харагдсан, keepalive дараа нь дахин илгээнэ.
+_snapshot_waiting: dict[str, int] = {}
+
+
+def snapshot_is_waiting(ip: str) -> bool:
+    return _snapshot_waiting.get(ip, 0) > 0
+
+
+def note_snapshot_waiting(ip: str, delta: int) -> None:
+    _snapshot_waiting[ip] = max(0, _snapshot_waiting.get(ip, 0) + delta)
+
+
+def _channel_wanted(ip: str) -> str | None:
+    """Түгжээг өөр ажил хүлээж байвал юу болохыг: «хаалт» / «зураг» / None."""
+    if barrier_is_waiting(ip):
+        return "хаалт"
+    if snapshot_is_waiting(ip):
+        return "зураг"
+    return None
+
+
+_YIELD_POLL = 0.05
+
+
+async def _sleep_or_yield(ip: str, seconds: float) -> str | None:
+    """Дэлгэцийн давталтын завсар — хаалт/зураг түгжээ хүлээж эхэлбэл ≤50мс-д тасална.
+    Өмнө нь 1.5с бүтэн унтаад дараа нь л шалгадаг байсан (хаалт ч 1.5с хүртэл хүлээдэг байв)."""
+    end = time.monotonic() + max(0.0, seconds)
+    while True:
+        wanted = _channel_wanted(ip)
+        if wanted:
+            return wanted
+        left = end - time.monotonic()
+        if left <= 0:
+            return None
+        await asyncio.sleep(min(_YIELD_POLL, left))
+
+
 # ─── Давхар «нээх» командыг таслах ───────────────────────────────────────────
 # Нэг машин гарахад камер 2-3 удаа уншдаг: 1-р уншилт auto_exit-ээр хаалт нээнэ,
 # 2-р уншилт dedup дээр exit_retry-ээр ДАХИН нээхийг оролдоно. DB дэх cooldown
@@ -1042,12 +1084,13 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                 try:
                     for i in range(times):
                         if i:
-                            await asyncio.sleep(settings.screen_repeat_interval)
-                            # Хаалтны команд хүлээж байвал сессээ ЯГ ОДОО чөлөөлнө —
-                            # машин хаалганы өмнө зогсохоос дэлгэцийн давталт чухал биш
-                            if barrier_is_waiting(ip):
-                                log.info("[screen] %s: хаалт хүлээж байна — давталтыг "
-                                         "%d/%d дээр тасаллаа", ip, i, times)
+                            # Хаалт эсвэл зураг авалт түгжээ хүлээж байвал сессээ ЯГ ОДОО
+                            # чөлөөлнө — машин хаалганы өмнө зогсох, нотлох зураг нь
+                            # дэлгэцийн давталтаас чухал (эхний текст аль хэдийн харагдсан)
+                            wanted = await _sleep_or_yield(ip, settings.screen_repeat_interval)
+                            if wanted:
+                                log.info("[screen] %s: %s хүлээж байна — давталтыг "
+                                         "%d/%d дээр тасаллаа", ip, wanted, i, times)
                                 break
                         await rpc.set_screen(text)
                         shown = i + 1
@@ -1171,8 +1214,9 @@ async def _keep_on_screen(ip: str, text: str, creds: tuple[str, str] | None, gen
             alive = False
         if not alive:
             break
-        if barrier_is_waiting(ip) or camera_sick_remaining(ip) or auth_block_remaining(ip):
-            continue   # суваг завгүй/өвчтэй — дараагийн мөчлөгт
+        if (barrier_is_waiting(ip) or snapshot_is_waiting(ip) or camera_sick_remaining(ip)
+                or auth_block_remaining(ip)):
+            continue   # суваг завгүй (хаалт/зураг)/өвчтэй — дараагийн мөчлөгт
         if _display_gen.get(ip) != gen or control_since():
             break
         err = await display_on_screen(ip, text, None, repeat=1, creds=creds, keepalive=True,
