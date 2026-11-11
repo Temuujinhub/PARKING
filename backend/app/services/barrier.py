@@ -772,6 +772,7 @@ async def close_barrier(db: Session, device: Device, session_id: str | None = No
 # _rpc_lock()-ийн тайлбараас хараарай.
 _rpc_locks: dict[tuple[int, str], tuple] = {}
 _barrier_waiting: dict[str, int] = {}     # ip -> хүлээж буй хаалтны командын тоо
+_last_control_at: dict[str, float] = {}   # ip -> сүүлийн хаалтны команд ЭХЭЛСЭН (monotonic)
 
 # Камер сесс чөлөөлөхөд ХОЦРОГДОЛТОЙ: logout буцсаны дараа ч сессийн слот шууд
 # сулардаггүй. Тиймээс хаалт нээгээд ШУУД дэлгэц бичихэд камер «хязгаар давлаа»
@@ -884,6 +885,8 @@ class _BarrierPriority:
 
     async def __aenter__(self):
         _barrier_waiting[self.ip] = _barrier_waiting.get(self.ip, 0) + 1
+        # «Дараагийн команд ирлээ» — гарах LED-ийн дүнг барих ажиллагаа зогсоно (_keep_on_screen)
+        _last_control_at[self.ip] = time.monotonic()
         try:
             await asyncio.wait_for(_rpc_lock(self.ip).acquire(),
                                    timeout=settings.barrier_lock_wait_sec)
@@ -982,9 +985,13 @@ def screen_stats(ip: str, since: datetime) -> tuple[int, int]:
     return ok, fail
 
 
+KEEP_STOPPED = "дэлгэц барих зогсов (хаалтны команд ирсэн)"
+
+
 async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                             repeat: int | None = None,
-                            creds: tuple[str, str] | None = None) -> str:
+                            creds: tuple[str, str] | None = None,
+                            keepalive: bool = False, keep_since: float | None = None) -> str:
     """Камерын LED дэлгэцэнд текст харуулна (шаардлагатай бол дуут зарлал).
 
     Камер Vehicle Passing горимдоо манай текстийг хурдан дарж бичдэг тул текстийг
@@ -1024,6 +1031,10 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
         async with _rpc_lock(ip):
             if barrier_is_waiting(ip):
                 return "хаалт хүлээж байна"   # хаалт тэргүүлэх эрхтэй — дараа оролдоно
+            # Дүнг барих давталт: түгжээ хүлээх зуур хаалт нээгдэж «Баяртай» бичигдсэн бол
+            # хуучин дүнг ДАРЖ бичихгүй (төлсөн жолоочид дүн дахин харагдахгүй)
+            if keep_since is not None and _last_control_at.get(ip, 0.0) >= keep_since:
+                return KEEP_STOPPED
             if True:
                 client = camera_client(ip)   # хуваалцсан холболт
                 rpc = DahuaRpc(client, ip, username, password)
@@ -1045,12 +1056,17 @@ async def display_on_screen(ip: str, text: str, voice_text: str | None = None,
                 finally:
                     await rpc.logout()
         # Амжилтыг ч логлоно — LED-ийг нүдээр харахгүйгээр алсаас
-        # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй
-        log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
+        # (journalctl | grep screen) ажилласныг батлахад хэрэгтэй. Дэлгэц барих
+        # (keepalive) давталт нь 4с тутам тул журналыг дүүргэхгүй — debug.
+        if keepalive:
+            log.debug(f"[screen] {ip}: барив ×{shown} «{text}»")
+        else:
+            log.info(f"[screen] {ip}: OK ×{shown} «{text}»")
         _auth_ok(ip)
         note_rpc_done(ip)
         _note_screen_shown(ip, text)
-        _screen_record(ip, True)
+        if not keepalive:
+            _screen_record(ip, True)   # LED-ийн амжилтын % — машин бүрийн анхны бичилтээр
         return ""
     except Exception as e:  # дэлгэцний алдаа хаалт нээх урсгалыг хэзээ ч зогсоохгүй
         err = f"{type(e).__name__}: {str(e)[:200]}"
@@ -1111,8 +1127,68 @@ def _is_transient_screen_error(err: str) -> bool:
     return True
 
 
+# Дэлгэц барих давталтын доод завсар — камерын RPC сессийн чөлөөлөлт (camera_rpc_gap_sec)
+# хоцордог тул түүнээс ойр бүү цохи.
+_MIN_KEEP_INTERVAL = 2.0
+
+
+async def _keep_on_screen(ip: str, text: str, creds: tuple[str, str] | None, gen: int,
+                          keep_while, since: float | None = None) -> int:
+    """Гарах LED-ийн төлөх дүнг ДАРААГИЙН КОМАНД ирэх хүртэл барина (2026-11-11).
+
+    Гомдол: «гарах камерт машин ирэхэд дэлгэцэнд төлөх дүн маш богино харагдаад алга
+    болдог». Камер Vehicle Passing горимдоо манай текстийг өөрийн агуулгаар дарж бичдэг
+    тул өмнө нь 4×1.5с (~6с) л харагддаг байв. Одоо машин гарцад төлбөр хүлээж байх
+    хооронд `screen_keep_interval_sec` тутам НЭГ удаа (богино RPC сесс) дахин илгээнэ.
+
+    Зогсох нөхцөл (аль нь түрүүлж биелэх):
+      • энэ камерт ШИНЭ текст хүсэгдсэн (дараагийн машин, «Баяртай», дүн өөрчлөгдсөн) — gen;
+      • энэ камерт хаалтны команд явсан (`since`-ээс хойш — төлсөн/оператор нээсэн);
+      • `keep_while()` False — сешн төлөгдсөн/хаагдсан/өөр камерт шилжсэн (DB);
+      • `screen_keep_sec` дуусав; камер тогтмол алдаа өгөв.
+    Хаалтны команд хүлээж байвал тэр мөчлөгийг алгасна (хаалт ямагт тэргүүлнэ); түгжээг
+    мөчлөгийн хооронд барихгүй. Буцаана: дахин илгээсэн тоо."""
+    total = max(0.0, float(settings.screen_keep_sec or 0))
+    if total <= 0 or keep_while is None:
+        return 0
+    since = time.monotonic() if since is None else since
+
+    def control_since() -> bool:
+        return _last_control_at.get(ip, 0.0) >= since
+    interval = max(_MIN_KEEP_INTERVAL, float(settings.screen_keep_interval_sec or 4.0))
+    deadline = time.monotonic() + total
+    # Эхний давталт анхны 4×1.5с-ийн ДАРАА шууд — цоорхой үлдээхгүй
+    delay = min(interval, 2.0)
+    sent = 0
+    while True:
+        await asyncio.sleep(delay)
+        delay = interval
+        if time.monotonic() >= deadline or _display_gen.get(ip) != gen or control_since():
+            break
+        try:
+            alive = await asyncio.to_thread(keep_while)
+        except Exception:  # noqa: BLE001 — DB түр алдаа: дэлгэцийг барихаа зогсооно
+            alive = False
+        if not alive:
+            break
+        if barrier_is_waiting(ip) or camera_sick_remaining(ip) or auth_block_remaining(ip):
+            continue   # суваг завгүй/өвчтэй — дараагийн мөчлөгт
+        if _display_gen.get(ip) != gen or control_since():
+            break
+        err = await display_on_screen(ip, text, None, repeat=1, creds=creds, keepalive=True,
+                                      keep_since=since)
+        if not err:
+            sent += 1
+        elif err == KEEP_STOPPED or not _is_transient_screen_error(err):
+            break
+    if sent:
+        log.info("[screen] %s: төлөх дүнг %d удаа дахин илгээж барив", ip, sent)
+    return sent
+
+
 async def _display_with_retry(ip: str, text: str, voice_text: str | None,
-                              creds: tuple[str, str] | None, gen: int):
+                              creds: tuple[str, str] | None, gen: int, keep_while=None,
+                              since: float | None = None):
     """Дэлгэцийг харуулах — амжилтгүй бол ХОЖУУ дахин оролдоно.
 
     Яагаад: гарах үед жолооч төлбөрөө төлж хэдэн арван секунд зогсдог тул
@@ -1130,6 +1206,8 @@ async def _display_with_retry(ip: str, text: str, voice_text: str | None,
         if not err:
             if i:
                 log.info("[screen] %s: %d-р оролдлогоор амжиллаа", ip, i + 1)
+            if keep_while is not None:
+                await _keep_on_screen(ip, text, creds, gen, keep_while, since)
             return
         if not _is_transient_screen_error(err):
             # Камер командыг өөрийг нь татгалзлаа — дахин оролдох нь ашиггүй
@@ -1138,9 +1216,12 @@ async def _display_with_retry(ip: str, text: str, voice_text: str | None,
 
 
 def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
-                     creds: tuple[str, str] | None = None):
+                     creds: tuple[str, str] | None = None, keep_while=None):
     """Event боловсруулалтын дараа дуудна — дэлгэцний командыг АРД НЬ явуулна
-    (хаалт нээх/WS broadcast-ыг хэзээ ч хүлээлгэхгүй, snapshot-той ижил хэв маяг)."""
+    (хаалт нээх/WS broadcast-ыг хэзээ ч хүлээлгэхгүй, snapshot-той ижил хэв маяг).
+
+    keep_while (2026-11-11): гарах LED-ийн төлөх дүнд — `keep_while()` True байх хооронд
+    (машин гарцад төлбөр хүлээж байна) текстийг дахин илгээж барина (_keep_on_screen)."""
     if not settings.screen_enabled or not ip or not text:
         return
     try:
@@ -1152,7 +1233,15 @@ def schedule_display(ip: str | None, text: str, voice_text: str | None = None,
         log.debug("[screen] %s: саяхан харуулсан текст — алгасав", ip)
         return
     gen = _display_gen[ip] = _display_gen.get(ip, 0) + 1
-    asyncio.create_task(_display_with_retry(ip, text, voice_text, creds, gen))
+    # Энэ мөчөөс хойш хаалтны команд явбал дүнг барихаа болино («дараагийн команд»)
+    since = time.monotonic()
+    task = asyncio.create_task(_display_with_retry(ip, text, voice_text, creds, gen, keep_while,
+                                                   since))
+    _display_tasks.add(task)   # GC-д алдагдахгүй (дэлгэц барих нь минут хүртэл амьдарна)
+    task.add_done_callback(_display_tasks.discard)
+
+
+_display_tasks: set = set()
 
 
 def format_duration(minutes: float | int | None) -> str:

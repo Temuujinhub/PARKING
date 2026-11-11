@@ -2381,7 +2381,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             _txt = _fee_screen_text(plate, 0, _flat, debt_shown, db=db, site_id=site_id)
             schedule_display(device.ip_address, _txt,
                              _txt if settings.screen_voice else None,
-                             camera_credentials(device))
+                             camera_credentials(device),
+                             keep_while=exit_wait_alive(session.id, device.id))
             log.info("[exit] орох уншилтгүй машинд суурь хураамж: %s %s₮", plate, _flat)
             return {"action": "no_session_fee", "session_id": session.id,
                     "plate": plate, "amount_due": float(_flat), "autopay": _autopay}
@@ -2465,7 +2466,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                 db=db, site_id=site_id)
         schedule_display(device.ip_address, _txt,
                          _txt if settings.screen_voice else None,
-                         camera_credentials(device))
+                         camera_credentials(device),
+                         keep_while=exit_wait_alive(session.id, device.id))
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount,
                 "autopay": _autopay}
 
@@ -2542,12 +2544,31 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Өртэй машинд ӨМНӨХ ӨР тусдаа мөрөөр (өнөөдрийн зогсолтын дүнтэй нийлүүлэхгүй).
     fee_text = _fee_screen_text(plate, fee["duration_minutes"], due, debt_shown,
                                 db=db, site_id=site_id)
+    # Дүнг жолооч төлж дуустал (дараагийн команд хүртэл) барина — 2026-11-11
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
-                         camera_credentials(device))
+                     camera_credentials(device),
+                     keep_while=exit_wait_alive(session.id, device.id))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
             "debt_amount": debt_amount, "autopay": _autopay}
+
+
+def exit_wait_alive(session_id: str, device_id: str):
+    """Гарах LED-ийн төлөх дүнг барих нөхцөл (barrier._keep_on_screen-д, 2026-11-11):
+    сешн төлбөр хүлээсээр (AWAITING_PAYMENT) БА сүүлд энэ камерт уншигдсан бол True.
+    Төлөгдсөн/хаагдсан/оператор гаргасан/өөр гарцад шилжсэн мөчид дэлгэц барихаа болино.
+    Thread дээр дуудагдана (sync DB) — өөрийн богино сешнтэй."""
+    def alive() -> bool:
+        from .database import SessionLocal
+        db = SessionLocal()
+        try:
+            row = (db.query(ParkingSession.status, ParkingSession.exit_device_id)
+                   .filter(ParkingSession.id == session_id).first())
+            return bool(row and row[0] == "AWAITING_PAYMENT" and row[1] == device_id)
+        finally:
+            db.close()
+    return alive
 
 
 def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0,
