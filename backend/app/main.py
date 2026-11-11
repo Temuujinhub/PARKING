@@ -50,6 +50,11 @@ try:
 except Exception as _e:  # noqa: BLE001 — баталгаажуулалт унасан ч серверийг унагахгүй
     print(f"[device_auto] startup шалгалт алдаа: {_e}")
 
+# Түншийн тохиргоог deploy-оор тавих (2026-11-11: MonPay autoPay webhook — TEST → z-wallet,
+# PROD → wallet). Серверийн үүрэг тодорхойгүй бол юу ч хийхгүй; алдаа серверийг унагахгүй.
+from .services.partner_presets import run_startup_presets  # noqa: E402
+run_startup_presets()
+
 # API баримт (Swagger) зөвхөн debug үед нээлттэй — production-д API гадаргууг ил гаргахгүй
 app = FastAPI(
     title=settings.app_name,
