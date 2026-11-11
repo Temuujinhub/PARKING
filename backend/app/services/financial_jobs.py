@@ -472,7 +472,12 @@ def enqueue_receipt_ready(db, payment, receipt):
              "receipt_id": receipt.id, "ddtd": receipt.ebarimt_id,
              "lottery": receipt.lottery_code, "amount": str(receipt.amount),
              "vat_amount": str(receipt.vat_amount), "kind": kind, "debt_id": debt_id,
-             "status": "SENT"}
+             "status": "SENT",
+             # Байгууллагын баримт (2026-11-11): ORGANIZATION + регистр/ТТД, эс бөгөөс CITIZEN
+             "receipt_type": ("ORGANIZATION" if (receipt.customer_tin and
+                                                 payment.ebarimt_receiver_type == "COMPANY") else "CITIZEN"),
+             "payer_reg_no": (receipt.customer_tin if (receipt.customer_tin and
+                                                       payment.ebarimt_receiver_type == "COMPANY") else None)}
     db.add(FinancialJob(id=event_id, job_key=key, kind="PARTNER", payment_id=payment.id,
         payload={"url": original.payload["url"], "partner": original.payload["partner"], "event": event}))
 
