@@ -8,7 +8,7 @@
 // харагдац, «Цааш ачаалах» хуудаслалт (өмнө нь 1000 мөрөөр таслагддаг байв), Excel.
 import { AlertTriangle, ChevronDown, ChevronRight, Eraser, FileSpreadsheet, List, RefreshCw, ScrollText, Search, Users } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, fmt, fmtDate, fmtMDHM, fmtShort, preferredSite, rememberSite } from '../api'
+import { api, fmt, fmtDate, fmtMDHM, fmtShort } from '../api'
 import { useAuth } from '../auth'
 import { Field, Modal, Table, useToast } from '../components/ui'
 import { useDownload } from '../hooks/useDownload'
@@ -46,6 +46,19 @@ const QUICK_REASONS = [
   'Удирдлагын шийдвэрээр чөлөөлөв',
 ]
 
+// 2026-11-11: Өр цэвэрлэх хуудас өөрийн зогсоолын сонголтыг ТУСАД НЬ санана — бусад хуудсын
+// (Касс, Хаалт…) сүүлд сонгосон зогсоол руу «өөрөө солигдож» дугаарын хайлт зөвхөн тэр
+// зогсоолд хязгаарлагддаг байв. Анхдагч — Бүх зогсоол.
+const DEBT_SITE_KEY = 'debts_site_id'
+const debtSiteInitial = (sites) => {
+  try {
+    const saved = localStorage.getItem(DEBT_SITE_KEY)
+    if (saved === '' || (saved && sites.some((s) => s.id === saved))) return saved
+  } catch {}
+  return ''
+}
+const rememberDebtSite = (id) => { try { localStorage.setItem(DEBT_SITE_KEY, id || '') } catch {} }
+
 const STATUS_LABEL = Object.fromEntries(STATUS_OPTS)
 function StatusPill({ s }) {
   return <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] ${STATUS_STYLE[s] || 'bg-slate-500/15 text-slate-300'}`}>{STATUS_LABEL[s] || s}</span>
@@ -78,15 +91,19 @@ export default function Debts() {
   const [lastResult, setLastResult] = useState(null)
 
   useEffect(() => {
-    api('/api/admin/sites').then((s) => { setSites(s); setSiteId(preferredSite(s)) }).catch(() => {})
+    api('/api/admin/sites').then((s) => { setSites(s); setSiteId(debtSiteInitial(s)) }).catch(() => {})
   }, [])
 
+  // Дугаараар хайхад ҮРГЭЛЖ бүх зогсоолоос (2026-11-11) — нэг машины өр олон зогсоолд байдаг;
+  // зогсоолын сонголт зөвхөн дугааргүй жагсаалтад үйлчилнэ.
+  const plateSearch = !!applied.plate.trim()
+  const effSite = plateSearch ? '' : siteId
   // Жагсаалт ба Excel НЭГ шүүлтээр (хоёр өөр үр дүн гаргахгүй)
   const params = () => {
     const p = new URLSearchParams()
     if (status) p.set('status', status)
-    if (siteId) p.set('site_id', siteId)
-    if (applied.plate.trim()) p.set('plate', applied.plate.trim())
+    if (effSite) p.set('site_id', effSite)
+    if (plateSearch) p.set('plate', applied.plate.trim())
     if (minDays) p.set('min_days', minDays)
     if (applied.from) p.set('created_from', applied.from)
     if (applied.to) p.set('created_to', applied.to)
@@ -113,8 +130,8 @@ export default function Debts() {
   }
   const loadLog = () => {
     const p = new URLSearchParams({ limit: 500 })
-    if (siteId) p.set('site_id', siteId)
-    if (applied.plate.trim()) p.set('plate', applied.plate.trim())
+    if (effSite) p.set('site_id', effSite)
+    if (plateSearch) p.set('plate', applied.plate.trim())
     api(`/api/compensations/write-off-log?${p}`).then(setLogData).catch((e) => toast(e.message, 'error'))
   }
   useEffect(() => { if (sites.length) { load(); loadLog() } }, [siteId, minDays, status, reason, applied, nonce, sites.length]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -129,7 +146,7 @@ export default function Debts() {
     dl(`/api/compensations/excel?${params()}`, `ur_${toDateInput()}.xlsx`)
   }
 
-  const siteName = sites.find((s) => s.id === siteId)?.name || 'Бүх зогсоол'
+  const siteName = sites.find((s) => s.id === effSite)?.name || 'Бүх зогсоол'
   const rangeLabel = applied.from || applied.to
     ? `${applied.from ? applied.from.replace('T', ' ') : '…'} — ${applied.to ? applied.to.replace('T', ' ') : '…'}`
     : ''
@@ -196,10 +213,15 @@ export default function Debts() {
       <div className="card space-y-3">
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end">
           <Field label="Зогсоол">
-            <select className="input" value={siteId} onChange={(e) => { setSiteId(e.target.value); rememberSite(e.target.value) }}>
+            <select className={`input${plateSearch ? ' opacity-50' : ''}`} value={siteId}
+              title={plateSearch ? 'Дугаараар хайхад бүх зогсоолоос хайна' : undefined}
+              onChange={(e) => { setSiteId(e.target.value); rememberDebtSite(e.target.value) }}>
               <option value="">Бүх зогсоол</option>
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
+            {plateSearch && siteId && (
+              <div className="hint">Дугаараар хайхад <b>бүх зогсоолоос</b> хайна</div>
+            )}
           </Field>
           <Field label="Төлөв">
             <select className="input" value={status} onChange={(e) => setStatus(e.target.value)}>

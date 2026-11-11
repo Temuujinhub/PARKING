@@ -237,6 +237,27 @@ event илгээнэ. Толгой: `Content-Type: application/json`, `X-Parking
   байж болно. Машин бүртгэлийн «Турших» нь format-аас үл хамааран зөвхөн
   `{"data":{"plateNo","enteredDate"}}` илгээнэ (`Idempotency-Key: test-…`).
 
+#### 6.4 Байгууллагын (ТТД-тэй) баримт — 2026-11-11
+
+Хэрэглэгч байгууллагын нэр дээр баримт авах бол wallet нь байгууллагын **регистр (7 орон)** эсвэл
+**ТТД (11–14 орон)**-ыг `payer_reg_no` талбараар дамжуулна (хуучин нэр `customer_tin` мөн
+хүлээн авна). POS/касс/QR-тай НЭГ дүрэм (`msgbill.classify_reg_no`).
+
+| Хаана | Юу |
+|---|---|
+| `POST /api/v1/payments` (intent) | `{"session_id", "include_debts"?, "payer_reg_no": "6235971"}` — **зөвлөмж**: хэрэглэгч «Байгууллагаар» сонгомогц |
+| `POST /api/v1/payments/{id}/confirm` | `payer_reg_no` (сонголттой) — баримт үүсэхээс ӨМНӨ хэрэглэгдэнэ; давтан confirm хүлээн авагчийг өөрчлөхгүй |
+| `GET /api/v1/ebarimt/payer?reg_no=6235971` | Байгууллагын НЭР шалгах: `{reg_no, receipt_type, available, found, name, tin, is_vat_payer}`. `available:false` = шалгах суваг ажиллахгүй («олдсонгүй» биш). Түлхүүр тутам минутад 60 |
+| `POST /api/v1/payments/{id}/ebarimt` | `{"payer_reg_no"}` — төлсний ДАРАА: баримт хараахан илгээгдээгүй / суваг татгалзсан бол байгууллагынх болгоно (шинэ баримт → `receipt.ready`). Баримт аль хэдийн гарсан (SENT) бол **409 `RECEIPT_ALREADY_ISSUED`** — ТЕГ-ийн баримтыг автоматаар цуцлахгүй (EasyParking-ийн санхүү гараар) |
+
+- Буруу дугаар (иргэний регистр, үсэгтэй, урт буруу) → **422** — intent үүсэхгүй. Иргэний баримтад
+  талбарыг бүү илгээ (`null`/хоосон = иргэний сугалаатай баримт).
+- Хариу бүрд (intent, confirm, `GET /payments/{id}`, `payment.paid`): `receipt_type`
+  (`ORGANIZATION` | `CITIZEN`), `payer_reg_no`. `ebarimts[]`-ийн мөр бүрд `receiver_type`
+  (`COMPANY`/`CITIZEN`) + `payer_reg_no`; `receipt.ready`-д `receipt_type`, `payer_reg_no`.
+- Байгууллагын баримтад сугалаа (`lottery`) гарахгүй. Өртэй (`include_debts`) төлбөрийн бүх баримт
+  (зогсолт + өр тус бүр) ижил байгууллагын нэр дээр гарна.
+
 #### 6.5 Баримт хэн гаргах — түлхүүр тус бүрээр (2026-10-22)
 
 | `receipt_issuer` (Тохиргоо → Холболт → Гадаад API → мөрийн «e-Barimt») | Зан төлөв |

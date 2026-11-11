@@ -2,10 +2,11 @@
 // Дугаарын эхний тэмдэгтээр live шүүнэ, төлөв/зогсоолоор шүүнэ, real-time шинэчлэгдэнэ.
 // Админ "Аудит горим"-оор сэжигтэй (гарсан ч хаагдаагүй / буруу дугаар / удсан) бүртгэлийг
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
-import { CarFront, Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Ban, CarFront, Pencil, RefreshCw, ShieldCheck, Star, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtDate, fmtDur, wsConnect } from '../api'
+import { api, fmt, fmtDate, fmtDur, wsConnect, coalesce } from '../api'
 import { useAuth } from '../auth'
+import { BlockBadge, BlockModal } from '../components/BlockVehicle'
 import { PaymentWaitSince } from '../components/PaymentWait'
 import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
@@ -72,6 +73,9 @@ export default function Check() {
   const [data, setData] = useState({ total: 0, rows: [], suspect: 0 })
   const [sel, setSel] = useState([]) // админ: хасахаар сонгосон session id-ууд
   const [removing, setRemoving] = useState(null) // {ids, createComp, reason}
+  // «Зогсоолоос хасах»-ын шалтгаан: хадгалсан (★) + сүүлд хэрэглэсэн (2026-11-11)
+  const [reasons, setReasons] = useState({ presets: [], recent: [] })
+  const [blocking, setBlocking] = useState(null) // {plate, existing} — машин блоклох (2026-11-11)
   const [backfill, setBackfill] = useState(null) // {rows, debt} — камерын логоос нөхөж бүртгэх
   const debounceRef = useRef(null)
 
@@ -128,6 +132,17 @@ export default function Check() {
     }
   }
 
+  useEffect(() => {
+    if (!removing || !isAdmin) return
+    api('/api/sessions/remove-reasons').then(setReasons).catch(() => {})
+  }, [!!removing]) // eslint-disable-line react-hooks/exhaustive-deps
+  const savePresets = async (items) => {
+    try {
+      const r = await api('/api/sessions/remove-reasons', { method: 'PUT', body: { items } })
+      setReasons((prev) => ({ presets: r.presets, recent: prev.recent.filter((x) => !r.presets.includes(x)) }))
+    } catch (err) { toast(err.message, 'error') }
+  }
+
   const doRemove = async (e) => {
     e.preventDefault()
     try {
@@ -166,7 +181,13 @@ export default function Check() {
     debounceRef.current = setTimeout(load, 350)
     return () => clearTimeout(debounceRef.current)
   }, [plate])
-  useEffect(() => wsConnect('all', load), [siteId, status, plate, audit])
+  // Сонгосон зогсоолын event л (бүх зогсоолынхыг биш), 5с-д нэгээс олонгүй дахин ачаална —
+  // жагсаалт 200 машины төлбөрийг бодох хүнд хүсэлт (2026-11-11 «POS удаан»)
+  useEffect(() => {
+    const reload = coalesce(load, 5000)
+    const close = wsConnect(siteId || 'all', () => reload())
+    return () => { reload.cancel(); close() }
+  }, [siteId, status, plate, audit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Дэлгэцэнд харуулах мөрүүд: аудит горимд "зөвхөн сэжигтэй" + дугаарын шүүлт client талд
   const rows = data.rows.filter((r) => {
@@ -326,8 +347,7 @@ export default function Check() {
         <input key="all" type="checkbox" className="cursor-pointer" title="Бүгдийг сонгох"
           checked={rows.length > 0 && rows.every((r) => sel.includes(r.id))}
           onChange={(e) => setSel(e.target.checked ? rows.map((r) => r.id) : [])} />,
-      ] : []), 'Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв', 'Зураг',
-      ...(isAdmin ? [''] : [])]}
+      ] : []), 'Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв', 'Зураг', '']}
         empty={rows.length === 0}>
         {rows.map((s) => (
           <tr key={s.id} className={s.debt ? 'bg-red-500/10' : (s.audit?.suspect ? 'bg-amber-500/5' : 'hover:bg-surface-muted/30')}>
@@ -345,6 +365,7 @@ export default function Check() {
                 </div>
               )}
               <FlagBadges audit={s.audit} />
+              <BlockBadge blacklist={s.blacklist} />
             </td>
             <td className="td">{s.site_name}</td>
             <td className="td font-mono text-xs">
@@ -375,18 +396,26 @@ export default function Check() {
               )}
             </td>
             <td className="td"><SnapshotButton session={s} /></td>
-            {isAdmin && (
-              <td className="td text-right whitespace-nowrap">
-                <button className="btn-secondary py-1 text-xs mr-1" title="Дугаар засах (камер буруу уншсан)"
-                  onClick={() => editPlate(s)}>
-                  <Pencil size={13} />
-                </button>
-                <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
-                  onClick={() => setRemoving({ ids: [s.id], createComp: false, reason: '' })}>
-                  <Trash2 size={13} />
-                </button>
-              </td>
-            )}
+            <td className="td text-right whitespace-nowrap">
+              {/* Блоклох — оператор ч (шалтгаан заавал, бүх зогсоолд) */}
+              <button className={`btn-secondary py-1 text-xs mr-1 ${s.blacklist ? 'text-red-400 border-red-500/50' : ''}`}
+                title={s.blacklist ? 'Блок харах / засах / цуцлах' : 'Машин блоклох'}
+                onClick={() => setBlocking({ plate: s.plate_number, existing: s.blacklist })}>
+                <Ban size={13} />
+              </button>
+              {isAdmin && (
+                <>
+                  <button className="btn-secondary py-1 text-xs mr-1" title="Дугаар засах (камер буруу уншсан)"
+                    onClick={() => editPlate(s)}>
+                    <Pencil size={13} />
+                  </button>
+                  <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
+                    onClick={() => setRemoving({ ids: [s.id], createComp: false, reason: '' })}>
+                    <Trash2 size={13} />
+                  </button>
+                </>
+              )}
+            </td>
           </tr>
         ))}
       </Table>
@@ -432,6 +461,9 @@ export default function Check() {
         })()}
       </Modal>
 
+      <BlockModal plate={blocking?.plate} existing={blocking?.existing}
+        onClose={() => setBlocking(null)} onSaved={load} />
+
       {/* Зогсоолоос хасах modal — өр үүсгэх эсэх + шалтгаан */}
       <Modal open={!!removing} onClose={() => setRemoving(null)} title="Зогсоолоос хасах">
         {removing && (
@@ -452,9 +484,40 @@ export default function Check() {
               өр үүсгэхгүйгээр (checkbox-г болиулж) хасаж болно.
             </div>
             <Field label="Шалтгаан (заавал биш)">
-              <input className="input" value={removing.reason} placeholder="ж: аудит — гарсан ч хаагдаагүй"
-                onChange={(e) => setRemoving({ ...removing, reason: e.target.value })} />
+              <div className="flex gap-1.5">
+                <input className="input flex-1" value={removing.reason} placeholder="ж: аудит — гарсан ч хаагдаагүй"
+                  maxLength={300} onChange={(e) => setRemoving({ ...removing, reason: e.target.value })} />
+                <button type="button" className="btn-secondary px-2.5" title="Энэ шалтгааныг жагсаалтад хадгалах"
+                  disabled={!removing.reason.trim() || reasons.presets.includes(removing.reason.trim())}
+                  onClick={() => savePresets([...reasons.presets, removing.reason.trim()])}>
+                  <Star size={15} />
+                </button>
+              </div>
             </Field>
+            {/* Хадгалсан (★) ба сүүлд хэрэглэсэн шалтгаан — нэг товшилтоор (2026-11-11) */}
+            {(reasons.presets.length > 0 || reasons.recent.length > 0) && (
+              <div className="flex flex-wrap gap-1.5 -mt-1">
+                {reasons.presets.map((r) => (
+                  <span key={`p-${r}`} className={`inline-flex items-center rounded-md border text-xs ${removing.reason === r
+                    ? 'border-accent/60 bg-accent/15 text-accent' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'}`}>
+                    <button type="button" className="px-2 py-1 cursor-pointer flex items-center gap-1"
+                      onClick={() => setRemoving({ ...removing, reason: r })}>
+                      <Star size={11} className="fill-current" />{r}
+                    </button>
+                    <button type="button" className="px-1.5 py-1 text-slate-400 hover:text-red-400 cursor-pointer"
+                      title="Жагсаалтаас хасах" aria-label={`«${r}» хасах`}
+                      onClick={() => savePresets(reasons.presets.filter((x) => x !== r))}>×</button>
+                  </span>
+                ))}
+                {reasons.recent.map((r) => (
+                  <button key={`r-${r}`} type="button" title="Сүүлд хэрэглэсэн шалтгаан"
+                    className={`px-2 py-1 rounded-md border text-xs cursor-pointer ${removing.reason === r
+                      ? 'border-accent/60 bg-accent/15 text-accent'
+                      : 'border-surface-border/60 bg-surface-muted/60 text-slate-300 hover:bg-surface-muted'}`}
+                    onClick={() => setRemoving({ ...removing, reason: r })}>{r}</button>
+                ))}
+              </div>
+            )}
             <button className="btn-primary w-full justify-center bg-red-600 hover:bg-red-500">
               <Trash2 size={15} /> Хасах
             </button>

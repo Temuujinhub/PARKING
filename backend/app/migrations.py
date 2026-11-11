@@ -505,6 +505,12 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_partner_autopay_key_created ON partner_autopay_requests "
     "(partner_key_id, created_at)",
 
+    # 2026-11-11 Машин блоклох: машин тус бүрээр орох хаалтын шийдвэр (DENY/ALLOW/NULL=дүрмээр)
+    # + хэн/хэзээ зассан. nullable — хуучин бүх мөр NULL (хуучин зан төлөв, дүрмээр).
+    "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS entry_policy VARCHAR(10)",
+    "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS updated_by VARCHAR(60)",
+    "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+
 ]
 
 
@@ -584,6 +590,7 @@ def check_ready():
         conn.execute(text("SELECT auto_pay, auto_pay_updated_at FROM partner_vehicles LIMIT 0"))
         conn.execute(text("SELECT payment_id, status, expires_at, notice_status "
                           "FROM partner_autopay_requests LIMIT 0"))
+        conn.execute(text("SELECT entry_policy, updated_by, updated_at FROM blacklist LIMIT 0"))
         secret_columns = conn.execute(text("""
             SELECT count(*) FROM information_schema.columns
             WHERE table_schema=current_schema() AND data_type='text'

@@ -50,6 +50,11 @@ try:
 except Exception as _e:  # noqa: BLE001 — баталгаажуулалт унасан ч серверийг унагахгүй
     print(f"[device_auto] startup шалгалт алдаа: {_e}")
 
+# Түншийн тохиргоог deploy-оор тавих (2026-11-11: MonPay autoPay webhook — TEST → z-wallet,
+# PROD → wallet). Серверийн үүрэг тодорхойгүй бол юу ч хийхгүй; алдаа серверийг унагахгүй.
+from .services.partner_presets import run_startup_presets  # noqa: E402
+run_startup_presets()
+
 # API баримт (Swagger) зөвхөн debug үед нээлттэй — production-д API гадаргууг ил гаргахгүй
 app = FastAPI(
     title=settings.app_name,
@@ -79,6 +84,11 @@ if _pos_clients.is_enabled():
 else:
     log.warning("«Холбогдсон POS» УНТРААЛТТАЙ (PARKING_POS_CLIENTS_ENABLED=false) — POS аппын "
                 "хүсэлтийг бүртгэхгүй, heartbeat хадгалахгүй; төлбөр/хаалт/e-Barimt хэвийн")
+
+# API хүсэлтийн хугацааны статистик (2026-11-11 «POS удаан») — цэвэр ASGI, DB-гүй, санах ойд.
+# Хамгийн гадна давхарга байх ёстой тул СҮҮЛД нэмнэ (Starlette сүүлд нэмснийг гадна ороодог).
+from .services.request_stats import RequestTimingMiddleware  # noqa: E402
+app.add_middleware(RequestTimingMiddleware)
 
 for r in (auth_router, lpr_router, admin_router, sessions_router, payments_router,
           public_router, barriers_router, cashier_router, reports_router, compensations_router,

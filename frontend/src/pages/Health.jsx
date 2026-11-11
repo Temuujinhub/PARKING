@@ -305,6 +305,73 @@ export default function Health() {
         </div>
       )}
 
+      {/* Камерын зураг хадгалагдаж буй эсэх (2026-11-11) — орох/гарах зургийн хувь, зогсоолоор */}
+      {d.images && !d.images.error && (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-slate-300 font-medium"><Camera size={16} /> Камерын зураг (сүүлийн 24ц)</div>
+            <div className="text-xs text-slate-500">
+              Таг: {d.images.cap_bytes ? fmtBytes(d.images.cap_bytes) : 'хязгааргүй'} · {d.images.retention_days} хоног
+              {d.database?.storage?.snapshots && <> · одоо {fmtBytes(d.database.storage.snapshots.bytes)}</>}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {[['Орох', d.images.entry_percent, d.images.entry_images, d.images.entries],
+              ['Гарах', d.images.exit_percent, d.images.exit_images, d.images.exits]].map(([l, p, n, t]) => (
+              <div key={l}>
+                <div className="flex justify-between text-sm mb-1">
+                  <span>{l} зурагтай</span>
+                  <span className={`font-mono ${p == null ? 'text-slate-500' : p < 50 ? 'text-red-400' : p < 85 ? 'text-amber-400' : 'text-accent'}`}>
+                    {p == null ? '—' : `${p}%`} <span className="text-slate-500 text-xs">({n}/{t})</span>
+                  </span>
+                </div>
+                <Bar percent={p || 0} color={p == null ? 'bg-slate-600' : p < 50 ? 'bg-red-500' : p < 85 ? 'bg-amber-500' : 'bg-accent'} />
+              </div>
+            ))}
+          </div>
+          {d.images.manual_snapshot_off?.length > 0 && (
+            <div className="text-xs text-amber-300">
+              «Камераас гар зураг (Manual Snapshot)» унтраалттай: {d.images.manual_snapshot_off.join(', ')} —
+              эдгээр зогсоолд зургийн суваггүй камерын зураг хадгалагдахгүй (Тохиргоо → Төлбөрийн дүрэм).
+            </div>
+          )}
+          {(d.images.sites || []).filter((r) => r.percent != null && r.percent < 85).length > 0 && (
+            <div className="text-xs text-slate-400">
+              Зураг дутуу зогсоол: {(d.images.sites || []).filter((r) => r.percent != null && r.percent < 85).slice(0, 8)
+                .map((r) => `${r.site_name} ${r.percent}%`).join(' · ')}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* API хүсэлтийн хугацаа (2026-11-11 «POS удаан») — сүүлийн ≤1ц, p95-аар эрэмбэлсэн */}
+      {d.requests && d.requests.requests > 0 && (
+        <div className="card space-y-2">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 text-slate-300 font-medium"><Activity size={16} /> API хүсэлтийн хугацаа</div>
+            <div className="text-xs text-slate-500">
+              {new Date(d.requests.since * 1000).toLocaleTimeString('mn-MN', { hour12: false })}-аас · {d.requests.requests} хүсэлт ·
+              <span className={d.requests.slow ? ' text-amber-400' : ''}> {d.requests.slow} нь {d.requests.slow_ms}мс+</span>
+            </div>
+          </div>
+          <Table headers={['Зам', 'Тоо', 'Дундаж', 'p95', 'Хамгийн удаан', `${d.requests.slow_ms}мс+`]}>
+            {[...(d.requests.pos || []), ...(d.requests.top || []).filter((r) => !r.pos)].slice(0, 14).map((r) => (
+              <tr key={`${r.method} ${r.path}`}>
+                <td className="td font-mono text-xs">
+                  {r.pos && <span className="mr-1.5 px-1 rounded bg-accent/15 text-accent text-[10px]">POS</span>}
+                  {r.method} {r.path}
+                </td>
+                <td className="td font-mono text-xs">{r.count}</td>
+                <td className="td font-mono text-xs">{r.avg_ms}мс</td>
+                <td className={`td font-mono text-xs ${r.p95_ms >= 2000 ? 'text-red-400' : r.p95_ms >= 800 ? 'text-amber-400' : ''}`}>{r.p95_ms}мс</td>
+                <td className="td font-mono text-xs">{r.max_ms}мс</td>
+                <td className="td font-mono text-xs">{r.slow || '—'}</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      )}
+
       {/* Интеграци: QPay + WebSocket */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="card">

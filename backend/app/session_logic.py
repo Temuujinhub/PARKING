@@ -234,10 +234,38 @@ def find_inner_registered(db: Session, plate: str, site_id: str) -> RegisteredDr
     return _registered_order(_registered_base(db, plate).filter(cond)).first()
 
 
+def blacklist_blocks_entry(black: BlacklistEntry | None, rules: dict) -> bool:
+    """Хар жагсаалтын машиныг орох хаалтанд ХОРИГЛОХ уу (2026-11-11 — машин тус бүрээр)."""
+    if black is None:
+        return False
+    policy = (getattr(black, "entry_policy", None) or "").upper()
+    if policy == "DENY":
+        return True
+    if policy == "ALLOW":
+        return False
+    return bool(rules.get("block_entry"))
+
+
+def blacklist_info(b: BlacklistEntry | None) -> dict | None:
+    """Касс/Шалгах/POS-д харуулах блокийн мэдээлэл — «дараагийн хүн» шалтгааныг харна."""
+    if b is None:
+        return None
+    return {"id": b.id, "reason": b.reason or "", "entry_policy": b.entry_policy,
+            "created_by": b.created_by, "created_at": b.created_at.isoformat() if b.created_at else None,
+            "updated_by": b.updated_by,
+            "updated_at": b.updated_at.isoformat() if b.updated_at else None}
+
+
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:
+    """Идэвхтэй хориг. Нэг дугаарт хэд хэдэн мөр (автомат + гараар) байж болно — ИЛ шийдвэртэйг
+    (DENY → ALLOW) нь, дараа нь хамгийн сүүлийнхийг авна (2026-11-11)."""
+    from sqlalchemy import case
+    rank = case((BlacklistEntry.entry_policy == "DENY", 0),
+                (BlacklistEntry.entry_policy == "ALLOW", 1), else_=2)
     return (
         db.query(BlacklistEntry)
         .filter(BlacklistEntry.plate_number == plate, BlacklistEntry.is_active.is_(True))
+        .order_by(rank, BlacklistEntry.created_at.desc())
         .first()
     )
 
@@ -1640,7 +1668,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Доорх nested зогсолтоос ӨМНӨ тооцно — хаалт нээгдэх эсэхээс хамаарна.
     from .services.app_settings import get_blacklist_rules
     _bl_rules = get_blacklist_rules(db, site_id)
-    black_blocks = bool(black) and _bl_rules["block_entry"]
+    # Машин тус бүрийн шийдвэр (2026-11-11) дүрмийг ДАРНА: DENY → нэвтрүүлэхгүй, ALLOW →
+    # нэвтрүүлж анхааруулна; хоосон бол дүрмээр (block_entry, зогсоол/түрээслэгчээр)
+    black_blocks = blacklist_blocks_entry(black, _bl_rules)
     # Урьдчилсан захиалга (wallet, 2026-10-22): энэ цагт БАТАЛГААЖСАН захиалгатай машин
     # «зөвхөн бүртгэлтэй» зогсоолд ч нэвтэрнэ; ШИНЭ сешнд урьдчилсан төлбөр нь холбогдоно.
     # Захиалгын аливаа алдаа орох хаалтыг хэзээ ч гацаахгүй (services/reservations.py).
@@ -1729,6 +1759,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             "plate": plate, "reason": black.reason, "lane": "entry",
             "session_id": session.id,
             "blocked": black_blocks,
+            # хэн/хэзээ блоклосон, машин тус бүрийн шийдвэр — дараагийн ээлжийн оператор харна
+            "entry_policy": black.entry_policy, "created_by": black.created_by,
+            "created_at": black.created_at.isoformat() if black.created_at else None,
             "debt_count": len(_bl_debts),
             "debt_amount": float(sum(d.amount for d in _bl_debts)),
         })
@@ -2381,7 +2414,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
             _txt = _fee_screen_text(plate, 0, _flat, debt_shown, db=db, site_id=site_id)
             schedule_display(device.ip_address, _txt,
                              _txt if settings.screen_voice else None,
-                             camera_credentials(device))
+                             camera_credentials(device),
+                             keep_while=exit_wait_alive(session.id, device.id))
             log.info("[exit] орох уншилтгүй машинд суурь хураамж: %s %s₮", plate, _flat)
             return {"action": "no_session_fee", "session_id": session.id,
                     "plate": plate, "amount_due": float(_flat), "autopay": _autopay}
@@ -2465,7 +2499,8 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
                                 db=db, site_id=site_id)
         schedule_display(device.ip_address, _txt,
                          _txt if settings.screen_voice else None,
-                         camera_credentials(device))
+                         camera_credentials(device),
+                         keep_while=exit_wait_alive(session.id, device.id))
         return {"action": "debt_blocked", "plate": plate, "debt_amount": debt_amount,
                 "autopay": _autopay}
 
@@ -2542,12 +2577,31 @@ async def handle_exit(db: Session, device: Device, plate: str, confidence: float
     # Өртэй машинд ӨМНӨХ ӨР тусдаа мөрөөр (өнөөдрийн зогсолтын дүнтэй нийлүүлэхгүй).
     fee_text = _fee_screen_text(plate, fee["duration_minutes"], due, debt_shown,
                                 db=db, site_id=site_id)
+    # Дүнг жолооч төлж дуустал (дараагийн команд хүртэл) барина — 2026-11-11
     schedule_display(device.ip_address, fee_text,
                      fee_text if settings.screen_voice else None,
-                         camera_credentials(device))
+                     camera_credentials(device),
+                     keep_while=exit_wait_alive(session.id, device.id))
     return {"action": "awaiting_payment", "session_id": session.id,
             "total_fee": fee["total_fee"], "amount_due": due,
             "debt_amount": debt_amount, "autopay": _autopay}
+
+
+def exit_wait_alive(session_id: str, device_id: str):
+    """Гарах LED-ийн төлөх дүнг барих нөхцөл (barrier._keep_on_screen-д, 2026-11-11):
+    сешн төлбөр хүлээсээр (AWAITING_PAYMENT) БА сүүлд энэ камерт уншигдсан бол True.
+    Төлөгдсөн/хаагдсан/оператор гаргасан/өөр гарцад шилжсэн мөчид дэлгэц барихаа болино.
+    Thread дээр дуудагдана (sync DB) — өөрийн богино сешнтэй."""
+    def alive() -> bool:
+        from .database import SessionLocal
+        db = SessionLocal()
+        try:
+            row = (db.query(ParkingSession.status, ParkingSession.exit_device_id)
+                   .filter(ParkingSession.id == session_id).first())
+            return bool(row and row[0] == "AWAITING_PAYMENT" and row[1] == device_id)
+        finally:
+            db.close()
+    return alive
 
 
 def _fee_screen_text(plate: str, duration_minutes, amount, debt: float = 0.0,

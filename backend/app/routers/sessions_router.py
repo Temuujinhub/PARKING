@@ -83,6 +83,27 @@ def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
             .group_by(Compensation.plate_number).all()}
     for d in dicts:
         d["debt"] = debt.get(d["plate_number"])
+    return _attach_blacklist(db, dicts, plates)
+
+
+def _attach_blacklist(db: Session, dicts: list[dict], plates: set | None = None) -> list[dict]:
+    """Блоклогдсон машины шалтгаан (2026-11-11): `blacklist` {reason, entry_policy, created_by,
+    created_at…} эсвэл None — Касс/Шалгах/POS дээр «дараагийн ээлжийн хүн» харна. НЭГ query."""
+    from ..models import BlacklistEntry
+    from ..session_logic import blacklist_info
+    plates = plates if plates is not None else {d["plate_number"] for d in dicts if d.get("plate_number")}
+    found: dict = {}
+    if plates:
+        rows = (db.query(BlacklistEntry)
+                .filter(BlacklistEntry.plate_number.in_(plates), BlacklistEntry.is_active.is_(True))
+                .order_by(BlacklistEntry.created_at.desc()).all())
+        rank = {"DENY": 0, "ALLOW": 1}
+        for b in rows:   # is_blacklisted-тэй ижил: ИЛ шийдвэртэй (DENY → ALLOW) нь, дараа нь шинэ нь
+            cur = found.get(b.plate_number)
+            if cur is None or rank.get(b.entry_policy, 2) < rank.get(cur.entry_policy, 2):
+                found[b.plate_number] = b
+    for d in dicts:
+        d["blacklist"] = blacklist_info(found.get(d.get("plate_number")))
     return dicts
 
 
@@ -613,17 +634,12 @@ def recent_exits(site_id: str, minutes: int | None = None,
                 ParkingSession.last_exit_seen_at >= since)
     )
     sessions = q.order_by(ParkingSession.last_exit_seen_at.desc(), ParkingSession.id.desc()).limit(20).all()
-    # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек)
-    from ..models import Compensation
-    debt_plates = {p for (p,) in db.query(Compensation.plate_number)
-                   .filter(Compensation.status == "PENDING").all()}
     dev_ids = {s.exit_device_id for s in sessions if s.exit_device_id}
     devs = {d.id: d for d in db.query(Device).filter(Device.id.in_(dev_ids)).all()} if dev_ids else {}
     out = []
     for s in sessions:
         d = devs.get(s.exit_device_id)
         out.append(_session_out(db, s, with_fee=True) | {
-            "has_debt": s.plate_number in debt_plates,
             "exit_camera_id": d.id if d else None,
             "last_exit_seen_at": s.last_exit_seen_at,
             "exit_lane_no": d.lane_no if d else None,
@@ -631,7 +647,13 @@ def recent_exits(site_id: str, minutes: int | None = None,
             "exit_device_name": d.name if d else None})
     # `debt` {amount, count} — касс дээр өнөөдрийн зогсолт ба өмнөх өрийг ТУСАД НЬ
     # харуулна (өмнө нь зөвхөн has_debt туг ирдэг байсан тул дүн харагддаггүй байв)
-    return _attach_debt(db, out)
+    out = _attach_debt(db, out)
+    # Нөхөн төлбөрийн өртэй машиныг касс дээр улаанаар тэмдэглэнэ (JGA спек). 2026-11-11 (POS
+    # удаан): өмнө нь POS-ын ХҮСЭЛТ БҮРД бүх зогсоолын БҮХ төлөгдөөгүй өрийн дугаарыг (~11 мянга)
+    # татаж has_debt тооцдог байв — одоо жагсаалтын ≤20 дугаарын нэгтгэлээс (_attach_debt).
+    for row in out:
+        row["has_debt"] = bool(row.get("debt"))
+    return out
 
 
 @router.put("/{session_id}/note")
@@ -949,6 +971,69 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
             "skip_reasons": skips, "debt_total": debt_total, "rows": created}
 
 
+# ── «Зогсоолоос хасах»-ын шалтгаан (2026-11-11): дахин шивэхгүй ─────────────────────────────
+# Гомдол: «хасах дээр бичигдэж байгаа тайлбарыг хадгалагддаг болгоё». Хоёр эх: (1) хадгалсан
+# (★ — админ цонхноос нэг товчоор хадгална/устгана, app_settings `remove_reasons`), (2) сүүлийн
+# 90 хоногт ADMIN_REMOVE аудитад бичигдсэн шалтгаанууд (давтамжаар). Цонхонд товч болж гарна.
+REMOVE_REASONS_KEY = "remove_reasons"
+REMOVE_REASONS_MAX = 20
+REMOVE_REASON_LEN = 300
+
+
+def _remove_presets(db: Session) -> list[str]:
+    from ..services.app_settings import get_state
+    items = get_state(db, REMOVE_REASONS_KEY).get("items")
+    return [str(x)[:REMOVE_REASON_LEN] for x in items if str(x).strip()] if isinstance(items, list) else []
+
+
+def _recent_remove_reasons(db: Session, limit: int = 8) -> list[str]:
+    """Сүүлийн 90 хоногийн ADMIN_REMOVE аудитын шалтгаан — давтамж, дараа нь шинэ нь эхэнд."""
+    since = datetime.utcnow() - timedelta(days=90)
+    rows = (db.query(AuditLog.detail).filter(AuditLog.action == "ADMIN_REMOVE",
+                                            AuditLog.created_at >= since)
+            .order_by(AuditLog.created_at.desc()).limit(1000).all())
+    freq: dict[str, int] = {}
+    order: dict[str, int] = {}
+    for i, (detail,) in enumerate(rows):
+        reason = str((detail or {}).get("reason") or "").strip() if isinstance(detail, dict) else ""
+        if not reason:
+            continue
+        freq[reason] = freq.get(reason, 0) + 1
+        order.setdefault(reason, i)
+    return sorted(freq, key=lambda r: (-freq[r], order[r]))[:limit]
+
+
+@router.get("/remove-reasons")
+def remove_reasons(db: Session = Depends(get_db),
+                   user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Хасах цонхны сонголт: {presets: хадгалсан, recent: сүүлд хэрэглэсэн (хадгалсныг давхардуулахгүй)}."""
+    presets = _remove_presets(db)
+    recent = [r for r in _recent_remove_reasons(db) if r not in presets]
+    return {"presets": presets, "recent": recent}
+
+
+@router.put("/remove-reasons")
+def save_remove_reasons(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Хадгалсан шалтгааны жагсаалтыг бүхэлд нь солино. body: {items: [str]}."""
+    from ..services.app_settings import set_state
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise HTTPException(422, "items нь жагсаалт байна")
+    clean: list[str] = []
+    for x in items:
+        t = " ".join(str(x or "").split())[:REMOVE_REASON_LEN]
+        if t and t not in clean:
+            clean.append(t)
+    if len(clean) > REMOVE_REASONS_MAX:
+        raise HTTPException(422, f"Хамгийн ихдээ {REMOVE_REASONS_MAX} шалтгаан хадгална")
+    set_state(db, REMOVE_REASONS_KEY, {"items": clean}, user.username)
+    db.add(AuditLog(username=user.username, action="REMOVE_REASONS_SET", entity="app_settings",
+                    entity_id=REMOVE_REASONS_KEY, detail={"items": clean}))
+    db.commit()
+    return {"presets": clean}
+
+
 @router.post("/bulk-remove")
 async def bulk_remove(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
@@ -1130,7 +1215,8 @@ def get_session(session_id: str, db: Session = Depends(get_db),
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын session
-    return _session_out(db, s, with_fee=True)
+    # Блоклогдсон машины шалтгаан (2026-11-11) — POS-ын төлбөрийн дэлгэц ч харна
+    return _attach_blacklist(db, [_session_out(db, s, with_fee=True)])[0]
 
 
 @router.post("/{session_id}/apply-discount")

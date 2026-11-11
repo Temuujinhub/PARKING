@@ -1,6 +1,8 @@
 // Төлбөрийн дэлгэрэнгүй — дугаар хайх, сонгосон машины тооцоо, төлбөр авах
-import { Accessibility, Banknote, DoorOpen, Landmark, QrCode, Search, Siren, UserX } from 'lucide-react'
+import { Accessibility, Ban, Banknote, DoorOpen, Landmark, QrCode, Search, Siren, UserX } from 'lucide-react'
+import { useState } from 'react'
 import { api, fmt, fmtDate, fmtDur } from '../../api'
+import { BlockBadge, BlockModal, POLICY_SHORT } from '../../components/BlockVehicle'
 import { SnapshotImg } from '../../components/Snapshot'
 import { Badge, Field, useToast } from '../../components/ui'
 
@@ -11,6 +13,12 @@ export default function PaymentPanel({
   onPay, onApplyDiscount, onManualExit, onSpecialExit, onSaveNote, siteId, loadExits,
 }) {
   const toast = useToast()
+  const [blocking, setBlocking] = useState(false)   // машин блоклох цонх (2026-11-11)
+  const refreshSelected = async () => {
+    loadExits(siteId)
+    if (!selected?.id) return
+    try { setSelected(await api(`/api/sessions/${selected.id}`)) } catch { /* жагсаалт шинэчлэгдэнэ */ }
+  }
   // Онцгой гаргалтын товчнууд (2026-09-14): QPay-ийн оронд операторт, POS-д нэмэлтээр.
   // Дарахад гарах камераас зураг авч баталгаажуулдаг (SpecialExitModal).
   const SPECIAL_BTN = {
@@ -40,7 +48,10 @@ export default function PaymentPanel({
           {searchResults.map((s) => (
             <button key={s.id} onClick={() => onPickResult(s)}
               className="w-full text-left px-3 py-2.5 rounded-lg bg-surface-muted/40 hover:bg-surface-muted border border-surface-border/50 hover:border-accent text-sm cursor-pointer flex items-center justify-between transition-colors">
-              <span className="font-mono font-bold text-base">{s.plate_number}</span>
+              <span className="font-mono font-bold text-base">
+                {s.plate_number}
+                <BlockBadge blacklist={s.blacklist} inline={false} />
+              </span>
               <span className="flex items-center gap-3">
                 <span className="font-mono text-amber-400">{s.fee?.is_free ? 'Үнэгүй' : `${fmt(s.fee?.total_fee ?? s.total_fee)}₮`}</span>
                 <Badge value={s.status} />
@@ -70,8 +81,28 @@ export default function PaymentPanel({
                 засах
               </button>
             </span>
-            <Badge value={selected.status} />
+            <span className="flex items-center gap-2">
+              <button type="button" onClick={() => setBlocking(true)}
+                className={`btn-secondary py-1 px-2 text-xs ${selected.blacklist ? 'text-red-400 border-red-500/50' : ''}`}
+                title={selected.blacklist ? 'Блок харах / засах / цуцлах' : 'Машин блоклох (шалтгаантай)'}>
+                <Ban size={13} /> {selected.blacklist ? 'Блоктой' : 'Блоклох'}
+              </button>
+              <Badge value={selected.status} />
+            </span>
           </div>
+          {/* Блоклогдсон машин — шалтгаан, хэн/хэзээ (дараагийн ээлжийн ажилтанд) */}
+          {selected.blacklist && (
+            <div className="rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2 text-sm">
+              <div className="font-semibold text-red-300 flex items-center gap-1.5">
+                <Ban size={14} /> Блоклогдсон машин · {POLICY_SHORT[selected.blacklist.entry_policy || ''] || 'дүрмээр'}
+              </div>
+              <div className="text-slate-200 mt-0.5">{selected.blacklist.reason || '—'}</div>
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                {selected.blacklist.created_by} · {fmtDate(selected.blacklist.created_at)}
+                {selected.blacklist.updated_by && <> · зассан: {selected.blacklist.updated_by}</>}
+              </div>
+            </div>
+          )}
           {fee?.price_held_until && <p role="status" className="text-sm text-accent">
             Үнэ {fmtDate(fee.price_held_until)} хүртэл тогтмол. Дараа нь нийт зогссон хугацаагаар бодно.
           </p>}
@@ -224,6 +255,8 @@ export default function PaymentPanel({
           Зүүн талаас машин сонгох эсвэл дугаараар хайна уу
         </div>
       )}
+      <BlockModal plate={blocking && selected ? selected.plate_number : null}
+        existing={selected?.blacklist} onClose={() => setBlocking(false)} onSaved={refreshSelected} />
     </div>
   )
 }

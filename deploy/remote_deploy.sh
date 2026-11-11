@@ -105,6 +105,17 @@ remote_main() {
   echo -n "    autoPay-тай машин: "
   sudo -u postgres psql -d parking -tAc \
     "SELECT count(*) FROM partner_vehicles WHERE deleted_at IS NULL AND auto_pay" 2>&1 | tail -1 || true
+  # MonPay-ийн autoPay webhook (2026-11-11): backend асахдаа серверийн үүргээр тавина
+  # (TEST → z-wallet.monpay.mn, PROD → wallet.monpay.mn — services/partner_presets.py)
+  echo "    MonPay webhook:"
+  sudo -u postgres psql -d parking -tAc \
+    "SELECT '      ' || name || ' → ' || COALESCE(webhook_url, '(хоосон)') FROM partner_keys
+     WHERE name IN ('mobifinance','monpay') AND is_active" 2>&1 | tail -3 || true
+  # Камерын зураг (2026-11-11): хадгалалтын таг анхдагч 400GB (дискний 60%-иас хэтрэхгүй).
+  # .env-д хуучин PARKING_RETENTION_SNAPSHOT_MAX_GB=20 г.м үлдсэн бол анхдагчийг ДАРНА — харуулна.
+  echo "    Зургийн хадгалалт (.env-д ил тавьсан бол):"
+  grep -E '^[[:space:]]*PARKING_(RETENTION_SNAPSHOT_[A-Z_]+|DISK_FREE_MIN_PERCENT|SNAPSHOT_CGI_FALLBACK|SCREEN_KEEP_[A-Z_]+)=' \
+    backend/.env | sed 's/^/      /' || echo "      (тохируулаагүй — анхдагч: 400GB / дискний 60%)"
   echo -n "    pillow: "; backend/venv/bin/python -c 'import PIL; print(PIL.__version__)' 2>&1 | tail -1 || true
   echo "    .env (autoPay/мэдэгдэл — хоосон бол анхдагч: асаалттай):"
   grep -E '^[[:space:]]*PARKING_(PARTNER_VEHICLE_NOTIFY|PARTNER_AUTOPAY_[A-Z_]+|PUBLIC_BASE_URL)=' backend/.env \

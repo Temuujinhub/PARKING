@@ -1,6 +1,6 @@
 import { Activity, Banknote, Building2, CalendarClock, Camera, Car, CarFront, Clock, DoorOpen, LogIn, LogOut as ExitIcon, TrendingUp, UserCheck, Wallet, Wifi } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtDate, wsConnect } from '../api'
+import { api, fmt, fmtDate, wsConnect, coalesce } from '../api'
 import { StatCard } from '../components/ui'
 
 const EVENT_LABELS = {
@@ -31,11 +31,13 @@ export default function Dashboard() {
   useEffect(() => {
     load()
     const t = setInterval(load, 30000)
+    // Event бүрд биш — 10с-д нэг удаа (сервер ч 10с кэштэй). Event урсгал шууд шинэчлэгдэнэ.
+    const reload = coalesce(load, 10000)
     const close = wsConnect('all', (ev) => {
       setEvents((prev) => [ev, ...prev].slice(0, 30))
-      load()
+      reload()
     })
-    return () => { clearInterval(t); close() }
+    return () => { clearInterval(t); reload.cancel(); close() }
   }, [])
   useEffect(() => { load() }, [revDays])
 

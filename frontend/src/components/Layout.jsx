@@ -35,7 +35,8 @@ const NAV = [
       { to: '/tariffs', label: 'Тарифын загвар', icon: Tag, module: 'discounts' },
       { to: '/drivers', label: 'Бүртгэлтэй машин', icon: ClipboardList, module: 'drivers' },
       { to: '/vat', label: 'Ибаримт', icon: ReceiptText, module: 'vat' },
-      { to: '/blacklist', label: 'Хар жагсаалт', icon: ShieldAlert, module: 'blacklist' },
+      // 2026-11-11: оператор ч машин блоклоно — Касс/Шалгах эрхтэй хэрэглэгчид ч харагдана
+      { to: '/blacklist', label: 'Хар жагсаалт', icon: ShieldAlert, module: ['blacklist', 'cashier', 'check'] },
     ],
   },
   {
@@ -66,9 +67,10 @@ export default function Layout() {
   const toggleMini = () => setMini((m) => { localStorage.setItem('sidebar-mini', m ? '0' : '1'); return !m })
 
   // Хүртээмжтэй child-тай бүлгүүд + standalone item-ууд
+  const canAny = (m) => (Array.isArray(m) ? m.some(can) : can(m))
   const nav = NAV.map((n) => n.group
-    ? { ...n, children: n.children.filter((c) => can(c.module)) }
-    : n).filter((n) => n.group ? n.children.length > 0 : can(n.module))
+    ? { ...n, children: n.children.filter((c) => canAny(c.module)) }
+    : n).filter((n) => n.group ? n.children.length > 0 : canAny(n.module))
   const linkClass = ({ isActive }) =>
     `flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-200 cursor-pointer
      border-l-2 ${isActive

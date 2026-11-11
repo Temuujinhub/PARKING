@@ -89,6 +89,8 @@ def receipt_list(db: Session, payment: Payment, qr: dict | None = None) -> list[
                     "status": r.status, "provider": r.provider,
                     "receiver_type": "COMPANY" if (r.customer_tin and payment.ebarimt_receiver_type
                                                    == "COMPANY") else "CITIZEN",
+                    "payer_reg_no": r.customer_tin if (r.customer_tin and payment.ebarimt_receiver_type
+                                                       == "COMPANY") else None,
                     "error": (r.receipt_url or "")[:200] if r.status not in ("SENT", "EXTERNAL") else None,
                     "qr_data": (qr or {}).get(r.id) or receipt_qr(r),
                     "created_at": r.created_at.isoformat() if r.created_at else None})
@@ -148,6 +150,36 @@ def debt_items(db: Session, comps) -> list[dict]:
     return out
 
 
+# ── Байгууллагын e-Barimt (2026-11-11) ──────────────────────────────────────────────────────
+# Wallet-ийн хэрэглэгч байгууллагын нэр дээр (ТТД) баримт авах: intent/confirm-д `payer_reg_no`
+# (хуучин нэр `customer_tin`). POS/касс/QR-тай НЭГ дүрэм — msgbill.classify_reg_no: ААН регистр
+# (7 орон) эсвэл ТТД (11–14 орон) → COMPANY; өөр бүх утга 422 (буруу дугаараар баримт унахаас өмнө).
+REG_NO_ERROR = ("payer_reg_no: байгууллагын регистр (7 орон) эсвэл ТТД (11–14 орон) оруулна уу — "
+                "иргэний баримтад талбарыг бүү илгээ")
+
+
+def wallet_buyer(body: dict | None) -> tuple[str, str] | None:
+    """(customer_tin, "COMPANY") | None (талбаргүй/хоосон = иргэний баримт). Буруу бол 422."""
+    body = body or {}
+    raw = body.get("payer_reg_no")
+    if raw is None:
+        raw = body.get("customer_tin")
+    if raw is None or str(raw).strip() == "":
+        return None
+    from ..services import msgbill
+    reg, rtype = msgbill.classify_reg_no(str(raw))
+    if not reg or rtype != "ORGANIZATION":
+        raise HTTPException(422, REG_NO_ERROR)
+    return reg, "COMPANY"
+
+
+def buyer_fields(payment: Payment) -> dict:
+    """Хариунд: receipt_type (ORGANIZATION | CITIZEN) + payer_reg_no — POS-ийн _buyer_echo-тэй ижил."""
+    org = payment.ebarimt_receiver_type == "COMPANY" and bool(payment.customer_tin)
+    return {"receipt_type": "ORGANIZATION" if org else "CITIZEN",
+            "payer_reg_no": payment.customer_tin if org else None}
+
+
 def payment_breakdown(db: Session, payment: Payment) -> dict:
     """Нэгдсэн (include_debts) төлбөрийн задаргаа: зогсолт + өр тус бүр (огноотой)."""
     from ..models import Compensation
@@ -172,7 +204,7 @@ def _payment_event(db: Session, payment: Payment, event: str) -> dict:
             "plate": sess.plate_number if sess else None,
             "site_code": site.site_code if site else None,
             "site_name": site.name if site else None,
-            **payment_breakdown(db, payment),
+            **payment_breakdown(db, payment), **buyer_fields(payment),
             "ebarimt": receipt_info(db, payment), **settlement_info(db, payment)}
 
 
@@ -482,6 +514,7 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
     include_debts = body.get("include_debts", False)
     if not isinstance(include_debts, bool):
         raise HTTPException(422, "include_debts нь true/false байна")
+    buyer = wallet_buyer(body)   # байгууллагын e-Barimt (2026-11-11) — буруу бол юу ч үүсгэхгүй 422
     session = lock_session(db, body.get("session_id", ""))
     _check_site_scope(partner, session.site_id)
     if session.status not in ("OPEN", "AWAITING_PAYMENT"):
@@ -498,27 +531,40 @@ def create_payment_intent(body: dict, db: Session = Depends(get_db),
                                for c in _pending_debts(db, session.plate_number, session.site))
         if abs(float(existing.amount) - current_due) > 0.01:
             raise HTTPException(409, "Үнэ өөрчлөгдсөн. Өмнөх wallet оролдлогыг баталгаажуулах эсвэл цуцална уу")
+        if buyer is not None and (existing.customer_tin, existing.ebarimt_receiver_type) != buyer:
+            # Төлөгдөөгүй intent — баримт үүсээгүй тул худалдан авагчийг шууд солино
+            old_buyer = buyer_fields(existing)
+            existing.customer_tin, existing.ebarimt_receiver_type = buyer
+            db.add(AuditLog(username=f"partner:{partner}", action="WALLET_EBARIMT_RECEIVER",
+                            entity="payment", entity_id=existing.id,
+                            detail={"from": old_buyer, "to": buyer_fields(existing), "stage": "intent"}))
+            db.commit()
         return {"payment_id": existing.id, "amount": float(existing.amount),
                 "vat_amount": float(existing.vat_amount), "status": "PENDING",
-                "plate_number": session.plate_number, **payment_breakdown(db, existing)}
+                "plate_number": session.plate_number, **payment_breakdown(db, existing),
+                **buyer_fields(existing)}
 
     payment = _create_payment(db, session, partner, "WALLET", include_debts=include_debts)
     payment.partner_key_id = partner.key_id
     payment.source = "WALLET"
+    if buyer is not None:
+        payment.customer_tin, payment.ebarimt_receiver_type = buyer
     debts = (payment.fee_snapshot or {}).get("debts") or []
     debt_amount = round(sum(float(d["amount"]) for d in debts), 2)
     db.add(AuditLog(username=f"partner:{partner}", action="WALLET_INTENT", entity="payment",
                     entity_id=payment.id,
                     detail={"plate": session.plate_number, "amount": float(payment.amount),
                             **({"debt_amount": debt_amount, "debt_count": len(debts)}
-                               if include_debts else {})}))
+                               if include_debts else {}),
+                            **({"payer_reg_no": buyer[0]} if buyer else {})}))
     db.commit()
     return {"payment_id": payment.id, "amount": float(payment.amount),
             "vat_amount": float(payment.vat_amount), "status": "PENDING",
             "plate_number": session.plate_number,
             "parking_amount": round(float(payment.amount) - debt_amount, 2),
             "debt_amount": debt_amount, "debt_count": len(debts),
-            "debts": debt_items(db, getattr(payment, "_debt_comps", None) or [])}
+            "debts": debt_items(db, getattr(payment, "_debt_comps", None) or []),
+            **buyer_fields(payment)}
 
 
 @router.post("/payments/{payment_id}/cancel")
@@ -571,6 +617,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     amount_defaulted = "amount" not in body
     paid_amount = None if amount_defaulted else money(body.get("amount"))
     reference = transaction_reference(body.get("transaction_id"))
+    buyer = wallet_buyer(body)   # байгууллагын e-Barimt — батлахаас ӨМНӨ (баримт үүсэхээс өмнө)
     # Мөрийг түгжинэ — wallet-ийн давхар confirm/retry зэрэг ирвэл нэг нь л finalize хийнэ
     payment = _lock_payment(db, payment.id)
     if payment is None:
@@ -580,13 +627,18 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     if payment.status == "PAID":
         if payment.provider_payment_id != reference or paid_amount != money(payment.amount):
             raise HTTPException(409, "Өмнөх баталгаажуулалтын дугаар эсвэл дүн зөрлөө")
-        return {"status": "PAID", "payment_id": payment.id, **payment_outcome(db, payment)}
+        # Давтан confirm хүлээн авагчийг ӨӨРЧЛӨХГҮЙ — POST /payments/{id}/ebarimt (2026-11-11)
+        return {"status": "PAID", "payment_id": payment.id, **payment_outcome(db, payment),
+                **buyer_fields(payment)}
     if payment.status not in ("PENDING", "CANCELLED", "UNKNOWN", "REVIEW"):
         raise HTTPException(400, f"Төлбөрийн төлөв буруу: {payment.status}")
     if paid_amount != money(payment.amount):
         raise HTTPException(400, f"Дүн зөрүүтэй: систем {float(payment.amount)}₮ хүлээж байна")
 
     claim_reference(db, payment, partner.key_id or f"legacy:{partner}", reference)
+    if buyer is not None:
+        # intent-д өгөөгүй/өөр байсан ч баримт ҮҮСЭХЭЭС өмнө — _finalize_paid үүнийг уншина
+        payment.customer_tin, payment.ebarimt_receiver_type = buyer
     hook = _webhook_url_for(db, partner)
     await _finalize_paid(db, payment, raw={"partner": partner, **{
         k: v for k, v in body.items() if k in ("transaction_id", "amount", "wallet_user")},
@@ -602,7 +654,7 @@ async def confirm_payment(payment_id: str, body: dict, db: Session = Depends(get
     # The webhook intent was committed with settlement, before opening a gate.
     return {"status": "PAID", "payment_id": payment.id, "paid_at":
             payment.paid_at.isoformat() if payment.paid_at else datetime.utcnow().isoformat(),
-            **payment_breakdown(db, payment),
+            **payment_breakdown(db, payment), **buyer_fields(payment),
             "ebarimt": receipt_info(db, payment), "ebarimts": receipt_list(db, payment),
             **payment_outcome(db, payment)}
 
@@ -624,10 +676,103 @@ async def payment_status(payment_id: str, db: Session = Depends(get_db),
     return {"payment_id": payment.id, "status": payment.status,
             "amount": float(payment.amount),
             "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
-            **payment_breakdown(db, payment),
+            **payment_breakdown(db, payment), **buyer_fields(payment),
             # e-Barimt (ДДТД, сугалаа, QR) — PAID болсны дараа; FAILED бол шалтгаан.
             # `ebarimt` = хамгийн сүүлийн баримт (хуучин), `ebarimts` = БҮХ баримт (зогсолт + өр)
             "ebarimt": latest, "ebarimts": rows,
             # Гарах хаалтан дээрх автомат төлбөрийн хүсэлт (2026-11-03) — үгүй бол null
             "autopay": autopay_status(db, payment.id),
             **payment_outcome(db, payment)}
+
+
+@router.get("/ebarimt/payer")
+async def ebarimt_payer_lookup(reg_no: str, request: Request,
+                               partner: PartnerAuth = Depends(require_partner)):
+    """Байгууллагын регистр (7 орон) / ТТД (11–14)-ээр татвар төлөгчийн НЭРИЙГ шалгана (2026-11-11) —
+    wallet хэрэглэгчид «ХХК нэр зөв үү?» гэж баталгаажуулахад. POS-ийн /api/payments/ebarimt/payer-тэй
+    ижил суваг (PosAPI → api.ebarimt.mn, 24ц кэш). `available: false` = шалгах суваг ажиллахгүй
+    («олдсонгүй» гэсэн үг БИШ) — тэр үед төлбөрийг үргэлжлүүлж болно. Түлхүүр тутам минутад 60."""
+    if throttle(f"partner-tin:{getattr(partner, 'key_id', None) or partner}", limit=60, window=60):
+        raise HTTPException(429, "Хэт олон хүсэлт — минутад 60 хүртэл")
+    from ..services import msgbill, tin_lookup
+    reg, rtype = msgbill.classify_reg_no(reg_no)
+    if not reg or rtype != "ORGANIZATION":
+        raise HTTPException(422, REG_NO_ERROR.replace("payer_reg_no", "reg_no"))
+    r = await tin_lookup.lookup(reg)
+    return {"reg_no": reg, "receipt_type": "ORGANIZATION", "available": bool(r.get("available")),
+            "found": bool(r.get("found")), "name": r.get("name"), "tin": r.get("tin"),
+            "is_vat_payer": r.get("is_vat_payer")}
+
+
+@router.post("/payments/{payment_id}/ebarimt")
+async def change_payment_receipt_receiver(payment_id: str, body: dict, db: Session = Depends(get_db),
+                                          partner: PartnerAuth = Depends(require_partner)):
+    """Төлбөрийн e-Barimt-ыг БАЙГУУЛЛАГЫН нэр дээр болгох (2026-11-11). body: {payer_reg_no}.
+
+    • PENDING intent — худалдан авагчийг шууд солино (intent/confirm-д payer_reg_no өгөхтэй ижил).
+    • PAID, баримт хараахан илгээгдээгүй ЭСВЭЛ суваг тодорхой татгалзсан/цуцлагдсан — шинэ
+      хүлээн авагчаар (байгууллага) гаргана; гармагц receipt.ready (kind/debt_id хэвээр).
+    • PAID, баримт АЛЬ ХЭДИЙН гарсан (SENT) эсвэл явж байна → 409 RECEIPT_ALREADY_ISSUED: wallet
+      автоматаар ТЕГ-ийн баримт цуцлахгүй. Тэр тохиолдолд EasyParking-ийн санхүү гараар хийнэ.
+    Тиймээс байгууллагын баримт хэрэгтэй бол payer_reg_no-г intent эсвэл confirm-д илгээнэ үү."""
+    from .payments_router import _lock_payment
+    _require_pay(partner)
+    buyer = wallet_buyer(body)
+    if buyer is None:
+        raise HTTPException(422, REG_NO_ERROR)
+    payment = db.get(Payment, payment_id)
+    if not payment or payment.provider != partner:
+        raise HTTPException(404, "Payment олдсонгүй")
+    _check_payment_scope(db, partner, payment)
+    payment = _lock_payment(db, payment.id)
+    if payment is None:
+        raise HTTPException(409, "Төлбөр боловсруулагдаж байна — дахин оролдоно уу")
+    if payment.status == "CANCELLED":
+        raise HTTPException(409, "Цуцлагдсан төлбөр")
+    before = buyer_fields(payment)
+    if payment.status != "PAID":
+        payment.customer_tin, payment.ebarimt_receiver_type = buyer
+        db.add(AuditLog(username=f"partner:{partner}", action="WALLET_EBARIMT_RECEIVER",
+                        entity="payment", entity_id=payment.id,
+                        detail={"from": before, "to": buyer_fields(payment), "stage": "pending"}))
+        db.commit()
+        return {"payment_id": payment.id, "status": payment.status, **buyer_fields(payment),
+                "ebarimts": []}
+    if (payment.customer_tin, payment.ebarimt_receiver_type) == buyer:
+        return {"payment_id": payment.id, "status": payment.status, **buyer_fields(payment),
+                "ebarimts": receipt_list(db, payment)}
+    from ..models import FinancialJob, VatReceipt
+    from ..services import financial_jobs as FJ
+    jobs = (db.query(FinancialJob).filter_by(payment_id=payment.id, kind="RECEIPT")
+            .order_by(FinancialJob.id).with_for_update().all())
+    recs = (db.query(VatReceipt).filter_by(payment_id=payment.id)
+            .order_by(VatReceipt.created_at, VatReceipt.id).with_for_update().all())
+    if any(r.status == "EXTERNAL" for r in recs):
+        raise HTTPException(409, "RECEIPT_ALREADY_ISSUED: баримтыг өөр суваг гаргасан")
+    by_rec = FJ._jobs_by_receipt(jobs)
+    active = [r for r in recs if r.status != "CANCELLED"]
+    if active and all(FJ.never_sent(r, by_rec.get(r.id, [])) for r in active):
+        # Сувагт ОГТ илгээгээгүй — ажлын payload-ыг байранд нь засна (админы retry-ebarimt-тэй ижил)
+        payment.customer_tin, payment.ebarimt_receiver_type = buyer
+        for r in active:
+            for job in by_rec.get(r.id, []):
+                job.payload = {**job.payload, "customer_tin": payment.customer_tin,
+                               "receiver_type": payment.ebarimt_receiver_type}
+            r.customer_tin = payment.customer_tin
+        stage = "not_sent"
+    else:
+        res = FJ.change_receiver(db, payment, customer_tin=buyer[0], receiver_type=buyer[1],
+                                 username=f"partner:{partner}")
+        if res.get("conflict"):
+            db.rollback()
+            raise HTTPException(409, "RECEIPT_ALREADY_ISSUED: баримт иргэний нэр дээр аль хэдийн гарсан "
+                                     "эсвэл илгээгдэж байна — байгууллагын баримтыг EasyParking-ийн санхүү "
+                                     "гараар (цуцлаад дахин) гаргана. Цаашид payer_reg_no-г intent/confirm-д "
+                                     f"илгээнэ үү. ({res.get('code') or 'LOCKED'})")
+        stage = "reissue"
+    db.add(AuditLog(username=f"partner:{partner}", action="WALLET_EBARIMT_RECEIVER",
+                    entity="payment", entity_id=payment.id,
+                    detail={"from": before, "to": buyer_fields(payment), "stage": stage}))
+    db.commit()
+    return {"payment_id": payment.id, "status": payment.status, **buyer_fields(payment),
+            "ebarimts": receipt_list(db, payment)}

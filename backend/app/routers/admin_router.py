@@ -3023,9 +3023,30 @@ def put_blacklist_rules(body: dict, db: Session = Depends(get_db),
 
 
 @router.get("/blacklist")
-def list_blacklist(db: Session = Depends(get_db), user: User = Depends(require("blacklist", "cashier"))):
+def list_blacklist(db: Session = Depends(get_db),
+                   user: User = Depends(require("blacklist", "cashier", "check"))):
     return [to_dict(b) for b in
-            db.query(BlacklistEntry).order_by(BlacklistEntry.created_at.desc()).limit(500).all()]
+            db.query(BlacklistEntry).order_by(BlacklistEntry.is_active.desc(),
+                                              BlacklistEntry.created_at.desc()).limit(500).all()]
+
+
+BLACKLIST_POLICIES = (None, "DENY", "ALLOW")
+
+
+def _bl_policy(body: dict):
+    """entry_policy: DENY (нэвтрүүлэхгүй) | ALLOW (нэвтрүүлж анхааруулна) | хоосон (дүрмээр)."""
+    raw = body.get("entry_policy")
+    pol = (str(raw).strip().upper() or None) if raw is not None else None
+    if pol not in BLACKLIST_POLICIES:
+        raise HTTPException(422, "entry_policy нь DENY, ALLOW эсвэл хоосон")
+    return pol
+
+
+def _bl_reason(body: dict, required: bool = True) -> str:
+    reason = " ".join(str(body.get("reason") or "").split())[:500]
+    if required and len(reason) < 3:
+        raise HTTPException(400, "Блоклох шалтгааныг бичнэ үү — дараагийн ээлжийн ажилтанд харагдана")
+    return reason
 
 
 @router.post("/blacklist/clear")
@@ -3061,26 +3082,52 @@ def clear_blacklist(body: dict, db: Session = Depends(get_db),
 
 
 @router.post("/blacklist")
-def add_blacklist(body: dict, db: Session = Depends(get_db), user: User = Depends(require("blacklist"))):
-    b = BlacklistEntry(plate_number=admin_plate(body["plate_number"]),
-                       reason=body.get("reason", ""), created_by=user.username)
-    db.add(b)
-    db.flush()
-    _audit(db, user, "CREATE", "blacklist", b.id, body)
+def add_blacklist(body: dict, db: Session = Depends(get_db),
+                  user: User = Depends(require("blacklist", "cashier", "check"))):
+    """Машин блоклох (2026-11-11: оператор ч — Касс/Шалгах-аас). body: {plate_number, reason
+    (заавал, ≥3), entry_policy: DENY|ALLOW|null}. Дугаарт идэвхтэй хориг аль хэдийн байвал
+    шинэ мөр үүсгэхгүй — түүнийг шинэчилнэ (шалтгаан/шийдвэр). Хар жагсаалт зогсоол дамнасан."""
+    plate = admin_plate(body.get("plate_number") or "")
+    reason = _bl_reason(body)
+    policy = _bl_policy(body)
+    from ..session_logic import is_blacklisted
+    b = is_blacklisted(db, plate)
+    if b is not None:
+        old = {"reason": b.reason, "entry_policy": b.entry_policy}
+        b.reason, b.entry_policy = reason, policy
+        b.updated_by, b.updated_at = user.username, datetime.utcnow()
+        _audit(db, user, "BLACKLIST_UPDATE", "blacklist", b.id,
+               {"plate": plate, "reason": reason, "entry_policy": policy, "old": old})
+    else:
+        b = BlacklistEntry(plate_number=plate, reason=reason, entry_policy=policy,
+                           created_by=user.username)
+        db.add(b)
+        db.flush()
+        _audit(db, user, "CREATE", "blacklist", b.id,
+               {"plate": plate, "reason": reason, "entry_policy": policy})
     db.commit()
     return to_dict(b)
 
 
 @router.put("/blacklist/{entry_id}")
 def update_blacklist(entry_id: str, body: dict, db: Session = Depends(get_db),
-                     user: User = Depends(require("blacklist"))):
+                     user: User = Depends(require("blacklist", "cashier", "check"))):
+    """Шалтгаан / шийдвэр (entry_policy) / идэвхтэй эсэхийг засна. Блок цуцлахад (is_active=false)
+    `note` (заавал биш) аудитад үлдэнэ — хэн, хэзээ, яагаад суллав."""
     b = db.get(BlacklistEntry, entry_id)
     if not b:
         raise HTTPException(404, "Бичлэг олдсонгүй")
-    for k in ("reason", "is_active"):
-        if k in body:
-            setattr(b, k, body[k])
-    _audit(db, user, "UPDATE", "blacklist", entry_id, body)
+    old = {"reason": b.reason, "entry_policy": b.entry_policy, "is_active": b.is_active}
+    if "reason" in body:
+        b.reason = _bl_reason(body)
+    if "entry_policy" in body:
+        b.entry_policy = _bl_policy(body)
+    if "is_active" in body:
+        b.is_active = bool(body["is_active"])
+    b.updated_by, b.updated_at = user.username, datetime.utcnow()
+    _audit(db, user, "UPDATE", "blacklist", entry_id,
+           {"plate": b.plate_number, "old": old,
+            **{k: body[k] for k in ("reason", "entry_policy", "is_active", "note") if k in body}})
     db.commit()
     return to_dict(b)
 
