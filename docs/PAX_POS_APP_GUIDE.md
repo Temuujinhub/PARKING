@@ -200,6 +200,10 @@ ws://SERVER/ws/sites/{site_id}
 - `EXIT_LPR_EVENT` ирэхэд жагсаалтын эхэнд нэмнэ
 - `EXIT_COMPLETED` / `PAYMENT_COMPLETED` ирэхэд жагсаалтаас хасна
 - Мөр бүрт: **дугаар (том, font-mono), орсон цаг, хугацаа, дүн**
+- **Блоклогдсон машин (2026-11-11)**: мөр бүрд `blacklist` — `null` эсвэл
+  `{"reason", "entry_policy": "DENY"|"ALLOW"|null, "created_by", "created_at", "updated_by", "updated_at"}`.
+  `null` биш бол дугаарын доор улаанаар «Блок: {reason}» харуулна (дараагийн ээлжийн ажилтан ЯАГААД
+  гэдгийг мэднэ). Ижил талбар `GET /api/sessions/check` болон `GET /api/sessions/{id}`-д ирнэ
 - Гараар хайх товч → `GET /api/sessions/check?plate=...`
 
 ### 3.2 Fee Detail

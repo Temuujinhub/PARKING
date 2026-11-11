@@ -83,6 +83,27 @@ def _attach_debt(db: Session, dicts: list[dict]) -> list[dict]:
             .group_by(Compensation.plate_number).all()}
     for d in dicts:
         d["debt"] = debt.get(d["plate_number"])
+    return _attach_blacklist(db, dicts, plates)
+
+
+def _attach_blacklist(db: Session, dicts: list[dict], plates: set | None = None) -> list[dict]:
+    """Блоклогдсон машины шалтгаан (2026-11-11): `blacklist` {reason, entry_policy, created_by,
+    created_at…} эсвэл None — Касс/Шалгах/POS дээр «дараагийн ээлжийн хүн» харна. НЭГ query."""
+    from ..models import BlacklistEntry
+    from ..session_logic import blacklist_info
+    plates = plates if plates is not None else {d["plate_number"] for d in dicts if d.get("plate_number")}
+    found: dict = {}
+    if plates:
+        rows = (db.query(BlacklistEntry)
+                .filter(BlacklistEntry.plate_number.in_(plates), BlacklistEntry.is_active.is_(True))
+                .order_by(BlacklistEntry.created_at.desc()).all())
+        rank = {"DENY": 0, "ALLOW": 1}
+        for b in rows:   # is_blacklisted-тэй ижил: ИЛ шийдвэртэй (DENY → ALLOW) нь, дараа нь шинэ нь
+            cur = found.get(b.plate_number)
+            if cur is None or rank.get(b.entry_policy, 2) < rank.get(cur.entry_policy, 2):
+                found[b.plate_number] = b
+    for d in dicts:
+        d["blacklist"] = blacklist_info(found.get(d.get("plate_number")))
     return dicts
 
 
@@ -1194,7 +1215,8 @@ def get_session(session_id: str, db: Session = Depends(get_db),
     if not s:
         raise HTTPException(404, "Session олдсонгүй")
     enforce_site(user, s.site_id)  # оператор зөвхөн өөрийн зогсоолын session
-    return _session_out(db, s, with_fee=True)
+    # Блоклогдсон машины шалтгаан (2026-11-11) — POS-ын төлбөрийн дэлгэц ч харна
+    return _attach_blacklist(db, [_session_out(db, s, with_fee=True)])[0]
 
 
 @router.post("/{session_id}/apply-discount")

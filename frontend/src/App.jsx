@@ -33,7 +33,7 @@ function Protected({ module, children }) {
   const { user, loading, can } = useAuth()
   if (loading) return <div className="min-h-dvh flex items-center justify-center text-slate-500">Ачаалж байна…</div>
   if (!user) return <Navigate to="/login" replace />
-  if (module && !can(module)) return <Navigate to="/" replace />
+  if (module && !(Array.isArray(module) ? module.some(can) : can(module))) return <Navigate to="/" replace />
   return children
 }
 
@@ -74,7 +74,7 @@ export default function App() {
             <Route path="vat" element={<Protected module="vat"><Vat /></Protected>} />
             <Route path="compensations" element={<Protected module="compensations"><Compensations /></Protected>} />
             <Route path="barriers" element={<Protected module="barriers"><Barriers /></Protected>} />
-            <Route path="blacklist" element={<Protected module="blacklist"><Blacklist /></Protected>} />
+            <Route path="blacklist" element={<Protected module={['blacklist', 'cashier', 'check']}><Blacklist /></Protected>} />
             <Route path="settings" element={<Protected module="settings"><Settings /></Protected>} />
             <Route path="tariffs" element={<Protected module="discounts"><Tariffs /></Protected>} />
             <Route path="settlement" element={<Protected module="reports"><Settlement /></Protected>} />

@@ -234,10 +234,38 @@ def find_inner_registered(db: Session, plate: str, site_id: str) -> RegisteredDr
     return _registered_order(_registered_base(db, plate).filter(cond)).first()
 
 
+def blacklist_blocks_entry(black: BlacklistEntry | None, rules: dict) -> bool:
+    """Хар жагсаалтын машиныг орох хаалтанд ХОРИГЛОХ уу (2026-11-11 — машин тус бүрээр)."""
+    if black is None:
+        return False
+    policy = (getattr(black, "entry_policy", None) or "").upper()
+    if policy == "DENY":
+        return True
+    if policy == "ALLOW":
+        return False
+    return bool(rules.get("block_entry"))
+
+
+def blacklist_info(b: BlacklistEntry | None) -> dict | None:
+    """Касс/Шалгах/POS-д харуулах блокийн мэдээлэл — «дараагийн хүн» шалтгааныг харна."""
+    if b is None:
+        return None
+    return {"id": b.id, "reason": b.reason or "", "entry_policy": b.entry_policy,
+            "created_by": b.created_by, "created_at": b.created_at.isoformat() if b.created_at else None,
+            "updated_by": b.updated_by,
+            "updated_at": b.updated_at.isoformat() if b.updated_at else None}
+
+
 def is_blacklisted(db: Session, plate: str) -> BlacklistEntry | None:
+    """Идэвхтэй хориг. Нэг дугаарт хэд хэдэн мөр (автомат + гараар) байж болно — ИЛ шийдвэртэйг
+    (DENY → ALLOW) нь, дараа нь хамгийн сүүлийнхийг авна (2026-11-11)."""
+    from sqlalchemy import case
+    rank = case((BlacklistEntry.entry_policy == "DENY", 0),
+                (BlacklistEntry.entry_policy == "ALLOW", 1), else_=2)
     return (
         db.query(BlacklistEntry)
         .filter(BlacklistEntry.plate_number == plate, BlacklistEntry.is_active.is_(True))
+        .order_by(rank, BlacklistEntry.created_at.desc())
         .first()
     )
 
@@ -1640,7 +1668,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
     # Доорх nested зогсолтоос ӨМНӨ тооцно — хаалт нээгдэх эсэхээс хамаарна.
     from .services.app_settings import get_blacklist_rules
     _bl_rules = get_blacklist_rules(db, site_id)
-    black_blocks = bool(black) and _bl_rules["block_entry"]
+    # Машин тус бүрийн шийдвэр (2026-11-11) дүрмийг ДАРНА: DENY → нэвтрүүлэхгүй, ALLOW →
+    # нэвтрүүлж анхааруулна; хоосон бол дүрмээр (block_entry, зогсоол/түрээслэгчээр)
+    black_blocks = blacklist_blocks_entry(black, _bl_rules)
     # Урьдчилсан захиалга (wallet, 2026-10-22): энэ цагт БАТАЛГААЖСАН захиалгатай машин
     # «зөвхөн бүртгэлтэй» зогсоолд ч нэвтэрнэ; ШИНЭ сешнд урьдчилсан төлбөр нь холбогдоно.
     # Захиалгын аливаа алдаа орох хаалтыг хэзээ ч гацаахгүй (services/reservations.py).
@@ -1729,6 +1759,9 @@ async def handle_entry(db: Session, device: Device, plate: str, confidence: floa
             "plate": plate, "reason": black.reason, "lane": "entry",
             "session_id": session.id,
             "blocked": black_blocks,
+            # хэн/хэзээ блоклосон, машин тус бүрийн шийдвэр — дараагийн ээлжийн оператор харна
+            "entry_policy": black.entry_policy, "created_by": black.created_by,
+            "created_at": black.created_at.isoformat() if black.created_at else None,
             "debt_count": len(_bl_debts),
             "debt_amount": float(sum(d.amount for d in _bl_debts)),
         })

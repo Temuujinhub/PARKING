@@ -3,7 +3,7 @@
 import { AlertTriangle, CarFront, FlaskConical, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, fmt, fmtHM, preferredSite, rememberSite, wsConnect, coalesce } from '../api'
+import { api, fmt, fmtHM, preferredSite, rememberSite, wsConnect, coalesce, fmtDate } from '../api'
 import { useAuth } from '../auth'
 import { useToast } from '../components/ui'
 import { paymentOutcome } from '../paymentOutcome'
@@ -294,12 +294,19 @@ export default function Cashier() {
                 ? <span className="ml-2 text-xs bg-red-500/30 px-1.5 py-0.5 rounded">хаалт нээгээгүй</span>
                 : <span className="ml-2 text-xs bg-amber-500/25 text-amber-200 px-1.5 py-0.5 rounded">зогсоолд оруулав</span>}
             </div>
-            <div className="text-sm text-slate-300">
-              {blAlert.debt_amount > 0
-                ? <>Төлөгдөөгүй өр: <b className="font-mono text-red-300">{fmt(blAlert.debt_amount)}₮</b>
-                    {' '}({blAlert.debt_count} нэхэмжлэл) — гарахад нь заавал барагдуулна уу.</>
-                : <>Шалтгаан: {blAlert.reason || '—'}</>}
+            {/* Шалтгааныг ҮРГЭЛЖ харуулна (2026-11-11) — хэн, хэзээ блоклосон; дараагийн ээлжийн оператор мэднэ */}
+            <div className="text-sm text-slate-200">
+              Шалтгаан: <b>{blAlert.reason || '—'}</b>
+              {blAlert.created_by && (
+                <span className="text-xs text-slate-400"> · {blAlert.created_by}{blAlert.created_at ? `, ${fmtDate(blAlert.created_at)}` : ''}</span>
+              )}
             </div>
+            {blAlert.debt_amount > 0 && (
+              <div className="text-sm text-slate-300">
+                Төлөгдөөгүй өр: <b className="font-mono text-red-300">{fmt(blAlert.debt_amount)}₮</b>
+                {' '}({blAlert.debt_count} нэхэмжлэл) — гарахад нь заавал барагдуулна уу.
+              </div>
+            )}
           </div>
           {blAlert.debt_amount > 0 && (
             <Link className="btn-primary bg-red-600 hover:bg-red-500" to="/compensations"

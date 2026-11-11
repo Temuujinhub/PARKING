@@ -299,6 +299,12 @@ class BlacklistEntry(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_by = Column(String(60), default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # 2026-11-11: машин тус бүрээр орох хаалтын шийдвэр — 'DENY' (нэвтрүүлэхгүй, хаалт
+    # нээгдэхгүй), 'ALLOW' (нэвтрүүлж операторт анхааруулна), NULL = Хар жагсаалт → Дүрэм
+    # (block_entry, зогсоол/түрээслэгчээр). Шалтгаан (reason) Касс/Шалгах/POS дээр харагдана.
+    entry_policy = Column(String(10), nullable=True)
+    updated_by = Column(String(60), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
 
 
 class ParkingSession(Base):

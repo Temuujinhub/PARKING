@@ -2,10 +2,11 @@
 // Дугаарын эхний тэмдэгтээр live шүүнэ, төлөв/зогсоолоор шүүнэ, real-time шинэчлэгдэнэ.
 // Админ "Аудит горим"-оор сэжигтэй (гарсан ч хаагдаагүй / буруу дугаар / удсан) бүртгэлийг
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
-import { CarFront, Pencil, RefreshCw, ShieldCheck, Star, Trash2 } from 'lucide-react'
+import { Ban, CarFront, Pencil, RefreshCw, ShieldCheck, Star, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect, coalesce } from '../api'
 import { useAuth } from '../auth'
+import { BlockBadge, BlockModal } from '../components/BlockVehicle'
 import { PaymentWaitSince } from '../components/PaymentWait'
 import { SnapshotButton } from '../components/Snapshot'
 import { Badge, Field, Modal, Table, useToast } from '../components/ui'
@@ -74,6 +75,7 @@ export default function Check() {
   const [removing, setRemoving] = useState(null) // {ids, createComp, reason}
   // «Зогсоолоос хасах»-ын шалтгаан: хадгалсан (★) + сүүлд хэрэглэсэн (2026-11-11)
   const [reasons, setReasons] = useState({ presets: [], recent: [] })
+  const [blocking, setBlocking] = useState(null) // {plate, existing} — машин блоклох (2026-11-11)
   const [backfill, setBackfill] = useState(null) // {rows, debt} — камерын логоос нөхөж бүртгэх
   const debounceRef = useRef(null)
 
@@ -345,8 +347,7 @@ export default function Check() {
         <input key="all" type="checkbox" className="cursor-pointer" title="Бүгдийг сонгох"
           checked={rows.length > 0 && rows.every((r) => sel.includes(r.id))}
           onChange={(e) => setSel(e.target.checked ? rows.map((r) => r.id) : [])} />,
-      ] : []), 'Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв', 'Зураг',
-      ...(isAdmin ? [''] : [])]}
+      ] : []), 'Дугаар', 'Зогсоол', 'Орсон', 'Хугацаа', 'Дүн', 'Өр', 'Гэрээт', 'Төлөв', 'Зураг', '']}
         empty={rows.length === 0}>
         {rows.map((s) => (
           <tr key={s.id} className={s.debt ? 'bg-red-500/10' : (s.audit?.suspect ? 'bg-amber-500/5' : 'hover:bg-surface-muted/30')}>
@@ -364,6 +365,7 @@ export default function Check() {
                 </div>
               )}
               <FlagBadges audit={s.audit} />
+              <BlockBadge blacklist={s.blacklist} />
             </td>
             <td className="td">{s.site_name}</td>
             <td className="td font-mono text-xs">
@@ -394,18 +396,26 @@ export default function Check() {
               )}
             </td>
             <td className="td"><SnapshotButton session={s} /></td>
-            {isAdmin && (
-              <td className="td text-right whitespace-nowrap">
-                <button className="btn-secondary py-1 text-xs mr-1" title="Дугаар засах (камер буруу уншсан)"
-                  onClick={() => editPlate(s)}>
-                  <Pencil size={13} />
-                </button>
-                <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
-                  onClick={() => setRemoving({ ids: [s.id], createComp: false, reason: '' })}>
-                  <Trash2 size={13} />
-                </button>
-              </td>
-            )}
+            <td className="td text-right whitespace-nowrap">
+              {/* Блоклох — оператор ч (шалтгаан заавал, бүх зогсоолд) */}
+              <button className={`btn-secondary py-1 text-xs mr-1 ${s.blacklist ? 'text-red-400 border-red-500/50' : ''}`}
+                title={s.blacklist ? 'Блок харах / засах / цуцлах' : 'Машин блоклох'}
+                onClick={() => setBlocking({ plate: s.plate_number, existing: s.blacklist })}>
+                <Ban size={13} />
+              </button>
+              {isAdmin && (
+                <>
+                  <button className="btn-secondary py-1 text-xs mr-1" title="Дугаар засах (камер буруу уншсан)"
+                    onClick={() => editPlate(s)}>
+                    <Pencil size={13} />
+                  </button>
+                  <button className="btn-secondary py-1 text-xs text-red-400" title="Зогсоолоос хасах"
+                    onClick={() => setRemoving({ ids: [s.id], createComp: false, reason: '' })}>
+                    <Trash2 size={13} />
+                  </button>
+                </>
+              )}
+            </td>
           </tr>
         ))}
       </Table>
@@ -450,6 +460,9 @@ export default function Check() {
           )
         })()}
       </Modal>
+
+      <BlockModal plate={blocking?.plate} existing={blocking?.existing}
+        onClose={() => setBlocking(null)} onSaved={load} />
 
       {/* Зогсоолоос хасах modal — өр үүсгэх эсэх + шалтгаан */}
       <Modal open={!!removing} onClose={() => setRemoving(null)} title="Зогсоолоос хасах">
