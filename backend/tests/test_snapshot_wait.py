@@ -96,8 +96,10 @@ snapshot._fetch_from_camera = fake_fetch
 snapshot._snapshot_written = fake_written
 snapshot._manual_snapshot_allowed = fake_manual
 _orig_wait, _orig_stream = settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec
+_orig_settle = settings.snapshot_settle_sec
 settings.snapshot_wait_event_sec = 1.5
 settings.snapshot_stream_wait_sec = 0.5
+settings.snapshot_settle_sec = 0.05   # хаалтны команд хүлээх (2026-11-11) — энд хаалтгүй
 
 
 def run(raw, ip, written_n=None):
@@ -181,6 +183,7 @@ snapshot._fetch_from_camera = _orig_fetch
 snapshot._snapshot_written = _orig_written
 snapshot._manual_snapshot_allowed = _orig_manual
 settings.snapshot_wait_event_sec, settings.snapshot_stream_wait_sec = _orig_wait, _orig_stream
+settings.snapshot_settle_sec = _orig_settle
 settings.snap_pull, settings.snap_comet = orig_snap_pull, orig_comet
 snap_puller._comet_state.clear()
 

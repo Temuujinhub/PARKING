@@ -149,3 +149,21 @@ def test_startup_never_raises():
     def boom():
         raise RuntimeError("db down")
     PP.run_startup_presets(boom)      # алдааг лог л болгоно
+
+
+def test_fuzzy_single_key_name(db):
+    """PROD-ийн түлхүүр өөр нэртэй (ж: monpay-prod) — ганц төстэй түлхүүр байвал түүнд тавина."""
+    mp = _key(db, "monpay-prod")
+    _key(db, "socialpay")
+    assert PP.apply_monpay_webhook(db, role="production")[0]["new"] == PROD_URL
+    db.refresh(mp)
+    assert mp.webhook_url == PROD_URL
+
+
+def test_fuzzy_ambiguous_keys_untouched(db):
+    a = _key(db, "monpay-a")
+    b = _key(db, "mobifinance_b")
+    assert PP.apply_monpay_webhook(db, role="production") == []
+    db.refresh(a)
+    db.refresh(b)
+    assert a.webhook_url is None and b.webhook_url is None
