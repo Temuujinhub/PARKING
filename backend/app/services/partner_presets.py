@@ -127,6 +127,21 @@ def apply_monpay_webhook(db, role: str | None = None) -> list[dict]:
     keys = (db.query(PartnerKey)
             .filter(PartnerKey.name.in_(MONPAY_KEY_NAMES), PartnerKey.is_active.is_(True))
             .order_by(PartnerKey.created_at).all())
+    if not keys:
+        # PROD дээр түлхүүр өөр нэртэй байж болно (2026-11-11: `mobifinance`/`monpay` нэртэй
+        # идэвхтэй түлхүүр алга) — нэрэнд monpay/mobifinance агуулсан ЯГ НЭГ түлхүүр байвал түүнд.
+        # Олон бол аль нь болохыг таахгүй — лог үлдээгээд UI-аас гараар.
+        cand = [k for k in (db.query(PartnerKey).filter(PartnerKey.is_active.is_(True))
+                            .order_by(PartnerKey.created_at).all())
+                if any(x in (k.name or "").lower() for x in ("monpay", "mobifinance"))]
+        if len(cand) == 1:
+            keys = cand
+        elif cand:
+            log.warning("MonPay webhook preset: MonPay-тэй төстэй %d түлхүүр (%s) — аль нь болохыг "
+                        "таахгүй, UI-аас тавина уу", len(cand), ", ".join(k.name for k in cand))
+        else:
+            log.info("MonPay webhook preset: MonPay-ийн идэвхтэй түлхүүр алга — түлхүүр үүсгэсний "
+                     "дараах restart-д тавигдана")
     changes = []
     for k in keys:
         new, why = plan_monpay_webhook(k.webhook_url, role, done)

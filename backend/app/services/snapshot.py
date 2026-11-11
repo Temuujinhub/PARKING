@@ -402,6 +402,40 @@ async def _wait_camera_image(session_id: str, camera_ip: str, lane_dir: str,
         await asyncio.sleep(min(0.25, max(0, deadline - _time.monotonic())))
 
 
+async def _await_barrier_start(ip: str, max_wait: float) -> bool:
+    """Энэ event-ийн хаалтны команд ЭХЛЭХИЙГ богино хугацаанд хүлээнэ (эхэлбэл True)."""
+    import time as _time
+    from .barrier import barrier_is_waiting
+    deadline = _time.monotonic() + max(0.0, max_wait)
+    while _time.monotonic() < deadline:
+        if barrier_is_waiting(ip):
+            return True
+        await asyncio.sleep(0.05)
+    return barrier_is_waiting(ip)
+
+
+async def _fetch_after_own_barrier(session_id: str, camera_ip: str, lane_dir: str,
+                                   creds: tuple[str, str] | None) -> bytes | None:
+    """snapshot.cgi — машины ӨӨРИЙН хаалтны командын ДАРАА (2026-11-11 PROD).
+
+    schedule_capture нь хаалт нээхээс ӨМНӨ дуудагддаг тул зураг авалт ихэнхдээ тухайн машины
+    өөрийн хаалтны командаас түрүүлж эхэлж, түүнд зам тавиад тасардаг байв (deploy-ийн дараах
+    3 минутад 26 тасалсан / 9 амжилттай). Тиймээс: (1) хаалтны команд эхлэхийг ≤snapshot_settle_sec
+    хүлээнэ — эхэлбэл _fetch_from_camera түүнийг дуустал хүлээгээд дараа нь авна; (2) тэгсэн ч
+    хаалтанд зам тавьж тасарвал (дараагийн машин г.м) НЭГ удаа дахин оролдоно — хаалт ≈0.1–0.3с,
+    машин хөдлөхөд 1–2с тул тэр машин хаалганы өмнө хэвээр. Камер дээрх илүүц «Manual Snapshot»
+    бичлэг ч цөөрнө (тасарсан хүсэлт ч бичлэг үүсгэдэг)."""
+    await _await_barrier_start(camera_ip, settings.snapshot_settle_sec)
+    for attempt in range(2):
+        before = _yielded.get(camera_ip, 0)
+        data = await _fetch_from_camera(camera_ip, creds)
+        if data is not None or _yielded.get(camera_ip, 0) == before:
+            return data                 # амжилт эсвэл камерын жинхэнэ алдаа — давтахгүй
+        if attempt == 0 and await _snapshot_written(session_id, lane_dir):
+            return None                 # хооронд нь өөр суваг зургаа холбочихсон
+    return None
+
+
 async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
                              lane_dir: str, raw: dict,
                              creds: tuple[str, str] | None = None):
@@ -449,7 +483,7 @@ async def _capture_and_store(session_id: str, camera_ip: str, plate: str,
         if await _snapshot_written(session_id, lane_dir):
             log.info(f"{plate} {lane_dir}: event зураг аль хэдийн бий — snapshot.cgi алгасав")
             return
-        data = await _fetch_from_camera(camera_ip, creds)
+        data = await _fetch_after_own_barrier(session_id, camera_ip, lane_dir, creds)
         source = "snapshot.cgi"
     if data is None:
         log.warning(f"{plate} {lane_dir}: зураг ОЛДСОНГҮЙ (payload-д алга, камер {camera_ip or '-'})")

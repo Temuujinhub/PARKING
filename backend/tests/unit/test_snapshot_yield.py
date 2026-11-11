@@ -95,3 +95,61 @@ def test_cgi_success_unchanged(monkeypatch):
         assert await S._fetch_from_camera("cam-ok", ("u", "p")) == jpeg
         assert not lock.locked()
     asyncio.run(scenario())
+
+
+# ── 2026-11-11 PROD: зураг авалт ӨӨРИЙН хаалтны командад тасарч байв (26 тасалсан / 9 OK) ──
+def _fake_fetch(monkeypatch, results, yield_on):
+    """results — дуудлага бүрийн хариу; yield_on — аль дуудлагад хаалтанд зам тавьсан мэт болох."""
+    calls = []
+
+    async def fake(ip, creds=None):
+        n = len(calls)
+        calls.append(asyncio.get_running_loop().time())
+        if n in yield_on:
+            S._yielded[ip] = S._yielded.get(ip, 0) + 1
+        return results[n] if n < len(results) else None
+    monkeypatch.setattr(S, "_fetch_from_camera", fake)
+
+    async def not_written(*a):
+        return False
+    monkeypatch.setattr(S, "_snapshot_written", not_written)
+    return calls
+
+
+def test_retry_once_after_yield(monkeypatch):
+    monkeypatch.setattr(settings, "snapshot_settle_sec", 0)
+    monkeypatch.setattr(barrier, "barrier_is_waiting", lambda ip: False)
+    calls = _fake_fetch(monkeypatch, [None, b"JPEG"], yield_on={0})
+    assert asyncio.run(S._fetch_after_own_barrier("sid", "ip-r1", "entry", None)) == b"JPEG"
+    assert len(calls) == 2
+
+
+def test_no_retry_on_camera_failure_and_at_most_two(monkeypatch):
+    monkeypatch.setattr(settings, "snapshot_settle_sec", 0)
+    monkeypatch.setattr(barrier, "barrier_is_waiting", lambda ip: False)
+    calls = _fake_fetch(monkeypatch, [None], yield_on=set())      # камерын алдаа — давтахгүй
+    assert asyncio.run(S._fetch_after_own_barrier("sid", "ip-r2", "entry", None)) is None
+    assert len(calls) == 1
+    calls = _fake_fetch(monkeypatch, [None, None, b"x"], yield_on={0, 1})   # 2 удаа тасарвал болино
+    assert asyncio.run(S._fetch_after_own_barrier("sid", "ip-r3", "entry", None)) is None
+    assert len(calls) == 2
+
+
+def test_waits_for_own_barrier_to_start(monkeypatch):
+    """Хаалтны команд 0.15с-ийн дараа эхэлдэг → зураг авалт түүнийг хүлээж эхэлсний ДАРАА дуудагдана."""
+    monkeypatch.setattr(settings, "snapshot_settle_sec", 1.0)
+    state = {"t0": None}
+
+    def waiting(ip):
+        now = asyncio.get_event_loop().time()
+        return state["t0"] is not None and now - state["t0"] >= 0.15
+
+    monkeypatch.setattr(barrier, "barrier_is_waiting", waiting)
+    calls = _fake_fetch(monkeypatch, [b"JPEG"], yield_on=set())
+
+    async def scenario():
+        state["t0"] = asyncio.get_running_loop().time()
+        out = await S._fetch_after_own_barrier("sid", "ip-r4", "entry", None)
+        return out, calls[0] - state["t0"]
+    out, started = asyncio.run(scenario())
+    assert out == b"JPEG" and 0.14 <= started < 0.6     # settle-ийг бүтэн 1с хүлээхгүй

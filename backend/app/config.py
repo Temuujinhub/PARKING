@@ -509,6 +509,11 @@ class Settings(BaseSettings):
     # Зогсоол бүрээр: Тохиргоо → Төлбөрийн дүрэм → «Камераас гар зураг (Manual
     # Snapshot) авах» (2026-10-30-аас анхдагч унтраалттай). Энэ нь серверийн хориг.
     snapshot_cgi_fallback: bool = True
+    # snapshot.cgi-г дуудахаас өмнө ТУХАЙН машины хаалтны команд эхлэхийг хүлээх дээд хугацаа (сек).
+    # Эхэлбэл түүнийг дуустал хүлээгээд зургаа авна — эс бөгөөс зураг авалт өөрийн хаалтанд зам тавьж
+    # тасардаг (2026-11-11 PROD: 26 тасалсан / 9 амжилттай). Гарцад төлбөр хүлээх машинд (хаалт
+    # нээгдэхгүй) энэ хугацаагаар л хойшилно. 0 = хүлээхгүй.
+    snapshot_settle_sec: float = Field(default=0.8, ge=0, le=3)
     # Total CGI budget includes waiting for the camera lock and HTTP authentication.
     snapshot_cgi_budget_sec: float = Field(default=5.0, gt=0, le=30)
     # Fixed window from the FIRST picture, never extended by a continuing burst.
