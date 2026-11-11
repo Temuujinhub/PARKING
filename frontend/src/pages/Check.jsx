@@ -2,7 +2,7 @@
 // Дугаарын эхний тэмдэгтээр live шүүнэ, төлөв/зогсоолоор шүүнэ, real-time шинэчлэгдэнэ.
 // Админ "Аудит горим"-оор сэжигтэй (гарсан ч хаагдаагүй / буруу дугаар / удсан) бүртгэлийг
 // ялган нэг товчоор цэвэрлэж, зогсоолын тоог бодит байдалтай тулгана.
-import { CarFront, Pencil, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { CarFront, Pencil, RefreshCw, ShieldCheck, Star, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api, fmt, fmtDate, fmtDur, wsConnect, coalesce } from '../api'
 import { useAuth } from '../auth'
@@ -72,6 +72,8 @@ export default function Check() {
   const [data, setData] = useState({ total: 0, rows: [], suspect: 0 })
   const [sel, setSel] = useState([]) // админ: хасахаар сонгосон session id-ууд
   const [removing, setRemoving] = useState(null) // {ids, createComp, reason}
+  // «Зогсоолоос хасах»-ын шалтгаан: хадгалсан (★) + сүүлд хэрэглэсэн (2026-11-11)
+  const [reasons, setReasons] = useState({ presets: [], recent: [] })
   const [backfill, setBackfill] = useState(null) // {rows, debt} — камерын логоос нөхөж бүртгэх
   const debounceRef = useRef(null)
 
@@ -126,6 +128,17 @@ export default function Check() {
         } catch (e2) { toast(e2.message, 'error') }
       } else toast(err.message, 'error')
     }
+  }
+
+  useEffect(() => {
+    if (!removing || !isAdmin) return
+    api('/api/sessions/remove-reasons').then(setReasons).catch(() => {})
+  }, [!!removing]) // eslint-disable-line react-hooks/exhaustive-deps
+  const savePresets = async (items) => {
+    try {
+      const r = await api('/api/sessions/remove-reasons', { method: 'PUT', body: { items } })
+      setReasons((prev) => ({ presets: r.presets, recent: prev.recent.filter((x) => !r.presets.includes(x)) }))
+    } catch (err) { toast(err.message, 'error') }
   }
 
   const doRemove = async (e) => {
@@ -458,9 +471,40 @@ export default function Check() {
               өр үүсгэхгүйгээр (checkbox-г болиулж) хасаж болно.
             </div>
             <Field label="Шалтгаан (заавал биш)">
-              <input className="input" value={removing.reason} placeholder="ж: аудит — гарсан ч хаагдаагүй"
-                onChange={(e) => setRemoving({ ...removing, reason: e.target.value })} />
+              <div className="flex gap-1.5">
+                <input className="input flex-1" value={removing.reason} placeholder="ж: аудит — гарсан ч хаагдаагүй"
+                  maxLength={300} onChange={(e) => setRemoving({ ...removing, reason: e.target.value })} />
+                <button type="button" className="btn-secondary px-2.5" title="Энэ шалтгааныг жагсаалтад хадгалах"
+                  disabled={!removing.reason.trim() || reasons.presets.includes(removing.reason.trim())}
+                  onClick={() => savePresets([...reasons.presets, removing.reason.trim()])}>
+                  <Star size={15} />
+                </button>
+              </div>
             </Field>
+            {/* Хадгалсан (★) ба сүүлд хэрэглэсэн шалтгаан — нэг товшилтоор (2026-11-11) */}
+            {(reasons.presets.length > 0 || reasons.recent.length > 0) && (
+              <div className="flex flex-wrap gap-1.5 -mt-1">
+                {reasons.presets.map((r) => (
+                  <span key={`p-${r}`} className={`inline-flex items-center rounded-md border text-xs ${removing.reason === r
+                    ? 'border-accent/60 bg-accent/15 text-accent' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'}`}>
+                    <button type="button" className="px-2 py-1 cursor-pointer flex items-center gap-1"
+                      onClick={() => setRemoving({ ...removing, reason: r })}>
+                      <Star size={11} className="fill-current" />{r}
+                    </button>
+                    <button type="button" className="px-1.5 py-1 text-slate-400 hover:text-red-400 cursor-pointer"
+                      title="Жагсаалтаас хасах" aria-label={`«${r}» хасах`}
+                      onClick={() => savePresets(reasons.presets.filter((x) => x !== r))}>×</button>
+                  </span>
+                ))}
+                {reasons.recent.map((r) => (
+                  <button key={`r-${r}`} type="button" title="Сүүлд хэрэглэсэн шалтгаан"
+                    className={`px-2 py-1 rounded-md border text-xs cursor-pointer ${removing.reason === r
+                      ? 'border-accent/60 bg-accent/15 text-accent'
+                      : 'border-surface-border/60 bg-surface-muted/60 text-slate-300 hover:bg-surface-muted'}`}
+                    onClick={() => setRemoving({ ...removing, reason: r })}>{r}</button>
+                ))}
+              </div>
+            )}
             <button className="btn-primary w-full justify-center bg-red-600 hover:bg-red-500">
               <Trash2 size={15} /> Хасах
             </button>

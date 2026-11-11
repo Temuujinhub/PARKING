@@ -950,6 +950,69 @@ def register_from_camera(body: dict, db: Session = Depends(get_db),
             "skip_reasons": skips, "debt_total": debt_total, "rows": created}
 
 
+# ── «Зогсоолоос хасах»-ын шалтгаан (2026-11-11): дахин шивэхгүй ─────────────────────────────
+# Гомдол: «хасах дээр бичигдэж байгаа тайлбарыг хадгалагддаг болгоё». Хоёр эх: (1) хадгалсан
+# (★ — админ цонхноос нэг товчоор хадгална/устгана, app_settings `remove_reasons`), (2) сүүлийн
+# 90 хоногт ADMIN_REMOVE аудитад бичигдсэн шалтгаанууд (давтамжаар). Цонхонд товч болж гарна.
+REMOVE_REASONS_KEY = "remove_reasons"
+REMOVE_REASONS_MAX = 20
+REMOVE_REASON_LEN = 300
+
+
+def _remove_presets(db: Session) -> list[str]:
+    from ..services.app_settings import get_state
+    items = get_state(db, REMOVE_REASONS_KEY).get("items")
+    return [str(x)[:REMOVE_REASON_LEN] for x in items if str(x).strip()] if isinstance(items, list) else []
+
+
+def _recent_remove_reasons(db: Session, limit: int = 8) -> list[str]:
+    """Сүүлийн 90 хоногийн ADMIN_REMOVE аудитын шалтгаан — давтамж, дараа нь шинэ нь эхэнд."""
+    since = datetime.utcnow() - timedelta(days=90)
+    rows = (db.query(AuditLog.detail).filter(AuditLog.action == "ADMIN_REMOVE",
+                                            AuditLog.created_at >= since)
+            .order_by(AuditLog.created_at.desc()).limit(1000).all())
+    freq: dict[str, int] = {}
+    order: dict[str, int] = {}
+    for i, (detail,) in enumerate(rows):
+        reason = str((detail or {}).get("reason") or "").strip() if isinstance(detail, dict) else ""
+        if not reason:
+            continue
+        freq[reason] = freq.get(reason, 0) + 1
+        order.setdefault(reason, i)
+    return sorted(freq, key=lambda r: (-freq[r], order[r]))[:limit]
+
+
+@router.get("/remove-reasons")
+def remove_reasons(db: Session = Depends(get_db),
+                   user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Хасах цонхны сонголт: {presets: хадгалсан, recent: сүүлд хэрэглэсэн (хадгалсныг давхардуулахгүй)}."""
+    presets = _remove_presets(db)
+    recent = [r for r in _recent_remove_reasons(db) if r not in presets]
+    return {"presets": presets, "recent": recent}
+
+
+@router.put("/remove-reasons")
+def save_remove_reasons(body: dict, db: Session = Depends(get_db),
+                        user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
+    """Хадгалсан шалтгааны жагсаалтыг бүхэлд нь солино. body: {items: [str]}."""
+    from ..services.app_settings import set_state
+    items = body.get("items")
+    if not isinstance(items, list):
+        raise HTTPException(422, "items нь жагсаалт байна")
+    clean: list[str] = []
+    for x in items:
+        t = " ".join(str(x or "").split())[:REMOVE_REASON_LEN]
+        if t and t not in clean:
+            clean.append(t)
+    if len(clean) > REMOVE_REASONS_MAX:
+        raise HTTPException(422, f"Хамгийн ихдээ {REMOVE_REASONS_MAX} шалтгаан хадгална")
+    set_state(db, REMOVE_REASONS_KEY, {"items": clean}, user.username)
+    db.add(AuditLog(username=user.username, action="REMOVE_REASONS_SET", entity="app_settings",
+                    entity_id=REMOVE_REASONS_KEY, detail={"items": clean}))
+    db.commit()
+    return {"presets": clean}
+
+
 @router.post("/bulk-remove")
 async def bulk_remove(body: dict, db: Session = Depends(get_db),
                       user: User = Depends(require_role("ADMIN", "SUPER_ADMIN"))):
