@@ -18,16 +18,19 @@ tokI, Easy Wallet зэрэг гадаад төлбөрийн систем энэ
 Түншийн нэр Payment.provider болж тайланд ялгарна.
 """
 import hashlib
+import math
+import threading
+import time
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
 from ..models import AuditLog, ParkingSession, ParkingSite, PartnerKey, Payment
-from ..ratelimit import throttle
+from ..ratelimit import allow as rate_allow, throttle
 from ..session_logic import amount_due, normalize_plate, session_fee_info
 
 router = APIRouter(prefix="/api/v1", tags=["integration"])
@@ -247,6 +250,7 @@ class PartnerAuth(str):
     site_id: str | None = None
     site_ids: list[str] | None = None   # хандах зогсоолууд (None = хязгааргүй) — partner_scope
     key_id: str | None = None
+    rate_limit_per_min: int | None = None   # лавлах замын хязгаар (None = анхдагч) — partner_lookup
 
     def scope_ids(self) -> list[str] | None:
         """Хандах зогсоолууд: site_ids (зогсоол/түрээслэгч) → site_id → None (хязгааргүй)."""
@@ -294,6 +298,7 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
             from ..services.partner_scope import key_site_ids
             auth.site_ids = key_site_ids(db, row)
             auth.key_id = row.id
+            auth.rate_limit_per_min = row.rate_limit_per_min
             return auth
     partners = settings.partner_map()
     if not partners and not db.query(PartnerKey.id).first():
@@ -302,6 +307,70 @@ def require_partner(request: Request, x_api_key: str = Header(default=""),
     if not name:
         _auth_fail(request)
     return PartnerAuth(name)   # .env түлхүүр — бүрэн эрхтэй (хуучин зан төлөв)
+
+
+# ── Лавлах замын түлхүүр тутмын хурдны хязгаар (2026-11-11) ──────────────────────────────
+# PROD: Easy Wallet ~190 дугаарыг 24с тутам /sessions-оор асууж (секундэд ~8, өдөрт ~700 мянга) —
+# бүгд POS-той ижил ганц backend процесс дээр. Хязгаар нь түлхүүр тутам, ЗАМ ТУС БҮРД тусдаа сав:
+# /sessions-ийг тасралтгүй асуусан ч /recent-exits (гарах урсгал), /sites нөлөөлөхгүй.
+# Төлбөрийн замууд (payments, confirm, cancel, ebarimt) ЭНЭ dependency-г ХЭЗЭЭ Ч хэрэглэхгүй —
+# мөнгө, хаалт нээх урсгал хязгаараас болж хэзээ ч зогсохгүй.
+LOOKUP_WINDOW_SEC = 60
+_limited: dict[str, dict[str, int]] = {}      # key_id → {зам: татгалзсан тоо} (restart-аас хойш)
+_limited_logged: dict[str, float] = {}
+_limited_lock = threading.Lock()
+
+
+def lookup_limit(partner) -> int:
+    """Энэ түлхүүрийн лавлах замын хязгаар (минутад, зам тус бүрд); 0 = хязгааргүй."""
+    v = getattr(partner, "rate_limit_per_min", None)
+    if v is None:
+        v = settings.partner_lookup_rate_per_min
+    return max(0, int(v or 0))
+
+
+def limited_counts(key_id) -> dict:
+    """Admin жагсаалтад: restart-аас хойш зам тутам 429 буцаасан тоо."""
+    with _limited_lock:
+        return dict(_limited.get(str(key_id), {}))
+
+
+def _note_limited(who: str, partner, bucket: str, limit: int) -> None:
+    now = time.monotonic()
+    with _limited_lock:
+        counts = _limited.setdefault(who, {})
+        counts[bucket] = counts.get(bucket, 0) + 1
+        total = counts[bucket]
+        last = _limited_logged.get(f"{who}:{bucket}")
+        if last is not None and now - last < 60:
+            return
+        _limited_logged[f"{who}:{bucket}"] = now
+    # Минутад нэг л мөр — секундэд хэдэн 429 логийг дүүргэхгүй
+    log.warning("Түншийн хурдны хязгаар: %s «%s» — минутад %d-аас хэтэрсэн хүсэлтэд 429 "
+                "(restart-аас хойш %d)", str(partner), bucket, limit, total)
+
+
+def partner_lookup(bucket: str):
+    """Лавлах замын dependency: require_partner + түлхүүр тутмын хязгаар (`bucket` = замын нэр)."""
+    def dep(response: Response, partner: PartnerAuth = Depends(require_partner)) -> PartnerAuth:
+        limit = lookup_limit(partner)
+        if limit <= 0:
+            return partner
+        who = str(partner.key_id or f"env:{partner}")
+        ok, remaining, wait = rate_allow(f"partner-lookup:{who}:{bucket}", limit, LOOKUP_WINDOW_SEC)
+        if ok:
+            response.headers["X-RateLimit-Limit"] = str(limit)
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
+            return partner
+        _note_limited(who, partner, bucket, limit)
+        retry = max(1, math.ceil(wait))
+        raise HTTPException(
+            429,
+            f"Хэт олон хүсэлт: энэ түлхүүрээр /{bucket} замд минутад {limit} хүртэл. {retry} секундын "
+            "дараа дахин оролдоно уу. Машины орох/гарах мэдээг тасралтгүй асуухын оронд машин бүртгэл + "
+            "webhook (vehicle.entry/vehicle.exit) ашиглана уу.",
+            headers={"Retry-After": str(retry), "X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0"})
+    return dep
 
 
 def _require_pay(partner: PartnerAuth):
@@ -406,7 +475,7 @@ def site_catalog(db: Session, partner: "PartnerAuth") -> tuple[list, list[dict],
 
 
 @router.get("/sites")
-def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
+def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(partner_lookup("sites"))):
     """Authenticated map catalogue. Occupancy is a session estimate, not a sensor reading."""
     _, out, sampled_at = site_catalog(db, partner)
     return {"sites": out, "sampled_at": sampled_at}
@@ -414,7 +483,7 @@ def list_sites(db: Session = Depends(get_db), partner: PartnerAuth = Depends(req
 
 @router.get("/sessions")
 def find_sessions(plate: str, site_code: str = "",
-                  db: Session = Depends(get_db), partner: PartnerAuth = Depends(require_partner)):
+                  db: Session = Depends(get_db), partner: PartnerAuth = Depends(partner_lookup("sessions"))):
     """Дугаараар нээлттэй session хайна. site_code өгөхгүй бол БҮХ зогсоолоос —
     жолооч аль зогсоолд байгааг wallet апп мэдэхгүй байж болно."""
     plate = normalize_plate(plate)
@@ -439,7 +508,7 @@ def find_sessions(plate: str, site_code: str = "",
 def recent_exits_all_sites(minutes: int = 5, site_code: str = "",
                            include_completed: bool = False,
                            db: Session = Depends(get_db),
-                           partner: PartnerAuth = Depends(require_partner)):
+                           partner: PartnerAuth = Depends(partner_lookup("recent-exits"))):
     """БҮХ зогсоолын сүүлийн гарцын урсгал (Easy Wallet-ийн хүсэлтээр, 2026-09-01).
 
     Гарах камерт сүүлийн `minutes` (1..60, default 5) минутад уншигдаад ТӨЛБӨР

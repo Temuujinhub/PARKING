@@ -1,5 +1,8 @@
 """Түншийн тохиргоог deploy-оор ТАВИХ (серверийн DB-д SSH-гүй хүрэх нэг удаагийн алхам).
 
+Одоогийн preset-үүд: (1) MonPay-ийн autoPay webhook — доор; (2) Easy Wallet-ийн лавлах хүсэлтийн
+хязгаар 120/мин (`apply_easywallet_rate_limit`, файлын төгсгөлд).
+
 MonPay (Мобифинанс, түлхүүрийн нэр `mobifinance`) 2026-11-11-нд autoPay-ийн
 («auto-parking») webhook URL-аа ирүүлсэн:
 
@@ -164,8 +167,52 @@ def apply_monpay_webhook(db, role: str | None = None) -> list[dict]:
     return changes
 
 
+# ── Easy Wallet-ийн лавлах хүсэлтийн хязгаар (2026-11-11) ──────────────────────────────
+# PROD: `easywallet` түлхүүр ~190 дугаарыг 24с тутам GET /api/v1/sessions-оор асууж байв (секундэд ~8,
+# өдөрт ~700 мянга — «Apache-HttpClient/5.5 (Java/21)»). Эзэмшигчийн шийдвэрээр түлхүүр тутмын
+# хязгаар: минутад 120, ЗАМ ТУС БҮРД (sessions / recent-exits / sites тусдаа) — төлбөрт хамаарахгүй.
+# НЭГ удаа тавина; админ дараа нь өөрчилбөл/хасвал (Тохиргоо → Холболт → Гадаад API) хөндөхгүй.
+EASYWALLET_KEY_NAME = "easywallet"
+EASYWALLET_RATE_PER_MIN = 120
+RATE_STATE_KEY = "preset_easywallet_rate_20261111"
+
+
+def apply_easywallet_rate_limit(db) -> list[dict]:
+    """`easywallet` түлхүүрт лавлах замын хязгаарыг нэг удаа тавина. Commit хийнэ."""
+    from ..models import AuditLog, PartnerKey
+    from .app_settings import get_state, set_state
+    if get_state(db, RATE_STATE_KEY).get("done"):
+        return []
+    keys = (db.query(PartnerKey)
+            .filter(PartnerKey.name == EASYWALLET_KEY_NAME, PartnerKey.is_active.is_(True))
+            .order_by(PartnerKey.created_at).all())
+    if not keys:
+        log.info("Easy Wallet хязгаар preset: идэвхтэй «%s» түлхүүр алга — алгасав", EASYWALLET_KEY_NAME)
+        return []
+    changes = []
+    for k in keys:
+        if k.rate_limit_per_min is not None:
+            log.info("Easy Wallet хязгаар preset: %s (%s) — аль хэдийн %s/мин, хөндөхгүй",
+                     k.name, k.key_prefix, k.rate_limit_per_min)
+            continue
+        k.rate_limit_per_min = EASYWALLET_RATE_PER_MIN
+        db.add(AuditLog(username="system:deploy", action="PARTNER_RATE_LIMIT_SET",
+                        entity="partner_key", entity_id=k.id,
+                        detail={"name": k.name, "old": None, "new": EASYWALLET_RATE_PER_MIN,
+                                "reason": "24с тутам ~190 дугаар /sessions-оор асуудаг (секундэд ~8)",
+                                "source": "эзэмшигчийн хүсэлт 2026-11-11 (deploy)"}))
+        changes.append({"key_id": k.id, "name": k.name, "new": EASYWALLET_RATE_PER_MIN})
+        log.warning("Easy Wallet хязгаар preset: %s (%s) → лавлах зам тус бүрд минутад %d",
+                    k.name, k.key_prefix, EASYWALLET_RATE_PER_MIN)
+    set_state(db, RATE_STATE_KEY, {"done": True, "per_min": EASYWALLET_RATE_PER_MIN,
+                                   "keys": [k.id for k in keys]}, "system:deploy")
+    db.commit()
+    return changes
+
+
 def run_startup_presets(session_factory=None) -> None:
-    """main.py-аас startup-д. Алдаа гарвал лог л үлдээнэ — серверийг хэзээ ч унагахгүй."""
+    """main.py-аас startup-д. Алдаа гарвал лог л үлдээнэ — серверийг хэзээ ч унагахгүй.
+    Preset бүр тусдаа — нэг нь унасан ч нөгөө нь ажиллана."""
     if session_factory is None:
         from ..database import SessionLocal as session_factory
     try:
@@ -174,9 +221,12 @@ def run_startup_presets(session_factory=None) -> None:
         log.error("partner presets: DB холболт алдаа: %r", e)
         return
     try:
-        apply_monpay_webhook(db)
-    except Exception as e:  # noqa: BLE001
-        db.rollback()
-        log.error("partner presets: MonPay webhook алдаа: %r", e)
+        for name, fn in (("MonPay webhook", apply_monpay_webhook),
+                         ("Easy Wallet хязгаар", apply_easywallet_rate_limit)):
+            try:
+                fn(db)
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                log.error("partner presets: %s алдаа: %r", name, e)
     finally:
         db.close()

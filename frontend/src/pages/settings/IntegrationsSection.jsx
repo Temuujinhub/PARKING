@@ -864,6 +864,34 @@ function KeyCreateModal({ open, sites, scope, tenants, scopeTenant, onClose, onD
   )
 }
 
+// Лавлах хүсэлтийн хурдны хязгаар (2026-11-11): минутад, ЗАМ ТУС БҮРД (sessions / recent-exits / sites
+// тусдаа). Төлбөрийн хүсэлтэд хамаарахгүй. Хоосон = анхдагч (серверийн тохиргоо, 0 = хязгааргүй).
+// Easy Wallet 24с тутам ~190 дугаар асуудаг байсан тул 120/мин. Зөвхөн системийн админ өөрчилнө.
+function RateLimitLine({ k, canEdit, defaultRate, onChanged }) {
+  const toast = useToast()
+  const eff = k.rate_limit_per_min ?? (defaultRate || 0)
+  const rejected = Object.values(k.rate_limited || {}).reduce((a, b) => a + b, 0)
+  const edit = async () => {
+    const v = prompt(`«${k.name}»: лавлах хүсэлтийн хязгаар — минутад хэдэн хүсэлт (зам тус бүрд, 10–100000)?\n`
+      + 'Хоосон = хязгааргүй. Төлбөрийн хүсэлтэд хамаарахгүй.', k.rate_limit_per_min ?? '')
+    if (v === null) return
+    const n = v.trim() === '' ? null : Number(v.trim())
+    if (n !== null && !Number.isInteger(n)) { toast('Бүхэл тоо оруулна уу', 'error'); return }
+    try {
+      await api(`/api/admin/partner-keys/${k.id}/rate-limit`, { method: 'POST', body: { per_min: n } })
+      toast('Хязгаар хадгалагдлаа'); onChanged()
+    } catch (err) { toast(err.message, 'error') }
+  }
+  return (
+    <span className="block text-[11px] text-slate-400"
+      title="Лавлах замын (sessions, recent-exits, sites) хязгаар — зам тус бүрд тусдаа. Төлбөр хязгаарлагдахгүй. 429 = restart-аас хойш татгалзсан хүсэлт.">
+      Хязгаар: {eff > 0 ? `${eff}/мин` : 'хязгааргүй'}
+      {rejected > 0 && <span className="text-amber-400"> · 429: {rejected.toLocaleString()}</span>}
+      {canEdit && <button className="ml-1.5 underline hover:text-slate-200" onClick={edit}>өөрчлөх</button>}
+    </span>
+  )
+}
+
 // Машин бүртгэл (SocialPay 2026-10-14; MonPay г.м бусад түнш 2026-10-15): «vehicles» эрх +
 // бүртгэлтэй машины орох/гарах мэдэгдлийн URL. SocialPay: {SP_URL}/parking/notification; хоосон бол
 // мэдэгдэл явахгүй (бүртгэл ажиллана). «socialpay» формат = үндсэн JSON (plateNo/enteredDate/exitedDate);
@@ -1090,7 +1118,9 @@ function PartnerApiPanel() {
                 <td className="td font-mono text-sm">{k.name}</td>
                 <td className="td font-mono text-xs text-slate-500">{k.key_prefix}…</td>
                 <td className="td text-xs">{k.scopes.includes('pay') ? 'Лавлах + Төлбөр' : 'Зөвхөн лавлах'}
-                  {k.vehicles_enabled && <span className="block text-accent">+ Машин бүртгэл</span>}</td>
+                  {k.vehicles_enabled && <span className="block text-accent">+ Машин бүртгэл</span>}
+                  {k.is_active && <RateLimitLine k={k} canEdit={data?.scope === 'system'}
+                    defaultRate={data?.lookup_rate_default} onChanged={load} />}</td>
                 <td className="td text-xs">{k.site_code
                   ? <span>{k.site_name} <span className="font-mono text-slate-500">({k.site_code})</span></span>
                   : k.tenant_name

@@ -734,6 +734,10 @@ class Settings(BaseSettings):
     partner_vehicle_pair_days: int = 7         # орох мэдэгдсэн машины гарцыг хэдэн хоног хянах
     partner_vehicle_max_per_user: int = 10     # нэг хэрэглэгчийн идэвхтэй машины дээд тоо (түнш тус бүрд)
     partner_vehicle_rate_per_min: int = 600    # register/delete/bill — түлхүүр тутам минутад (nginx /api/ ч IP тутам 600/мин)
+    # 2026-11-11: ЛАВЛАХ замын (sessions, recent-exits, sites) түлхүүр тутмын хязгаар — минутад, зам тус
+    # бүрд тусдаа. partner_keys.rate_limit_per_min тавиагүй түлхүүрт үйлчлэх анхдагч; 0 = хязгааргүй.
+    # Төлбөрийн замууд (payments/confirm/cancel/ebarimt) ХЭЗЭЭ Ч хязгаарлагдахгүй.
+    partner_lookup_rate_per_min: int = Field(default=0, ge=0)
     partner_vehicle_http_timeout: float = 5.0  # түншийн webhook-ийн хугацаа (сек)
     partner_vehicle_retry_hours: int = 24      # амжилтгүй мэдэгдлийг давтах нийт хугацаа → DEAD
 
