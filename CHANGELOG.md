@@ -26,6 +26,34 @@ curl -s http://127.0.0.1:8000/api/health/system | python3 -c 'import sys,json;pr
 
 ---
 
+## 2026-11-13 — «POS-ын дэлгэц удаан»: backend 20с тутам ~8.5с БҮХЭЛД НЬ царцдаг байсан (log_tail)
+
+Гаднаас (PROD, `https://site.easy-parking.mn/api/health`, секунд тутам 60с) хэмжсэн: серверийн хариу ердийн үед
+~0мс (зөвхөн сүлжээний RTT ~230мс), харин **яг 20 секунд тутам ~8.5 секунд БҮХ хүсэлт зогсдог** (t=8, 28, 48с —
+тэр хооронд ирсэн хүсэлт бүгд царцалт дуусахад зэрэг хариулагддаг «шат» хэлбэр). /api/health хүртэл хүлээдэг тул
+нэг замын удаашрал биш — нэг процессын (uvicorn --workers 1) event loop бүхэлдээ блоклогдож байв → POS, касс,
+камер, wallet бүгд ~40% хугацаанд хариугүй.
+
+Шалтгаан: `log_tail` (чимээгүй камерын лог-нөөц, `log_tail_interval_sec`=20) мөчлөг бүрийн эхэнд
+`_silent_devices` камер бүрийн `max(lpr_events.created_at)`-ыг **хугацааны хязгааргүй**, raw JSON-оор шүүж
+асуудаг байв — 90 хоногийн lpr_events-ийг (device_id-д индексгүй) бүхэлд нь уншиж, мөр бүрийн JSON-ыг
+задалдаг. Асуулга event loop дээр СИНХРОН ажилладаг тул тэр хугацаанд процесс бүхэлдээ зогсдог. Локал дээр
+2 сая мөрөөр (1.07GB) давтав: хуучин асуулга ~1.0с (parallel seq scan) → шинэ 0.25мс (created_at индекс);
+мөчлөгийн event loop-ийн царцалт ~1000мс → 1–2мс. PROD-д мөр нь том (камерын JSON) тул ~8.5с.
+
+| Төрөл | Юу | Commit | Deploy TEST | Deploy PROD |
+|---|---|---|---|---|
+| perf | **log_tail-ийн «чимээгүй камер» хайлт хугацаагаар хязгаарлагдсан**: `created_at >= cutoff` (`log_tail_silence_sec`, 180с) — индексээр хэдхэн мөр; «чимээгүй» гэсэн утга ӨӨРЧЛӨГДӨӨГҮЙ (cutoff-оос хойш хүлээн авсан, өөрийн оруулаагүй уншилтгүй = чимээгүй). DB-ийн ажил `asyncio.to_thread`-д — удаан DB-тэй үед ч event loop царцахгүй. `tests/postgres/test_log_tail_bounded_pg.py` (утга + query бүр хугацааны хязгаартай) | (энэ commit) | ⏳ хүлээгдэж байна | ⏳ хүлээгдэж байна |
+| tool | **`tools/diag_api_load.sh`** — API ачаалал/хариуны хугацааны оношилгоо (зөвхөн уншина): сервер (CPU/RAM, uvicorn 1 процесс), шууд/nginx-ээр хариуны хугацаа, **секунд тутмын шугам (давтагдах царцалт)**, журнал (event loop ЦАРЦЛАА, SLOW, DB алдаа), nginx урсгал клиентээр (Easy Wallet / SocialPay / POS / хөтөч, 429/499/5xx), nginx хязгаар, PostgreSQL (холболт, удаан query, seq scan), түнш (түлхүүр, webhook, дараалал), апп доторх зам тутмын p95 (сонголттой ADMIN нэвтрэлт). `sudo bash tools/diag_api_load.sh \| tee /tmp/diag-api.txt` | (энэ commit) | — | — |
+
+Шалгах (deploy-ийн дараа): `sudo bash /root/PARKING/tools/diag_api_load.sh` — 2б-д 1с-ээс удаан 0 байх ёстой;
+`journalctl -u parking-backend --since '-10 min' | grep -c 'ЦАРЦЛАА'` → 0 орчим.
+
+Үлдсэн эрсдэл (тусдаа ажил): бүх зүйл НЭГ процесст (камерын стрим, арын ажил, API, түнш) — нэг синхрон
+удаан ажил бүгдийг зогсооно. Камер/арын ажлыг тусдаа процесс болгох, API-г олон worker болгох нь бүтцийн засвар.
+`/api/admin/devices` мөн lpr_events-д хугацаагүй max(created_at) хийдэг (thread-д тул loop царцаахгүй, гэхдээ
+хуудас удаан) — `lpr_events (device_id, created_at)` индексийг шөнө CONCURRENTLY үүсгэх.
+
 ## 2026-11-11 — Өдрийн дүн, маргааш шалгах
 
 PR [#29](https://github.com/Temuujinhub/PARKING/pull/29) → [#30](https://github.com/Temuujinhub/PARKING/pull/30) →

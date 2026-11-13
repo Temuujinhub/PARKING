@@ -221,6 +221,11 @@ def _remember(device_id: str, key: str) -> None:
 
 
 async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
+    """Хуучин async интерфейс (тест, гараар дуудах) — `_silent_devices_sync`-ийг дуудна."""
+    return _silent_devices_sync(db, site_id)
+
+
+def _silent_devices_sync(db, site_id: str | None = None) -> list[Device]:
     """Стрим нь чимээгүй байгаа камерууд. «Чимээгүй» = СТРИМЭЭР сүүлд ирсэн
     уншилтаас хойш `log_tail_silence_sec` өнгөрсөн. Шөнө машин ирэхгүй үед ч
     чимээгүй болох тул энэ нь ГАЦСАН гэсэн үг биш — гэхдээ логийг татах нь
@@ -236,8 +241,17 @@ async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
         `log_tail_fresh_sec` (240с)-ээс хуучирсан уншилтууд ХАЯГДАЖ, машин
         огт бүртгэгдэхгүй үлддэг байв (2026-08-21 Рашбулаг ЭТТ дээр
         хаалтны лог яг 200 секундын алхамтай байснаар илэрсэн).
+
+    ГҮЙЦЭТГЭЛ (2026-11-13, «POS-ын дэлгэц удаан»): өмнө нь камер бүрийн
+    max(created_at)-ыг ХУГАЦААНЫ ХЯЗГААРГҮЙ авдаг байсан тул lpr_events-ийг
+    (90 хоног, сая сая мөр, device_id-д индексгүй) бүхэлд нь уншиж, мөр бүрийн
+    raw JSON-ыг задалдаг байв. Энэ нь 20с тутам event loop дээр СИНХРОН
+    ажиллаж PROD-ын backend-ийг ~8.5 секунд БҮХЭЛД НЬ царцаадаг байв (гаднаас
+    хэмжсэн: 20с тутам /api/health хүртэл 8.5с хүлээсэн — POS, касс, камер бүгд).
+    Одоо зөвхөн cutoff-оос хойших мөрийг (created_at индекс, хэдхэн мөр) уншина;
+    «чимээгүй» гэсэн тодорхойлолт ӨӨРЧЛӨГДӨӨГҮЙ (cutoff-оос хойш уншилтгүй = чимээгүй).
     """
-    from sqlalchemy import func, or_
+    from sqlalchemy import or_
 
     cams = (db.query(Device).join(ParkingSite, Device.site_id == ParkingSite.id)
             .filter(Device.device_type == "camera", Device.status == "active",
@@ -250,12 +264,14 @@ async def _silent_devices(db, site_id: str | None = None) -> list[Device]:
         return []
     cutoff = datetime.utcnow() - timedelta(seconds=settings.log_tail_silence_sec)
     _injected = LprEvent.raw["log_tail"].as_string()
-    last = dict(db.query(LprEvent.device_id, func.max(LprEvent.created_at))
-                .filter(LprEvent.device_id.in_([c.id for c in cams]),
-                        LprEvent.accepted.is_(True),
-                        or_(_injected.is_(None), _injected != "true"))
-                .group_by(LprEvent.device_id).all())
-    return [c for c in cams if (last.get(c.id) or datetime.min) < cutoff]
+    recent = {dev_id for (dev_id,) in
+              db.query(LprEvent.device_id)
+              .filter(LprEvent.created_at >= cutoff,          # ← индекс: зөвхөн сүүлийн silence_sec
+                      LprEvent.device_id.in_([c.id for c in cams]),
+                      LprEvent.accepted.is_(True),
+                      or_(_injected.is_(None), _injected != "true"))
+              .distinct().all()}
+    return [c for c in cams if c.id not in recent]
 
 
 async def _pull_one(device_id: str, ip: str, creds, name: str,
@@ -441,13 +457,17 @@ async def run_once(site_id: str | None = None) -> dict:
     """Нэг мөчлөг — чимээгүй камер бүрээс лог татна. Хураангуй буцаана.
 
     `site_id` өгвөл зөвхөн тэр зогсоолд ажиллана (гараар турших/оношлоход)."""
-    db = SessionLocal()
-    try:
-        cams = await _silent_devices(db, site_id)
-        targets = [(c.id, c.ip_address, camera_credentials(c), c.name or c.ip_address,
-                    c.site_id) for c in cams]
-    finally:
-        db.close()
+    def _load_targets():
+        # DB-ийн синхрон ажлыг thread-д — event loop (хаалт, POS, касс) хэзээ ч хүлээхгүй
+        db = SessionLocal()
+        try:
+            cams = _silent_devices_sync(db, site_id)
+            return [(c.id, c.ip_address, camera_credentials(c), c.name or c.ip_address,
+                     c.site_id) for c in cams]
+        finally:
+            db.close()
+
+    targets = await asyncio.to_thread(_load_targets)
     if not targets:
         return {"silent": 0, "recovered": 0}
     # Камерын нөөцийг хамгаална — зэрэг цөөн хандалт
