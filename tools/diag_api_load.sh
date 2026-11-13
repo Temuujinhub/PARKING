@@ -75,11 +75,12 @@ probe() {  # probe <нэр> <curl аргументууд...>   (mawk-д ажил
       i=int(NR*0.95); if (i<1) i=1;
       printf "%-46s min %5.0fмс  дундаж %5.0fмс  p95 %5.0fмс  max %6.0fмс  [%s]\n", n, t[1], s/NR, t[i], t[NR], codes}'
 }
-probe "backend ШУУД  /api/health (DB-гүй)"            "$API/api/health"
+probe "backend ШУУД  /api/health (хөнгөн DB)"         "$API/api/health"
 SITE_CODE=$(q "select site_code from parking_sites where is_active order by site_code limit 1" 2>/dev/null | sed -n '3p' | tr -d ' ')
 [ -n "$SITE_CODE" ] && probe "backend ШУУД  /api/public/site/$SITE_CODE (DB)" "$API/api/public/site/$SITE_CODE"
 probe "nginx-ээр   https://$DOMAIN/api/health"         -k --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/health"
-echo "(/api/health нь DB-гүй: ШУУД нь >50мс бол event loop/процесс өөр ажилд эзлэгдсэн; nginx-ээр нь ШУУД-аас"
+echo "(/api/health нь зөвхөн хөнгөн схемийн шалгалт хийдэг (LIMIT 0, түгжээ үүсгэхгүй): ШУУД нь >50мс бол"
+echo " event loop/процесс өөр ажилд эзлэгдсэн; nginx-ээр нь ШУУД-аас"
 echo " хамаагүй удаан бол nginx/TLS/хязгаар; 429 гарвал nginx-ийн rate limit.)"
 
 # ───────────────────────────── 2б. Секунд тутмын шугам ─────────────────────────────
