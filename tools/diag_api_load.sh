@@ -14,11 +14,14 @@
 #
 # Юуг ч ӨӨРЧЛӨХГҮЙ, файл/DB/тохиргоонд БИЧИХГҮЙ. Ажиллуулах (VPN + SSH, PROD дээр):
 #   sudo bash /root/PARKING/tools/diag_api_load.sh 2>&1 | tee /tmp/diag-api.txt
-#   sudo HOURS=6 bash /root/PARKING/tools/diag_api_load.sh            # 6 цагийн цонх
-# Deploy-гүйгээр (энэ файл main-д ороогүй үед):
-#   cd /root/PARKING && sudo git fetch origin <branch> && \
-#     sudo git show origin/<branch>:tools/diag_api_load.sh | sudo bash 2>&1 | tee /tmp/diag-api.txt
-# ADMIN нэвтрэлтийг (8-р хэсэг) асуухгүй алгасах: sudo SKIP_LOGIN=1 bash ...
+#   sudo env HOURS=6 bash /root/PARKING/tools/diag_api_load.sh        # 6 цагийн цонх
+# Deploy-гүйгээр (энэ файл серверт ороогүй үед) — ӨӨРИЙН КОМПЬЮТЕРЭЭС (VPN, Git Bash/WSL);
+# PROD GitHub-д хүрэхгүй байж болох тул файлыг компьютероор дамжуулна:
+#   curl -fsSL -o diag_api_load.sh \
+#     https://raw.githubusercontent.com/Temuujinhub/PARKING/refs/heads/<branch>/tools/diag_api_load.sh
+#   scp diag_api_load.sh easyparking@172.16.100.21:/tmp/diag_api_load.sh
+#   ssh -t easyparking@172.16.100.21 'sudo bash /tmp/diag_api_load.sh' | tee diag-api.txt
+# ADMIN нэвтрэлтийг (8-р хэсэг) асуухгүй алгасах: sudo env SKIP_LOGIN=1 bash ...
 set -uo pipefail
 
 HOURS=${HOURS:-3}
